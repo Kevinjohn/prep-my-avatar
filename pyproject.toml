@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avatar-prep"
+version = "0.1.0"
+description = "Local-first photo triage, crop, caption and coverage planning for reusable avatar model training"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=10.0"]
+
+[project.optional-dependencies]
+vision = ["opencv-python-headless>=4.9"]
+
+[project.scripts]
+avatar-prep = "avatar_prep.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

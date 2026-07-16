@@ -1,0 +1,37 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Local avatar runs can contain personal photographs.
+runs/
+output/
+
+# Upstream runtime data and local configuration.
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Secrets and local config — never commit.
+.env
+config.json
+
+# Frontend and packaging outputs.
+frontend/node_modules/
+packaging/build/
+packaging/dist/
+packaging/*.spec
+
+# Local planning/controller scratch.
+.superpowers/
+.claude/
+.playwright-mcp/
+docs/superpowers/
+
+# Windows OS noise.
+Thumbs.db

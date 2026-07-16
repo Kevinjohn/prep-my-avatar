@@ -1,0 +1,171 @@
+"""Thin vast.ai REST client (no SDK dependency). All vast-specific HTTP lives
+here so an API change touches one file. The API key is read from the secret
+store on every call — never cached, so a key pasted in Settings applies
+immediately."""
+import logging
+
+import requests
+
+from .. import config as cfg
+
+logger = logging.getLogger(__name__)
+
+API_BASE = 'https://console.vast.ai/api/v0'
+# Instance LISTING moved to v1 on 2026-07-12 (v0 answers 410 deprecated_endpoint).
+# Everything else (bundles, asks, single instance, destroy) still lives on v0.
+API_BASE_V1 = 'https://console.vast.ai/api/v1'
+_TIMEOUT = 30
+
+
+class VastError(RuntimeError):
+    pass
+
+
+def _request(method, path, *, base=API_BASE, **kwargs):
+    key = cfg.secret('VAST_API_KEY')
+    if not key:
+        raise VastError('VAST_API_KEY is not configured')
+    headers = {'Authorization': f'Bearer {key}', 'Accept': 'application/json'}
+    try:
+        return requests.request(method, f'{base}{path}', headers=headers,
+                                timeout=_TIMEOUT, **kwargs)
+    except requests.RequestException as e:
+        raise VastError(f'vast.ai request failed: {e}') from e
+
+
+def search_offers(min_vram_gb: int, max_dph: float, limit: int = 20,
+                  min_inet_down_mbps: int = 0, min_reliability: float = 0.95,
+                  min_disk_bw_mbps: int = 0) -> list:
+    """Verified-datacenter offers with enough VRAM under the price cap,
+    cheapest first. gpu_ram is expressed in MB on the vast side. inet_down
+    (Mbps) filters out hosts whose registry pull of the ~7 GB image would eat
+    the whole boot budget (observed live: a retry-looping host on 2026-07-12);
+    disk_bw (MB/s) filters out hosts too slow to EXTRACT it (a 5090 host froze
+    in 'loading' on 2026-07-13 with network fine — the disk was the bound)."""
+    body = {
+        'gpu_ram': {'gte': int(min_vram_gb) * 1024},
+        'reliability': {'gte': float(min_reliability)},
+        'verified': {'eq': True},
+        'rentable': {'eq': True},
+        'dph_total': {'lte': float(max_dph)},
+        'num_gpus': {'eq': 1},
+        'type': 'ondemand',
+        'limit': int(limit),
+    }
+    if min_inet_down_mbps:
+        body['inet_down'] = {'gte': int(min_inet_down_mbps)}
+    if min_disk_bw_mbps:
+        body['disk_bw'] = {'gte': int(min_disk_bw_mbps)}
+    r = _request('POST', '/bundles/', json=body)
+    if r.status_code != 200:
+        raise VastError(f'offer search failed: HTTP {r.status_code}')
+    offers = (r.json() or {}).get('offers') or []
+    out = [{
+        'offer_id': o.get('id'),
+        'gpu_name': o.get('gpu_name'),
+        'dph_total': o.get('dph_total'),
+        'gpu_ram_gb': round((o.get('gpu_ram') or 0) / 1024.0, 1),
+        # host identity + quality signals for the selection layer (blacklist
+        # of hosts that failed to boot, reliability preference within a class)
+        'machine_id': o.get('machine_id'),
+        'reliability': o.get('reliability2') or o.get('reliability'),
+    } for o in offers if o.get('id') is not None]
+    out.sort(key=lambda x: x['dph_total'] if x['dph_total'] is not None else 9e9)
+    return out
+
+
+def create_instance(offer_id, disk_gb: int, label: str, template_hash: str | None = None,
+                    image: str | None = None, env: dict | None = None,
+                    onstart: str | None = None) -> str:
+    """Rent the offer. Preferred path: template_hash — the instance inherits the
+    official template's env/ports/entrypoint (the raw-image path never published
+    the UI port; smoke-tested 2026-07-12). image/env/onstart remain as a
+    config-escape-hatch fallback when no template hash is set."""
+    if template_hash:
+        body = {'template_hash_id': template_hash, 'label': label, 'disk': int(disk_gb)}
+        # The official template pins an OLD image tag (2026-05-20 — predates the
+        # krea2 arch: run #5 died on 'StableDiffusionPipeline expected [...]').
+        # vast merges body params over template defaults, so overriding just the
+        # image keeps the template's env/ports/entrypoint with current code.
+        if image:
+            body['image'] = image
+    else:
+        body = {'image': image, 'label': label, 'disk': int(disk_gb),
+                'runtype': 'args', 'env': dict(env or {})}
+        if onstart:
+            body['onstart'] = onstart
+    r = _request('PUT', f'/asks/{offer_id}/', json=body)
+    data = r.json() if r.status_code == 200 else {}
+    if r.status_code != 200 or not data.get('success'):
+        raise VastError(f'create_instance failed: HTTP {r.status_code} {data}')
+    return str(data.get('new_contract'))
+
+
+def _normalize(i: dict) -> dict:
+    return {
+        'instance_id': str(i.get('id')),
+        'actual_status': i.get('actual_status'),
+        'public_ipaddr': i.get('public_ipaddr'),
+        'ports': i.get('ports'),
+        'label': i.get('label'),
+        'dph_total': i.get('dph_total'),
+        # per-instance auth token generated by vast — the template's Caddy
+        # proxy accepts it as `Authorization: Bearer <jupyter_token>`
+        'jupyter_token': i.get('jupyter_token'),
+    }
+
+
+def list_instances() -> list:
+    r = _request('GET', '/instances/', base=API_BASE_V1)
+    if r.status_code != 200:
+        raise VastError(f'list_instances failed: HTTP {r.status_code}')
+    return [_normalize(i) for i in (r.json() or {}).get('instances') or []]
+
+
+def get_instance(instance_id):
+    """Single-instance lookup (v0 show endpoint; body is {'instances': {...}}).
+    Falls back to the list scan if the shape ever changes."""
+    r = _request('GET', f'/instances/{instance_id}/')
+    if r.status_code == 200:
+        one = (r.json() or {}).get('instances')
+        if isinstance(one, dict) and one.get('id') is not None:
+            return _normalize(one)
+        if isinstance(one, list):
+            for i in one:
+                if str(i.get('id')) == str(instance_id):
+                    return _normalize(i)
+            return None
+        if one is None:
+            return None            # instance gone (vast answers 200 + null)
+    for inst in list_instances():
+        if inst['instance_id'] == str(instance_id):
+            return inst
+    return None
+
+
+def destroy_instance(instance_id) -> bool:
+    """Idempotent: a 404 means the instance is already gone — success.
+    Network failure -> False (callers log and retry via reconciliation)."""
+    try:
+        r = _request('DELETE', f'/instances/{instance_id}/')
+    except VastError as e:
+        logger.warning('destroy_instance %s: %s', instance_id, e)
+        return False
+    if r.status_code in (200, 404):
+        return True
+    logger.warning('destroy_instance %s: HTTP %s', instance_id, r.status_code)
+    return False
+
+
+def derive_base_url(instance: dict, container_port: int):
+    """Public URL of the pod's UI from the docker-style port mapping.
+    Returns None while the mapping isn't published yet (instance booting)."""
+    if not instance:
+        return None
+    ip = instance.get('public_ipaddr')
+    ports = instance.get('ports') or {}
+    entries = ports.get(f'{container_port}/tcp') or []
+    if not ip or not entries:
+        return None
+    host_port = (entries[0] or {}).get('HostPort')
+    return f'http://{ip}:{host_port}' if host_port else None

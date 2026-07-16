@@ -1,0 +1,125 @@
+/**
+ * Full-screen inspection lightbox (F3): toggle fit ↔ 100 % (native pixels) to
+ * hunt skin/eyes artefacts before keeping an image. Esc, ✕ or a click on the
+ * backdrop close it; a click on the image toggles the zoom mode.
+ */
+import { useEffect, useRef, useState } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { displayLabel } from '../../utils/labels';
+
+const IMPROVE_HELP = 'Klein creates a new 2 MP version to validate and leaves the original intact.';
+
+export default function DatasetLightbox({
+  img,
+  datasetId,
+  nonce = 0,
+  onClose,
+  onCrop,
+  onImprove,
+  busy = false,
+  improvePending = false,
+  improveReady = false,
+  kleinAvailable = false,
+}) {
+  const [full, setFull] = useState(false); // false = fit screen, true = 100 %
+  const [improving, setImproving] = useState(false);
+  const dialogRef = useRef(null);
+  const closeRef = useRef(null);
+
+  // Focus trap keeps Tab inside the dialog (P2-7).
+  useFocusTrap(dialogRef, !!(img && img.filename));
+
+  // Keyboard support: Escape closes, initial focus on the close button.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  useEffect(() => { closeRef.current?.focus(); }, []);
+
+  if (!img || !img.filename) return null;
+  const url = `/api/dataset/${datasetId}/img/${encodeURIComponent(img.filename)}${nonce ? `?v=${nonce}` : ''}`;
+  const alt = displayLabel(img.variation_label) || 'dataset image';
+  const improvementActive = improving || improvePending;
+  const improveDisabled = busy || improvementActive || improveReady || !kleinAvailable;
+  const improveTitle = !kleinAvailable
+    ? `Klein is not available in this setup. ${IMPROVE_HELP}`
+    : improveReady
+      ? `A new version is waiting for validation. ${IMPROVE_HELP}`
+    : improvePending
+      ? `An improvement is already running for this image. ${IMPROVE_HELP}`
+      : IMPROVE_HELP;
+
+  const improve = async (event) => {
+    event.stopPropagation();
+    if (!onImprove || improveDisabled) return;
+    setImproving(true);
+    try {
+      await onImprove(img.id);
+    } finally {
+      setImproving(false);
+    }
+  };
+
+  return (
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`Inspect — ${alt}`}
+      className="fixed inset-0 z-[9996] bg-black/95 flex flex-col" onClick={onClose}>
+      <button type="button" ref={closeRef}
+        onClick={(e) => { e.stopPropagation(); onClose(); }}
+        title="Close (Esc)" aria-label="Close inspection"
+        className="absolute top-3 right-3 z-10 w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white text-lg leading-none">✕</button>
+
+      {full ? (
+        <div className="flex-1 min-h-0 overflow-auto">
+          <img src={url} alt={alt}
+            onClick={(e) => { e.stopPropagation(); setFull(false); }}
+            className="max-w-none cursor-zoom-out select-none" />
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 flex items-center justify-center p-4">
+          <img src={url} alt={alt}
+            onClick={(e) => { e.stopPropagation(); setFull(true); }}
+            className="max-h-full max-w-full object-contain cursor-zoom-in select-none" />
+        </div>
+      )}
+
+      <div onClick={(e) => e.stopPropagation()}
+        className="shrink-0 flex flex-wrap items-center justify-center gap-2 px-4 py-2.5 bg-black/60">
+        <span className="text-white text-sm">{alt}</span>
+        <span className="px-1.5 py-0.5 rounded text-[10px] bg-white/10 text-white/80">
+          {img.source === 'import' ? 'real' : 'generated'}{img.framing ? ` · ${img.framing}` : ''}
+        </span>
+        {img.generation_engine && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-500/20 text-indigo-100">
+            engine · {img.generation_engine}
+          </span>
+        )}
+        {!!img.generation_anchor_metadata?.length && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-100"
+            title={img.generation_anchor_metadata.map((anchor) => `${anchor.source_name || anchor.filename}: ${anchor.selection_reason}`).join('\n')}>
+            ◆ {img.generation_anchor_metadata.length} generation anchor(s)
+          </span>
+        )}
+        <span className="text-white/50 text-[11px]">
+          {full ? '100 % — click image to fit' : 'fitted — click image for 100 %'}
+        </span>
+        {onCrop && (
+          <button type="button" onClick={() => onCrop(img)}
+            title="Open the crop editor for this image (stretchable box, any ratio)"
+            className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-semibold">
+            ✂ Crop
+          </button>
+        )}
+        {onImprove && (
+          <button type="button" onClick={improve} disabled={improveDisabled}
+            aria-busy={improvementActive} title={improveTitle}
+            className="min-h-9 w-full sm:w-auto px-3 py-1.5 rounded-lg border border-indigo-400/50 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45">
+            {improveReady
+              ? '✓ Review improvement first'
+              : improvementActive ? '✨ Improving…' : '✨ Upscale & improve'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

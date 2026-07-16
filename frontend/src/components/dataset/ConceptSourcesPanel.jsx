@@ -1,0 +1,362 @@
+/**
+ * ConceptSourcesPanel — build a concept dataset from scraped images.
+ *
+ * A concept LoRA is built from REAL images, so instead of the face tooling
+ * (reference photo, variations, face analysis) you: paste a gallery URL → scan
+ * (read-only /api/scrape/scan) → pick images → import them DIRECTLY into the
+ * dataset (/dataset/<id>/scrape-import). Nothing touches a shared pool.
+ *
+ * Guidance surfaced in the UI: aim for 20-50 varied images, keep at most ~10 per
+ * gallery (one gallery ≈ one shoot). Server-side filters (dedup, min side < 768px,
+ * ratio > 3:1) run at import — low-resolution images can optionally be preserved
+ * as reviewable Klein rescue pairs instead of being skipped.
+ */
+import { useState, useCallback, useEffect } from 'react';
+import { useToast } from '../common/Toast';
+import { postJson } from '../../hooks/useDataset';
+import { useCapabilities } from '../../context/CapabilitiesContext';
+import InstallRunner from '../setup/InstallRunner';
+import { clearScraperScanState, loadScraperScanState, saveScraperScanState } from './scraperState';
+
+const thumbFor = (it) =>
+  `/api/scrape/thumb?url=${encodeURIComponent(it.thumbnail || it.url)}`;
+
+const SOURCE_GROUPS = [
+  { label: 'SFW', tone: 'emerald', sources: [
+    ['Reddit', 'https://www.reddit.com/'], ['Instagram', 'https://www.instagram.com/'],
+    ['X / Twitter', 'https://x.com/'], ['Civitai images', 'https://civitai.com/images'],
+  ] },
+  { label: 'NSFW', tone: 'rose', sources: [
+    ['PornPics', 'https://www.pornpics.com/'], ['Sex.com', 'https://www.sex.com/'],
+    ['Picazor', 'https://picazor.com/'], ['Erome', 'https://www.erome.com/'],
+    ['Fapello', 'https://fapello.com/'], ['Coomer', 'https://coomer.st/'],
+    ['Kemono', 'https://kemono.cr/'], ['Cyberdrop', 'https://cyberdrop.me/'],
+    ['Bunkr', 'https://bunkr.cr/'],
+  ] },
+];
+
+export default function ConceptSourcesPanel({ datasetId, onImport, busy }) {
+  const toast = useToast();
+  const { caps, refresh } = useCapabilities();
+  const [restoredScan] = useState(() => loadScraperScanState(datasetId));
+  const [url, setUrl] = useState(restoredScan.url);
+  const [kw, setKw] = useState(restoredScan.kw);       // Reddit keyword search
+  const [sub, setSub] = useState(restoredScan.sub);     // optional subreddit scope
+  const [items, setItems] = useState(restoredScan.items);
+  const [page, setPage] = useState(restoredScan.page);
+  const [paginated, setPaginated] = useState(restoredScan.paginated);
+  const [scanning, setScanning] = useState(false);
+  // Gallery-listing scans (PornPics category/tag/search): OFF = one cover per
+  // matched gallery (the keyword-relevant shot), ON = every photo of each gallery.
+  const [fullAlbums, setFullAlbums] = useState(restoredScan.fullAlbums);
+  // Generative rescue is deliberately opt-in for every import. The source and
+  // Klein result both stay out of training until the side-by-side review.
+  const [rescueSmall, setRescueSmall] = useState(restoredScan.rescueSmall);
+  const [selected, setSelected] = useState(() => new Set(restoredScan.selected));
+  const [importing, setImporting] = useState(false);
+  // URLs whose thumbnail failed to load (dead/expired source links). Hidden from
+  // the grid so you only ever see & pick live images — dead galleries are common.
+  const [broken, setBroken] = useState(() => new Set());
+  // Preview tile size (px). A category scrape returns whole galleries (many
+  // off-concept frames) → larger previews speed up eyeballing. Persisted.
+  const [tile, setTile] = useState(() => {
+    const v = Number(localStorage.getItem('conceptTileSize'));
+    return v >= 72 && v <= 320 ? v : 120;
+  });
+  const changeTile = (v) => {
+    setTile(v);
+    try { localStorage.setItem('conceptTileSize', String(v)); } catch { /* ignore */ }
+  };
+
+  useEffect(() => {
+    saveScraperScanState(datasetId, { url, kw, sub, items, page, paginated,
+      fullAlbums, rescueSmall, selected });
+  }, [datasetId, url, kw, sub, items, page, paginated, fullAlbums, rescueSmall, selected]);
+
+  // `explicitUrl` lets the Reddit keyword search scan a freshly-built URL without
+  // waiting for the `url` state to flush; "Load more" omits it and reuses `url`.
+  const runScan = useCallback(async (nextPage, explicitUrl) => {
+    const target = (explicitUrl ?? url).trim();
+    if (!target || scanning) return;
+    setScanning(true);
+    try {
+      const body = await postJson('/api/scrape/scan',
+        { url: target, page: nextPage, include_albums: fullAlbums });
+      if (!body || !body.scannable) { toast.error((body && body.error) || 'Could not scan this URL.'); return; }
+      // Images only (the dataset import rejects video/gif anyway).
+      const imgs = (body.items || []).filter((it) => it.type === 'image');
+      setItems((prev) => (nextPage === 0 ? imgs : [...prev, ...imgs]));
+      setPaginated(!!body.paginated);
+      setPage(nextPage);
+      if (nextPage === 0) { setSelected(new Set()); setBroken(new Set()); }  // fresh scan resets; "Load more" keeps it
+      if (imgs.length === 0 && nextPage === 0) toast.info('No images found on this page.');
+    } finally {
+      setScanning(false);
+    }
+  }, [url, scanning, fullAlbums, toast]);
+
+  // Reddit search, three modes depending on which field is filled:
+  //   keyword only          → search all of Reddit for the term
+  //   keyword + subreddit    → search that term WITHIN one community (cleaner)
+  //   subreddit only         → browse that community's top posts (no term)
+  // All build a reddit URL routed through the same scan pipeline; the backend
+  // RedditSource enumerates via the authenticated OAuth API (anon browsing is walled).
+  const runRedditSearch = useCallback(() => {
+    if (scanning) return;
+    const q = kw.trim();
+    const s = sub.trim().replace(/^\/?(r\/)?/i, '').replace(/[^A-Za-z0-9_]/g, '');
+    if (!q && !s) return;
+    let built;
+    if (q) {
+      const p = new URLSearchParams({ q, sort: 'top', t: 'all', type: 'link' });
+      built = s
+        ? `https://www.reddit.com/r/${s}/search/?${p.toString()}&restrict_sr=1`
+        : `https://www.reddit.com/search/?${p.toString()}`;
+    } else {
+      built = `https://www.reddit.com/r/${s}/top/?t=all`;   // subreddit only → browse top
+    }
+    setUrl(built);
+    runScan(0, built);
+  }, [kw, sub, scanning, runScan]);
+
+  const toggle = (u) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(u)) next.delete(u); else next.add(u);
+      return next;
+    });
+  };
+
+  // Thumbnail failed → the source image is dead/expired. Hide it and un-select it.
+  const markBroken = (u) => {
+    setBroken((prev) => new Set(prev).add(u));
+    setSelected((prev) => {
+      if (!prev.has(u)) return prev;
+      const next = new Set(prev); next.delete(u); return next;
+    });
+  };
+
+  const handleImport = async () => {
+    const chosen = items.filter((it) => selected.has(it.url))
+      .map((it) => ({ url: it.url, title: it.title || '' }));
+    if (chosen.length === 0 || importing) return;
+    setImporting(true);
+    try {
+      const d = await onImport?.(chosen, { rescueSmall });
+      if (d?.ok) setSelected(new Set());
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const resetScan = () => {
+    clearScraperScanState(datasetId);
+    setUrl(''); setKw(''); setSub(''); setItems([]); setPage(0);
+    setPaginated(false); setFullAlbums(false); setRescueSmall(false);
+    setSelected(new Set()); setBroken(new Set());
+  };
+
+  return (
+    <section className="bg-surface rounded-xl border border-border p-3 flex flex-col gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <h2 className="text-content font-semibold text-sm">🕷️ Build from scraped images</h2>
+        <span className="text-content-subtle text-[0.6875rem]"
+          title="Research-backed: 20-50 curated images beat hundreds of mixed ones; keep at most ~10 per gallery (one gallery ≈ one shoot).">
+          aim for 20-50 varied images
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" aria-label="Compatible scraper sites">
+        {SOURCE_GROUPS.map((group) => (
+          <div key={group.label}
+            className={`rounded-lg border px-2.5 py-2 ${group.tone === 'emerald'
+              ? 'border-emerald-400/30 bg-emerald-500/5'
+              : 'border-rose-400/30 bg-rose-500/5'}`}>
+            <span className={`mr-2 text-[0.6875rem] font-bold ${group.tone === 'emerald'
+              ? 'text-emerald-300' : 'text-rose-300'}`}>{group.label}</span>
+            <span className="inline-flex flex-wrap gap-x-2 gap-y-1">
+              {group.sources.map(([name, href]) => (
+                <a key={name} href={href} target="_blank" rel="noreferrer"
+                  className="text-[0.6875rem] text-content-muted underline decoration-white/20 underline-offset-2 hover:text-content">
+                  {name} ↗
+                </a>
+              ))}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Scrape extras (curl_cffi, gallery-dl, cloudscraper…) live in the
+          optional requirements-scrape.txt — without them most sources fail
+          ("curl_cffi non disponible"). One-click install into THIS interpreter. */}
+      {caps.scrape_deps === false && (
+        <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 p-2 flex flex-col gap-1.5">
+          <p className="text-amber-200 text-[0.6875rem]">
+            ⚠ The scraper&apos;s Python packages are not installed (curl_cffi, gallery-dl,
+            cloudscraper…) — most sources (Picazor included) need them.
+          </p>
+          <InstallRunner action="scrape_extras" buttonLabel="⬇ Install scraper extras"
+            onDone={() => refresh(true)} />
+        </div>
+      )}
+
+      {/* URL → scan. Chosen images are downloaded straight into THIS dataset. */}
+      <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); runScan(0); }}>
+        <input
+          type="url" value={url} onChange={(e) => setUrl(e.target.value)}
+          placeholder="Gallery or search URL (e.g. pornpics.com/… or sex.com/en/pics?search=…)"
+          className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm placeholder:text-content-subtle focus:border-indigo-500 outline-none"
+        />
+        <button type="submit" disabled={scanning || !url.trim()}
+          className="px-3 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm hover:bg-white/10 disabled:opacity-40">
+          {scanning && page === 0 ? 'Scanning…' : 'Scan'}
+        </button>
+        <button type="button" onClick={handleImport} disabled={busy || importing || selected.size === 0}
+          className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
+          {importing ? 'Importing…' : `⬇ Import ${selected.size || ''}`}
+        </button>
+      </form>
+
+      <label className={`flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[0.75rem] ${
+        rescueSmall
+          ? 'border-indigo-400/50 bg-indigo-500/10 text-content'
+          : 'border-border bg-white/[0.03] text-content-muted'} ${
+        caps.engines?.klein === false ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
+        <input type="checkbox" checked={rescueSmall}
+          disabled={busy || importing || caps.engines?.klein === false}
+          onChange={(e) => setRescueSmall(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 rounded border-border-strong accent-indigo-500" />
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="font-semibold text-content">
+            Rescue images under 768 px with Klein (generative)
+          </span>
+          <span className="text-[0.6875rem] leading-relaxed text-content-subtle">
+            Off by default. Only small images are sent to Klein. The original is preserved,
+            and neither version enters training until you choose one in Curation.
+            {caps.engines?.klein === false ? ' Klein is not ready in this setup.' : ''}
+          </span>
+        </span>
+      </label>
+
+      {/* Gallery-listing option — only meaningful for PornPics category/tag/search
+          URLs (a direct /galleries/... URL always returns its full album). */}
+      {/pornpics\.com/i.test(url) && !/\/galleries\//i.test(url) && (
+        <label className="flex items-center gap-2 text-[0.6875rem] text-content-muted cursor-pointer"
+          title="Off: you get exactly the preview images the listing page shows — one per gallery, the shot that matches your keyword. On: every photo of each matched gallery floods in (a lot of off-topic frames). To grab one full album, paste its /galleries/ URL directly.">
+          <input type="checkbox" checked={fullAlbums}
+            onChange={(e) => setFullAlbums(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-border-strong accent-indigo-500" />
+          Scan full albums — off = one cover per matched gallery, on = every photo of each
+        </label>
+      )}
+
+      {/* Reddit search — two fields, three modes (keyword / keyword+sub / sub only).
+          Both build a reddit URL routed through the same scan pipeline. */}
+      <div className="rounded-lg border border-border bg-white/5 px-2 py-2 flex flex-col gap-1.5">
+        <span className="text-content-subtle text-[0.6875rem] flex items-center gap-1">
+          <span aria-hidden>🔎</span> Search Reddit
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={kw} onChange={(e) => setKw(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); runRedditSearch(); } }}
+            placeholder="keyword — what to look for (e.g. film portrait)"
+            title="The term to search for across Reddit. Leave empty to browse a subreddit's top posts."
+            className="flex-[2] min-w-[9rem] px-2.5 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm placeholder:text-content-subtle focus:border-indigo-500 outline-none"
+          />
+          <span className="text-content-subtle text-sm shrink-0">in r/</span>
+          <input
+            value={sub} onChange={(e) => setSub(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); runRedditSearch(); } }}
+            placeholder="community, e.g. analog (optional)"
+            title="A subreddit name (community). Restricts the search to it — cleaner results. This is also how you reach NSFW communities."
+            className="flex-[1] min-w-[7rem] px-2.5 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm placeholder:text-content-subtle focus:border-indigo-500 outline-none"
+          />
+          <button type="button" onClick={runRedditSearch} disabled={scanning || (!kw.trim() && !sub.trim())}
+            className="px-3 py-1.5 rounded-lg bg-surface border border-border text-content text-sm hover:bg-white/10 disabled:opacity-40 shrink-0">
+            Search
+          </button>
+        </div>
+        {/* Plain-language explanation of the two fields. */}
+        <p className="text-content-muted text-[0.6875rem] leading-relaxed">
+          <b className="text-content-subtle">Keyword</b> searches all of Reddit for a term.
+          Add a <b className="text-content-subtle">subreddit</b> (a community — the part after
+          <code className="px-1 text-content-subtle">r/</code>, e.g. <code className="px-1 text-content-subtle">analog</code>,
+          <code className="px-1 text-content-subtle">photographs</code>) to search only inside it — far cleaner,
+          on-topic images (and the way to reach NSFW communities). <b className="text-content-subtle">Subreddit alone</b>,
+          no keyword → just browse its top posts.
+        </p>
+      </div>
+
+      {items.length > 0 && (() => {
+        // Only live thumbnails are shown/pickable; dead source links are hidden.
+        const liveItems = items.filter((it) => !broken.has(it.url));
+        const deadCount = items.length - liveItems.length;
+        return (
+        <>
+          <div className="flex items-center gap-2 text-[0.6875rem] text-content-subtle flex-wrap">
+            <button type="button" onClick={() => setSelected(new Set(liveItems.map((it) => it.url)))}
+              title="Selects all live (loaded) images"
+              className="px-2 py-0.5 rounded border border-border hover:text-content">
+              Select all ({liveItems.length})
+            </button>
+            {deadCount > 0 && (
+              <span title="Images whose source link is dead/expired — hidden from the grid.">
+                🚫 {deadCount} dead hidden
+              </span>
+            )}
+            {selected.size > 0 && (
+              <button type="button" onClick={() => setSelected(new Set())}
+                className="px-2 py-0.5 rounded border border-border hover:text-content">
+                Clear
+              </button>
+            )}
+            <label className="flex items-center gap-1.5" title="Preview size — enlarge to judge images faster">
+              <span aria-hidden>🔍</span>
+              <input type="range" min="72" max="300" step="4" value={tile}
+                onChange={(e) => changeTile(Number(e.target.value))}
+                aria-label="Preview size"
+                className="w-24 sm:w-32 accent-indigo-500 cursor-pointer" />
+            </label>
+            <button type="button" onClick={resetScan} disabled={scanning || importing}
+              className="px-2 py-0.5 rounded border border-border hover:text-content disabled:opacity-40">
+              Reset scan
+            </button>
+            <span className="ml-auto">
+              Filters at import: duplicates, {rescueSmall ? 'Klein review for' : 'skip'} short side &lt; 768px, ratio &gt; 3:1
+            </span>
+          </div>
+
+          <div className="grid gap-1.5 overflow-y-auto max-h-[34rem] pr-1"
+            style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${tile}px, 1fr))` }}>
+            {liveItems.map((it) => {
+              const on = selected.has(it.url);
+              return (
+                <button type="button" key={it.url} onClick={() => toggle(it.url)}
+                  aria-pressed={on} title={it.title || it.url}
+                  className={`relative aspect-square rounded-lg overflow-hidden border-2 transition-all
+                    ${on ? 'border-indigo-400' : 'border-transparent hover:border-border-strong'}`}>
+                  <img src={thumbFor(it)} alt="" loading="lazy" onError={() => markBroken(it.url)}
+                    className="w-full h-full object-cover" />
+                  <span aria-hidden
+                    className={`absolute top-1 right-1 w-4 h-4 rounded-full text-[0.625rem] leading-4 text-center font-bold
+                      ${on ? 'bg-indigo-500 text-white' : 'bg-black/50 text-white/70'}`}>
+                    {on ? '✓' : ''}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {paginated && (
+            <button type="button" onClick={() => runScan(page + 1)} disabled={scanning}
+              className="self-start px-3 py-1.5 rounded-lg border border-border bg-surface text-content-muted hover:text-content text-xs disabled:opacity-40">
+              {scanning ? 'Loading…' : 'Load more galleries'}
+            </button>
+          )}
+        </>
+        );
+      })()}
+    </section>
+  );
+}
