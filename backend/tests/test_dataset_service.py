@@ -89,7 +89,7 @@ def test_import_images_normalizes_and_persists(app):
         assert len(ids) == 1 and failed == 0
         payload = svc.dataset_payload(LOCAL_USER, ds.id)
         assert len(payload['images']) == 1
-        assert payload['images'][0]['status'] == 'keep'
+        assert payload['images'][0]['status'] == 'pending'
 
 
 def test_import_records_source_provenance_and_technical_analysis(app):
@@ -155,6 +155,7 @@ def test_generation_anchor_pack_uses_imported_corpus_and_records_ids(app, monkey
             row = svc.db.session.get(FaceDatasetImage, ids[0])
             row.framing = framing
             row.training_usefulness = 'green'
+            row.status = 'keep'
             imported.append(ids[0])
         svc.db.session.commit()
 
@@ -200,6 +201,7 @@ def test_corpus_workbench_metadata_anchor_decisions_and_coverage(app):
 
         assert svc.set_anchor_decision(LOCAL_USER, ids[0], 'pinned')
         assert svc.set_anchor_decision(LOCAL_USER, ids[1], 'excluded')
+        assert svc.set_image_status(LOCAL_USER, ids[0], 'keep')
         assert svc.set_image_coverage(LOCAL_USER, ids[0], {
             'framing': 'face', 'angle': 'front', 'expression': 'neutral',
             'lighting': 'daylight', 'pose': 'headshot', 'background': 'plain',

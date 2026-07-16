@@ -63,10 +63,16 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
 
     with app.app_context():
         ds, source, raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        original_raw = _png((90, 80, 70))
+        source.original_filename = 'originals/source-original.png'
+        os.makedirs(os.path.join(svc._dataset_dir(ds.id), 'originals'), exist_ok=True)
+        with open(os.path.join(svc._dataset_dir(ds.id), source.original_filename), 'wb') as fh:
+            fh.write(original_raw)
+        svc.db.session.commit()
         source_id = source.id
         original_values = {
             field: getattr(source, field)
-            for field in ('filename', 'source', 'status', 'framing', 'caption',
+            for field in ('filename', 'source', 'framing', 'caption',
                           'variation_label', 'variation_prompt', 'derivation_kind',
                           'job_id', 'parent_image_id')
         }
@@ -77,6 +83,7 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
         source = svc.db.session.get(FaceDatasetImage, source_id)
         candidate = svc.db.session.get(FaceDatasetImage, result['candidate_id'])
         assert {field: getattr(source, field) for field in original_values} == original_values
+        assert source.status == 'pending'  # suspended until the exclusive review resolves
         with open(svc._img_path(source), 'rb') as fh:
             assert fh.read() == raw
         assert result == {'candidate_id': candidate.id, 'job_id': 'improve-job-1'}
@@ -90,12 +97,15 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
         assert candidate.framing == source.framing
         assert candidate.caption == source.caption
         assert candidate.variation_prompt == svc.KLEIN_IMAGE_IMPROVE_PROMPT
-        assert candidate.variation_label.startswith('Klein upscale & improve')
+        assert candidate.variation_label.startswith('Klein reconstruction')
         assert candidate.job_id == 'improve-job-1'
-        assert queued[0]['source_filename'] == source.filename
-        assert queued[0]['source_path'] == svc._img_path(source)
+        assert queued[0]['source_filename'] == 'source-original.png'
+        assert queued[0]['source_path'] == os.path.join(
+            svc._dataset_dir(ds.id), source.original_filename)
+        with open(queued[0]['source_path'], 'rb') as fh:
+            assert fh.read() == original_raw
         assert queued[0]['edit_prompt'] == svc.KLEIN_IMAGE_IMPROVE_PROMPT
-        assert queued[0]['lora_strength'] == 0.0
+        assert queued[0]['lora_strength'] is None
         assert queued[0]['sampler_steps'] == 4
         assert queued[0]['base_lora_strength'] == 0.0
         assert queued[0]['extra_metadata']['source_image_id'] == source_id
@@ -114,7 +124,7 @@ def test_improve_existing_image_returns_active_candidate_idempotently(app, monke
         active = FaceDatasetImage(
             dataset_id=ds.id, source='generated', status='pending',
             parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE,
-            variation_label='Klein upscale & improve', job_id='already-running')
+            variation_label='Klein reconstruction', job_id='already-running')
         svc.db.session.add(active)
         svc.db.session.commit()
         active_id = active.id
@@ -170,7 +180,7 @@ def test_improve_existing_image_rejects_missing_and_review_sources(app, monkeypa
             derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
         improve_candidate.source = 'generated'
         svc.db.session.commit()
-        with pytest.raises(ValueError, match='cannot be improved again'):
+        with pytest.raises(ValueError, match='cannot be reconstructed again'):
             svc.improve_existing_image(LOCAL_USER, improve_candidate.id)
         with pytest.raises(ValueError, match='cannot be regenerated'):
             svc.regenerate_image(LOCAL_USER, improve_candidate.id)
@@ -315,3 +325,268 @@ def test_improve_route_preflights_missing_nodes(client, monkeypatch):
     response = client.post('/api/dataset/image/8/improve', json={})
     assert response.status_code == 409
     assert response.get_json()['klein_nodes_missing'] == missing
+
+
+@pytest.mark.parametrize(('choice', 'expected'), [
+    ('original', ('keep', 'reject')),
+    ('improved', ('reject', 'keep')),
+    ('reject', ('reject', 'reject')),
+])
+def test_resolve_image_improvement_admits_exactly_one_version(app, choice, expected):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        candidate_name = 'reconstructed.png'
+        with open(os.path.join(svc._dataset_dir(ds.id), candidate_name), 'wb') as fh:
+            fh.write(_png((80, 90, 100)))
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending', filename=candidate_name,
+            parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+
+        result = svc.resolve_image_improvement(
+            LOCAL_USER, ds.id, candidate.id, choice)
+        svc.db.session.refresh(source)
+        svc.db.session.refresh(candidate)
+        assert (source.status, candidate.status) == expected
+        assert result['choice'] == choice
+        # Network retries are idempotent, but the pair cannot later be flipped by
+        # either the dedicated resolver or generic curation controls.
+        assert svc.resolve_image_improvement(
+            LOCAL_USER, ds.id, candidate.id, choice)['choice'] == choice
+        other = 'original' if choice != 'original' else 'reject'
+        with pytest.raises(RuntimeError, match='already resolved'):
+            svc.resolve_image_improvement(LOCAL_USER, ds.id, candidate.id, other)
+        with pytest.raises(ValueError, match='dedicated comparison'):
+            svc.set_image_status(LOCAL_USER, source.id, 'pending')
+        with pytest.raises(ValueError, match='cannot be deleted independently'):
+            svc.delete_image(LOCAL_USER, candidate.id)
+
+
+def test_resolve_image_improvement_requires_ready_candidate(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending',
+            parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE,
+            job_id='not-ready')
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+        with pytest.raises(ValueError, match='not ready'):
+            svc.resolve_image_improvement(
+                LOCAL_USER, ds.id, candidate.id, 'improved')
+
+
+def test_image_improvement_resolve_route(client, monkeypatch):
+    from app.services import face_dataset_service as svc
+
+    monkeypatch.setattr(svc, 'resolve_image_improvement', lambda *_args: {
+        'choice': 'improved',
+        'source': {'id': 2, 'status': 'reject'},
+        'candidate': {'id': 8, 'status': 'keep'},
+    })
+    response = client.post(
+        '/api/dataset/3/image-improvement/8/resolve', json={'choice': 'improved'})
+    assert response.status_code == 200
+    assert response.get_json()['choice'] == 'improved'
+
+
+def test_backup_preserves_inflight_reconstruction_pair_as_reviewable_failure(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        source.status = 'pending'
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending',
+            parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE,
+            job_id='machine-local-job')
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+        restored = svc.import_backup_zip(
+            LOCAL_USER, svc.build_backup_zip(LOCAL_USER, ds.id))
+        rows = FaceDatasetImage.query.filter_by(dataset_id=restored.id).all()
+        restored_candidate = next(
+            row for row in rows if row.derivation_kind == svc.KLEIN_IMAGE_IMPROVE)
+        restored_source = svc.db.session.get(
+            FaceDatasetImage, restored_candidate.parent_image_id)
+        assert restored_candidate.status == 'failed'
+        assert restored_source and restored_source.status == 'pending'
+        assert 'source is preserved' in restored_candidate.fail_reason
+        result = svc.resolve_image_improvement(
+            LOCAL_USER, restored.id, restored_candidate.id, 'original')
+        assert result['source']['status'] == 'keep'
+
+
+def test_legacy_siblings_normalize_then_resolve_as_one_group(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        source.status = 'reject'
+        siblings = []
+        for index in range(2):
+            filename = f'legacy-{index}.png'
+            with open(os.path.join(svc._dataset_dir(ds.id), filename), 'wb') as fh:
+                fh.write(_png((40 + index, 50, 60)))
+            sibling = FaceDatasetImage(
+                dataset_id=ds.id, source='generated', status='keep', filename=filename,
+                parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+            svc.db.session.add(sibling)
+            siblings.append(sibling)
+        svc.db.session.commit()
+
+        assert svc.normalize_legacy_image_improvement_rows(ds.id) == 1
+        svc.db.session.refresh(source)
+        for sibling in siblings:
+            svc.db.session.refresh(sibling)
+        assert source.status == 'pending'
+        assert [sibling.status for sibling in siblings] == ['reject', 'pending']
+
+        svc.resolve_image_improvement(
+            LOCAL_USER, ds.id, siblings[1].id, 'improved')
+        svc.db.session.refresh(source)
+        for sibling in siblings:
+            svc.db.session.refresh(sibling)
+        assert source.status == 'reject'
+        assert [sibling.status for sibling in siblings] == ['reject', 'keep']
+
+
+def test_orphaned_legacy_candidate_is_independently_cleanable(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Orphan', 'orphan')
+        filename = 'orphan.png'
+        with open(os.path.join(svc._dataset_dir(ds.id), filename), 'wb') as fh:
+            fh.write(_png())
+        orphan = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='reject', filename=filename,
+            parent_image_id=999999, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        svc.db.session.add(orphan)
+        svc.db.session.commit()
+        orphan_id = orphan.id
+
+        assert svc.set_image_status(LOCAL_USER, orphan_id, 'pending') is True
+        assert svc.set_image_status(LOCAL_USER, orphan_id, 'reject') is True
+        assert svc.purge_unused(LOCAL_USER, ds.id) == 1
+        assert svc.db.session.get(FaceDatasetImage, orphan_id) is None
+
+
+def test_unresolved_reconstruction_pixels_are_immutable(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        source.status = 'pending'
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending',
+            filename='candidate.png', parent_image_id=source.id,
+            derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        with open(os.path.join(svc._dataset_dir(ds.id), candidate.filename), 'wb') as fh:
+            fh.write(_png((100, 110, 120)))
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+
+        with pytest.raises(ValueError, match='before cropping'):
+            svc.crop_image(LOCAL_USER, source.id, 0, 0, 32, 32)
+        with pytest.raises(ValueError, match='before cropping'):
+            svc.crop_image(LOCAL_USER, candidate.id, 0, 0, 32, 32)
+
+
+def test_reconstruction_qa_scores_exact_input_without_overwriting_source(app, monkeypatch):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.services import face_similarity
+
+    captured = {}
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        ds.ref_filename = 'ref.png'
+        with open(os.path.join(svc._dataset_dir(ds.id), ds.ref_filename), 'wb') as fh:
+            fh.write(_png((200, 200, 200)))
+        source.original_filename = 'originals/exact.png'
+        os.makedirs(os.path.dirname(os.path.join(
+            svc._dataset_dir(ds.id), source.original_filename)), exist_ok=True)
+        with open(os.path.join(svc._dataset_dir(ds.id), source.original_filename), 'wb') as fh:
+            fh.write(_png((5, 6, 7)))
+        source.face_state = 'scorable'
+        source.face_score = 0.88
+        source.analysis_json = '{"metrics":{"sharpness":50,"exposure":50,"resolution":50}}'
+        source.status = 'pending'
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending',
+            filename='candidate.png', parent_image_id=source.id,
+            derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        with open(os.path.join(svc._dataset_dir(ds.id), candidate.filename), 'wb') as fh:
+            fh.write(_png((180, 180, 180)))
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+
+        def score(_ref, paths, **_kwargs):
+            captured['paths'] = paths
+            return ({
+                paths[0]: {'state': 'scorable', 'sim': 0.20, 'face_count': 1,
+                           'face_sharpness': 80, 'face_exposure': 80},
+                paths[1]: {'state': 'scorable', 'sim': 0.70, 'face_count': 1,
+                           'face_sharpness': 80, 'face_exposure': 80},
+            }, None)
+
+        monkeypatch.setattr(face_similarity, 'score_dataset_faces', score)
+        assert svc._prepare_completed_improvement(candidate) is True
+        svc._analyze_completed_improvement(candidate)
+        comparison = svc.parse_analysis(candidate.analysis_json)['repair_comparison']
+
+        assert captured['paths'][1] == os.path.join(
+            svc._dataset_dir(ds.id), source.original_filename)
+        assert comparison['source_filename'] == source.original_filename
+        assert comparison['source_identity_score'] == 0.70
+        assert comparison['recommendation'] == 'identity_risk'
+        assert comparison['phase'] == 'ready'
+        assert source.face_score == 0.88
+
+
+def test_backup_recovers_orphaned_reconstruction_as_ordinary_row(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds, source, _raw = _source(svc, FaceDatasetImage, LOCAL_USER)
+        filename = 'surviving-reconstruction.png'
+        with open(os.path.join(svc._dataset_dir(ds.id), filename), 'wb') as fh:
+            fh.write(_png((33, 44, 55)))
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='reject', filename=filename,
+            parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+        # Recreate the legacy database shape that the current API no longer permits.
+        svc.db.session.delete(source)
+        svc.db.session.commit()
+
+        restored = svc.import_backup_zip(
+            LOCAL_USER, svc.build_backup_zip(LOCAL_USER, ds.id))
+        rows = FaceDatasetImage.query.filter_by(dataset_id=restored.id).all()
+        assert len(rows) == 1
+        assert rows[0].filename == filename
+        assert rows[0].parent_image_id is None
+        assert rows[0].derivation_kind is None
+        assert 'orphaned reconstruction' in rows[0].fail_reason

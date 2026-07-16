@@ -630,7 +630,9 @@ def _parse_trained_stem(filename: str):
     en (trigger, step|None, [tokens_de_base]). Renvoie None si le nom ne suit PAS la
     convention (le caller retombe alors sur un label générique). Source UNIQUE du
     parse, partagée par le libellé lisible ET la clé de regroupement des checkpoints."""
-    stem = os.path.basename(filename).rsplit('.', 1)[0]
+    # ComfyUI persists model names with backslashes even when the app later
+    # reads that configuration on POSIX. Treat both separators as path syntax.
+    stem = (filename or '').replace('\\', '/').rsplit('/', 1)[-1].rsplit('.', 1)[0]
     if not stem.lower().startswith('lora_'):
         return None
     tokens = [t for t in stem[len('lora_'):].split('_') if t]

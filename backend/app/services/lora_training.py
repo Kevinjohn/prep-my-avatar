@@ -2611,8 +2611,181 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
     except Exception:
         pass   # best-effort: an unreadable file must not block the preflight
 
+    # 6) The training set is an admitted projection of the corpus. Surface the
+    # quality signals on those admitted rows; acceptance remains a human choice,
+    # but a red face crop or unverified identity must never be invisible at launch.
+    quality_images = []
+    if n:
+        technical_red = [r for r in kept if (r.training_usefulness or '').lower() == 'red']
+        technical_amber = [r for r in kept if (r.training_usefulness or '').lower() == 'amber']
+        technical_unknown = [r for r in kept if not r.training_usefulness]
+        face_red, face_amber, face_unknown = [], [], []
+        for r in kept:
+            face_quality = (fds.parse_analysis(r.analysis_json).get('face') or {}).get('quality')
+            if face_quality == 'red':
+                face_red.append(r)
+            elif face_quality == 'amber':
+                face_amber.append(r)
+            elif face_quality != 'green':
+                # Legacy rows may have a face state/score but no face-region pixel
+                # assessment.  That is still unchecked, never implicitly clean.
+                face_unknown.append(r)
+        flagged = {r.id: r for r in (
+            technical_red + technical_amber + technical_unknown
+            + face_red + face_amber + face_unknown)}
+        quality_images = [
+            {'id': r.id, 'filename': r.filename,
+             'technical': r.training_usefulness,
+             'face_quality': (fds.parse_analysis(r.analysis_json).get('face') or {}).get('quality')}
+            for r in flagged.values()]
+        if technical_red or face_red:
+            warnings.append(
+                f'{len({r.id for r in technical_red + face_red})} kept image(s) have red '
+                'technical or face-region quality — reject them or verify at 100%.')
+            _check('pixel_quality', 'Training pixels are clean', 'warn',
+                   f'{len({r.id for r in technical_red + face_red})} red QA image(s)', 'gf-images')
+        elif technical_amber or face_amber:
+            _check('pixel_quality', 'Training pixels are clean', 'warn',
+                   f'{len({r.id for r in technical_amber + face_amber})} amber QA image(s)', 'gf-images')
+        elif technical_unknown or face_unknown:
+            warnings.append(
+                f'{len({r.id for r in technical_unknown + face_unknown})} kept image(s) '
+                'have incomplete technical or face-region QA — refresh corpus analysis '
+                'before training.')
+            _check('pixel_quality', 'Training pixels are clean', 'warn',
+                   f'{len({r.id for r in technical_unknown + face_unknown})} image(s) '
+                   'not fully analysed', 'gf-images')
+        else:
+            _check('pixel_quality', 'Training pixels are clean', 'ok', 'no red/amber QA signal')
+
+    if n and not concept:
+        orange = cfg.get('face_scoring.orange')
+        try:
+            orange = float(orange)
+        except (TypeError, ValueError):
+            orange = 0.45
+        unscored = [r for r in kept if not r.face_state]
+        non_scorable = [r for r in kept if r.face_state and r.face_state != 'scorable']
+        missing_score = [r for r in kept
+                         if r.face_state == 'scorable' and r.face_score is None]
+        low_identity = [r for r in kept if r.face_state == 'scorable'
+                        and r.face_score is not None and r.face_score < orange]
+        if unscored or non_scorable or missing_score or low_identity:
+            warnings.append(
+                f'identity QA needs review: {len(unscored)} unscored, '
+                f'{len(non_scorable)} non-scorable, {len(missing_score)} missing a score, '
+                f'{len(low_identity)} below the identity threshold.')
+            _check('identity_quality', 'Identity verified', 'warn',
+                   f'{len(unscored)} unscored · {len(non_scorable)} non-scorable · '
+                   f'{len(missing_score)} missing score · '
+                   f'{len(low_identity)} below {orange:.2f}', 'gf-images')
+        else:
+            _check('identity_quality', 'Identity verified', 'ok',
+                   f'{n}/{n} accepted images checked')
+
+    watermark_risk = [r for r in kept if r.watermark_state in ('detected', 'failed')]
+    watermark_unscanned = [r for r in kept if r.watermark_state is None]
+    if watermark_risk:
+        warnings.append(f'{len(watermark_risk)} kept image(s) still have a detected or failed '
+                        'watermark check — clean, crop, or reject them.')
+        _check('watermarks', 'No unresolved watermarks', 'warn',
+               f'{len(watermark_risk)} kept image(s) still flagged', 'gf-curation')
+    elif watermark_unscanned:
+        warnings.append(f'{len(watermark_unscanned)} kept image(s) have not been scanned '
+                        'for overlaid watermarks.')
+        _check('watermarks', 'No unresolved watermarks', 'warn',
+               f'{len(watermark_unscanned)} image(s) not scanned', 'gf-curation')
+    elif n:
+        _check('watermarks', 'No unresolved watermarks', 'ok', '0 unresolved flag')
+
+    enlarged = [r for r in kept if (r.upscale_ratio or 0) >= fds.UPSCALE_WARN_THRESHOLD]
+    if enlarged:
+        warnings.append(f'{len(enlarged)} kept image(s) were enlarged by at least '
+                        f'{fds.UPSCALE_WARN_THRESHOLD:g}× during crop — inspect facial texture at 100%.')
+        _check('native_resolution', 'Enough native detail', 'warn',
+               f'{len(enlarged)} heavily enlarged crop(s)', 'gf-images')
+    elif n:
+        _check('native_resolution', 'Enough native detail', 'ok', 'no heavily enlarged crop')
+
+    # Provenance sanity: one source/reconstruction pair may contribute one row,
+    # and a mostly generated corpus should be an explicit decision, not an accident.
+    by_id = {r.id: r for r in rows}
+    improve_groups = {}
+    for candidate in rows:
+        if candidate.derivation_kind != fds.KLEIN_IMAGE_IMPROVE:
+            continue
+        source = by_id.get(candidate.parent_image_id)
+        # An orphaned legacy reconstruction is an ordinary retained image so the
+        # owner can reject/delete it; it is not an unresolvable exclusive pair.
+        if source and source.dataset_id == candidate.dataset_id:
+            improve_groups.setdefault(source.id, []).append(candidate)
+    exclusive_pair_ids = set()
+    both_kept = []
+    unresolved_improvements = []
+    for source_id, candidates in improve_groups.items():
+        source = by_id[source_id]
+        exclusive_pair_ids.add(source.id)
+        exclusive_pair_ids.update(candidate.id for candidate in candidates)
+        if source.status == 'keep' and any(c.status == 'keep' for c in candidates):
+            both_kept.append(source_id)
+        if fds._image_improvement_resolved_choice(source, candidates) is None:
+            unresolved_improvements.append(source_id)
+    if both_kept:
+        blockers.append(f'{len(both_kept)} reconstruction pair(s) have both source and '
+                        'candidate kept — resolve each pair before training.')
+        _check('provenance_pairs', 'One version per reconstruction', 'fail',
+               f'{len(both_kept)} pair(s) double-counted', 'gf-curation')
+    elif unresolved_improvements:
+        warnings.append(f'{len(unresolved_improvements)} reconstruction comparison(s) are '
+                        'unresolved and excluded from training.')
+        _check('provenance_pairs', 'One version per reconstruction', 'warn',
+               f'{len(unresolved_improvements)} comparison(s) unresolved', 'gf-curation')
+    elif improve_groups:
+        _check('provenance_pairs', 'One version per reconstruction', 'ok',
+               'every reconstruction has one admitted version')
+
+    small_candidates = [r for r in rows if r.derivation_kind == fds.KLEIN_SMALL_IMAGE]
+    unresolved_small = []
+    for candidate in small_candidates:
+        source = by_id.get(candidate.parent_image_id)
+        if not source or source.derivation_kind != fds.SMALL_IMAGE_SOURCE:
+            continue
+        exclusive_pair_ids.update((source.id, candidate.id))
+        resolved = ((source.status == 'keep' and candidate.status == 'reject')
+                    or (source.status == 'reject' and candidate.status in ('keep', 'reject')))
+        if not resolved:
+            unresolved_small.append(candidate)
+    if unresolved_small:
+        warnings.append(f'{len(unresolved_small)} small-image rescue comparison(s) are '
+                        'unresolved and excluded from training.')
+        _check('rescue_pairs', 'Small-image rescues resolved', 'warn',
+               f'{len(unresolved_small)} comparison(s) unresolved', 'gf-curation')
+    elif small_candidates:
+        _check('rescue_pairs', 'Small-image rescues resolved', 'ok',
+               'every rescue has one admitted version')
+
+    if n and not concept:
+        synthetic = [r for r in kept if r.source == 'generated']
+        real = [r for r in kept if r.source == 'import']
+        share = len(synthetic) / n
+        if not real:
+            warnings.append('the accepted set contains no imported real photo — generated '
+                            'images can reinforce one another’s artifacts and identity drift.')
+            _check('source_mix', 'Real-photo foundation', 'warn',
+                   '0 accepted imported photos', 'ds-add-import')
+        elif share > 0.40:
+            warnings.append(f'{len(synthetic)}/{n} kept images are generated or reconstructed '
+                            f'({share:.0%}) — keep synthetic supplementation below the real-photo majority.')
+            _check('source_mix', 'Real-photo foundation', 'warn',
+                   f'{len(real)} real · {len(synthetic)} generated/reconstructed', 'gf-images')
+        else:
+            _check('source_mix', 'Real-photo foundation', 'ok',
+                   f'{len(real)} real · {len(synthetic)} generated/reconstructed')
+
     # 11) images encore en attente de tri (elles ne s'entraînent PAS)
-    untriaged = sum(1 for r in rows if r.status == 'pending' and r.filename)
+    untriaged = sum(1 for r in rows
+                    if r.status == 'pending' and r.filename
+                    and r.id not in exclusive_pair_ids)
     if untriaged:
         warnings.append(f'{untriaged} image(s) still await triage (✓/✕) — they will NOT '
                         'be part of the training.')
@@ -2643,6 +2816,7 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
             # Détail « lesquelles » pour l'UI : images dont la caption fuit, et paires
             # quasi-doublons — le message reste agrégé, mais on peut drill-down + agir.
             'leak_images': leak_images, 'dup_pairs': dup_pairs,
+            'quality_images': quality_images,
             'checks': checks, 'verdict': verdict,
             'kept': n, 'floor': floor, 'recommended': reco}
 

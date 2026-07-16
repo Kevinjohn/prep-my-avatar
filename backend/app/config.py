@@ -212,13 +212,16 @@ def aitoolkit_path(kind: str):
         explicit = (get('aitoolkit.python') or '').strip()
         if explicit:
             return Path(explicit)
-        # Both venv layouts exist: ai-toolkit's docs say `venv`, plenty of
-        # setups use `.venv`. Pick whichever actually exists.
+        # Both venv directory names and both interpreter layouts exist in
+        # exported/restored configurations. Prefer the native layout, but accept
+        # the other platform's layout when it is the file actually on disk.
+        layouts = (('Scripts', 'python.exe'), ('bin', 'python')) if os.name == 'nt' else (
+            ('bin', 'python'), ('Scripts', 'python.exe'))
         for env_dir in ('venv', '.venv'):
-            p = (root / env_dir / 'Scripts' / 'python.exe' if os.name == 'nt'
-                 else root / env_dir / 'bin' / 'python')
-            if p.exists():
-                return p
+            for parts in layouts:
+                p = root / env_dir / Path(*parts)
+                if p.exists():
+                    return p
         # Nothing found: return the historical default path so callers keep a
         # concrete path to name in their "invalid" details.
         win = root / 'venv' / 'Scripts' / 'python.exe'

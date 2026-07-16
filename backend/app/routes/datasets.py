@@ -643,7 +643,7 @@ def dataset_image_delete(image_id):
 
 @bp.post('/dataset/image/<int:image_id>/improve')
 def dataset_image_improve(image_id):
-    """Create a regular Klein-upscaled candidate without touching the source."""
+    """Create an exclusive reconstruction candidate without touching the source."""
     try:
         result = svc.improve_existing_image(LOCAL_USER, image_id)
     except Exception as e:
@@ -652,6 +652,20 @@ def dataset_image_improve(image_id):
             return _klein_missing_response(e.missing, e.missing_nodes)
         if isinstance(e, KleinModelsMissing):
             return _klein_missing_response(e.missing)
+        return _map_error(e)
+    if result is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True, **result})
+
+
+@bp.post('/dataset/<int:dataset_id>/image-improvement/<int:candidate_id>/resolve')
+def dataset_image_improvement_resolve(dataset_id, candidate_id):
+    """Atomically choose the original, the reconstruction, or neither."""
+    data = request.get_json(silent=True) or {}
+    try:
+        result = svc.resolve_image_improvement(
+            LOCAL_USER, dataset_id, candidate_id, data.get('choice'))
+    except Exception as e:
         return _map_error(e)
     if result is None:
         return jsonify({'error': 'not found'}), 404
@@ -813,10 +827,13 @@ def dataset_image_caption(image_id):
 def dataset_image_crop(image_id):
     data = request.get_json(silent=True) or {}
     try:
-        ok = svc.crop_image(LOCAL_USER, image_id,
-                            int(data['x']), int(data['y']), int(data['w']), int(data['h']))
+        box = tuple(int(data[key]) for key in ('x', 'y', 'w', 'h'))
     except (KeyError, ValueError, TypeError):
         return jsonify({'error': 'invalid crop box'}), 400
+    try:
+        ok = svc.crop_image(LOCAL_USER, image_id, *box)
+    except Exception as e:
+        return _map_error(e)
     return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
 
 

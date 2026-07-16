@@ -2,6 +2,7 @@
   "name": "prep-my-avatar-frontend",
   "private": true,
   "version": "0.0.1",
+  "packageManager": "pnpm@10.21.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

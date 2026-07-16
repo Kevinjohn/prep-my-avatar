@@ -32,7 +32,7 @@ def _stderr_tail(proc) -> str:
                  if ln.strip()), '')
 
 
-def score_dataset_faces(ref_path, image_paths, timeout: int = 900):
+def score_dataset_faces(ref_path, image_paths, timeout: int = 900, ref_paths=None):
     """Retourne ({path: {state, sim?, det, bbox_frac, yaw}}, error|None).
 
     `error` est None quand le scorer a tourne, sinon {'kind', 'detail'} :
@@ -47,7 +47,11 @@ def score_dataset_faces(ref_path, image_paths, timeout: int = 900):
     if not is_available():
         return {}, {'kind': 'unavailable',
                     'detail': 'face scoring is not installed (Quality tools step in Setup)'}
-    payload = json.dumps({"ref": ref_path, "images": image_paths,
+    refs = []
+    for candidate in list(ref_paths or []) + [ref_path]:
+        if candidate and os.path.isfile(candidate) and candidate not in refs:
+            refs.append(candidate)
+    payload = json.dumps({"ref": ref_path, "refs": refs, "images": image_paths,
                           "models_root": cfg.get('face_scoring.models_root') or None})
     try:
         proc = subprocess.run([_scoring_python(), _SCRIPT], input=payload,

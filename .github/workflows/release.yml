@@ -1,4 +1,4 @@
-# Release automation: push a tag `vYYYY.MM.DD[.N]` and this builds the portable
+# Release automation: push a CalVer tag `vYYYY.MM.DD.N` and this builds the portable
 # Windows bundle (packaging/build_portable.ps1) and publishes it as a GitHub
 # Release. The release author is the github-actions bot. The in-app update
 # check for PACKAGED builds compares the latest release tag against

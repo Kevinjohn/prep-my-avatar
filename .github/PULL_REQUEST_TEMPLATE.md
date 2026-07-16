@@ -12,7 +12,7 @@ Closes #
 ## How I tested
 
 - [ ] `python -m pytest backend/tests -q` passes
-- [ ] Frontend `npm run build` succeeds **and I committed the regenerated `frontend/dist/`** (only if I touched `frontend/src`)
+- [ ] Frontend `pnpm run build` succeeds **and I committed the regenerated `frontend/dist/`** (only if I touched `frontend/src`)
 - [ ] N/A — docs / config only
 
 ## Screenshots

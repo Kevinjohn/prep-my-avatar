@@ -121,10 +121,14 @@ def _ollama_binary() -> str:
     if os.name == 'nt':
         local = os.environ.get('LOCALAPPDATA')
         if local:
-            cand = Path(local).joinpath(*_OLLAMA_WIN_BINARY)
+            # ``Path`` chooses WindowsPath from the live ``os.name`` value,
+            # which also makes platform-probe tests fail when run on POSIX.
+            # os.path was selected for the host at import time and safely joins
+            # this concrete filesystem path without constructing WindowsPath.
+            cand = os.path.join(local, *_OLLAMA_WIN_BINARY)
             try:
-                if cand.is_file():
-                    return str(cand)
+                if os.path.isfile(cand):
+                    return cand
             except OSError:
                 pass
     return ''

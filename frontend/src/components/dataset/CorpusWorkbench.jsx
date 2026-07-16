@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { isCleanAdmissionCandidate, needsQualityReview } from '../../utils/corpusAdmission.js';
 
 const COVERAGE_OPTIONS = {
   framing: ['face', 'bust', 'body', 'back', 'unknown'],
@@ -11,9 +12,10 @@ const COVERAGE_OPTIONS = {
 };
 
 const FILTERS = [
-  ['all', 'All'], ['anchors', 'Anchor set'], ['duplicates', 'Duplicates'],
-  ['unclassified', 'Needs coverage'],
+  ['all', 'All'], ['pending', 'Needs decision'], ['quality', 'Quality review'],
+  ['anchors', 'Anchor set'], ['duplicates', 'Duplicates'], ['unclassified', 'Needs coverage'],
 ];
+const EMPTY_IDS = new Set();
 
 function countClassified(image) {
   return Object.keys(image?.coverage || {}).length;
@@ -33,9 +35,10 @@ function Stat({ label, value, tone = '' }) {
 }
 
 export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, coveragePlan,
-  onAnalyze, onClassify, onAnchorDecision, onCoverage, busy = false,
-  visionAvailable = false }) {
-  const imported = useMemo(() => images.filter((image) => image.source === 'import' && image.filename), [images]);
+  onAnalyze, onClassify, onAnchorDecision, onCoverage, onStatus, onBatch, busy = false,
+  visionAvailable = false, reviewPairIds = EMPTY_IDS, faceThresholds = {} }) {
+  const imported = useMemo(() => images.filter((image) => image.source === 'import'
+    && image.filename && !reviewPairIds.has(image.id)), [images, reviewPairIds]);
   const selectedIds = useMemo(() => new Set(anchorPlan?.selected_import_ids || []), [anchorPlan]);
   const duplicateRoots = useMemo(() => new Set(imported.map((image) => image.duplicate_of_id).filter(Boolean)), [imported]);
   const [filter, setFilter] = useState('all');
@@ -62,12 +65,22 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
   }
 
   const visible = imported.filter((image) => {
+    if (filter === 'pending') return image.status === 'pending';
+    if (filter === 'quality') return needsQualityReview(image);
     if (filter === 'anchors') return selectedIds.has(image.id) || image.anchor_decision === 'pinned';
     if (filter === 'duplicates') return !!image.duplicate_of_id || duplicateRoots.has(image.id);
     if (filter === 'unclassified') return !image.framing || image.framing === 'unknown' || countClassified(image) < 6;
     return true;
   });
   const summary = coveragePlan?.summary || {};
+  const pending = imported.filter((image) => image.status === 'pending');
+  const accepted = imported.filter((image) => image.status === 'keep');
+  const identityFloor = Number(faceThresholds.green ?? 0.50);
+  const cleanPending = pending.filter((image) => (
+    isCleanAdmissionCandidate(image, identityFloor, duplicateRoots)
+  ));
+  const redPending = pending.filter((image) => image.training_usefulness === 'red'
+    || image.analysis?.face?.quality === 'red');
 
   return (
     <section id="ds-corpus-review" tabIndex={-1}
@@ -79,7 +92,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
             <h3 className="m-0 text-sm font-semibold text-content">Corpus workbench</h3>
           </div>
           <p className="m-0 mt-0.5 max-w-3xl text-[0.6875rem] leading-relaxed text-content-muted">
-            Keep the whole real-photo pool, resolve near-duplicates deliberately, and control which images may leave the machine as generation anchors.
+            Import preserves the master photo pool. Only images you accept here enter training; rejected and undecided originals remain available for review.
           </p>
         </div>
         <div className="ml-auto flex flex-wrap gap-1.5">
@@ -97,12 +110,30 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
 
       <div className="flex flex-wrap gap-1.5">
         <Stat label="real photos" value={imported.length} tone="good" />
+        <Stat label="accepted for training" value={accepted.length} tone={accepted.length ? 'good' : 'warn'} />
+        <Stat label="needs decision" value={pending.length} tone={pending.length ? 'warn' : 'good'} />
         <Stat label="anchors/request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />
         <Stat label="pinned" value={anchorPlan?.pinned || 0} />
         <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />
         <Stat label="near-duplicates" value={summary.near_duplicates || 0} tone={summary.near_duplicates ? 'warn' : ''} />
         <Stat label="needs coverage" value={summary.unclassified || 0} tone={summary.unclassified ? 'warn' : 'good'} />
       </div>
+
+      {!!pending.length && onBatch && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-500/5 px-2.5 py-2">
+          <span className="text-[0.6875rem] text-amber-100">Admission shortcuts only act on undecided photos with completed QA.</span>
+          <button type="button" disabled={busy || !cleanPending.length}
+            onClick={() => onBatch(cleanPending.map((image) => image.id), 'keep')}
+            className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-[0.625rem] font-semibold text-emerald-200 disabled:opacity-40">
+            ✓ Accept clean ({cleanPending.length})
+          </button>
+          <button type="button" disabled={busy || !redPending.length}
+            onClick={() => onBatch(redPending.map((image) => image.id), 'reject')}
+            className="rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1 text-[0.625rem] font-semibold text-red-200 disabled:opacity-40">
+            ✕ Reject red QA ({redPending.length})
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-1" role="tablist" aria-label="Corpus filters">
         {FILTERS.map(([id, label]) => (
@@ -137,7 +168,8 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
                   <span className="absolute right-1 top-1 rounded bg-amber-950/90 px-1 py-px text-[0.5625rem] text-amber-200">≈ duplicate</span>
                 )}
                 <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] text-white/75">
-                  {image.framing || '?'} · {image.training_usefulness || 'unknown'}
+                  {image.status === 'keep' ? '✓ training' : image.status === 'reject' ? '✕ rejected' : '… review'}
+                  {' · '}{image.framing || '?'} · {image.training_usefulness || 'unknown'}
                 </span>
               </button>
             );
@@ -152,8 +184,27 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
               </p>
               <p className="m-0 mt-0.5 text-[0.625rem] text-content-subtle">
                 technical {selected.training_usefulness || 'unknown'}
+                {selected.analysis?.face?.quality ? ` · face pixels ${selected.analysis.face.quality}` : ' · face pixels not checked'}
+                {selected.face_state === 'scorable' && selected.face_score != null
+                  ? ` · identity ${selected.face_score.toFixed(3)}`
+                  : ` · identity ${selected.face_state || 'not checked'}`}
                 {selected.duplicate_of_id ? ` · near-duplicate of #${selected.duplicate_of_id}` : ''}
               </p>
+            </div>
+
+            <div>
+              <p className="m-0 mb-1 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Training admission</p>
+              <div className="grid grid-cols-3 gap-1">
+                {[['keep', '✓ Accept'], ['pending', '… Review'], ['reject', '✕ Reject']].map(([value, label]) => (
+                  <button key={value} type="button" disabled={busy}
+                    onClick={() => onStatus(selected.id, value)} aria-pressed={selected.status === value}
+                    className={`rounded-md border px-1.5 py-1 text-[0.625rem] ${selected.status === value
+                      ? 'border-indigo-400/60 bg-indigo-500/20 text-indigo-100'
+                      : 'border-border bg-surface text-content-muted'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div>

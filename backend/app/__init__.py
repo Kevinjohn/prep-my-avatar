@@ -111,6 +111,11 @@ def create_app(config_object=None):
         from . import models  # noqa: F401
         db.create_all()
         _apply_additive_migrations()
+        # The reconstruction workflow used to allow several independently kept
+        # children for one source. Normalize those legacy groups before any worker
+        # or API request can observe them under the new exclusive-pair contract.
+        from .services.face_dataset_service import normalize_legacy_image_improvement_rows
+        normalize_legacy_image_improvement_rows()
         # Vision requests are process-local, while their mutual-exclusion flag is
         # persisted in SQLite. A killed captioning request therefore cannot still
         # be running after boot; clear its stale flag immediately instead of
@@ -139,7 +144,7 @@ def create_app(config_object=None):
     @app.get('/')
     def index():
         if not FRONTEND_DIST.exists():
-            return jsonify({'error': 'frontend not built — run npm run build in frontend/'}), 503
+            return jsonify({'error': 'frontend not built — run pnpm run build in frontend/'}), 503
         # The csrf_token cookie is (re)planted by the after_request hook below —
         # which covers '/' AND every /api response — so a SPA session can no longer
         # outlive its token (see _refresh_csrf_cookie for the full rationale).

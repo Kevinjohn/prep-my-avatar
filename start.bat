@@ -82,7 +82,7 @@ if "%REBUILD%"=="1" (
 
 "%VPY%" -m pip install -q -r backend\requirements.txt || exit /b 1
 if not exist frontend\dist\index.html (
-  echo frontend\dist is missing -- this repo ships it prebuilt. Run: cd frontend ^&^& npm install ^&^& npm run build
+  echo frontend\dist is missing -- this repo ships it prebuilt. Run: cd frontend ^&^& pnpm install ^&^& pnpm run build
   exit /b 1
 )
 rem Port 5000 is a frequent collision (macOS AirPlay, another local Flask app).

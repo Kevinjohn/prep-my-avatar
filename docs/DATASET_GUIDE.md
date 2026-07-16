@@ -57,6 +57,35 @@ ComfyUI.
 - **Quality floor:** no motion blur, no heavy compression, the face readable.
   One bad image does more harm than one good image does good.
 
+### Preserve first, admit second
+
+For character datasets, an import now enters the **master corpus** as *Needs
+decision*. It is preserved, analysed and available for coverage review, but it
+does not train until you explicitly **Accept** it. Run both local technical
+analysis and face analysis first. The latter measures the detected face crop —
+sharpness, exposure, detection confidence, size, pose, face count and identity
+similarity — rather than letting a crisp background disguise a soft face.
+
+Pin several strong, accepted photos with different angles and expressions. The
+face scorer uses the primary/additional references plus up to four pinned photos
+as a small identity centroid, which is more reliable than one reference frame.
+
+### What “upscaling” can and cannot fix
+
+- Ordinary resizing can create more pixels, but not new evidence. A 400 px face
+  enlarged to 1024 px is still a 400 px face; the app flags heavily enlarged
+  crops in pre-flight.
+- Blur, missed focus, clipped highlights and heavy compression are usually reasons
+  to prefer another photo. Restoration has diminishing returns quickly.
+- **Reconstruct & compare** is explicitly generative. It starts from the exact
+  preserved upload, adds reviewed identity references and measures technical and
+  identity deltas. It never overwrites the source, and its side-by-side resolver
+  allows exactly one version — source, reconstruction, or neither — into training.
+- Treat a reconstruction as a last-resort replacement for unique evidence, not as
+  a way to double the dataset. Inspect eyes, teeth, hairline, skin texture and small
+  identity marks at 100%; prefer the source when the measured gain is absent or
+  identity similarity falls.
+
 **Body fidelity mode** (Datasets → ⋯ More): use it when the body shape and body
 marks (tattoos, scars) should bind to the trigger too. It shifts the composition
 targets toward bust/body shots, imports full-frame by default, and extends the
@@ -173,6 +202,11 @@ The app runs these checks when you hit Train — here's the list to self-check e
 - [ ] **Zero identity leaks** (no hair/face/skin words — the leak badge shows 0)
 - [ ] Captions varied, ≥ 8 words, style matches the family (prose vs booru)
 - [ ] Near-duplicate pairs resolved (keep one of each)
+- [ ] No red technical/face-region QA among accepted images
+- [ ] Identity checked; multi-face and low-similarity frames reviewed manually
+- [ ] No unresolved watermark or reconstruction review
+- [ ] No heavily enlarged crop being mistaken for native detail
+- [ ] Real photographs remain the majority; generated/reconstructed images only fill gaps
 - [ ] Body fidelity: if ON, actual full-body shots exist
 
 ---

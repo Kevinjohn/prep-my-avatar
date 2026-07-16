@@ -1,15 +1,26 @@
 import { useMemo } from 'react';
+import { buildSmallImageRescuePairs } from '../utils/smallImageRescue.js';
+import { buildImageImprovementPairs } from '../utils/imageImprovement.js';
 
 /* Pure derivation of the guided path from the dataset payload + capabilities.
    No fetching here — lives at the workspace's existing poll rhythm. */
 export function deriveSteps(d, caps, checkpointCount = 0) {
   const images = (d && d.images) || [];
   const live = images.filter((i) => i.status !== 'failed');
-  const kept = live.filter((i) => i.status === 'keep');
-  const imported = live.filter((i) => i.source === 'import' && i.filename);
-  const generated = live.filter((i) => i.source === 'generated' && i.filename);
-  const triage = live.filter((i) => i.status === 'pending' && i.filename);   // generated, awaiting keep/reject
-  const generating = live.filter((i) => i.status === 'pending' && !i.filename);
+  const unresolvedPairs = [
+    ...buildSmallImageRescuePairs(images).filter((pair) => !pair.resolved),
+    ...buildImageImprovementPairs(images).filter((pair) => !pair.resolved),
+  ];
+  const exclusiveIds = new Set(unresolvedPairs.flatMap((pair) => (
+    pair.imageIds || [pair.original.id, pair.candidate.id]
+  )));
+  const ordinary = live.filter((image) => !exclusiveIds.has(image.id));
+  const kept = ordinary.filter((i) => i.status === 'keep');
+  const imported = live.filter((i) => i.source === 'import' && i.filename
+    && !['klein_image_improve', 'klein_small_image'].includes(i.derivation_kind));
+  const generated = ordinary.filter((i) => i.source === 'generated' && i.filename);
+  const triage = ordinary.filter((i) => i.status === 'pending' && i.filename);
+  const generating = ordinary.filter((i) => i.status === 'pending' && !i.filename);
   const captioned = kept.filter((i) => (i.caption || '').trim());
   const scored = kept.filter((i) => i.face_state);
   const trainMode = !!(caps && caps.training_visible);
@@ -42,9 +53,10 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
       done: generated.length > 0 || (hasImportedCorpus && recommended.length === 0),
       optional: hasImportedCorpus,
       subtitle: recommended.length ? `${recommended.length} suggested` : 'no proven gaps', busy: generating.length > 0 },
-    { id: 'curate', label: 'Curate', targetId: 'gf-images',
-      done: live.length > 0 && triage.length === 0 && kept.length > 0,
-      subtitle: triage.length ? `${triage.length} to triage` : `${kept.length} kept` },
+    { id: 'curate', label: 'Curate', targetId: unresolvedPairs.length ? 'gf-curation' : 'gf-images',
+      done: live.length > 0 && triage.length === 0 && unresolvedPairs.length === 0 && kept.length > 0,
+      subtitle: unresolvedPairs.length ? `${unresolvedPairs.length} comparison(s) to review`
+        : triage.length ? `${triage.length} to triage` : `${kept.length} kept` },
     { id: 'caption', label: 'Caption', targetId: 'gf-captions',
       done: kept.length > 0 && captioned.length === kept.length,
       subtitle: `${captioned.length}/${kept.length} captioned` },

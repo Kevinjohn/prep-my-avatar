@@ -12,6 +12,7 @@ import ConceptSourcesPanel from './ConceptSourcesPanel';
 import { isScraperImportBlocked } from './scraperState';
 import DatasetGrid from './DatasetGrid';
 import SmallImageRescueReview from './SmallImageRescueReview';
+import ImageImprovementReview from './ImageImprovementReview';
 import CaptionToolsBar from './CaptionToolsBar';
 import { recaptionConfirmation } from './captionCategory';
 import CropModal from './CropModal';
@@ -32,6 +33,7 @@ import {
   filterSmallImageRescueGrid,
   isSmallImageRescueRow,
 } from '../../utils/smallImageRescue';
+import { buildImageImprovementPairs, filterImageImprovementGrid } from '../../utils/imageImprovement';
 import { WORKSPACE_SECTIONS, SECTION_FOR_TARGET } from './workspaceSections';
 import {
   PANEL_STATUS,
@@ -146,7 +148,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const navImages = d?.images || EMPTY_IMAGES;
   const navContext = useMemo(() => ({
     kind: d?.kind || 'character',
-    hasSelectableImages: filterSmallImageRescueGrid(navImages)
+    hasSelectableImages: filterImageImprovementGrid(filterSmallImageRescueGrid(navImages))
       .some((image) => Boolean(image.filename)),
     hasKeptImages: navImages.some((image) => image.status === 'keep'),
     hasCaptionedKept: navImages.some(
@@ -337,7 +339,22 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const unresolvedRescueIds = new Set(unresolvedRescuePairs.flatMap(
     (pair) => [pair.original.id, pair.candidate.id],
   ));
+  const rescuePairIds = new Set(rescuePairs.flatMap(
+    (pair) => [pair.original.id, pair.candidate.id],
+  ));
   const rescueGridImages = filterSmallImageRescueGrid(images);
+  const improvementPairs = buildImageImprovementPairs(images);
+  const unresolvedImprovementPairs = improvementPairs.filter((pair) => !pair.resolved);
+  const improvementPairIds = new Set(improvementPairs.flatMap(
+    (pair) => pair.imageIds,
+  ));
+  const unresolvedImprovementIds = new Set(unresolvedImprovementPairs.flatMap(
+    (pair) => pair.imageIds,
+  ));
+  const unresolvedExclusiveIds = new Set([
+    ...unresolvedRescueIds, ...unresolvedImprovementIds,
+  ]);
+  const reviewGridImages = filterImageImprovementGrid(rescueGridImages);
   const rescueReviewCount = unresolvedRescuePairs.length;
   // Dataset CONCEPT : on masque tout ce qui est identité/visage (référence, générateur
   // de variations, analyse faciale, badge de fuite, composition, flux guidé) — il ne
@@ -356,7 +373,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const bodyFid = d.fidelity === 'body';
   const kept = images.filter((i) => i.status === 'keep').length;
   const unused = images.filter((i) => (i.status === 'reject' || i.status === 'failed')
-    && !isSmallImageRescueRow(i)).length;
+    && !rescuePairIds.has(i.id) && !improvementPairIds.has(i.id)).length;
   const keptUncaptioned = images.filter((i) => i.status === 'keep' && !i.caption).length;
   const keptCaptioned = kept - keptUncaptioned;
   // Overlaid watermarks still awaiting removal → drives the "🧽 Clean (N)" button.
@@ -380,13 +397,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
   // The list actually rendered by the grid. Filtering here means select-all,
   // auto-triage and every bulk action operate ONLY on the visible images. The
   // Caption-tools counts keep using the full `images` list (global, never lies).
-  const gridImages = filterImages(rescueGridImages, {
+  const gridImages = filterImages(reviewGridImages, {
     excludes: excludeTags, includes: includeTags, mode: effCaptionMode,
   });
   const pending = images.filter((i) => i.status === 'pending' && !i.filename
-    && !unresolvedRescueIds.has(i.id)).length;
+    && !unresolvedRescueIds.has(i.id) && !unresolvedImprovementIds.has(i.id)).length;
   const triage = images.filter((i) => i.status === 'pending' && i.filename
-    && !unresolvedRescueIds.has(i.id)).length;   // generated/imported, awaiting ✓/✕
+    && !unresolvedRescueIds.has(i.id) && !unresolvedImprovementIds.has(i.id)).length;
 
   const toggleLeakReview = () => {
     onRevealOpenChange('leak-review', !showLeaks, setShowLeaks);
@@ -435,7 +452,9 @@ export default function DatasetWorkspace({ ds, onBack }) {
   // Keep the inspected image in sync with poll refreshes (label/status updates).
   const viewImgLive = viewImg ? {
     ...(images.find((i) => i.id === viewImg.id) || viewImg),
+    ...(viewImg._imageImprovementReviewPreview ? { filename: viewImg.filename } : {}),
     _rescueReviewPreview: !!viewImg._rescueReviewPreview,
+    _imageImprovementReviewPreview: !!viewImg._imageImprovementReviewPreview,
   } : null;
   const viewImgImproving = viewImgLive ? images.some((image) => (
     image.derivation_kind === 'klein_image_improve'
@@ -450,8 +469,10 @@ export default function DatasetWorkspace({ ds, onBack }) {
   )) : false;
   const canImproveViewImg = !!viewImgLive
     && !viewImgLive._rescueReviewPreview
+    && !viewImgLive._imageImprovementReviewPreview
     && !isSmallImageRescueRow(viewImgLive)
-    && viewImgLive.derivation_kind !== 'klein_image_improve';
+    && viewImgLive.derivation_kind !== 'klein_image_improve'
+    && !improvementPairIds.has(viewImgLive.id);
 
   // Export ZIP — shared by the header CTA and the Import & export row.
   // Guard-rails: untriaged images are silently EXCLUDED from the zip,
@@ -511,11 +532,11 @@ export default function DatasetWorkspace({ ds, onBack }) {
       ? { n: triage, tone: 'amber', srLabel: `${triage} image(s) awaiting keep/reject` } : null,
     add: pending > 0
       ? { n: pending, tone: 'indigo', pulse: true, srLabel: `${pending} generation(s) in progress` } : null,
-    curation: watermarkDetected + rescueReviewCount > 0
+    curation: watermarkDetected + rescueReviewCount + unresolvedImprovementPairs.length > 0
       ? {
-          n: watermarkDetected + rescueReviewCount,
+          n: watermarkDetected + rescueReviewCount + unresolvedImprovementPairs.length,
           tone: 'amber',
-          srLabel: `${watermarkDetected} watermark(s) and ${rescueReviewCount} Klein rescue pair(s) to review`,
+          srLabel: `${watermarkDetected} watermark(s), ${rescueReviewCount} Klein rescue pair(s), and ${unresolvedImprovementPairs.length} reconstruction(s) to review`,
         } : null,
     captions: (!isStyle && (d.caption_leak?.leaking ?? 0) > 0)
       ? { n: d.caption_leak.leaking, tone: 'amber', srLabel: `${d.caption_leak.leaking} caption(s) leaking` }
@@ -746,10 +767,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
           <div className={sectionCls('images')}>
             {heading('images')}
             <p className="m-0 text-content-subtle text-[0.75rem] tabular-nums">
-              {rescueGridImages.length} image(s) · {kept} kept
+              {reviewGridImages.length} image(s) · {kept} kept
               {triage > 0 ? <> · <span className="text-amber-300">{triage} awaiting ✓/✕</span></> : ''}
               {rescueReviewCount > 0
                 ? <> · <span className="text-indigo-300">{rescueReviewCount} Klein rescue pair(s) in Curation</span></>
+                : ''}
+              {unresolvedImprovementPairs.length > 0
+                ? <> · <span className="text-cyan-300">{unresolvedImprovementPairs.length} reconstruction(s) in Curation</span></>
                 : ''}
               {kept > 0 ? ` · ${keptCaptioned}/${kept} captioned` : ''}
               {watermarkDetected > 0 ? ` · ${watermarkDetected} watermark(s) flagged` : ''}
@@ -757,7 +781,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
             <div id="gf-images" className="scroll-mt-20 flex flex-col gap-2">
               {filtersActive && (
                 <GridFilterBar excludes={excludeTags} includes={includeTags}
-                  shown={gridImages.length} total={rescueGridImages.length}
+                  shown={gridImages.length} total={reviewGridImages.length}
                   onRemoveExclude={toggleExclude} onRemoveInclude={toggleInclude}
                   onClearAll={clearFilters} />
               )}
@@ -774,7 +798,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   onCrop={setCropImg} onDelete={ds.deleteImage}
                   onRegenerate={(id, loraStrength, prompt) => ds.regenerate(id, loraStrength, prompt)} onView={setViewImg}
                   onBatch={ds.batchImages} busy={ds.busy}
-                  nonces={ds.nonces} faceThresholds={d.face_thresholds} />
+                  nonces={ds.nonces} faceThresholds={d.face_thresholds}
+                  exclusiveImageIds={unresolvedExclusiveIds} />
               )}
             </div>
           </div>
@@ -808,6 +833,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   anchorPlan={d.anchor_plan} coveragePlan={d.coverage_plan}
                   onAnalyze={ds.analyzeCorpus} onClassify={ds.classify}
                   onAnchorDecision={ds.setAnchorDecision} onCoverage={ds.setCoverage}
+                  onStatus={ds.setStatus} onBatch={ds.batchImages}
+                  reviewPairIds={unresolvedExclusiveIds} faceThresholds={d.face_thresholds}
                   busy={ds.busy}
                   visionAvailable={!!(caps.ollama?.reachable && caps.ollama?.vision_model_ready)} />
 
@@ -881,6 +908,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
                 onResolve={ds.resolveSmallImageRescue}
                 onPreview={(image) => setViewImg({ ...image, _rescueReviewPreview: true })}
                 nonces={ds.nonces} />
+              <ImageImprovementReview images={images} datasetId={d.id}
+                onResolve={ds.resolveImageImprovement} onPreview={setViewImg} />
               <div className="flex items-center gap-2 flex-wrap rounded-lg border border-border bg-surface px-3 py-2">
                 {!concept && (
                   <button id="ds-curation-face-analysis" type="button" data-workspace-focus
@@ -1364,7 +1393,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
           improveReady={viewImgImprovementReady}
           busy={ds.busy}
           kleinAvailable={Boolean(caps.engines?.klein)}
-          onCrop={viewImgLive._rescueReviewPreview
+          onCrop={viewImgLive._rescueReviewPreview || viewImgLive._imageImprovementReviewPreview
             ? undefined
             : (img) => { setViewImg(null); setCropImg(img); }} />
       )}

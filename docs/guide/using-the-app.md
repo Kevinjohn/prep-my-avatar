@@ -20,7 +20,10 @@ hide.
    skipped; near-duplicates stay visible for review.
 3. **Use the Corpus Workbench.** Refresh the local technical pass, then map
    framing, angle, expression, lighting, pose, background and occlusion with
-   Ollama vision or the manual editor. Pin must-use identity anchors, leave good
+   Ollama vision or the manual editor. Imports start at **Needs decision** and
+   do not train until you explicitly Accept them. Run **Analyze faces** after
+   setting a reference: face-region sharpness/exposure and identity are recorded
+   alongside whole-image quality. Pin several strong, accepted identity anchors, leave good
    candidates on Automatic, and mark private/unsuitable provider references as
    Excluded. Excluded photos may still remain in the training set.
 4. **Review the Coverage Plan.** It distinguishes covered, weak, missing and
@@ -36,6 +39,10 @@ hide.
    **12 face · 6 bust · 6 body · 1 back**. Watch the face-similarity badges
    (green = strong match, orange = review) to drop off-identity shots before
    they poison training.
+   For irreplaceable low-quality evidence, open it at full size and choose
+   **Reconstruct & compare**. This is a generative, identity-constrained repair,
+   not neutral upscaling. Curation shows source and candidate side by side with
+   measured quality/identity deltas and atomically admits one version or neither.
 8. **Caption** — one click captions the kept set (prose or booru tags,
    matched to the target model). The **identity-leak check** flags any caption
    that describes hair/face/skin — fix every flagged one. A find/replace +
@@ -45,7 +52,9 @@ hide.
 9. **Fix individual shots** — every generated tile has a ✏️ button: edit the
    exact prompt that made it and regenerate in place, without losing the rest.
 10. **Train** — the pre-flight check runs the full checklist (count, balance,
-   captions, leaks, duplicates). It no longer *blocks*: leaking captions and
+   captions, leaks, duplicates, pixel/identity QA, watermarks, enlarged crops,
+   reconstruction provenance and real/generated source mix). Most findings warn;
+   an impossible double-kept reconstruction pair blocks until resolved. Leaking captions and
    near-duplicates are editable right inside the confirm, and missing captions
    just ask you to **Start anyway** (captions stay strongly recommended). Steps
    are computed automatically; ⚙️ Advanced options exposes every knob (each with

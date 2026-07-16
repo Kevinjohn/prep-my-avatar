@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { displayLabel } from '../../utils/labels';
 
-const IMPROVE_HELP = 'Klein creates a new 2 MP version to validate and leaves the original intact.';
+const IMPROVE_HELP = 'Klein reconstructs from the preserved original with identity references. It is generative: compare both versions, then admit exactly one.';
 
 export default function DatasetLightbox({
   img,
@@ -116,7 +116,7 @@ export default function DatasetLightbox({
             className="min-h-9 w-full sm:w-auto px-3 py-1.5 rounded-lg border border-indigo-400/50 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45">
             {improveReady
               ? '✓ Review improvement first'
-              : improvementActive ? '✨ Improving…' : '✨ Upscale & improve'}
+              : improvementActive ? '🔬 Reconstructing…' : '🔬 Reconstruct & compare'}
           </button>
         )}
       </div>

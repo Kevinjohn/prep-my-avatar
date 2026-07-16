@@ -14,7 +14,9 @@ def _mk(app, n_keep=0, framing='face', caption='a nice varied caption with many 
     for i in range(n_keep):
         svc.db.session.add(FaceDatasetImage(
             dataset_id=ds.id, filename=f'k{i}.webp', status='keep', framing=framing,
-            caption=f'{caption} #{i}'))
+            caption=f'{caption} #{i}', source='import', training_usefulness='green',
+            face_state='scorable', face_score=0.70,
+            analysis_json='{"face":{"quality":"green"}}', watermark_state='none'))
     for row in extra_rows:
         svc.db.session.add(FaceDatasetImage(dataset_id=ds.id, **row))
     svc.db.session.commit()
@@ -172,6 +174,74 @@ def test_preflight_warns_untriaged_and_short_captions(app):
     assert any('very short' in w for w in r['warnings'])
 
 
+def test_preflight_surfaces_quality_watermark_and_provenance_risks(app):
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_training as lt
+    with app.app_context():
+        ds = _mk(app, n_keep=12, framing='body')
+        source = FaceDatasetImage.query.filter_by(dataset_id=ds.id).first()
+        source.training_usefulness = 'red'
+        source.analysis_json = '{"face":{"quality":"red"}}'
+        source.watermark_state = 'detected'
+        source.upscale_ratio = 2.0
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, filename='reconstruction.webp', source='generated',
+            status='keep', framing='body', caption=source.caption,
+            parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE,
+            training_usefulness='green', face_state='scorable', face_score=0.70,
+            analysis_json='{"face":{"quality":"green"}}')
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+        result = lt.training_preflight(LOCAL_USER, ds.id)
+
+    checks = {check['id']: check for check in result['checks']}
+    assert checks['pixel_quality']['status'] == 'warn'
+    assert checks['watermarks']['status'] == 'warn'
+    assert checks['native_resolution']['status'] == 'warn'
+    assert checks['provenance_pairs']['status'] == 'fail'
+    assert result['verdict'] == 'blocked'
+    assert result['quality_images'][0]['id'] == source.id
+
+
+@pytest.mark.parametrize('state', ['no_face', 'too_small', 'extreme_pose'])
+def test_preflight_never_calls_non_scorable_identity_verified(app, state):
+    from app.models import FaceDatasetImage
+    from app.services import lora_training as lt
+    with app.app_context():
+        ds = _mk(app, n_keep=12, framing='body')
+        row = FaceDatasetImage.query.filter_by(dataset_id=ds.id).first()
+        row.face_state = state
+        row.face_score = None
+        svc_face = '{"face":{"quality":"amber"}}'
+        row.analysis_json = svc_face
+        from app.extensions import db
+        db.session.commit()
+        result = lt.training_preflight(LOCAL_USER, ds.id)
+    identity = next(check for check in result['checks'] if check['id'] == 'identity_quality')
+    assert identity['status'] == 'warn'
+    assert '1 non-scorable' in identity['detail']
+
+
+def test_preflight_excludes_review_pairs_from_generic_triage_count(app):
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_training as lt
+    with app.app_context():
+        ds = _mk(app, n_keep=12, framing='body')
+        source = FaceDatasetImage.query.filter_by(dataset_id=ds.id).first()
+        source.status = 'pending'
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, filename='repair.webp', source='generated', status='pending',
+            parent_image_id=source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+        result = lt.training_preflight(LOCAL_USER, ds.id)
+    checks = {check['id']: check for check in result['checks']}
+    assert checks['provenance_pairs']['status'] == 'warn'
+    assert checks['triage']['status'] == 'ok'
+
+
 def test_preflight_vram_warning_krea_only_when_known(app, monkeypatch):
     from app.services import lora_training as lt
     from app import capabilities
@@ -266,6 +336,8 @@ def test_preflight_route(client, app, monkeypatch):
     tmp = pathlib.Path(tempfile.mkdtemp())
     (tmp / 'venv' / 'Scripts').mkdir(parents=True)
     (tmp / 'venv' / 'Scripts' / 'python.exe').touch()
+    (tmp / 'venv' / 'bin').mkdir(parents=True)
+    (tmp / 'venv' / 'bin' / 'python').touch()
     (tmp / 'run.py').touch()
     with app.app_context():
         from app import config as cfg
@@ -273,7 +345,7 @@ def test_preflight_route(client, app, monkeypatch):
         ds = _mk(app, n_keep=5)
         ds_id = ds.id
     r = client.get(f'/api/dataset/{ds_id}/train/preflight')
-    assert r.status_code == 200
+    assert r.status_code == 200, r.get_json()
     body = r.get_json()
     assert body['ok'] is True and body['blockers']
     assert client.get('/api/dataset/999999/train/preflight').status_code == 404

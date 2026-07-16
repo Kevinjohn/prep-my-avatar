@@ -280,6 +280,10 @@ def test_export_zip_content_type(client):
     client.post(f'/api/dataset/{ds_id}/import', data=files, content_type='multipart/form-data')
     imgs = client.get(f'/api/dataset/{ds_id}').get_json()['images']
     assert imgs, 'import should have produced at least one image row'
+    assert imgs[0]['status'] == 'pending'
+    accepted = client.post(
+        f"/api/dataset/image/{imgs[0]['id']}/status", json={'status': 'keep'})
+    assert accepted.status_code == 200
 
     resp = client.get(f'/api/dataset/{ds_id}/export')
     assert resp.status_code == 200

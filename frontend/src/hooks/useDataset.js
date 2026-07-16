@@ -171,9 +171,15 @@ export function useDataset() {
     syncedRef.current = new Set();
   }, [gRemove]);
 
-  // Poll while generation jobs are still pending (no filename yet).
+  // Poll while generation jobs are still pending (no filename yet), and while a
+  // completed reconstruction's asynchronous identity/face QA is still running.
+  // Without the latter, the first payload containing the result file would stop
+  // polling and leave the comparison stuck on "analyzing" until a manual refresh.
   useEffect(() => {
-    const pending = (data?.images || []).some((i) => i.status === 'pending' && !i.filename);
+    const pending = (data?.images || []).some((i) => (
+      (i.status === 'pending' && !i.filename)
+      || i.analysis?.repair_comparison?.phase === 'analyzing'
+    ));
     if (pending && currentId) {
       pollRef.current = setInterval(() => refresh(currentId), 4000);
       return () => clearInterval(pollRef.current);
@@ -394,10 +400,27 @@ export function useDataset() {
       toast.error(d.error || 'Could not start image improvement');
       return d;
     }
-    toast.success('Improvement started — the original stays intact while a separate 2 MP candidate is generated for validation.');
+    toast.success('Reconstruction started from the preserved original. Compare both versions in Curation; only one can enter training.');
     await refresh();
     return d;
   }, [refresh, toast]);
+
+  const resolveImageImprovement = useCallback(async (candidateId, choice) => {
+    const d = await postJson(
+      `/api/dataset/${currentId}/image-improvement/${candidateId}/resolve`, { choice });
+    if (!d.ok) {
+      toast.error(d.error || 'Could not save the reconstruction choice');
+      return d;
+    }
+    const labels = {
+      original: 'Preserved source admitted · reconstruction rejected',
+      improved: 'Reconstruction admitted · source retained as rejected provenance',
+      reject: 'Both versions rejected',
+    };
+    toast.success(labels[choice] || 'Reconstruction choice saved');
+    await refresh();
+    return d;
+  }, [currentId, refresh, toast]);
 
   const classify = useCallback(() => wrap(async () => {
     const d = await postJson(`/api/dataset/${currentId}/classify`);
@@ -473,7 +496,8 @@ export function useDataset() {
         return;
       }
       const grey = (d.states?.too_small || 0) + (d.states?.no_face || 0)
-        + (d.states?.extreme_pose || 0) + (d.states?.low_det || 0);
+        + (d.states?.extreme_pose || 0) + (d.states?.low_det || 0)
+        + (d.states?.multi_face || 0);
       toast.success(`${d.analyzed} analyzed · ${d.states?.scorable || 0} scored, ${grey} not scorable`);
       await refresh();
     } finally {
@@ -871,7 +895,7 @@ export function useDataset() {
            analyzing: analyzingLive, watermarking: watermarkingLive, activity,
            nonces, refNonce, create, open,
            deleteDataset, updateSettings, setCurrentId, setRef, addExtraRef, removeExtraRef,
-           generate, importFiles, scrapeImport, resolveSmallImageRescue, improveImage,
+           generate, importFiles, scrapeImport, resolveSmallImageRescue, improveImage, resolveImageImprovement,
            classify, analyzeCorpus, setAnchorDecision, setCoverage, caption, recaption,
            setStatus, setCaption, crop, cropRef, recropRefAuto, setDatasetTrainType, setDatasetFidelity, deleteImage, batchImages, replaceCaptions, writeCaptionFiles, openDatasetFolder, cancelPending, regenerate, analyzeFaces,
            findWatermarks, cleanWatermarks, cleanWatermarkImages, dismissWatermarks, saveWatermarkRegions,

@@ -110,8 +110,12 @@ SMALL_IMAGE_SOURCE = 'small_image_source'
 KLEIN_SMALL_IMAGE = 'klein_small_image'
 KLEIN_IMAGE_IMPROVE = 'klein_image_improve'
 KLEIN_IMAGE_IMPROVE_PROMPT = (
-    'add detailed texture, add sharp details, add candid shot, add soft focus effect')
+    'Restore this exact photograph at higher resolution. Preserve the exact identity, '
+    'facial proportions, expression, pose, framing, lighting, clothing, background and '
+    'camera character. Remove only compression artifacts, noise and recoverable blur. '
+    'Do not beautify, restyle, change age, invent skin texture, or add new details.')
 _SMALL_IMAGE_DERIVATIONS = (SMALL_IMAGE_SOURCE, KLEIN_SMALL_IMAGE)
+_EXCLUSIVE_DERIVATIONS = (*_SMALL_IMAGE_DERIVATIONS, KLEIN_IMAGE_IMPROVE)
 # A striped in-process lock is sufficient for LDS's single local server process
 # and makes the active-candidate check + row creation + enqueue one critical
 # section.  In particular, a second simultaneous lightbox click waits until the
@@ -704,11 +708,12 @@ def build_coverage_plan(ds, images) -> dict:
     composition = {framing: sum(1 for img in accepted if img.framing == framing)
                    for framing in targets}
     imported = [img for img in accepted if img.source == 'import']
+    all_imported = [img for img in images if img.source == 'import' and img.filename]
     generated = [img for img in accepted if img.source == 'generated']
     pending_generated = [img for img in images if img.source == 'generated'
                          and img.filename and img.status == 'pending']
     technical = {'green': 0, 'amber': 0, 'red': 0, 'unknown': 0}
-    for img in imported:
+    for img in all_imported:
         key = (img.training_usefulness or 'unknown').lower()
         technical[key if key in technical else 'unknown'] += 1
 
@@ -773,7 +778,7 @@ def build_coverage_plan(ds, images) -> dict:
         'recommended_variation_ids': [entry['id'] for entry in recommended],
         'summary': {
             'usable': len(accepted), 'imported': len(imported),
-            'reference_pool': len(imported), 'generated': len(generated),
+            'reference_pool': len(all_imported), 'generated': len(generated),
             'pending_candidates': len(pending_generated),
             'gaps': sum(1 for gap in framing_gaps if gap['deficit'] > 0),
             'dimension_gaps': sum(1 for dimension in dimension_plans
@@ -781,12 +786,12 @@ def build_coverage_plan(ds, images) -> dict:
                                   if item['state'] in ('missing', 'weak')),
             'missing_combinations': sum(1 for entry in labels if entry['state'] == 'missing'),
             'unknown_combinations': sum(1 for entry in labels if entry['state'] == 'unknown'),
-            'originals_preserved': sum(1 for img in imported if img.original_filename),
-            'unclassified': sum(1 for img in imported
+            'originals_preserved': sum(1 for img in all_imported if img.original_filename),
+            'unclassified': sum(1 for img in all_imported
                                 if img.framing in (None, 'unknown')
                                 or len(parse_coverage(img.coverage_json)) < 6),
-            'near_duplicates': sum(1 for img in imported if img.duplicate_of_id),
-            'duplicate_groups': len({img.duplicate_of_id for img in imported
+            'near_duplicates': sum(1 for img in all_imported if img.duplicate_of_id),
+            'duplicate_groups': len({img.duplicate_of_id for img in all_imported
                                      if img.duplicate_of_id}),
         },
         'technical': technical,
@@ -957,6 +962,8 @@ def set_image_status(user_id, image_id, status):
         return False
     if img.derivation_kind in _SMALL_IMAGE_DERIVATIONS:
         raise ValueError('resolve small-image rescue pairs with the dedicated review action')
+    if _has_image_improvement_pair(img):
+        raise ValueError('resolve reconstructed image pairs with the dedicated comparison action')
     if status == 'reject':
         _clear_watermark_metadata(img)
     img.status = status
@@ -970,6 +977,144 @@ def _owned_image(user_id, image_id):
         return None
     ds = db.session.get(FaceDataset, img.dataset_id)
     return img if ds and str(ds.user_id) == str(user_id) else None
+
+
+def _has_image_improvement_pair(img) -> bool:
+    if not img:
+        return False
+    if img.derivation_kind == KLEIN_IMAGE_IMPROVE:
+        if not img.parent_image_id:
+            return False
+        return (FaceDatasetImage.query.filter_by(
+            id=img.parent_image_id, dataset_id=img.dataset_id).first() is not None)
+    return (FaceDatasetImage.query.filter_by(
+        dataset_id=img.dataset_id, parent_image_id=img.id,
+        derivation_kind=KLEIN_IMAGE_IMPROVE).first() is not None)
+
+
+def _image_improvement_candidates(source):
+    if not source:
+        return []
+    return (FaceDatasetImage.query.filter_by(
+        dataset_id=source.dataset_id, parent_image_id=source.id,
+        derivation_kind=KLEIN_IMAGE_IMPROVE)
+        .order_by(FaceDatasetImage.id.asc()).all())
+
+
+def _image_improvement_resolved_choice(source, candidates, selected_id=None):
+    """Return the terminal group choice, accounting for legacy sibling rows."""
+    if not source or not candidates:
+        return None
+    statuses = [candidate.status for candidate in candidates]
+    if source.status == 'keep' and all(status == 'reject' for status in statuses):
+        return 'original'
+    if source.status == 'reject' and all(status == 'reject' for status in statuses):
+        return 'reject'
+    kept = [candidate for candidate in candidates if candidate.status == 'keep']
+    if (source.status == 'reject' and len(kept) == 1
+            and all(candidate.status in ('keep', 'reject') for candidate in candidates)):
+        if selected_id is None or kept[0].id == selected_id:
+            return 'improved'
+        return f'improved:{kept[0].id}'
+    return None
+
+
+def _unresolved_image_improvement_ids(dataset_id):
+    candidates = (FaceDatasetImage.query.filter_by(
+        dataset_id=dataset_id, derivation_kind=KLEIN_IMAGE_IMPROVE)
+        .order_by(FaceDatasetImage.id.asc()).all())
+    by_parent = {}
+    for candidate in candidates:
+        by_parent.setdefault(candidate.parent_image_id, []).append(candidate)
+    ids = set()
+    for parent_id, siblings in by_parent.items():
+        source = db.session.get(FaceDatasetImage, parent_id) if parent_id else None
+        if source and _image_improvement_resolved_choice(source, siblings) is None:
+            ids.add(source.id)
+            ids.update(candidate.id for candidate in siblings)
+    return ids
+
+
+def _is_unresolved_image_improvement_row(img):
+    if not img:
+        return False
+    if img.derivation_kind == KLEIN_IMAGE_IMPROVE:
+        source = (db.session.get(FaceDatasetImage, img.parent_image_id)
+                  if img.parent_image_id else None)
+    else:
+        source = img
+    if not source:
+        return False
+    candidates = _image_improvement_candidates(source)
+    return bool(candidates) and _image_improvement_resolved_choice(source, candidates) is None
+
+
+def normalize_legacy_image_improvement_rows(dataset_id=None):
+    """Normalize pre-exclusive reconstruction siblings without deleting their files.
+
+    Old releases allowed several independently curated candidates for one source.
+    Coherent groups are left untouched. Ambiguous groups are reduced to one latest
+    review candidate; every competitor is retained as rejected provenance.
+    """
+    # Some additive-migration tests (and very early installations) have a skeletal
+    # image table that predates most ORM columns. An ORM entity query selects every
+    # mapped column, so defer normalization until that historical schema has been
+    # upgraded instead of making app startup fail on an unrelated missing column.
+    from sqlalchemy import inspect
+    existing_columns = {
+        column['name'] for column in inspect(db.engine).get_columns('face_dataset_image')
+    }
+    mapped_columns = {column.name for column in FaceDatasetImage.__table__.columns}
+    if not mapped_columns.issubset(existing_columns):
+        logger.info('skipping reconstruction normalization for incomplete legacy image schema')
+        return 0
+
+    query = FaceDatasetImage.query.filter_by(derivation_kind=KLEIN_IMAGE_IMPROVE)
+    if dataset_id is not None:
+        query = query.filter_by(dataset_id=dataset_id)
+    candidates = query.order_by(FaceDatasetImage.id.asc()).all()
+    groups = {}
+    for candidate in candidates:
+        groups.setdefault((candidate.dataset_id, candidate.parent_image_id), []).append(candidate)
+    normalized = 0
+    for (ds_id, parent_id), siblings in groups.items():
+        if len(siblings) < 2 or not parent_id:
+            continue
+        source = FaceDatasetImage.query.filter_by(id=parent_id, dataset_id=ds_id).first()
+        if not source:
+            continue  # orphan candidates intentionally remain independently cleanable
+        choice = _image_improvement_resolved_choice(source, siblings)
+        if choice in ('original', 'reject', 'improved'):
+            continue
+        kept = [candidate for candidate in siblings if candidate.status == 'keep']
+        if source.status == 'reject' and len(kept) == 1:
+            canonical = kept[0]
+            for sibling in siblings:
+                if sibling.id != canonical.id:
+                    sibling.status = 'reject'
+                    _clear_watermark_metadata(sibling)
+            normalized += 1
+            continue
+        canonical = max(
+            siblings,
+            key=lambda candidate: (candidate.filename is not None, candidate.id))
+        source.status = 'pending'
+        for sibling in siblings:
+            if sibling.id == canonical.id:
+                if sibling.filename:
+                    sibling.status = 'pending'
+                elif sibling.status != 'pending' or not sibling.job_id:
+                    sibling.status = 'failed'
+                    sibling.fail_reason = (sibling.fail_reason
+                                           or 'Legacy reconstruction requires review; no result file is available.')
+            else:
+                sibling.status = 'reject'
+                _clear_watermark_metadata(sibling)
+        normalized += 1
+    if normalized:
+        db.session.commit()
+        logger.info('normalized %s legacy reconstruction sibling group(s)', normalized)
+    return normalized
 
 
 def resolve_small_image_rescue(user_id, dataset_id, candidate_id, choice):
@@ -1073,6 +1218,100 @@ def resolve_small_image_rescue(user_id, dataset_id, candidate_id, choice):
     return result
 
 
+def resolve_image_improvement(user_id, dataset_id, candidate_id, choice):
+    """Atomically admit the source, admit its reconstruction, or reject both.
+
+    A reconstruction and the pixels it derives from are one evidence item, never two
+    independent training samples. Generic status/delete paths therefore refuse either
+    row and this resolver is the only way to make a training decision.
+    """
+    if choice not in ('original', 'improved', 'reject'):
+        raise ValueError('choice must be original, improved, or reject')
+
+    def _load_pair():
+        ds = get_dataset(user_id, dataset_id)
+        if not ds:
+            return None, None, []
+        candidate = FaceDatasetImage.query.filter_by(
+            id=candidate_id, dataset_id=dataset_id,
+            derivation_kind=KLEIN_IMAGE_IMPROVE).first()
+        if not candidate or not candidate.parent_image_id:
+            raise ValueError('image is not a reconstruction candidate')
+        source = FaceDatasetImage.query.filter_by(
+            id=candidate.parent_image_id, dataset_id=dataset_id).first()
+        if not source:
+            raise ValueError('reconstruction source is missing')
+        siblings = _image_improvement_candidates(source)
+        return source, candidate, siblings
+
+    source, candidate, siblings = _load_pair()
+    if source is None:
+        return None
+    already = _image_improvement_resolved_choice(source, siblings, candidate.id)
+    if already:
+        result = {'choice': already,
+                  'source': {'id': source.id, 'status': source.status},
+                  'candidate': {'id': candidate.id, 'status': candidate.status}}
+        db.session.rollback()
+        if already.startswith('improved:'):
+            raise RuntimeError(
+                f'image reconstruction was already resolved with candidate {already.split(":", 1)[1]}')
+        if already != choice:
+            raise RuntimeError(f'image reconstruction was already resolved as {already}')
+        return result
+    if choice == 'improved' and not candidate.filename:
+        db.session.rollback()
+        raise ValueError('the reconstructed candidate is not ready')
+    cancel_job_ids = [
+        sibling.job_id for sibling in siblings
+        if sibling.job_id and not sibling.filename
+        and (choice != 'improved' or sibling.id != candidate.id)
+    ]
+    db.session.rollback()
+    for job_id in cancel_job_ids:
+        try:
+            from ..job_queue import queue_manager
+            queue_manager.cancel_job(job_id, str(user_id), 'image')
+        except Exception:
+            logger.exception('image reconstruction: failed to cancel job %s', job_id)
+    db.session.rollback()
+
+    from sqlalchemy import text
+    try:
+        db.session.execute(text('BEGIN IMMEDIATE'))
+        source, candidate, siblings = _load_pair()
+        if source is None:
+            db.session.rollback()
+            return None
+        already = _image_improvement_resolved_choice(source, siblings, candidate.id)
+        if already:
+            if already.startswith('improved:'):
+                raise RuntimeError(
+                    f'image reconstruction was already resolved with candidate {already.split(":", 1)[1]}')
+            if already != choice:
+                raise RuntimeError(f'image reconstruction was already resolved as {already}')
+        else:
+            if choice == 'improved' and not candidate.filename:
+                raise ValueError('the reconstructed candidate is not ready')
+            source.status = 'keep' if choice == 'original' else 'reject'
+            for sibling in siblings:
+                sibling.status = ('keep' if choice == 'improved'
+                                  and sibling.id == candidate.id else 'reject')
+                if sibling.status == 'reject':
+                    _clear_watermark_metadata(sibling)
+            if source.status == 'reject':
+                _clear_watermark_metadata(source)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+    if cancel_job_ids:
+        _sync_generate_activity(dataset_id)
+    return {'choice': choice,
+            'source': {'id': source.id, 'status': source.status},
+            'candidate': {'id': candidate.id, 'status': candidate.status}}
+
+
 def set_image_caption(user_id, image_id, caption):
     img = _owned_image(user_id, image_id)
     if not img:
@@ -1117,6 +1356,8 @@ def crop_image(user_id, image_id, x, y, w, h):
     img = _owned_image(user_id, image_id)
     if not img or not img.filename:
         return False
+    if _is_unresolved_image_improvement_row(img):
+        raise ValueError('resolve the reconstruction comparison before cropping either version')
     ok, scale = _crop_resize_file(_img_path(img), x, y, w, h)
     if ok:
         _clear_watermark_metadata(img)
@@ -1133,6 +1374,8 @@ def delete_image(user_id, image_id):
         return False
     if img.derivation_kind in _SMALL_IMAGE_DERIVATIONS:
         raise ValueError('resolve the small-image rescue pair before cleanup')
+    if _has_image_improvement_pair(img):
+        raise ValueError('reconstruction provenance pairs cannot be deleted independently')
     if img.status == 'pending' and not img.filename and img.job_id:
         try:
             from ..job_queue import queue_manager
@@ -1228,11 +1471,14 @@ def cancel_pending(user_id, dataset_id):
                 queue_manager.cancel_job(img.job_id, str(user_id), 'image')
             except Exception:
                 pass
-        if img.derivation_kind == KLEIN_SMALL_IMAGE:
+        if img.derivation_kind in (KLEIN_SMALL_IMAGE, KLEIN_IMAGE_IMPROVE):
             # Preserve the review pair and its original file. A cancelled rescue
-            # is equivalent to an engine failure: the original can still be kept.
+            # or reconstruction is equivalent to an engine failure: the source
+            # can still be admitted through the dedicated comparison.
             img.status = 'failed'
-            img.fail_reason = 'Klein small-image rescue was cancelled.'
+            img.fail_reason = ('Klein small-image rescue was cancelled.'
+                               if img.derivation_kind == KLEIN_SMALL_IMAGE
+                               else 'Image reconstruction was cancelled.')
         else:
             db.session.delete(img)
         n += 1
@@ -1255,6 +1501,7 @@ def purge_unused(user_id, dataset_id):
             .filter(FaceDatasetImage.status.in_(('reject', 'failed')))
             .filter(FaceDatasetImage.derivation_kind.notin_(_SMALL_IMAGE_DERIVATIONS)
                     | FaceDatasetImage.derivation_kind.is_(None)).all())
+    rows = [row for row in rows if not _has_image_improvement_pair(row)]
     n = 0
     for img in rows:
         if delete_image(user_id, img.id):
@@ -1294,7 +1541,7 @@ _BACKUP_IMG_FIELDS = ('filename', 'source', 'framing', 'variation_label', 'statu
 def build_backup_zip(user_id, dataset_id) -> bytes:
     """Self-contained backup of one dataset: manifest.json (settings) +
     images.json (rows) + ref/ + images/ files. Ordinary rows without a file are
-    skipped, but small-image rescue metadata rows are retained so their pair can
+    skipped, but exclusive-review metadata rows are retained so their pair can
     never become orphaned after restore."""
     ds = get_dataset(user_id, dataset_id)
     if not ds:
@@ -1303,7 +1550,7 @@ def build_backup_zip(user_id, dataset_id) -> bytes:
     from sqlalchemy import or_
     rows = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
             .filter(or_(FaceDatasetImage.filename.isnot(None),
-                        FaceDatasetImage.derivation_kind.in_(_SMALL_IMAGE_DERIVATIONS)))
+                        FaceDatasetImage.derivation_kind.in_(_EXCLUSIVE_DERIVATIONS)))
             .all())
     manifest = {
         'format': BACKUP_FORMAT, 'version': BACKUP_VERSION,
@@ -1398,6 +1645,10 @@ def import_backup_zip(user_id, zip_bytes):
             rescue_parent_counts[parent_id] = rescue_parent_counts.get(parent_id, 0) + 1
             if rescue_parent_counts[parent_id] > 1:
                 raise ValueError('multiple Klein rescue candidates for one source')
+        elif derivation == KLEIN_IMAGE_IMPROVE:
+            parent_id = meta.get('parent_image_id')
+            if backup_id is None or isinstance(parent_id, bool) or not isinstance(parent_id, int):
+                raise ValueError('invalid reconstruction provenance')
     if any(parent_id not in rescue_sources for parent_id in rescue_parent_counts):
         raise ValueError('Klein rescue candidate has no valid source')
     infos = [i for i in z.infolist()
@@ -1440,20 +1691,36 @@ def import_backup_zip(user_id, zip_bytes):
         and meta.get('derivation_kind') == SMALL_IMAGE_SOURCE
         and meta.get('filename') in extracted
     }
+    valid_image_ids = {
+        meta.get('backup_image_id') for meta in images_meta
+        if isinstance(meta, dict) and meta.get('filename') in extracted
+    }
     for meta in images_meta:
         if not isinstance(meta, dict):
             continue
         fn = meta.get('filename')
         derivation = meta.get('derivation_kind')
-        is_candidate = derivation == KLEIN_SMALL_IMAGE
+        is_candidate = derivation in (KLEIN_SMALL_IMAGE, KLEIN_IMAGE_IMPROVE)
         if fn and fn not in extracted:
             continue
         if not fn and not is_candidate:
-            continue   # only rescue candidates have meaningful metadata-only rows
-        if is_candidate and meta.get('parent_image_id') not in valid_source_ids:
-            continue   # never restore an orphaned candidate
+            continue   # in-flight exclusive-review candidates are metadata-only
+        valid_parents = (valid_source_ids if derivation == KLEIN_SMALL_IMAGE
+                         else valid_image_ids)
+        parent_valid = not is_candidate or meta.get('parent_image_id') in valid_parents
+        if derivation == KLEIN_SMALL_IMAGE and not parent_valid:
+            continue   # a small-rescue candidate has no standalone meaning
+        if derivation == KLEIN_IMAGE_IMPROVE and not parent_valid and not fn:
+            continue   # metadata-only orphan has neither source nor recoverable pixels
         values = {f: meta.get(f) for f in _BACKUP_IMG_FIELDS
                   if f not in ('filename', 'parent_image_id', 'duplicate_of_id')}
+        if derivation == KLEIN_IMAGE_IMPROVE and not parent_valid:
+            # Old releases allowed deleting a reconstruction source independently.
+            # Preserve the surviving pixels as an ordinary generated row so the
+            # restored backup remains usable and the row can be curated/deleted.
+            values['derivation_kind'] = None
+            values['fail_reason'] = (values.get('fail_reason')
+                                     or 'Recovered from orphaned reconstruction provenance.')
         if values.get('original_filename') not in extracted:
             values['original_filename'] = None
         if is_candidate and not fn and values.get('status') in ('pending', 'keep'):
@@ -1461,6 +1728,9 @@ def import_backup_zip(user_id, zip_bytes):
             values['fail_reason'] = (
                 'Klein rescue was in flight when this backup was created; '
                 'the original image is preserved, but the job must be started again.'
+                if derivation == KLEIN_SMALL_IMAGE else
+                'Image reconstruction was in flight when this backup was created; '
+                'the source is preserved and can still be selected in review.'
             )
         img = FaceDatasetImage(dataset_id=ds.id,
                                **values,
@@ -1498,6 +1768,7 @@ def import_backup_zip(user_id, zip_bytes):
     if ds.ref_original_filename and ds.ref_original_filename not in extracted:
         ds.ref_original_filename = None
     db.session.commit()
+    normalize_legacy_image_improvement_rows(ds.id)
     logger.info(f"dataset backup restored: '{name}' -> #{ds.id} ({n_rows} image rows)")
     return ds
 
@@ -1575,6 +1846,8 @@ def batch_image_action(user_id, dataset_id, image_ids, action):
     if action != 'clear_caption' and any(
             img.derivation_kind in _SMALL_IMAGE_DERIVATIONS for img in rows):
         raise ValueError('resolve small-image rescue pairs with the dedicated review action')
+    if action != 'clear_caption' and any(_has_image_improvement_pair(img) for img in rows):
+        raise ValueError('resolve reconstructed image pairs with the dedicated comparison action')
     if action == 'delete':
         # Per-image path: reuses delete_image (file removal + pending-job cancel).
         for img in rows:
@@ -1926,7 +2199,11 @@ def face_crop_to_square_webp(image_bytes: bytes, size: int = 1024, pad: float = 
 
 # --- Import + classify (Qwen3-VL) ------------------------------------------
 def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, stats=None):
-    """Normalize (or head-crop) + persist + create import rows (status=keep).
+    """Normalize (or head-crop) + persist + create import rows.
+
+    Character photos enter the master corpus as ``pending``: import means preserve and
+    inspect, not silently admit to training. Concept/style imports retain their previous
+    accepted-by-default behaviour because identity scoring does not apply to them.
     When crop=True, each image is auto head-cropped via Qwen3-VL - the CALLER
     must then hold the GPU-exclusive window - and is by construction a face,
     so framing='face' is set directly (no classify pass needed).
@@ -2013,7 +2290,7 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
         img = FaceDatasetImage(
             dataset_id=dataset_id,
             source='import',
-            status='keep',
+            status='keep' if is_conceptual(ds) else 'pending',
             filename=fn,
             source_name=analysis.get('source_name') or None,
             original_filename=original_filename,
@@ -2316,7 +2593,10 @@ def analyze_corpus(user_id, dataset_id) -> dict:
             source_path = original_path if original_path and os.path.isfile(original_path) else normalized_path
             with open(source_path, 'rb') as fh:
                 raw = fh.read()
+            previous = parse_analysis(row.analysis_json)
             analysis = analyse_image_bytes(raw, source_name=row.source_name)
+            if previous.get('face'):
+                analysis['face'] = previous['face']
             with Image.open(normalized_path) as image:
                 row.perceptual_hash = f'{_dhash(image):016x}'
             row.source_sha256 = row.source_sha256 or analysis.get('source_sha256')
@@ -3190,8 +3470,55 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
 
 
 # --- Face similarity scoring (InsightFace antelopev2, CPU subprocess) -------
+def _identity_reference_paths(ds) -> list[str]:
+    ref_path = _ref_path(ds)
+    paths = [ref_path] if os.path.exists(ref_path) else []
+    for filename in extra_ref_filenames(ds):
+        candidate = os.path.join(_dataset_dir(ds.id), filename)
+        if os.path.exists(candidate) and candidate not in paths:
+            paths.append(candidate)
+    pinned = (FaceDatasetImage.query.filter_by(
+        dataset_id=ds.id, status='keep', anchor_decision='pinned')
+        .filter(FaceDatasetImage.filename.isnot(None)).all())
+    for anchor in pinned[:4]:
+        candidate = _img_path(anchor)
+        if os.path.exists(candidate) and candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def _face_result_payload(result):
+    face = {key: result.get(key) for key in (
+        'state', 'sim', 'det', 'bbox_frac', 'yaw', 'face_count',
+        'face_sharpness', 'face_exposure', 'face_clipped',
+        'face_width', 'face_height') if result.get(key) is not None}
+    state = face.get('state')
+    sharp = face.get('face_sharpness')
+    exposure = face.get('face_exposure')
+    if state in ('low_det', 'unreadable', 'error') or (
+            sharp is not None and sharp < 25) or (
+            exposure is not None and exposure < 25):
+        face['quality'] = 'red'
+    elif state in ('no_face', 'too_small', 'extreme_pose', 'multi_face') or (
+            sharp is not None and sharp < 45) or (
+            exposure is not None and exposure < 45):
+        face['quality'] = 'amber'
+    else:
+        face['quality'] = 'green'
+    return face
+
+
+def _persist_face_result(img, result):
+    img.face_state = result.get('state')
+    img.face_score = result.get('sim')
+    analysis = parse_analysis(img.analysis_json)
+    face = _face_result_payload(result)
+    analysis['face'] = face
+    img.analysis_json = analysis_json(analysis)
+
+
 def analyze_faces(user_id, dataset_id) -> dict:
-    """Score les images GARDEES vs la reference (InsightFace antelopev2, CPU subprocess).
+    """Score reviewable images vs a small identity reference set (InsightFace CPU).
     Persiste face_score (cosinus brut, None si non note) + face_state. Lot A : AUCUNE
     suppression. Tourne sur CPU -> pas de fenetre GPU. Retourne {state: count}."""
     ds = get_dataset(user_id, dataset_id)
@@ -3202,8 +3529,14 @@ def analyze_faces(user_id, dataset_id) -> dict:
     ref_path = _ref_path(ds)
     if not os.path.exists(ref_path):
         raise ValueError('reference photo missing')
-    rows = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
+    rows = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
+            .filter(FaceDatasetImage.status.in_(('pending', 'keep')))
             .filter(FaceDatasetImage.filename.isnot(None)).all())
+    # A reconstruction comparison is a frozen QA snapshot. Re-running the general
+    # face pass must not overwrite either side's score while its recommendation is
+    # awaiting a decision; resolved winners can be scored normally after editing.
+    unresolved_improvement_ids = _unresolved_image_improvement_ids(dataset_id)
+    rows = [row for row in rows if row.id not in unresolved_improvement_ids]
     by_path = {}
     for img in rows:
         p = _img_path(img)
@@ -3220,15 +3553,19 @@ def analyze_faces(user_id, dataset_id) -> dict:
     # finally clears the indicator even if scoring raises.
     token = dataset_activity.begin(dataset_id, 'analyze_faces', total=len(by_path))
     try:
-        results, scoring_error = score_dataset_faces(ref_path, list(by_path.keys()))
+        # Primary + explicit reference photos + pinned, accepted imports form a
+        # conservative identity centroid. This is more stable than trusting a single
+        # expression or camera angle while keeping the set human-controlled.
+        ref_paths = _identity_reference_paths(ds)
+        results, scoring_error = score_dataset_faces(
+            ref_path, list(by_path.keys()), ref_paths=ref_paths)
         counts = {}
         for p, img in by_path.items():
             dataset_activity.bump(token)
             r = results.get(p)
             if not r:
                 continue
-            img.face_state = r.get('state')
-            img.face_score = r.get('sim')   # None si non-scorable
+            _persist_face_result(img, r)
             db.session.commit()
             counts[img.face_state] = counts.get(img.face_state, 0) + 1
         return counts, scoring_error
@@ -3709,13 +4046,22 @@ def improve_existing_image(user_id, image_id):
         return _improve_existing_image_locked(user_id, image_id)
 
 
-def _improve_existing_image_locked(user_id, image_id):
-    """Queue one non-destructive Klein upscale/improvement of an existing image.
+def _image_improvement_source_path(img):
+    if not img:
+        return None
+    original_path = (os.path.join(_dataset_dir(img.dataset_id), img.original_filename)
+                     if img.original_filename else '')
+    if original_path and os.path.isfile(original_path):
+        return original_path
+    return _img_path(img) if img.filename else None
 
-    The source row and file are deliberately never modified.  The result is a
-    regular generated dataset image linked back to the source only for
-    provenance; unlike the small-scrape review pair it remains compatible with
-    the ordinary keep/reject/delete actions.
+
+def _improve_existing_image_locked(user_id, image_id):
+    """Queue one identity-constrained reconstruction of an existing image.
+
+    The exact uploaded original is used when available. The source and candidate
+    then become an exclusive provenance pair resolved only through side-by-side
+    review, so correlated pixels cannot be counted twice in training.
 
     Returns ``{'candidate_id', 'job_id'}``, ``None`` for an image not owned by
     ``user_id``, and returns the already-active candidate idempotently when the
@@ -3728,10 +4074,11 @@ def _improve_existing_image_locked(user_id, image_id):
         raise ValueError(
             'resolve the small-image rescue pair before improving either image')
     if img.derivation_kind == KLEIN_IMAGE_IMPROVE:
-        raise ValueError('an upscale & improve candidate cannot be improved again')
+        raise ValueError('a reconstruction candidate cannot be reconstructed again')
     if not img.filename:
         raise ValueError('image file required')
-    source_path = _img_path(img)
+    ds = db.session.get(FaceDataset, img.dataset_id)
+    source_path = _image_improvement_source_path(img)
     if not os.path.isfile(source_path):
         raise ValueError('image file missing')
 
@@ -3741,14 +4088,12 @@ def _improve_existing_image_locked(user_id, image_id):
     # or producing visually indistinguishable duplicates.
     active = (FaceDatasetImage.query
               .filter_by(dataset_id=img.dataset_id, parent_image_id=img.id,
-                         derivation_kind=KLEIN_IMAGE_IMPROVE, status='pending')
+                         derivation_kind=KLEIN_IMAGE_IMPROVE)
               .order_by(FaceDatasetImage.id.desc()).first())
     if active:
-        if active.job_id:
+        if active.status == 'pending' and active.job_id:
             return {'candidate_id': active.id, 'job_id': active.job_id}
-        # This tiny state exists only between the row commit and queue enqueue.
-        # Refuse a concurrent click rather than creating a second candidate.
-        raise RuntimeError('this image improvement is already being queued')
+        raise RuntimeError('this image already has a reconstruction comparison')
 
     from . import klein_edit_helper as keh
     missing = keh.klein_missing_assets()
@@ -3765,29 +4110,50 @@ def _improve_existing_image_locked(user_id, image_id):
         raise ValueError(
             f'too many generations in flight ({in_flight}), wait or cancel')
 
-    # Profile reproduced from the user-provided ComfyUI PNG metadata.
-    # Keep the selected/default Klein model; override only prompt/sampling/LoRA.
+    # The source carries composition; a small reviewed anchor pack constrains
+    # identity from other real photos. The configured consistency LoRA remains
+    # active (None means its configured strength), while style LoRAs stay off.
+    anchors = select_generation_references(ds, max_images=5) if ds else []
+    extra_paths = []
+    for anchor in anchors:
+        if anchor.get('image_id') == img.id:
+            continue
+        path = os.path.join(_dataset_dir(img.dataset_id), anchor['filename'])
+        if os.path.isfile(path) and path != source_path:
+            extra_paths.append(path)
     prompt = KLEIN_IMAGE_IMPROVE_PROMPT
     stored_prompt = prompt[:500]
-    base_label = 'Klein upscale & improve'
+    base_label = 'Klein reconstruction'
     source_label = (img.variation_label or '').strip()
     label = (f'{base_label} · {source_label}' if source_label else base_label)[:120]
+    source_was_cropped = bool(img.original_filename and img.upscale_ratio is not None)
     candidate = FaceDatasetImage(
         dataset_id=img.dataset_id, source='generated', status='pending',
         parent_image_id=img.id, derivation_kind=KLEIN_IMAGE_IMPROVE,
-        framing=img.framing, caption=img.caption,
+        # A preserved full-frame original may differ from the cropped derivative
+        # that supplied these fields. Do not attach known-stale framing/caption to
+        # the reconstruction; it can be classified/captioned after admission.
+        framing=None if source_was_cropped else img.framing,
+        caption=None if source_was_cropped else img.caption,
         variation_label=label, variation_prompt=stored_prompt,
         generation_engine='klein',
+        generation_anchor_ids=_generation_anchor_ids_json(anchors),
+        generation_anchor_metadata=_generation_anchor_metadata_json(anchors),
         generation_gap_ids=json.dumps(['klein_image_improve']),
     )
+    previous_source_status = img.status
     db.session.add(candidate)
+    # Suspend the source's training admission while its correlated replacement
+    # is unresolved. The dedicated resolver later admits exactly one version.
+    img.status = 'pending'
     db.session.commit()
 
     try:
         job_id = keh.enqueue_klein_edit(
-            user_id=str(user_id), source_filename=img.filename,
+            user_id=str(user_id), source_filename=os.path.basename(source_path),
             source_path=source_path, edit_prompt=prompt,
-            lora_strength=0.0, sampler_steps=4, base_lora_strength=0.0,
+            lora_strength=None, sampler_steps=4, base_lora_strength=0.0,
+            extra_ref_paths=extra_paths,
             extra_metadata={
                 'is_dataset': True,
                 'dataset_id': img.dataset_id,
@@ -3795,13 +4161,14 @@ def _improve_existing_image_locked(user_id, image_id):
                 'derivation_kind': KLEIN_IMAGE_IMPROVE,
                 'parent_image_id': img.id,
                 'source_image_id': img.id,
-                'action': 'upscale_improve',
+                'action': 'reconstruct_compare',
             },
         )
     except Exception:
-        # No broken tile: the original is still untouched and the user can retry
-        # as soon as the queue/ComfyUI issue is fixed.
+        # No broken tile: restore the source's prior admission decision so a
+        # queue failure cannot silently remove a previously accepted photo.
         db.session.delete(candidate)
+        img.status = previous_source_status
         db.session.commit()
         raise
 
@@ -3842,7 +4209,7 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
     if img.derivation_kind == KLEIN_SMALL_IMAGE:
         raise ValueError('small-image rescue candidates cannot be regenerated; re-import the source')
     if img.derivation_kind == KLEIN_IMAGE_IMPROVE:
-        raise ValueError('upscale & improve candidates cannot be regenerated from the dataset reference')
+        raise ValueError('reconstruction candidates cannot be regenerated from the dataset reference')
     ds = db.session.get(FaceDataset, img.dataset_id)
     if not ds:
         raise ValueError('dataset not found')
@@ -4186,6 +4553,194 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
 
 
 # --- Completion linking (called from the job queue) -------------------------
+def _technical_metric_score(analysis) -> float | None:
+    metrics = (analysis or {}).get('metrics') or {}
+    try:
+        return (float(metrics['sharpness']) * 0.42
+                + float(metrics['exposure']) * 0.23
+                + float(metrics['resolution']) * 0.35)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _improvement_source_filename(source) -> str | None:
+    """The dataset-relative file that supplied pixels to the reconstruction job."""
+    if not source:
+        return None
+    if source.original_filename:
+        original = os.path.join(_dataset_dir(source.dataset_id), source.original_filename)
+        if os.path.isfile(original):
+            return source.original_filename
+    return source.filename
+
+
+def _prepare_completed_improvement(img) -> bool:
+    """Do the cheap reconstruction QA needed before the completion callback returns.
+
+    Face scoring can load InsightFace and take minutes on a cold machine, so that pass
+    is deliberately performed by ``_run_completed_improvement_qa`` instead of holding
+    the single ComfyUI completion worker.  The provisional comparison also makes the
+    UI explicit that no recommendation exists yet.
+    """
+    path = _img_path(img)
+    try:
+        with open(path, 'rb') as fh:
+            candidate_analysis = analyse_image_bytes(fh.read(), source_name='reconstruction')
+    except Exception as exc:
+        logger.exception('reconstruction technical QA failed for image %s', img.id)
+        candidate_analysis = parse_analysis(img.analysis_json)
+        candidate_analysis['repair_comparison'] = {
+            'phase': 'failed',
+            'source_image_id': img.parent_image_id,
+            'source_filename': None,
+            'source_face': None,
+            'source_identity_score': None,
+            'technical_delta': None,
+            'identity_delta': None,
+            'recommendation': None,
+            'qa_error': str(exc)[:400],
+        }
+        img.analysis_json = analysis_json(candidate_analysis)
+        return False
+    img.analysis_json = analysis_json(candidate_analysis)
+    img.training_usefulness = candidate_analysis.get('training_usefulness')
+    img.source_sha256 = candidate_analysis.get('source_sha256')
+    img.coverage_value = img.coverage_value or 'unknown'
+    source = db.session.get(FaceDatasetImage, img.parent_image_id)
+    source_analysis = parse_analysis(source.analysis_json) if source else {}
+    source_technical = _technical_metric_score(source_analysis)
+    candidate_technical = _technical_metric_score(candidate_analysis)
+    technical_delta = (round(candidate_technical - source_technical, 1)
+                       if source_technical is not None and candidate_technical is not None
+                       else None)
+    candidate_analysis['repair_comparison'] = {
+        'phase': 'analyzing',
+        'source_image_id': source.id if source else img.parent_image_id,
+        'source_filename': _improvement_source_filename(source),
+        'source_face': None,
+        'source_identity_score': None,
+        'technical_delta': technical_delta,
+        'identity_delta': None,
+        'recommendation': None,
+        'qa_error': None,
+    }
+    img.analysis_json = analysis_json(candidate_analysis)
+    return True
+
+
+def _analyze_completed_improvement(img):
+    """Attach identity QA and a conservative recommendation to a reconstruction."""
+    path = _img_path(img)
+    source = db.session.get(FaceDatasetImage, img.parent_image_id)
+    ds = db.session.get(FaceDataset, img.dataset_id)
+    source_path = _image_improvement_source_path(source) if source else None
+    candidate_analysis = parse_analysis(img.analysis_json)
+    comparison = dict(candidate_analysis.get('repair_comparison') or {})
+    if not comparison:
+        if not _prepare_completed_improvement(img):
+            return
+        candidate_analysis = parse_analysis(img.analysis_json)
+        comparison = dict(candidate_analysis.get('repair_comparison') or {})
+
+    source_face = None
+    source_identity = None
+    qa_error = None
+    if ds and ds.ref_filename and source_path and os.path.isfile(source_path):
+        try:
+            from .face_similarity import score_dataset_faces
+            results, scoring_error = score_dataset_faces(
+                _ref_path(ds), [path, source_path], ref_paths=_identity_reference_paths(ds))
+            if results.get(path):
+                _persist_face_result(img, results[path])
+            if results.get(source_path):
+                source_face = _face_result_payload(results[source_path])
+                source_identity = source_face.get('sim')
+            if scoring_error:
+                qa_error = str(scoring_error)[:400]
+        except Exception as exc:
+            # Completion still succeeds when optional face tools are absent, but the
+            # comparison must say that QA failed rather than silently recommending it.
+            logger.exception('reconstruction QA face scoring failed for image %s', img.id)
+            qa_error = str(exc)[:400]
+    else:
+        qa_error = 'The exact reconstruction source or primary identity reference is unavailable.'
+
+    candidate_analysis = parse_analysis(img.analysis_json)
+    face_quality = (candidate_analysis.get('face') or {}).get('quality')
+    identity_delta = (round(img.face_score - source_identity, 4)
+                      if img.face_score is not None and source_identity is not None
+                      else None)
+    technical_delta = comparison.get('technical_delta')
+    try:
+        identity_floor = float(cfg.get('face_scoring.orange') or 0.45)
+    except (TypeError, ValueError):
+        identity_floor = 0.45
+
+    if img.face_state != 'scorable' or img.face_score is None or source_identity is None:
+        recommendation = 'manual_identity_check'
+    elif img.face_score < identity_floor or (identity_delta is not None and identity_delta < -0.03):
+        recommendation = 'identity_risk'
+    elif face_quality != 'green':
+        recommendation = 'quality_risk'
+    elif technical_delta is None:
+        recommendation = 'manual_quality_check'
+    elif technical_delta <= 0:
+        recommendation = 'no_measured_gain'
+    else:
+        recommendation = 'candidate_improved'
+
+    candidate_analysis['repair_comparison'] = {
+        **comparison,
+        'phase': 'ready',
+        'source_image_id': source.id if source else img.parent_image_id,
+        'source_filename': _improvement_source_filename(source),
+        'source_face': source_face,
+        'source_identity_score': source_identity,
+        'candidate_identity_score': img.face_score,
+        'identity_delta': identity_delta,
+        'recommendation': recommendation,
+        'qa_error': qa_error,
+    }
+    img.analysis_json = analysis_json(candidate_analysis)
+
+
+def _run_completed_improvement_qa(app, image_id):
+    """Run the optional, heavyweight face comparison outside the job queue worker."""
+    with app.app_context():
+        img = db.session.get(FaceDatasetImage, image_id)
+        if not img or not img.filename or img.derivation_kind != KLEIN_IMAGE_IMPROVE:
+            return
+        try:
+            _analyze_completed_improvement(img)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            logger.exception('reconstruction QA failed for completed image %s', image_id)
+            img = db.session.get(FaceDatasetImage, image_id)
+            if img:
+                candidate_analysis = parse_analysis(img.analysis_json)
+                comparison = dict(candidate_analysis.get('repair_comparison') or {})
+                candidate_analysis['repair_comparison'] = {
+                    **comparison,
+                    'phase': 'failed',
+                    'recommendation': None,
+                    'qa_error': str(exc)[:400],
+                }
+                img.analysis_json = analysis_json(candidate_analysis)
+                db.session.commit()
+        finally:
+            db.session.remove()
+
+
+def _start_completed_improvement_qa(app, image_id):
+    threading.Thread(
+        target=_run_completed_improvement_qa,
+        args=(app, image_id),
+        name=f'reconstruction-qa-{image_id}',
+        daemon=True,
+    ).start()
+
+
 def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
     """Attach a finished fan-out job to its FaceDatasetImage row.
 
@@ -4196,6 +4751,7 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
     before concluding the row really doesn't exist.
     `reason` (the job row's error_message, e.g. a ComfyUI execution error) shows
     on the failed tile so the user sees WHY, not a generic 'see the log'."""
+    qa_candidate_id = None
     img = FaceDatasetImage.query.filter_by(job_id=job_id).first()
     if img is None:
         db.session.rollback()  # drop the stale read snapshot, then re-read
@@ -4203,7 +4759,8 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
     if img is None:
         logger.warning(f"dataset link: no FaceDatasetImage row for job {job_id}")
         return
-    if img.derivation_kind == KLEIN_SMALL_IMAGE and img.status in ('keep', 'reject'):
+    if (img.derivation_kind in (KLEIN_SMALL_IMAGE, KLEIN_IMAGE_IMPROVE)
+            and img.status in ('keep', 'reject')):
         # The user already resolved the pair while this job/callback was racing.
         # The terminal review decision wins: do not attach
         # a late file and do not turn reject into failed. Remove a local Comfy output
@@ -4219,12 +4776,12 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
             _sync_generate_activity(img.dataset_id)
         except Exception:
             logger.exception(
-                'dataset link: terminal rescue activity sync failed for job %s', job_id)
+                'dataset link: terminal review activity sync failed for job %s', job_id)
         return
     if failed:
         # A cancel racing with the worker dispatches a failure callback. Never let
         # that callback overwrite an already-resolved rescue choice (keep/reject).
-        if not (img.derivation_kind == KLEIN_SMALL_IMAGE
+        if not (img.derivation_kind in (KLEIN_SMALL_IMAGE, KLEIN_IMAGE_IMPROVE)
                 and img.status in ('keep', 'reject')):
             img.status = 'failed'
             img.fail_reason = (img.fail_reason or reason
@@ -4263,6 +4820,11 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
                 img.fail_reason = ('The finished image could not be retrieved from ComfyUI '
                                    '(not on disk, and the /view API fetch failed).')
                 logger.warning(f"dataset link: file not on disk and /view API fetch failed (job {job_id})")
+        if (img.derivation_kind == KLEIN_IMAGE_IMPROVE
+                and img.status == 'pending' and img.filename
+                and os.path.isfile(_img_path(img))):
+            if _prepare_completed_improvement(img):
+                qa_candidate_id = img.id
     db.session.commit()
     # This job just left the in-flight set: reconcile the Klein 'generate'
     # indicator (clears it when this was the last job of the batch). Guarded — a
@@ -4271,6 +4833,9 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
         _sync_generate_activity(img.dataset_id)
     except Exception:
         logger.exception(f"dataset link: generate-activity sync failed for job {job_id}")
+    if qa_candidate_id is not None:
+        from flask import current_app
+        _start_completed_improvement_qa(current_app._get_current_object(), qa_candidate_id)
 
 
 # --- Migration helper (run once manually after deploy) ---------------------

@@ -42,3 +42,16 @@ test('generated candidates must be curated before they count as completed work',
   ] });
   assert.equal(deriveSteps(d, CAPS).nextStep.id, 'curate');
 });
+
+test('exclusive comparisons direct curation to their dedicated review', () => {
+  const d = dataset({ images: [
+    { id: 1, source: 'import', filename: 'real.webp', status: 'pending', caption: '' },
+    { id: 2, source: 'generated', filename: 'repair.webp', status: 'pending', caption: '',
+      parent_image_id: 1, derivation_kind: 'klein_image_improve' },
+  ] });
+  const result = deriveSteps(d, CAPS);
+  const curate = result.steps.find((step) => step.id === 'curate');
+  assert.equal(result.nextStep.id, 'curate');
+  assert.equal(curate.targetId, 'gf-curation');
+  assert.equal(curate.subtitle, '1 comparison(s) to review');
+});

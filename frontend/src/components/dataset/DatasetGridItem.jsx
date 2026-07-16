@@ -17,6 +17,7 @@ const STATUS_CLS = {
 const DEFAULT_FACE_VALID = 0.50, DEFAULT_FACE_ORANGE = 0.45;
 const GREY_LABEL = { no_face: 'no face detected', low_det: 'low detection',
   too_small: 'face too small', extreme_pose: 'profile — not scored',
+  multi_face: 'multiple faces — review',
   unreadable: 'unreadable', error: 'error' };
 
 // Retourne {border, icon, cls, label} d'apres face_state/face_score, ou null si pas analysé.
@@ -59,7 +60,8 @@ const WATERMARK_BADGE = {
 
 export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete,
                                           onRegenerate, onView, nonce = 0, faceThresholds,
-                                          selected = false, onToggleSelect, tileSize = 'M' }) {
+                                          selected = false, onToggleSelect, tileSize = 'M',
+                                          exclusiveLocked = false }) {
   const [cap, setCap] = useState(img.caption || '');
   const [captionEditorOpen, setCaptionEditorOpen] = useState(false);
   // ✏️ edit-prompt bubble open state (regenerate this tile with an edited prompt).
@@ -194,7 +196,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
               title="Crop" aria-label="Crop"
               className="px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px]">✂</button>
           )}
-          {!isRescueDerived && (
+          {!isRescueDerived && !exclusiveLocked && (
             <button type="button"
               onClick={(e) => { e.stopPropagation(); if (window.confirm('Permanently delete this image?')) onDelete(img.id); }}
               title="Delete permanently" aria-label="Delete permanently"
@@ -208,10 +210,10 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
             onClose={() => setEditingPrompt(false)} />
         )}
       </div>
-      {isRescueDerived ? (
+      {isRescueDerived || exclusiveLocked ? (
         <p className="m-1.5 rounded border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 text-center text-[0.625rem] text-indigo-200"
           title="This winner was chosen atomically with its provenance pair. Caption and crop remain available.">
-          ✓ Chosen in Klein rescue review
+          ✓ Chosen in {isRescueDerived ? 'Klein rescue' : 'reconstruction'} review
         </p>
       ) : (
         <div className="flex gap-1 p-1.5">

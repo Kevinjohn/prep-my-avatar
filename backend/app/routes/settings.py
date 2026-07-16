@@ -181,7 +181,7 @@ _git_check_cache = {'ts': 0.0, 'data': None}
 def update_check():
     import time
     import requests
-    from ..version import APP_VERSION
+    from ..version import APP_VERSION, is_newer_version
     from ..services import updater
     force = bool(request.args.get('force'))
     auto = bool(request.args.get('auto'))
@@ -217,8 +217,8 @@ def update_check():
             latest = (j.get('tag_name') or '').lstrip('vV').strip()
             out['latest'] = latest or None
             out['url'] = j.get('html_url') or out['url']
-            # Date-based versions (YYYY.MM.DD[.N]) -> plain string comparison.
-            out['update_available'] = bool(latest) and latest > APP_VERSION
+            out['update_available'] = bool(latest) and is_newer_version(
+                latest, APP_VERSION)
         else:
             out['reason'] = (f'release feed answered {r.status_code} '
                              '(no public release yet?)')

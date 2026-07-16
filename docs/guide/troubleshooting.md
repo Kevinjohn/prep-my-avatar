@@ -105,11 +105,11 @@ macOS reserves port 5000 for AirPlay Receiver. Change the port in
 Cosmetic only — some UTF-8 text renders wrong on the legacy console codepage.
 The app itself is unaffected.
 
-## `npm install` fails with `Cannot find module @rollup/rollup-<platform>-...`
+## `pnpm install` fails with `Cannot find module @rollup/rollup-<platform>-...`
 
 Only relevant if you rebuild the frontend yourself (the repo ships `dist/`
-prebuilt). It's a known npm bug: delete `frontend/node_modules` +
-`frontend/package-lock.json` and run `npm install` again on this machine.
+prebuilt). Delete `frontend/node_modules` and run `pnpm install` again on this
+machine.
 
 ## A cloud run seems stuck
 

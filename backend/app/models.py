@@ -115,7 +115,7 @@ class FaceDatasetImage(db.Model):
     generation_gap_ids = db.Column(Text, nullable=True)
     # Ressemblance faciale vs la reference (face analyzer Lot A). face_score = cosinus
     # ArcFace brut (NULL si non note) ; face_state = scorable|no_face|low_det|too_small|
-    # extreme_pose|unreadable|error. Score brut persiste -> seuils recalibrables cote UI.
+    # extreme_pose|multi_face|unreadable|error. Score brut persiste -> seuils recalibrables cote UI.
     face_score = db.Column(Float, nullable=True)
     face_state = db.Column(String(16), nullable=True)
     # Pourquoi status='failed' : message d'erreur du moteur (API/sauvegarde/queue),

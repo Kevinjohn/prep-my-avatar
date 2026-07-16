@@ -168,18 +168,20 @@ function AutoTriageBar({ images, datasetId, faceThresholds, onBatch, busy }) {
 }
 
 export default function DatasetGrid({ images, datasetId, onStatus, onCaption, onCrop, onDelete,
-                                      onRegenerate, onView, onBatch, busy, nonces, faceThresholds }) {
+                                      onRegenerate, onView, onBatch, busy, nonces, faceThresholds,
+                                      exclusiveImageIds }) {
+  const isExclusive = (image) => exclusiveImageIds?.has?.(image.id) || false;
   const [selected, setSelected] = useState(() => new Set());
   // Prune ids that vanished (deleted / poll refresh) so stale selections can't act.
   useEffect(() => {
     setSelected((prev) => {
       const alive = new Set(images
-        .filter((i) => i.filename && !isSmallImageRescueRow(i))
+        .filter((i) => i.filename && !isSmallImageRescueRow(i) && !isExclusive(i))
         .map((i) => i.id));
       const next = new Set([...prev].filter((id) => alive.has(id)));
       return next.size === prev.size ? prev : next;
     });
-  }, [images]);
+  }, [images, exclusiveImageIds]);
   // Thumbnail size: a UI preference, not dataset data — persisted globally
   // (same lazy-init + effect pattern as `datasetGenerator` in VariationCatalog).
   // Runs before the early return below so hook order stays stable.
@@ -203,7 +205,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   }
   // Rescue winners remain editable one-by-one (caption/crop), but their paired
   // provenance makes generic bulk status/delete unsafe. Never select them here.
-  const selectable = images.filter((i) => i.filename && !isSmallImageRescueRow(i));
+  const selectable = images.filter((i) => i.filename && !isSmallImageRescueRow(i) && !isExclusive(i));
   const ids = [...selected];
   const toggle = (id) => setSelected((prev) => {
     const next = new Set(prev);
@@ -222,7 +224,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
     <div id="ds-images-review" tabIndex={-1} data-workspace-focus
       className="flex flex-col gap-2 scroll-mt-20">
       {onBatch && (
-        <AutoTriageBar images={images.filter((image) => !isSmallImageRescueRow(image))}
+        <AutoTriageBar images={images.filter((image) => !isSmallImageRescueRow(image) && !isExclusive(image))}
           datasetId={datasetId} faceThresholds={faceThresholds} onBatch={onBatch} busy={busy} />
       )}
       <div id="ds-images-bulk" tabIndex={-1}
@@ -266,7 +268,8 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
           <DatasetGridItem key={img.id} img={img} datasetId={datasetId} onStatus={onStatus} onCaption={onCaption}
             onCrop={onCrop} onDelete={onDelete} onRegenerate={onRegenerate} onView={onView}
             selected={selected.has(img.id)}
-            onToggleSelect={onBatch && !isSmallImageRescueRow(img) ? toggle : undefined}
+            onToggleSelect={onBatch && !isSmallImageRescueRow(img) && !isExclusive(img) ? toggle : undefined}
+            exclusiveLocked={isExclusive(img)}
             nonce={(nonces && nonces[img.id]) || 0} faceThresholds={faceThresholds} tileSize={tileSize} />
         ))}
       </div>

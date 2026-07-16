@@ -50,6 +50,7 @@ def test_export_with_dest_dir_needs_no_aitoolkit(app, client, tmp_path, monkeypa
         ids, failed = fds.import_images('local', ds_id, [_png()], crop=False)
         assert failed == 0 and len(ids) == 1
         for im in FaceDatasetImage.query.filter_by(dataset_id=ds_id).all():
+            fds.set_image_status('local', im.id, 'keep')
             fds.set_image_caption('local', im.id, 'a test caption')
         dest = tmp_path / 'staging' / 'dataset'
         out = lt.export_dataset_to_aitoolkit('local', ds_id, masked=False,

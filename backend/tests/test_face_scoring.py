@@ -52,7 +52,9 @@ def test_analyze_faces_maps_state_and_sim_onto_rows(app, monkeypatch):
         ds, img = _dataset_with_ref_and_kept_image(svc, LOCAL_USER)
         path = svc._img_path(img)
         contract = {"ref_ok": True, "results": {path: {"state": "scorable", "sim": 0.62,
-                                                        "det": 0.9, "bbox_frac": 0.2, "yaw": 5.0}}}
+                                                        "det": 0.9, "bbox_frac": 0.2, "yaw": 5.0,
+                                                        "face_count": 1, "face_sharpness": 72,
+                                                        "face_exposure": 81}}}
         # Noise lines before the JSON line -- the parser must pick the LAST `{`-line.
         noisy_stdout = "some progress line\n[face] loading model\n" + json.dumps(contract)
         monkeypatch.setattr('app.services.face_similarity.subprocess.run',
@@ -61,7 +63,42 @@ def test_analyze_faces_maps_state_and_sim_onto_rows(app, monkeypatch):
         refreshed = svc.db.session.get(FaceDatasetImage, img.id)
         assert refreshed.face_state == 'scorable'
         assert refreshed.face_score == 0.62
+        analysis = svc.parse_analysis(refreshed.analysis_json)
+        assert analysis['face']['quality'] == 'green'
+        assert analysis['face']['face_sharpness'] == 72
         assert counts == {'scorable': 1}
+
+
+def test_analyze_faces_skips_unresolved_reconstruction_snapshot(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import face_similarity as fsim
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+
+    captured = []
+    with app.app_context():
+        ds, source = _dataset_with_ref_and_kept_image(svc, LOCAL_USER)
+        source.status = 'pending'
+        source.face_state, source.face_score = 'scorable', 0.71
+        candidate = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending',
+            filename='repair.webp', parent_image_id=source.id,
+            derivation_kind=svc.KLEIN_IMAGE_IMPROVE,
+            face_state='scorable', face_score=0.69)
+        with open(os.path.join(svc._dataset_dir(ds.id), candidate.filename), 'wb') as fh:
+            fh.write(_png((40, 50, 60)))
+        svc.db.session.add(candidate)
+        svc.db.session.commit()
+
+        monkeypatch.setattr(
+            fsim, 'score_dataset_faces',
+            lambda _ref, paths, **_kwargs: (captured.extend(paths) or ({}, None)))
+        counts, _err = svc.analyze_faces(LOCAL_USER, ds.id)
+        svc.db.session.refresh(source)
+        svc.db.session.refresh(candidate)
+        assert counts == {}
+        assert captured == []
+        assert (source.face_score, candidate.face_score) == (0.71, 0.69)
 
 
 def test_analyze_faces_ref_not_ok_returns_empty_and_no_row_change(app, monkeypatch):
@@ -156,6 +193,7 @@ def test_score_dataset_faces_stdin_payload_includes_models_root(app, monkeypatch
             fsim.score_dataset_faces(ref, [img_path])
     payload = json.loads(captured['input'])
     assert payload['models_root'] == 'C:/models/insightface'
+    assert payload['refs'] == [payload['ref']]
 
 
 def test_score_dataset_faces_stdin_payload_models_root_none_when_unconfigured(app, monkeypatch):

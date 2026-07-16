@@ -13,7 +13,7 @@ A quick "I'm going to look at X" in an issue or on Discord means nobody duplicat
 
 ## Dev setup
 
-You only need the backend to work on backend code. You only need Node to change the frontend.
+You only need the backend to work on backend code. You need Node and pnpm 10.21.0 to change the frontend; the pinned version is declared in `frontend/package.json`.
 
 ### Backend
 
@@ -43,16 +43,16 @@ The repo **ships the frontend prebuilt** in `frontend/dist/` (that folder is com
 
 ```bash
 cd frontend
-npm install
-npm run dev      # live-reload dev server; proxies /api to the running backend (see frontend/README.md)
-npm run build    # writes frontend/dist/
+pnpm install
+pnpm run dev      # live-reload dev server; proxies /api using frontend/vite.config.js
+pnpm run build    # writes frontend/dist/
 ```
 
-**If you change anything under `frontend/src`, run `npm run build` and commit the regenerated `frontend/dist/` in the same PR** — otherwise people running from source won't see your change. There's no TypeScript/ESLint step; a clean `npm run build` is the bar.
+**If you change anything under `frontend/src`, run `pnpm run build` and commit the regenerated `frontend/dist/` in the same PR** — otherwise people running from source won't see your change. There's no TypeScript/ESLint step; a clean `pnpm run build` is the bar.
 
 ## Tests
 
-The backend has a large test suite (950+ tests) and it must stay green:
+The backend has a large test suite (1,100+ tests) and it must stay green:
 
 ```bash
 python -m pytest backend/tests -q
@@ -60,7 +60,29 @@ python -m pytest backend/tests -q
 
 This is exactly what CI runs on a release tag, so run it locally before you open a PR. If you add or change behavior, add or update a test for it. The suite mocks external tools (ComfyUI, ai-toolkit, Ollama), so it runs without a GPU or any of those installed.
 
-For the frontend, a successful `npm run build` is the check.
+For the frontend, run the contract tests and production build:
+
+```bash
+cd frontend
+node --test
+pnpm run build
+```
+
+## Versions and releases
+
+Application releases use CalVer `YYYY.MM.DD.N`; they do not use the SemVer values
+belonging to the prototype Python or frontend packages. For a release:
+
+1. Set `APP_VERSION` in `backend/app/version.py` to today's CalVer. Start `N` at
+   `1`, or increment it for another release on the same day.
+2. Update the current version shown in `README.md`.
+3. Run the backend tests, frontend contract tests, and production frontend build.
+4. Commit with a versioned subject such as `Release v2026.07.17.1`.
+5. Create the matching tag, for example `git tag -a v2026.07.17.1 -m "Release v2026.07.17.1"`.
+
+Pushing that tag runs the release workflow, which refuses a tag that does not
+match `APP_VERSION`. See [`docs/VERSIONING.md`](docs/VERSIONING.md) for the policy,
+package-version boundaries, and update-comparison behavior.
 
 ## Pull requests
 

@@ -430,7 +430,8 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
     # source app's ComfyUI and is NOT part of the Klein install — bypass it when
     # its file is absent so ComfyUI doesn't fail validation on a missing LoRA. The
     # consistency LoRA injected above (if any) stays in the chain.
-    base_lora = (workflow.get("139", {}).get("inputs", {}).get("lora_name") or '').replace('/', os.sep)
+    base_lora = (workflow.get("139", {}).get("inputs", {}).get("lora_name") or '')
+    base_lora = os.path.join(*base_lora.replace('\\', '/').split('/')) if base_lora else ''
     loras_dir = cfg.comfyui_dir('loras')
     base_lora_path = os.path.join(str(loras_dir), base_lora) if (loras_dir and base_lora) else None
     if "139" in workflow and (not base_lora_path or not os.path.exists(base_lora_path)):

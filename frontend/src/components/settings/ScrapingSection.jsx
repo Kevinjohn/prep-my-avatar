@@ -71,7 +71,7 @@ export default function ScrapingSection(props) {
       </Card>
       <Card
         title="Klein image improvement"
-        help="Optional instruction for automatic rescue of scraped images under 768 px. Manual Upscale & improve uses its dedicated metadata-derived quality profile. Klein creates a separate 2 MP version to validate and leaves the original intact."
+        help="Optional instruction for automatic rescue of scraped images under 768 px. Manual Reconstruct & compare uses its dedicated metadata-derived quality profile. Klein creates a separate 2 MP version to validate beside the exact source pixels and leaves the original intact."
       >
         <div>
           <div className="flex items-center justify-between gap-3">
@@ -83,7 +83,7 @@ export default function ScrapingSection(props) {
           <p className="mb-1 text-xs leading-relaxed text-content-muted">
             Leave this empty to let Klein use the reference image alone. Add a short instruction only
             when you want to guide automatic scraper rescue; Klein remains generative and may change
-            details. Manual lightbox improvement uses its dedicated quality profile.
+            details. Manual Reconstruct & compare uses its dedicated quality profile.
           </p>
           <textarea id="klein-small-image-prompt" rows={4} value={prompt}
             onChange={(e) => props.setField('klein', 'small_image_prompt', e.target.value)}
