@@ -51,11 +51,14 @@ def test_crop_reference_reads_original_not_the_cropped_ref(app):
         # A 400px-wide box is IMPOSSIBLE from the 64px green ref (would clamp to 64) —
         # so a red 1024² result proves the crop was taken from the original.
         assert svc.crop_reference('local', ds.id, 0, 0, 400, 400) is True
-        im = Image.open(os.path.join(d, ref_fn)).convert('RGB')
+        with Image.open(os.path.join(d, ref_fn)) as source:
+            im = source.convert('RGB')
         assert im.size == (1024, 1024)
         r, g, _b = im.getpixel((512, 512))
+        im.close()
         assert r > 200 and g < 60                       # red = from the original
-        assert Image.open(os.path.join(d, orig_fn)).size == (600, 400)  # original untouched
+        with Image.open(os.path.join(d, orig_fn)) as original:
+            assert original.size == (600, 400)  # original untouched
 
 
 def test_crop_reference_legacy_without_original_crops_ref_in_place(app):
@@ -64,9 +67,11 @@ def test_crop_reference_legacy_without_original_crops_ref_in_place(app):
         d, _o, ref_fn = _seed_ref(ds, original=None, cropped=_webp((0, 0, 255), (128, 128)))
         assert ds.ref_original_filename is None
         assert svc.crop_reference('local', ds.id, 0, 0, 128, 128) is True
-        im = Image.open(os.path.join(d, ref_fn)).convert('RGB')
+        with Image.open(os.path.join(d, ref_fn)) as source:
+            im = source.convert('RGB')
         assert im.size == (1024, 1024)
         _r, _g, b = im.getpixel((512, 512))
+        im.close()
         assert b > 200                                  # blue = the legacy ref itself
 
 
@@ -78,9 +83,11 @@ def test_recrop_reference_auto_reruns_head_crop_on_original(app, monkeypatch):
         monkeypatch.setattr(svc, 'detect_head_bbox', lambda *a, **k: (0.25, 0.25, 0.75, 0.75))
         ok, detected = svc.recrop_reference_auto('local', ds.id)
         assert ok is True and detected is True
-        im = Image.open(os.path.join(d, ref_fn)).convert('RGB')
+        with Image.open(os.path.join(d, ref_fn)) as source:
+            im = source.convert('RGB')
         assert im.size == (1024, 1024)
         r, g, _b = im.getpixel((512, 512))
+        im.close()
         assert r > 200 and g < 60                       # regenerated from the red original
 
 
@@ -106,4 +113,5 @@ def test_ref_route_stores_original_and_exposes_it_in_payload(client, monkeypatch
     assert payload['ref_original_filename'] != payload['ref_filename']
     # the stored original is a decodable webp (the full-frame, not the crop stub)
     orig_path = os.path.join(svc._dataset_dir(did), payload['ref_original_filename'])
-    assert Image.open(orig_path).size == (256, 256)
+    with Image.open(orig_path) as original:
+        assert original.size == (256, 256)

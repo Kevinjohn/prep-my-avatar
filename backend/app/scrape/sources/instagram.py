@@ -354,8 +354,8 @@ def scan(validation):
         return None, "Erreur lors du scan Instagram."
 
 
-from .base import Source, Capabilities, Match
-from . import registry
+from .base import Source, Capabilities, Match  # noqa: E402 - registration follows helpers
+from . import registry  # noqa: E402 - avoid registry cycle during helper definition
 
 
 class InstagramSource(Source):

@@ -2,9 +2,9 @@
 // Extrait behavior-preserving de LoraTestStudio.jsx (bouton de lancement).
 export default function LaunchBar({ canLaunch, launching, onLaunch }) {
   return (
-    <button type="button" disabled={!canLaunch} onClick={onLaunch}
+    <button type="button" disabled={!canLaunch || launching} onClick={onLaunch}
       className="ml-auto px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
-      <span aria-hidden>🚀</span> Run test
+      <span aria-hidden>{launching ? '…' : '🚀'}</span> {launching ? 'Launching…' : 'Run test'}
     </button>
   );
 }

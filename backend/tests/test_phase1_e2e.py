@@ -11,7 +11,8 @@ from PIL import Image
 
 
 def _png():
-    buf = io.BytesIO(); Image.new('RGB', (64, 64), (1, 2, 3)).save(buf, 'PNG')
+    buf = io.BytesIO()
+    Image.new('RGB', (64, 64), (1, 2, 3)).save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -40,6 +41,9 @@ class _SyncExecutor:
 
 def test_api_only_end_to_end(client, app, monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'sk-x')
+    client.put('/api/settings', json={
+        'config': {'privacy': {'allow_remote_generation': True}},
+    })
 
     ds = client.post('/api/dataset/create',
                      json={'name': 'E2E', 'trigger_word': 'e2e'}).get_json()
@@ -99,6 +103,6 @@ def test_api_only_end_to_end(client, app, monkeypatch):
     assert z.status_code == 200 and z.mimetype == 'application/zip'
     zf = zipfile.ZipFile(io.BytesIO(z.data))
     names = zf.namelist()
-    assert any(n.endswith('_000_ref.png') for n in names)  # reference kept as the real anchor
+    assert not any(n.endswith('_000_ref.png') for n in names)  # anchors require explicit admission
     caption_file = next(n for n in names if n.endswith('_001.txt'))
     assert zf.read(caption_file).decode('utf-8') == 'e2e, a portrait'

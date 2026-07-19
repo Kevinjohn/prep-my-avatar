@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DatasetGridItem from './DatasetGridItem';
 import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
+import { useConfirmDialog } from '../common/ConfirmDialog';
 
 const DEFAULT_GREEN = 0.50;
+const GRID_PAGE_SIZE = 80;
 
 // 3-4 line plain-language explanation for the 🎯 panel's "?" button.
 const AUTO_TRIAGE_HELP = [
@@ -169,9 +171,16 @@ function AutoTriageBar({ images, datasetId, faceThresholds, onBatch, busy }) {
 
 export default function DatasetGrid({ images, datasetId, onStatus, onCaption, onCrop, onDelete,
                                       onRegenerate, onView, onBatch, busy, nonces, faceThresholds,
-                                      exclusiveImageIds }) {
-  const isExclusive = (image) => exclusiveImageIds?.has?.(image.id) || false;
+                                      exclusiveImageIds, hasMore = false, onLoadMore,
+                                      loadingMore = false, totalImages = null }) {
+  const confirm = useConfirmDialog();
+  const isExclusive = useCallback(
+    (image) => exclusiveImageIds?.has?.(image.id) || false,
+    [exclusiveImageIds],
+  );
   const [selected, setSelected] = useState(() => new Set());
+  const [visibleCount, setVisibleCount] = useState(GRID_PAGE_SIZE);
+  const moreRef = useRef(null);
   // Prune ids that vanished (deleted / poll refresh) so stale selections can't act.
   useEffect(() => {
     setSelected((prev) => {
@@ -181,7 +190,26 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
       const next = new Set([...prev].filter((id) => alive.has(id)));
       return next.size === prev.size ? prev : next;
     });
-  }, [images, exclusiveImageIds]);
+  }, [images, isExclusive]);
+  useEffect(() => { setVisibleCount(GRID_PAGE_SIZE); }, [datasetId]);
+  useEffect(() => {
+    const target = moreRef.current;
+    const total = images?.length || 0;
+    const canRevealLoaded = visibleCount < total;
+    if (!target || (!canRevealLoaded && !hasMore)
+        || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        if (canRevealLoaded) {
+          setVisibleCount((count) => Math.min(total, count + GRID_PAGE_SIZE));
+        } else if (!loadingMore) {
+          onLoadMore?.();
+        }
+      }
+    }, { rootMargin: '600px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [images, visibleCount, hasMore, loadingMore, onLoadMore]);
   // Thumbnail size: a UI preference, not dataset data — persisted globally
   // (same lazy-init + effect pattern as `datasetGenerator` in VariationCatalog).
   // Runs before the early return below so hook order stays stable.
@@ -206,6 +234,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   // Rescue winners remain editable one-by-one (caption/crop), but their paired
   // provenance makes generic bulk status/delete unsafe. Never select them here.
   const selectable = images.filter((i) => i.filename && !isSmallImageRescueRow(i) && !isExclusive(i));
+  const renderedImages = images.slice(0, visibleCount);
   const ids = [...selected];
   const toggle = (id) => setSelected((prev) => {
     const next = new Set(prev);
@@ -214,7 +243,12 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   });
   const act = async (action) => {
     if (action === 'delete'
-        && !window.confirm(`Permanently delete the ${ids.length} selected image(s) (files included)?`)) return;
+        && !(await confirm({
+          title: `Move ${ids.length} selected image${ids.length === 1 ? '' : 's'} to Trash?`,
+          message: 'The images remain recoverable in Settings until you empty the Trash.',
+          confirmLabel: 'Move to Trash',
+          tone: 'danger',
+        }))) return;
     await onBatch(ids, action);
     setSelected(new Set());
   };
@@ -251,7 +285,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
                 title="Delete the selected images' captions (the Caption button then regenerates them)"
                 className={`${batchBtn} bg-surface text-content border border-border`}>🧹 Clear captions</button>
               <button type="button" disabled={busy} onClick={() => act('delete')}
-                className={`${batchBtn} bg-red-500/15 border border-red-500/40 text-red-300`}>🗑 Delete</button>
+                className={`${batchBtn} bg-red-500/15 border border-red-500/40 text-red-300`}>🗑 Trash</button>
               <span className="ml-auto flex gap-2">
                 <button type="button" onClick={() => setSelected(new Set(selectable.map((i) => i.id)))}
                   className="text-content-muted underline hover:text-content">all ({selectable.length})</button>
@@ -264,7 +298,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
         <TileSizeControl size={tileSize} onChange={setTileSize} className="ml-auto" />
       </div>
       <div className={`grid ${TILE_SIZE_COLS[tileSize]} gap-2`}>
-        {images.map((img) => (
+        {renderedImages.map((img) => (
           <DatasetGridItem key={img.id} img={img} datasetId={datasetId} onStatus={onStatus} onCaption={onCaption}
             onCrop={onCrop} onDelete={onDelete} onRegenerate={onRegenerate} onView={onView}
             selected={selected.has(img.id)}
@@ -273,6 +307,23 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
             nonce={(nonces && nonces[img.id]) || 0} faceThresholds={faceThresholds} tileSize={tileSize} />
         ))}
       </div>
+      {(visibleCount < images.length || hasMore) && (
+        <div ref={moreRef} className="flex justify-center py-3">
+          <button type="button" disabled={loadingMore}
+            onClick={() => {
+              if (visibleCount < images.length) {
+                setVisibleCount((count) => Math.min(images.length, count + GRID_PAGE_SIZE));
+              } else {
+                onLoadMore?.();
+              }
+            }}
+            className="rounded-md border border-border px-3 py-1.5 text-xs text-content-muted hover:bg-surface-raised hover:text-content">
+            {loadingMore ? 'Loading more…' : `Show more · ${Math.max(
+              0, (totalImages ?? images.length) - visibleCount,
+            )} remaining`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

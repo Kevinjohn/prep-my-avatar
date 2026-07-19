@@ -57,11 +57,23 @@ def _fake_downloader(by_url):
 
 # --- dHash -------------------------------------------------------------------
 def test_dhash_dupe_and_distinct():
-    as_jpg = Image.open(io.BytesIO(_img_bytes(grad='ltr')))
-    as_png = Image.open(io.BytesIO(_img_bytes(grad='ltr', fmt='PNG')))
-    other = Image.open(io.BytesIO(_img_bytes(grad='rtl')))
-    assert svc._hamming(svc._dhash(as_jpg), svc._dhash(as_png)) <= svc.SCRAPE_DHASH_MAX_DISTANCE
-    assert svc._hamming(svc._dhash(as_jpg), svc._dhash(other)) > svc.SCRAPE_DHASH_MAX_DISTANCE
+    with (
+        Image.open(io.BytesIO(_img_bytes(grad='ltr'))) as as_jpg,
+        Image.open(io.BytesIO(_img_bytes(grad='ltr', fmt='PNG'))) as as_png,
+        Image.open(io.BytesIO(_img_bytes(grad='rtl'))) as other,
+    ):
+        assert svc._hamming(svc._dhash(as_jpg), svc._dhash(as_png)) <= svc.SCRAPE_DHASH_MAX_DISTANCE
+        assert svc._hamming(svc._dhash(as_jpg), svc._dhash(other)) > svc.SCRAPE_DHASH_MAX_DISTANCE
+
+
+def test_dhash_index_is_exact_at_radius_boundary():
+    base = 0x1234567890ABCDEF
+    index = svc._DHashIndex([('base', base)])
+    eight_bits = base ^ sum(1 << bit for bit in range(8))
+    nine_bits = eight_bits ^ (1 << 20)
+    match, distance = index.nearest_within(eight_bits)
+    assert match == ('base', base) and distance == 8
+    assert index.nearest_within(nine_bits) == (None, None)
 
 
 # --- Service : happy path + filtres ------------------------------------------

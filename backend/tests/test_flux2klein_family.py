@@ -74,12 +74,18 @@ def test_launch_refuses_flux2klein_when_arch_missing(app, tmp_path, monkeypatch)
     legacy loader -> corrupted LoRA. The refusal must be actionable (git pull)."""
     from app.services import lora_training as lt
     from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
     _configure_aitoolkit(tmp_path, app, supports_klein=False)
     monkeypatch.setattr(lt.shutil, 'disk_usage',
                         lambda p: type('u', (), {'free': 500e9})())
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'FK', 'zchar_fk', train_type='flux2klein')
+        svc.db.session.add_all([
+            FaceDatasetImage(dataset_id=ds.id, status='keep', filename=f'{i}.webp')
+            for i in range(15)
+        ])
+        svc.db.session.commit()
         with pytest.raises(ValueError, match=r'update it \(git pull\)'):
             lt.launch_training(LOCAL_USER, ds.id, check_captions=False)
         # Same guard on the queue path — no deferred job doomed to the fallback.
@@ -101,7 +107,8 @@ def test_build_job_config_flux2klein_4b_default_and_9b_optin(app, tmp_path):
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
         ds = svc.create_dataset(LOCAL_USER, 'Klee', 'zchar_klee', train_type='flux2klein')
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
 
         assert lt._flux2klein_is_9b(ds) is False          # no variant -> 4B
         p = lt.build_job_config(ds, str(folder), steps=1500)['config']['process'][0]
@@ -138,7 +145,7 @@ def test_flux2klein_expects_prose_captions(app):
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'FB', 'zchar_fb', train_type='flux2klein')
         booru = '1girl, solo, cafe, sitting, window, jeans, smile, looking_at_viewer'
-        for _ in range(12):
+        for _ in range(15):
             svc.db.session.add(FaceDatasetImage(dataset_id=ds.id, status='keep',
                                                 filename='x.webp', caption=booru))
         svc.db.session.commit()

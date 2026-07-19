@@ -32,6 +32,7 @@ import ResolutionSelector from '../../shared/ResolutionSelector';
 import LockableSlider from '../../shared/LockableSlider';
 import ZImageLoraConfig from '../../shared/ZImageLoraConfig';
 import StudioSection from './StudioSection';
+import { safeJson } from '../../../api/fetchClient';
 
 // Repli si /api/index_config n'est pas encore chargé (doit refléter la whitelist
 // backend KREA_ALLOWED_* — la liste réelle vient de config.krea_samplers/schedulers).
@@ -100,10 +101,8 @@ export default function StudioGenerationSettings({ family = 'zimage', storagePre
   useEffect(() => {
     if (!isKrea) return undefined;
     let cancelled = false;
-    fetch('/api/index_config', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (!cancelled && d) setConfig(d); })
-      .catch(() => { /* fallback whitelist en dur ci-dessous */ });
+    safeJson('/api/index_config')
+      .then((d) => { if (!cancelled && d?.ok !== false) setConfig(d); });
     return () => { cancelled = true; };
   }, [isKrea]);
 

@@ -3,7 +3,6 @@ LoKr + low rank + EMA 0.99 → likeness by ~step 500). Both are arch-generic in
 ai-toolkit (network.type='lokr' → LokrModule on every arch; train.ema_config is a
 TrainConfig knob), so they are offered on EVERY family with no whitelist — and the
 knob is a real config change, never a silent no-op."""
-import json
 
 import pytest
 
@@ -35,7 +34,8 @@ def test_default_no_lokr_no_ema_every_family(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         for tt in FAMILIES:
             p = _process(lt, _mk(svc, tt, tmp_path), folder)
             assert p['network']['type'] == 'lora', tt
@@ -52,7 +52,8 @@ def test_lokr_emitted_for_every_family(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         for tt in FAMILIES:
             ds = _mk(svc, tt, tmp_path)
             lt.update_train_settings(LOCAL_USER, ds.id, {'network_type': 'lokr'})
@@ -70,7 +71,8 @@ def test_ema_emitted_for_every_family(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         for tt in FAMILIES:
             ds = _mk(svc, tt, tmp_path)
             lt.update_train_settings(LOCAL_USER, ds.id, {'ema': 0.99})
@@ -86,7 +88,8 @@ def test_recipe_combo_lokr_lowrank_ema999(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         ds = _mk(svc, 'zimage', tmp_path)
         lt.update_train_settings(LOCAL_USER, ds.id,
                                  {'network_type': 'lokr', 'rank': 8, 'ema': 0.999})
@@ -188,7 +191,8 @@ def test_cloud_rebuild_carries_lokr_ema(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         ds = svc.create_dataset(LOCAL_USER, 'K', 'kt', train_type='krea')
         lt.update_train_settings(LOCAL_USER, ds.id, {'network_type': 'lokr', 'ema': 0.99})
         view = _run_config_dataset(svc.get_dataset(LOCAL_USER, ds.id),

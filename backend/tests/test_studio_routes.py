@@ -80,7 +80,8 @@ def test_studio_run_cancel_ungated_when_comfyui_down(client, monkeypatch):
 # --- /api/studio listings (ungated, no ComfyUI dependency) -------------------
 
 def test_studio_checkpoints_and_recent_prompts_smoke(client):
-    assert client.get('/api/studio/checkpoints').get_json() == {'loras': []}
+    assert client.get('/api/studio/checkpoints').get_json() == {
+        'loras': [], 'max_images': 24}
     assert client.get('/api/studio/recent-prompts').get_json() == {'ok': True, 'prompts': []}
 
 
@@ -127,6 +128,25 @@ def test_lora_test_status_reachable_regardless_of_comfyui(client, monkeypatch):
     ds_id = _create(client)
     resp = client.get(f'/api/dataset/{ds_id}/lora-test/status')
     assert resp.status_code == 200
+
+
+def test_training_feedback_route_is_ungated_and_family_scoped(client, monkeypatch):
+    ds_id = _create(client)
+    captured = {}
+
+    def fake_feedback(user_id, dataset_id, family=None):
+        captured.update(dataset_id=dataset_id, family=family)
+        return {'family': family, 'summary': 'measured', 'runs': []}
+
+    monkeypatch.setattr(
+        'app.services.lora_test_studio.training_feedback', fake_feedback)
+    _comfy(monkeypatch, False)
+    resp = client.get(
+        f'/api/dataset/{ds_id}/train/feedback?family=krea')
+
+    assert resp.status_code == 200
+    assert resp.get_json()['summary'] == 'measured'
+    assert captured == {'dataset_id': ds_id, 'family': 'krea'}
 
 
 # --- per-dataset lora-test/run gating -----------------------------------------
@@ -207,7 +227,6 @@ def test_rate_valid_ratings_accepted(client):
     with client.application.app_context():
         from app.services import face_dataset_service as svc
         from app.models import LoraTestImage
-        from app.config import LOCAL_USER
         img = LoraTestImage(dataset_id=ds_id, checkpoint='z image\\lora_nova_000001000.safetensors',
                             strength=1.0, status='done')
         svc.db.session.add(img)
@@ -231,7 +250,10 @@ def test_rate_invalid_rating_returns_400(client):
         image_id = img.id
     resp = client.post(f'/api/dataset/lora-test/image/{image_id}/rate', json={'rating': 5})
     assert resp.status_code == 400
-    assert resp.get_json() == {'ok': False, 'error': 'invalid'}
+    body = resp.get_json()
+    assert body['ok'] is False and body['error'] == 'invalid'
+    assert body['error_code'] == 'http_400'
+    assert body['request_id'] == body['error_detail']['request_id']
 
 
 # --- best set/clear roundtrip persists into FaceDataset.best_settings -------

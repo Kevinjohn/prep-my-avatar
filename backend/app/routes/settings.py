@@ -271,13 +271,62 @@ def trash_info():
     """Trash size for the Settings card — everything the app 'deletes' lands
     there; only 'Empty trash' below actually destroys bytes."""
     from ..services import trash
-    return jsonify({'size_bytes': trash.trash_size()})
+    return jsonify({'size_bytes': trash.trash_size(), 'entries': trash.list_entries()})
+
+
+@bp.post('/trash/<entry_id>/restore')
+def trash_restore(entry_id):
+    from ..services import face_dataset_service as datasets
+    from ..services import trash
+    try:
+        metadata = trash.entry_metadata(entry_id)
+        kind = metadata.get('kind')
+        if kind == 'dataset_image':
+            image = datasets.restore_trashed_image(cfg.LOCAL_USER, entry_id)
+            return jsonify({'ok': True, 'kind': kind, 'image_id': image.id,
+                            'dataset_id': image.dataset_id})
+        if kind == 'regenerated_image':
+            image = datasets.restore_regenerated_image(cfg.LOCAL_USER, entry_id)
+            return jsonify({'ok': True, 'kind': kind, 'image_id': image.id,
+                            'dataset_id': image.dataset_id})
+        if kind == 'dataset_backup':
+            dataset = datasets.restore_trashed_dataset(cfg.LOCAL_USER, entry_id)
+            return jsonify({'ok': True, 'kind': kind, 'dataset_id': dataset.id})
+        if kind == 'dataset_extra_reference':
+            dataset = datasets.restore_trashed_extra_reference(cfg.LOCAL_USER, entry_id)
+            return jsonify({'ok': True, 'kind': kind, 'dataset_id': dataset.id})
+        if kind == 'dataset_primary_reference':
+            dataset = datasets.restore_trashed_primary_reference(cfg.LOCAL_USER, entry_id)
+            return jsonify({'ok': True, 'kind': kind, 'dataset_id': dataset.id})
+        result = trash.restore_entry(entry_id)
+        return jsonify({'ok': True, 'kind': kind or 'files',
+                        'restored': result['restored']})
+    except FileExistsError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 409
+    except FileNotFoundError:
+        return jsonify({'ok': False, 'error': 'trash entry not found'}), 404
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
 
 
 @bp.post('/trash/empty')
 def trash_empty():
+    from ..services import face_dataset_service as datasets
     from ..services import trash
-    return jsonify({'ok': True, **trash.empty_trash()})
+    return jsonify({
+        'ok': True,
+        **trash.empty_trash(
+            purge_record=lambda metadata, entry_id: datasets.purge_trashed_record(
+                cfg.LOCAL_USER, metadata, entry_id)),
+    })
+
+
+@bp.get('/integrity')
+def integrity_check():
+    """Read-only DB/filesystem consistency audit for the Maintenance page."""
+    from ..services import integrity
+    include_orphans = request.args.get('orphans', '1').lower() not in ('0', 'false', 'no')
+    return jsonify(integrity.run(include_orphans=include_orphans))
 
 
 def _log_tail_lines(n):
@@ -334,7 +383,7 @@ def diagnostic():
     # viewer) keeps the raw lines, they're local-only and never meant to be
     # copy-pasted into a public thread.
     _, log_lines = _log_tail_lines(80)
-    log_lines = [_redact_user_paths(l) for l in log_lines]
+    log_lines = [_redact_user_paths(line) for line in log_lines]
     return jsonify({
         'app_version': APP_VERSION,
         'git_sha': updater.current_sha(),

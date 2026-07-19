@@ -1,9 +1,14 @@
-import io, json, zipfile
+import io
+import json
+import zipfile
+from pathlib import Path
 from PIL import Image
+import pytest
 
 
 def _png(color=(255, 0, 0)):
-    buf = io.BytesIO(); Image.new('RGB', (64, 64), color).save(buf, 'PNG')
+    buf = io.BytesIO()
+    Image.new('RGB', (64, 64), color).save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -25,16 +30,18 @@ def test_api_fanout_creates_pending_rows(app, monkeypatch):
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
+    from app import config as cfg
     from app.services.face_variations import select_preset
     calls = []
     monkeypatch.setattr('app.services.face_dataset_service.threading.Thread',
                         lambda target, args=(), daemon=True: type('T', (), {'start': lambda s: calls.append(args)})())
     with app.app_context():
+        cfg.save_config({'privacy': {'allow_remote_generation': True}})
         ds = svc.create_dataset(LOCAL_USER, 'A', 'a')
         # give it a reference so _all_ref_bytes works
         import os
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
-        open(os.path.join(svc._dataset_dir(ds.id), 'ref.webp'), 'wb').write(_png())
+        Path(svc._dataset_dir(ds.id), 'ref.webp').write_bytes(_png())
         ds.ref_filename = 'ref.webp'
         svc.db.session.commit()
         svc.generate_variations_nanobanana(app, LOCAL_USER, ds.id,
@@ -51,30 +58,33 @@ def test_export_zip_layout(app):
     import os
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Zoe', 'zoe')
-        d = svc._dataset_dir(ds.id); os.makedirs(d, exist_ok=True)
-        open(os.path.join(d, 'ref.webp'), 'wb').write(_png()); ds.ref_filename = 'ref.webp'
-        open(os.path.join(d, 'img1.webp'), 'wb').write(_png((0, 255, 0)))
+        d = svc._dataset_dir(ds.id)
+        os.makedirs(d, exist_ok=True)
+        Path(d, 'ref.webp').write_bytes(_png())
+        ds.ref_filename = 'ref.webp'
+        Path(d, 'img1.webp').write_bytes(_png((0, 255, 0)))
         svc.db.session.add(FaceDatasetImage(dataset_id=ds.id, filename='img1.webp',
                                             status='keep', framing='face', caption='a smile'))
         svc.db.session.commit()
         z = zipfile.ZipFile(io.BytesIO(svc.build_export_zip(LOCAL_USER, ds.id)))
         names = z.namelist()
-        assert any(n.endswith('_000_ref.png') for n in names)
+        assert not any(n.endswith('_000_ref.png') for n in names)
         txt = [n for n in names if n.endswith('_001.txt')][0]
         assert z.read(txt).decode('utf-8').startswith('zoe, ')
         manifest_name = [n for n in names if n.endswith('_prep_my_avatar_manifest.json')][0]
         manifest = json.loads(z.read(manifest_name))
         assert manifest['format'] == 'prep-my-avatar-training-export'
-        assert manifest['source_mix']['generated'] == 1
+        assert manifest['source_mix'] == {'reference': 0, 'imported': 0, 'generated': 1}
 
 
 def test_status_validation(app):
     from app.services import face_dataset_service as svc
     from app.config import LOCAL_USER
     with app.app_context():
-        ds = svc.create_dataset(LOCAL_USER, 'B', 'b')
+        svc.create_dataset(LOCAL_USER, 'B', 'b')
         try:
-            svc.set_image_status(LOCAL_USER, 99999, 'nonsense'); raised = False
+            svc.set_image_status(LOCAL_USER, 99999, 'nonsense')
+            raised = False
         except Exception:
             raised = True
         assert raised
@@ -138,11 +148,49 @@ def test_backup_roundtrip_preserves_uploaded_original(app):
             assert fh.read() == raw
 
 
+def test_backup_roundtrip_preserves_training_and_watermark_settings(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Complete backup', 'complete_backup')
+        ds.train_base_model = '/models/custom.safetensors'
+        ds.train_variant = 'base'
+        ds.train_vae_path = '/models/vae.safetensors'
+        ds.train_te_path = 'example/text-encoder'
+        ds.train_settings = json.dumps({'rank': 32, 'save_every': 500})
+        filename = 'marked.webp'
+        Path(svc._dataset_dir(ds.id), filename).write_bytes(_png((12, 34, 56)))
+        row = FaceDatasetImage(
+            dataset_id=ds.id, filename=filename, source='import', status='keep',
+            watermark_state='detected', watermark_bbox='[0.1, 0.2, 0.3, 0.4]',
+            watermark_regions='[[0.1, 0.2, 0.3, 0.4]]',
+        )
+        svc.db.session.add(row)
+        svc.db.session.commit()
+
+        restored = svc.import_backup_zip(
+            LOCAL_USER, svc.build_backup_zip(LOCAL_USER, ds.id))
+        restored_row = FaceDatasetImage.query.filter_by(dataset_id=restored.id).one()
+
+        assert restored.train_base_model == '/models/custom.safetensors'
+        assert restored.train_variant == 'base'
+        assert restored.train_vae_path == '/models/vae.safetensors'
+        assert restored.train_te_path == 'example/text-encoder'
+        assert json.loads(restored.train_settings) == {'rank': 32, 'save_every': 500}
+        assert restored_row.watermark_state == 'detected'
+        assert json.loads(restored_row.watermark_bbox) == [0.1, 0.2, 0.3, 0.4]
+        assert json.loads(restored_row.watermark_regions) == [[0.1, 0.2, 0.3, 0.4]]
+
+
 def test_generation_anchor_pack_uses_imported_corpus_and_records_ids(app, monkeypatch):
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
+    from app import config as cfg
     with app.app_context():
+        cfg.save_config({'privacy': {'allow_remote_generation': True}})
         ds = svc.create_dataset(LOCAL_USER, 'Anchors', 'anchors')
         imported = []
         for name, color, framing in (
@@ -207,11 +255,22 @@ def test_corpus_workbench_metadata_anchor_decisions_and_coverage(app):
             'lighting': 'daylight', 'pose': 'headshot', 'background': 'plain',
             'occlusion': 'none',
         })
+        assert svc.set_image_rights(LOCAL_USER, ids[0], {
+            'basis': 'licensed', 'license': 'CC BY 4.0',
+            'consent_confirmed': True, 'notes': 'creator release',
+        })
+        assert svc.set_coverage_policy(LOCAL_USER, ds.id, 'strict', {
+            'framing': {'face': 20}, 'dimensions': {'angle': {'profile': 4}},
+        })
         payload = svc.dataset_payload(LOCAL_USER, ds.id)
         by_id = {item['id']: item for item in payload['images']}
         assert by_id[ids[0]]['anchor_decision'] == 'pinned'
         assert by_id[ids[1]]['anchor_decision'] == 'excluded'
         assert by_id[ids[0]]['coverage']['angle'] == 'front'
+        assert by_id[ids[0]]['coverage_provenance']['source'] == 'manual'
+        assert by_id[ids[0]]['source_rights']['basis'] == 'licensed'
+        assert payload['coverage_plan']['profile'] == 'strict'
+        assert payload['coverage_plan']['targets']['face'] == 20
         assert payload['anchor_plan']['selected_import_ids'] == [ids[0]]
         assert payload['coverage_plan']['summary']['unclassified'] == 1
         angle = next(item for item in payload['coverage_plan']['dimensions']
@@ -226,20 +285,53 @@ def test_corpus_workbench_metadata_anchor_decisions_and_coverage(app):
                          .order_by(FaceDatasetImage.id).all())
         assert [row.anchor_decision for row in restored_rows] == ['pinned', 'excluded']
         assert json.loads(restored_rows[0].coverage_json)['angle'] == 'front'
+        assert json.loads(restored_rows[0].source_rights)['basis'] == 'licensed'
+        assert restored.coverage_profile == 'strict'
         assert sum(row.duplicate_of_id is not None for row in restored_rows) == 1
+
+
+def test_conceptual_coverage_ignores_rejected_sources(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(
+            LOCAL_USER, 'Concept coverage', 'concept_coverage',
+            kind='concept', concept_desc='a recurring action')
+        for index, (source_name, status) in enumerate((
+                ('accepted-source', 'keep'),
+                ('rejected-source-a', 'reject'),
+                ('rejected-source-b', 'reject'))):
+            filename = f'concept-{index}.webp'
+            Path(svc._dataset_dir(ds.id), filename).write_bytes(_png((index, 20, 30)))
+            svc.db.session.add(FaceDatasetImage(
+                dataset_id=ds.id, filename=filename, source='import',
+                source_name=source_name, status=status, caption='content'))
+        svc.db.session.commit()
+
+        plan = svc.dataset_payload(LOCAL_USER, ds.id)['coverage_plan']
+
+        assert plan['summary']['imported'] == 1
+        assert plan['summary']['source_diversity'] == 1
+        sources = next(item for item in plan['admission'] if item['id'] == 'sources')
+        assert sources['state'] == 'weak'
 
 
 def _seed_images(svc, ds_id, n=3, status='pending'):
     """N committed image rows with real files, returns their ids."""
     import os
     from app.models import FaceDatasetImage
-    d = svc._dataset_dir(ds_id); os.makedirs(d, exist_ok=True)
+    d = svc._dataset_dir(ds_id)
+    os.makedirs(d, exist_ok=True)
     ids = []
     for i in range(n):
         fn = f'img{i}.webp'
-        open(os.path.join(d, fn), 'wb').write(_png((i * 40, 0, 0)))
+        Path(d, fn).write_bytes(_png((i * 40, 0, 0)))
         img = FaceDatasetImage(dataset_id=ds_id, filename=fn, status=status, framing='face')
-        svc.db.session.add(img); svc.db.session.flush(); ids.append(img.id)
+        svc.db.session.add(img)
+        svc.db.session.flush()
+        ids.append(img.id)
     svc.db.session.commit()
     return ids
 
@@ -254,12 +346,13 @@ def test_batch_keep_and_clear_caption(app):
         assert svc.batch_image_action(LOCAL_USER, ds.id, ids, 'keep') == 3
         rows = FaceDatasetImage.query.filter(FaceDatasetImage.id.in_(ids)).all()
         assert all(r.status == 'keep' for r in rows)
-        rows[0].caption = 'a caption'; svc.db.session.commit()
+        rows[0].caption = 'a caption'
+        svc.db.session.commit()
         assert svc.batch_image_action(LOCAL_USER, ds.id, [ids[0]], 'clear_caption') == 1
         assert svc.db.session.get(FaceDatasetImage, ids[0]).caption is None
 
 
-def test_batch_delete_removes_rows_and_files(app):
+def test_batch_delete_hides_rows_and_moves_files_to_trash(app):
     import os
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
@@ -268,8 +361,10 @@ def test_batch_delete_removes_rows_and_files(app):
         ds = svc.create_dataset(LOCAL_USER, 'Bd', 'bd')
         ids = _seed_images(svc, ds.id)
         assert svc.batch_image_action(LOCAL_USER, ds.id, ids, 'delete') == 3
-        assert FaceDatasetImage.query.filter_by(dataset_id=ds.id).count() == 0
+        rows = FaceDatasetImage.query.filter_by(dataset_id=ds.id).all()
+        assert len(rows) == 3 and all(row.status == 'trashed' for row in rows)
         assert not any(f.startswith('img') for f in os.listdir(svc._dataset_dir(ds.id)))
+        assert svc.dataset_payload(LOCAL_USER, ds.id)['images'] == []
 
 
 def test_batch_skips_foreign_and_failed(app):
@@ -296,7 +391,9 @@ def _seed_captioned(svc, ds_id, captions):
     for i, cap in enumerate(captions):
         img = FaceDatasetImage(dataset_id=ds_id, filename=f'c{i}.webp',
                                status='keep', framing='face', caption=cap)
-        svc.db.session.add(img); svc.db.session.flush(); ids.append(img.id)
+        svc.db.session.add(img)
+        svc.db.session.flush()
+        ids.append(img.id)
     svc.db.session.commit()
     return ids
 
@@ -344,7 +441,8 @@ def test_replace_captions_ignores_non_kept_and_validates(app):
         ds = svc.create_dataset(LOCAL_USER, 'Rv', 'rv')
         img = FaceDatasetImage(dataset_id=ds.id, filename='r.webp',
                                status='reject', caption='a red car')
-        svc.db.session.add(img); svc.db.session.commit()
+        svc.db.session.add(img)
+        svc.db.session.commit()
         assert svc.replace_in_captions(LOCAL_USER, ds.id, 'red', 'blue') == 0
         assert svc.db.session.get(FaceDatasetImage, img.id).caption == 'a red car'
         with pytest.raises(ValueError):
@@ -364,11 +462,14 @@ def test_crop_image_preserves_box_aspect(app):
     from app.config import LOCAL_USER
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Cr', 'cr')
-        d = svc._dataset_dir(ds.id); os.makedirs(d, exist_ok=True)
-        buf = io.BytesIO(); Image.new('RGB', (1600, 1200), (90, 30, 30)).save(buf, 'PNG')
-        open(os.path.join(d, 'w.webp'), 'wb').write(buf.getvalue())
+        d = svc._dataset_dir(ds.id)
+        os.makedirs(d, exist_ok=True)
+        buf = io.BytesIO()
+        Image.new('RGB', (1600, 1200), (90, 30, 30)).save(buf, 'PNG')
+        Path(d, 'w.webp').write_bytes(buf.getvalue())
         img = FaceDatasetImage(dataset_id=ds.id, filename='w.webp', status='keep')
-        svc.db.session.add(img); svc.db.session.commit()
+        svc.db.session.add(img)
+        svc.db.session.commit()
         assert svc.crop_image(LOCAL_USER, img.id, 0, 0, 1000, 500) is True
         with Image.open(os.path.join(d, 'w.webp')) as im:
             assert im.size == (1024, 512)
@@ -390,7 +491,7 @@ def test_manual_crop_clears_all_watermark_metadata_after_pixel_change(app):
         os.makedirs(d, exist_ok=True)
         buf = io.BytesIO()
         Image.new('RGB', (1200, 900), (90, 30, 30)).save(buf, 'PNG')
-        open(os.path.join(d, 'crop.webp'), 'wb').write(buf.getvalue())
+        Path(d, 'crop.webp').write_bytes(buf.getvalue())
         img = FaceDatasetImage(
             dataset_id=ds.id, filename='crop.webp', status='keep',
             watermark_state='detected', watermark_bbox='[0.1, 0.1, 0.2, 0.2]',
@@ -416,11 +517,12 @@ def test_backup_roundtrip_restores_everything(app):
     from app.config import LOCAL_USER
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Bak', 'bak', train_type='sdxl')
-        d = svc._dataset_dir(ds.id); os.makedirs(d, exist_ok=True)
-        open(os.path.join(d, 'ref.webp'), 'wb').write(_png())
+        d = svc._dataset_dir(ds.id)
+        os.makedirs(d, exist_ok=True)
+        Path(d, 'ref.webp').write_bytes(_png())
         ds.ref_filename = 'ref.webp'
         ds.best_settings = '{"strength": 0.8}'
-        open(os.path.join(d, 'a.webp'), 'wb').write(_png((0, 255, 0)))
+        Path(d, 'a.webp').write_bytes(_png((0, 255, 0)))
         svc.db.session.add(FaceDatasetImage(dataset_id=ds.id, filename='a.webp', status='keep',
                                             framing='bust', caption='a green coat',
                                             face_score=0.61, face_state='scorable'))
@@ -450,7 +552,7 @@ def test_backup_roundtrip_preserves_optional_watermark_regions_and_accepts_legac
         ds = svc.create_dataset(LOCAL_USER, 'Watermark backup', 'wmbackup')
         d = svc._dataset_dir(ds.id)
         os.makedirs(d, exist_ok=True)
-        open(os.path.join(d, 'marked.webp'), 'wb').write(_png())
+        Path(d, 'marked.webp').write_bytes(_png())
         regions = '[[0.1, 0.1, 0.2, 0.2], [0.7, 0.7, 0.8, 0.8]]'
         svc.db.session.add(FaceDatasetImage(
             dataset_id=ds.id, filename='marked.webp', status='keep',
@@ -512,6 +614,142 @@ def test_backup_import_rejects_garbage_and_traversal(app):
         assert not os.path.exists(os.path.join(svc._dataset_dir(restored.id), '..', '..', 'evil.webp'))
 
 
+def test_backup_import_rejects_duplicate_paths_and_oversized_metadata(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        duplicate = io.BytesIO()
+        with pytest.warns(UserWarning, match='Duplicate name'):
+            with zipfile.ZipFile(duplicate, 'w') as archive:
+                archive.writestr('manifest.json', json.dumps({
+                    'format': svc.BACKUP_FORMAT, 'version': 1,
+                    'name': 'duplicate', 'trigger_word': 'duplicate',
+                }))
+                archive.writestr('images.json', '[]')
+                archive.writestr('images.json', '[]')
+        with pytest.raises(ValueError, match='duplicate archive paths'):
+            svc.import_backup_zip(LOCAL_USER, duplicate.getvalue())
+
+        monkeypatch.setattr(svc, '_BACKUP_MAX_METADATA_BYTES', 10)
+        oversized = io.BytesIO()
+        with zipfile.ZipFile(oversized, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps({
+                'format': svc.BACKUP_FORMAT, 'version': 1,
+                'name': 'oversized', 'trigger_word': 'oversized',
+            }))
+            archive.writestr('images.json', '[]')
+        with pytest.raises(ValueError, match='metadata is too large'):
+            svc.import_backup_zip(LOCAL_USER, oversized.getvalue())
+
+
+@pytest.mark.parametrize(('field', 'value', 'message'), [
+    ('version', 0, 'invalid backup version'),
+    ('kind', 'not-a-kind', 'invalid backup dataset kind'),
+    ('fidelity', 'hands', 'invalid backup dataset fidelity'),
+    ('train_type', 'mystery', 'invalid backup training family'),
+    ('coverage_profile', 'reckless', 'invalid backup coverage profile'),
+])
+def test_backup_import_rejects_invalid_manifest_enums(app, field, value, message):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        manifest = {
+            'format': svc.BACKUP_FORMAT, 'version': 1,
+            'name': 'invalid manifest', 'trigger_word': 'invalid',
+            field: value,
+        }
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps(manifest))
+            archive.writestr('images.json', '[]')
+        with pytest.raises(ValueError, match=message):
+            svc.import_backup_zip(LOCAL_USER, archive_bytes.getvalue())
+
+
+@pytest.mark.parametrize('targets', ['not-json', '[]', '{"framing":{"ears":3}}'])
+def test_backup_import_rejects_invalid_coverage_targets(app, targets):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps({
+                'format': svc.BACKUP_FORMAT, 'version': 1,
+                'name': 'invalid coverage', 'trigger_word': 'invalid',
+                'coverage_targets': targets,
+            }))
+            archive.writestr('images.json', '[]')
+        with pytest.raises(ValueError, match='invalid backup coverage targets'):
+            svc.import_backup_zip(LOCAL_USER, archive_bytes.getvalue())
+
+
+def test_backup_import_rejects_colliding_restored_paths(app):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps({
+                'format': svc.BACKUP_FORMAT, 'version': 1,
+                'name': 'collision', 'trigger_word': 'collision',
+            }))
+            archive.writestr('images.json', '[]')
+            archive.writestr('ref/shared.webp', _png())
+            archive.writestr('images/shared.webp', _png((1, 2, 3)))
+        with pytest.raises(ValueError, match='destinations collide'):
+            svc.import_backup_zip(LOCAL_USER, archive_bytes.getvalue())
+
+
+def test_backup_import_does_not_treat_reference_as_image_payload(app):
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps({
+                'format': svc.BACKUP_FORMAT, 'version': 1,
+                'name': 'prefix identity', 'trigger_word': 'prefix_identity',
+                'ref_filename': 'shared.webp',
+            }))
+            archive.writestr('images.json', json.dumps([{
+                'filename': 'shared.webp', 'source': 'import', 'status': 'keep',
+            }]))
+            archive.writestr('ref/shared.webp', _png())
+
+        restored = svc.import_backup_zip(LOCAL_USER, archive_bytes.getvalue())
+
+        assert restored.ref_filename == 'shared.webp'
+        assert FaceDatasetImage.query.filter_by(dataset_id=restored.id).count() == 0
+
+
+def test_failed_backup_extraction_cleans_partial_dataset(app, monkeypatch):
+    from app.models import FaceDataset
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps({
+                'format': svc.BACKUP_FORMAT, 'version': 1,
+                'name': 'partial', 'trigger_word': 'partial',
+            }))
+            archive.writestr('images.json', json.dumps([{
+                'filename': 'one.webp', 'source': 'import', 'status': 'keep',
+            }]))
+            archive.writestr('images/one.webp', _png())
+        before = FaceDataset.query.count()
+        monkeypatch.setattr(
+            svc.shutil, 'copyfileobj',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('disk full')))
+
+        with pytest.raises(OSError, match='disk full'):
+            svc.import_backup_zip(LOCAL_USER, archive_bytes.getvalue())
+
+        assert FaceDataset.query.count() == before
+        assert not any(row.name == 'partial' for row in FaceDataset.query.all())
+
+
 def test_batch_invalid_action_raises(app):
     import pytest
     from app.services import face_dataset_service as svc
@@ -528,8 +766,10 @@ def _grad_png(direction='ltr', w=800, h=800):
     ramp = list(range(0, 256, 32))
     if direction == 'rtl':
         ramp = ramp[::-1]
-    small = Image.new('L', (8, 8)); small.putdata([ramp[x] for _ in range(8) for x in range(8)])
-    buf = io.BytesIO(); small.resize((w, h), Image.BILINEAR).convert('RGB').save(buf, 'PNG')
+    small = Image.new('L', (8, 8))
+    small.putdata([ramp[x] for _ in range(8) for x in range(8)])
+    buf = io.BytesIO()
+    small.resize((w, h), Image.BILINEAR).convert('RGB').save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -540,7 +780,8 @@ def test_import_without_crop_keeps_aspect_ratio(app):
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
-    buf = io.BytesIO(); Image.new('RGB', (800, 400), (10, 120, 40)).save(buf, 'PNG')
+    buf = io.BytesIO()
+    Image.new('RGB', (800, 400), (10, 120, 40)).save(buf, 'PNG')
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Ar', 'ar')
         ids, failed = svc.import_images(LOCAL_USER, ds.id, [buf.getvalue()], crop=False)
@@ -619,9 +860,11 @@ def test_api_batch_skips_cancelled_rows(app, monkeypatch):
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         live = FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='nanobanana')
         gone = FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='nanobanana')
-        svc.db.session.add_all([live, gone]); svc.db.session.commit()
+        svc.db.session.add_all([live, gone])
+        svc.db.session.commit()
         live_id, gone_id = live.id, gone.id
-        svc.db.session.delete(gone); svc.db.session.commit()   # = cancel_pending
+        svc.db.session.delete(gone)
+        svc.db.session.commit()   # = cancel_pending
         svc._run_nanobanana_batch(app, [(live_id, 'p', '1:1'), (gone_id, 'p', '1:1')],
                                   [_png()], engine='nanobanana')
         assert len(calls) == 1                                  # only the live row hit the API
@@ -648,7 +891,8 @@ def test_api_batch_failure_stores_reason(app, monkeypatch):
         import os
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         img = FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='nanobanana')
-        svc.db.session.add(img); svc.db.session.commit()
+        svc.db.session.add(img)
+        svc.db.session.commit()
         svc._run_nanobanana_batch(app, [(img.id, 'p', '1:1')], [_png()], engine='nanobanana')
         svc.db.session.expire_all()
         row = svc.db.session.get(FaceDatasetImage, img.id)
@@ -662,6 +906,15 @@ def _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER, engine='nanoba
     """A dataset with a reference file on disk + one finished generated tile
     (engine-tagged so regenerate_image re-dispatches through the API path)."""
     import os
+    from app import config as cfg
+    # Remote generation is opt-in in the shipped config. These unit tests
+    # explicitly exercise the API lane, so make that test intent explicit.
+    if engine in svc.API_ENGINES:
+        enabled = list(cfg.get('engines.enabled') or [])
+        if engine not in enabled:
+            cfg.save_config({'engines': {'enabled': [*enabled, engine],
+                                         'default': engine},
+                             'privacy': {'allow_remote_generation': True}})
     ds = svc.create_dataset(LOCAL_USER, 'R', 'r')
     d = svc._dataset_dir(ds.id)
     os.makedirs(d, exist_ok=True)
@@ -701,9 +954,39 @@ def test_regenerate_with_edited_prompt_persists_and_reaches_engine(app, monkeypa
         assert row.filename                                        # a new file was written
 
 
+def test_regenerate_refuses_remote_engine_after_consent_is_revoked(app, monkeypatch):
+    from app import config as cfg
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    called = False
+
+    def provider(_engine):
+        nonlocal called
+        called = True
+        return lambda *args, **kwargs: _png()
+
+    monkeypatch.setattr(svc, '_api_generate_fn', provider)
+    with app.app_context():
+        ds, img = _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER)
+        old_path = Path(svc._dataset_dir(ds.id), 'old.webp')
+        old_path.write_bytes(_png())
+        img.filename = old_path.name
+        svc.db.session.commit()
+        cfg.save_config({'privacy': {'allow_remote_generation': False}})
+
+        with pytest.raises(svc.RemoteGenerationConsentRequired):
+            svc.regenerate_image(LOCAL_USER, img.id)
+
+        assert called is False
+        assert old_path.is_file()
+
+
 def test_regeneration_clears_all_watermark_metadata(app, monkeypatch):
     import os
     from app.services import face_dataset_service as svc
+    from app.services import trash
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
 
@@ -714,7 +997,7 @@ def test_regeneration_clears_all_watermark_metadata(app, monkeypatch):
     with app.app_context():
         ds, img = _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER)
         old_path = os.path.join(svc._dataset_dir(ds.id), 'old.webp')
-        open(old_path, 'wb').write(_png())
+        Path(old_path).write_bytes(_png())
         img.filename = 'old.webp'
         img.watermark_state = 'detected'
         img.watermark_bbox = '[0.1, 0.1, 0.2, 0.2]'
@@ -724,11 +1007,47 @@ def test_regeneration_clears_all_watermark_metadata(app, monkeypatch):
         svc.regenerate_image(LOCAL_USER, img.id)
 
         row = svc.db.session.get(FaceDatasetImage, img.id)
-        assert row.filename and row.filename != 'old.webp'
+        replacement_filename = row.filename
+        assert replacement_filename and replacement_filename != 'old.webp'
         assert not os.path.exists(old_path)
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'regenerated_image')
+        svc.restore_regenerated_image(LOCAL_USER, entry['id'])
+        svc.db.session.refresh(row)
+        assert os.path.exists(old_path)
+        assert row.filename == 'old.webp'
         assert (row.watermark_state, row.watermark_bbox, row.watermark_regions) == (
-            None, None, None,
+            'detected', '[0.1, 0.1, 0.2, 0.2]', '[[0.1, 0.1, 0.2, 0.2]]',
         )
+        # The displaced replacement is itself recoverable as the next version.
+        reverse = next(item for item in trash.list_entries()
+                       if item['kind'] == 'regenerated_image')
+        assert reverse['id'] != entry['id']
+
+
+def test_failed_regeneration_keeps_visible_pixels_and_row_state(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+
+    monkeypatch.setattr(svc, '_api_generate_fn', lambda _engine: lambda *_a, **_k: None)
+    with app.app_context():
+        ds, img = _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER)
+        old_path = Path(svc._dataset_dir(ds.id), 'old.webp')
+        old_path.write_bytes(_png())
+        img.filename = old_path.name
+        img.status = 'keep'
+        img.caption = 'existing caption'
+        svc.db.session.commit()
+
+        svc.regenerate_image(LOCAL_USER, img.id)
+        svc.db.session.refresh(img)
+
+        assert img.filename == 'old.webp'
+        assert img.status == 'keep'
+        assert img.caption == 'existing caption'
+        assert old_path.is_file()
+        assert img.fail_reason
 
 
 def test_regenerate_without_prompt_keeps_existing(app, monkeypatch):
@@ -758,12 +1077,16 @@ def test_regenerate_honors_currently_selected_api_engine(app, monkeypatch):
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
+    from app import config as cfg
     seen = {}
     def make(engine):
         seen['engine'] = engine
         return lambda refs, prompt, aspect_ratio=None: _png()
     monkeypatch.setattr(svc, '_api_generate_fn', make)
     with app.app_context():
+        cfg.save_config({'engines': {'enabled': ['klein', 'nanobanana'],
+                                     'default': 'nanobanana'},
+                         'privacy': {'allow_remote_generation': True}})
         ds, img = _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER,
                                              engine='flux-2-klein.safetensors')  # Klein-born
         svc.regenerate_image(LOCAL_USER, img.id, engine='nanobanana')  # app=None -> sync
@@ -837,7 +1160,8 @@ def test_regenerate_skips_engines_disabled_in_settings(app, monkeypatch):
     monkeypatch.setattr(svc, '_api_generate_fn', make)
     with app.app_context():
         cfg.save_config({'engines': {'enabled': ['nanobanana', 'chatgpt'],
-                                     'default': 'nanobanana'}})
+                                     'default': 'nanobanana'},
+                         'privacy': {'allow_remote_generation': True}})
         ds, img = _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER,
                                              engine='flux-2-klein.safetensors')  # Klein-born
         svc.regenerate_image(LOCAL_USER, img.id)          # legacy client: no engine sent
@@ -886,15 +1210,308 @@ def test_regenerate_edited_prompt_exposed_in_payload(app, monkeypatch):
         assert payload['images'][0]['variation_prompt'] == 'new scene, golden hour'
 
 
-def test_delete_dataset_without_lora_training_module(app):
-    """lora_training (Task 19) doesn't exist yet in phase 1 -> delete_dataset must
-    still succeed (purge step is best-effort and silently skipped)."""
+def test_delete_dataset_succeeds_without_loading_training_service(app):
+    """Soft deletion only moves dataset-owned files and must remain reversible."""
     from app.services import face_dataset_service as svc
     from app.config import LOCAL_USER
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'D', 'd')
         assert svc.delete_dataset(LOCAL_USER, ds.id) is True
         assert svc.get_dataset(LOCAL_USER, ds.id) is None
+
+
+def test_delete_dataset_streams_backup_and_retains_training_artifacts(app, monkeypatch):
+    """A soft delete neither allocates a monolithic backup nor purges LoRA state."""
+    from app.services import face_dataset_service as svc
+    from app.services import lora_training
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Streaming delete', 'streaming_delete')
+        called = {'destination': None}
+        original = svc.build_backup_zip
+
+        def tracked(user_id, dataset_id, *, destination=None):
+            called['destination'] = destination
+            return original(user_id, dataset_id, destination=destination)
+
+        monkeypatch.setattr(svc, 'build_backup_zip', tracked)
+        monkeypatch.setattr(
+            lora_training, 'purge_training_artifacts',
+            lambda *_args, **_kwargs: pytest.fail('soft delete must not purge training artifacts'))
+
+        assert svc.delete_dataset(LOCAL_USER, ds.id) is True
+        assert called['destination'] is not None
+
+
+def test_delete_dataset_removes_partial_backup_when_snapshot_fails(app, monkeypatch):
+    from app import config as cfg
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Failed backup', 'failed_backup')
+        before = set(cfg._data_dir().glob(f'dataset-{ds.id}-*.zip'))
+        monkeypatch.setattr(
+            svc, 'build_backup_zip',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('disk full')))
+
+        with pytest.raises(OSError, match='disk full'):
+            svc.delete_dataset(LOCAL_USER, ds.id)
+
+        assert set(cfg._data_dir().glob(f'dataset-{ds.id}-*.zip')) == before
+        assert svc.get_dataset(LOCAL_USER, ds.id) is not None
+
+
+def test_late_generation_cannot_recreate_deleted_dataset_folder(app):
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Late generation', 'late_generation')
+        image = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending', filename=None)
+        svc.db.session.add(image)
+        svc.db.session.commit()
+        image_id = image.id
+        dataset_dir = Path(svc._dataset_dir(ds.id))
+
+        assert svc.delete_dataset(LOCAL_USER, ds.id) is True
+        deleted_image = svc.db.session.get(FaceDatasetImage, image_id)
+        with pytest.raises(ValueError, match='deleted dataset'):
+            svc._commit_generated_replacement(
+                deleted_image, 'late.webp', _png(), provenance_updates={})
+
+        assert not dataset_dir.exists()
+
+
+def test_delete_image_is_hidden_and_restorable(app):
+    import os
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Recover image', 'recover_image')
+        folder = svc._dataset_dir(ds.id)
+        filename = 'recover.webp'
+        Path(folder, filename).write_bytes(_png())
+        image = FaceDatasetImage(dataset_id=ds.id, filename=filename,
+                                 status='keep', caption='portrait')
+        svc.db.session.add(image)
+        svc.db.session.commit()
+        image_id = image.id
+
+        assert svc.delete_image(LOCAL_USER, image_id) is True
+        row = svc.db.session.get(FaceDatasetImage, image_id)
+        assert row.status == 'trashed'
+        assert not os.path.exists(os.path.join(folder, filename))
+        assert svc.dataset_payload(LOCAL_USER, ds.id)['images'] == []
+
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'dataset_image')
+        restored = svc.restore_trashed_image(LOCAL_USER, entry['id'])
+        assert restored.id == image_id and restored.status == 'keep'
+        assert os.path.isfile(os.path.join(folder, filename))
+        assert svc.dataset_payload(LOCAL_USER, ds.id)['images'][0]['caption'] == 'portrait'
+
+
+def test_extra_reference_delete_is_transactional_and_restorable(app):
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Recover extra reference', 'extra_ref')
+        folder = Path(svc._dataset_dir(ds.id))
+        ds.ref_filename = 'primary.webp'
+        (folder / ds.ref_filename).write_bytes(_png())
+        svc.db.session.commit()
+        filename = svc.add_extra_ref(LOCAL_USER, ds.id, _png())
+        path = folder / filename
+
+        assert svc.remove_extra_ref(LOCAL_USER, ds.id, filename) is True
+        assert not path.exists()
+        assert filename not in svc.extra_ref_filenames(ds)
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'dataset_extra_reference')
+
+        restored = svc.restore_trashed_extra_reference(LOCAL_USER, entry['id'])
+        assert restored.id == ds.id
+        assert path.read_bytes()
+        assert filename in svc.extra_ref_filenames(restored)
+
+
+def test_extra_reference_delete_rolls_file_back_when_commit_fails(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Extra reference transaction', 'extra_ref_tx')
+        folder = Path(svc._dataset_dir(ds.id))
+        ds.ref_filename = 'primary.webp'
+        (folder / ds.ref_filename).write_bytes(_png())
+        svc.db.session.commit()
+        filename = svc.add_extra_ref(LOCAL_USER, ds.id, _png())
+        path = folder / filename
+        monkeypatch.setattr(
+            svc.db.session, 'commit',
+            lambda: (_ for _ in ()).throw(RuntimeError('commit failed')))
+
+        with pytest.raises(RuntimeError, match='commit failed'):
+            svc.remove_extra_ref(LOCAL_USER, ds.id, filename)
+
+        assert path.exists()
+        assert not any(item['kind'] == 'dataset_extra_reference'
+                       for item in trash.list_entries())
+
+
+def test_primary_reference_replacement_is_transactional_and_restorable(app):
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Recover primary reference', 'primary_ref')
+        folder = Path(svc._dataset_dir(ds.id))
+        ds.ref_filename = 'old-ref.webp'
+        ds.ref_original_filename = 'old-original.webp'
+        (folder / ds.ref_filename).write_bytes(b'old crop')
+        (folder / ds.ref_original_filename).write_bytes(b'old original')
+        svc.db.session.commit()
+
+        new_name = svc.set_primary_reference(
+            LOCAL_USER, ds.id, b'new original', b'new crop')
+        new_original = ds.ref_original_filename
+        assert new_name == ds.ref_filename
+        assert not (folder / 'old-ref.webp').exists()
+        assert not (folder / 'old-original.webp').exists()
+        assert (folder / new_name).read_bytes() == b'new crop'
+        assert (folder / new_original).read_bytes() == b'new original'
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'dataset_primary_reference')
+
+        restored = svc.restore_trashed_primary_reference(LOCAL_USER, entry['id'])
+        assert restored.ref_filename == 'old-ref.webp'
+        assert restored.ref_original_filename == 'old-original.webp'
+        assert (folder / 'old-ref.webp').read_bytes() == b'old crop'
+        assert (folder / 'old-original.webp').read_bytes() == b'old original'
+        assert not (folder / new_name).exists()
+        assert not (folder / new_original).exists()
+        # The displaced newer reference remains recoverable, so undo is reversible.
+        assert any(item['kind'] == 'dataset_primary_reference'
+                   for item in trash.list_entries())
+
+
+def test_primary_reference_replacement_rolls_back_when_commit_fails(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Primary reference transaction', 'primary_ref_tx')
+        folder = Path(svc._dataset_dir(ds.id))
+        ds.ref_filename = 'old-ref.webp'
+        ds.ref_original_filename = 'old-original.webp'
+        (folder / ds.ref_filename).write_bytes(b'old crop')
+        (folder / ds.ref_original_filename).write_bytes(b'old original')
+        svc.db.session.commit()
+        monkeypatch.setattr(
+            svc.db.session, 'commit',
+            lambda: (_ for _ in ()).throw(RuntimeError('commit failed')))
+
+        with pytest.raises(RuntimeError, match='commit failed'):
+            svc.set_primary_reference(
+                LOCAL_USER, ds.id, b'new original', b'new crop')
+
+        assert (folder / 'old-ref.webp').read_bytes() == b'old crop'
+        assert (folder / 'old-original.webp').read_bytes() == b'old original'
+        assert {path.name for path in folder.iterdir()} == {
+            'old-ref.webp', 'old-original.webp'}
+        assert not any(item['kind'] == 'dataset_primary_reference'
+                       for item in trash.list_entries())
+
+
+def test_image_restore_rolls_files_back_when_database_commit_fails(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Restore transaction', 'restore_tx')
+        folder = Path(svc._dataset_dir(ds.id))
+        image_path = folder / 'transaction.webp'
+        image_path.write_bytes(_png())
+        image = FaceDatasetImage(
+            dataset_id=ds.id, filename=image_path.name, status='keep')
+        svc.db.session.add(image)
+        svc.db.session.commit()
+        assert svc.delete_image(LOCAL_USER, image.id)
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'dataset_image')
+        assert not image_path.exists()
+
+        monkeypatch.setattr(
+            svc.db.session, 'commit',
+            lambda: (_ for _ in ()).throw(RuntimeError('commit failed')))
+        with pytest.raises(RuntimeError, match='commit failed'):
+            svc.restore_trashed_image(LOCAL_USER, entry['id'])
+
+        assert not image_path.exists()
+        assert trash.entry_metadata(entry['id'])['kind'] == 'dataset_image'
+
+
+def test_delete_dataset_creates_restorable_backup(app):
+    import os
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Recover dataset', 'recover_dataset')
+        old_id = ds.id
+        folder = svc._dataset_dir(old_id)
+        Path(folder, 'kept.webp').write_bytes(_png())
+        svc.db.session.add(FaceDatasetImage(
+            dataset_id=old_id, filename='kept.webp', status='keep', caption='kept'))
+        svc.db.session.commit()
+
+        assert svc.delete_dataset(LOCAL_USER, old_id) is True
+        assert svc.get_dataset(LOCAL_USER, old_id) is None
+        assert not os.path.exists(folder)
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'dataset_backup')
+        restored = svc.restore_trashed_dataset(LOCAL_USER, entry['id'])
+        assert restored.id is not None
+        payload = svc.dataset_payload(LOCAL_USER, restored.id)
+        assert payload['name'] == 'Recover dataset'
+        assert len(payload['images']) == 1
+        assert payload['images'][0]['caption'] == 'kept'
+
+
+def test_dataset_restore_consumes_entry_when_backup_unlink_fails(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Restore cleanup', 'restore_cleanup')
+        assert svc.delete_dataset(LOCAL_USER, ds.id) is True
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'dataset_backup')
+        metadata = trash.entry_metadata(entry['id'])
+        backup_name = metadata['backup_name']
+        backup_path = Path(next(
+            item['original_path'] for item in metadata['files']
+            if item['stored_name'] == backup_name))
+        original_unlink = Path.unlink
+
+        def fail_backup_unlink(path, *args, **kwargs):
+            if path == backup_path:
+                raise OSError('backup cleanup failed')
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, 'unlink', fail_backup_unlink)
+
+        restored = svc.restore_trashed_dataset(LOCAL_USER, entry['id'])
+
+        assert restored.id == ds.id
+        assert backup_path.exists()
+        assert all(item['id'] != entry['id'] for item in trash.list_entries())
 
 
 def test_detect_head_bbox_falls_back_to_none_when_ollama_unreachable(app, monkeypatch):
@@ -960,6 +1577,36 @@ def test_link_completed_dataset_image_without_comfyui_configured(app, monkeypatc
         assert refreshed.status == 'failed'
 
 
+def test_late_resolved_dataset_output_moves_to_recoverable_trash(app, tmp_path):
+    from app import config as cfg
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        comfy = tmp_path / 'ComfyUI'
+        output = comfy / 'output'
+        output.mkdir(parents=True)
+        cfg.save_config({'comfyui': {'base_dir': str(comfy)}})
+        ds = svc.create_dataset(LOCAL_USER, 'Late output', 'lateoutput')
+        image = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='reject', job_id='late-job',
+            derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+        svc.db.session.add(image)
+        svc.db.session.commit()
+        late = output / 'late-dataset.webp'
+        late.write_bytes(b'late expensive pixels')
+
+        svc.link_completed_dataset_image('late-job', late.name, failed=False)
+
+        assert not late.exists()
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'orphaned_generation')
+        trash.restore_entry(entry['id'])
+        assert late.read_bytes() == b'late expensive pixels'
+        assert image.status == 'reject' and image.filename is None
+
+
 # --- 'generate' activity indicator (blocks ⚡ Generate for the whole batch) ----
 
 def test_api_batch_advertises_generate_activity_then_clears(app, monkeypatch):
@@ -967,7 +1614,8 @@ def test_api_batch_advertises_generate_activity_then_clears(app, monkeypatch):
     the WHOLE batch — kind + total up front, done growing per image — and clears it
     when the pool drains (finally end()). This is what keeps ⚡ Generate disabled
     past the launch request (busyLive = busy OR activity)."""
-    import concurrent.futures, os
+    import concurrent.futures
+    import os
     from app.services import face_dataset_service as svc
     from app.services import dataset_activity as da
     from app.models import FaceDatasetImage
@@ -979,7 +1627,8 @@ def test_api_batch_advertises_generate_activity_then_clears(app, monkeypatch):
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         rows = [FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='nanobanana')
                 for _ in range(3)]
-        svc.db.session.add_all(rows); svc.db.session.commit()
+        svc.db.session.add_all(rows)
+        svc.db.session.commit()
         items = [(r.id, 'p', '1:1') for r in rows]
         seen = []
         def gen(*a, **k):
@@ -998,7 +1647,9 @@ def test_api_batch_advertises_generate_activity_then_clears(app, monkeypatch):
 def test_api_batch_generate_activity_cleared_on_pool_exception(app, monkeypatch):
     """end() is guaranteed even if the pool itself raises — the indicator must never
     strand a phantom 'in progress' that would keep Generate disabled forever."""
-    import concurrent.futures, os, pytest
+    import concurrent.futures
+    import os
+    import pytest
     from app.services import face_dataset_service as svc
     from app.services import dataset_activity as da
     from app.models import FaceDatasetImage
@@ -1016,7 +1667,8 @@ def test_api_batch_generate_activity_cleared_on_pool_exception(app, monkeypatch)
         ds = svc.create_dataset(LOCAL_USER, 'Boom', 'boom')
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         img = FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='nanobanana')
-        svc.db.session.add(img); svc.db.session.commit()
+        svc.db.session.add(img)
+        svc.db.session.commit()
         with pytest.raises(RuntimeError):
             svc._run_nanobanana_batch(app, [(img.id, 'p', '1:1')], [_png()],
                                       engine='nanobanana', dataset_id=ds.id)
@@ -1027,7 +1679,8 @@ def test_klein_generate_activity_from_enqueue_to_last_completion(app, monkeypatc
     """Klein: enqueue advertises 'generate' with the batch total (pending-count
     approximation); each job completion reconciles done; the LAST completion clears
     the indicator. The payload exposes it throughout the batch."""
-    import os, itertools
+    import os
+    import itertools
     from app.services import face_dataset_service as svc
     from app.services import dataset_activity as da
     from app.services import klein_edit_helper as keh
@@ -1039,10 +1692,12 @@ def test_klein_generate_activity_from_enqueue_to_last_completion(app, monkeypatc
     monkeypatch.setattr(keh, 'enqueue_klein_edit', lambda **k: f'job-{next(counter)}')
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'K', 'k')
-        d = svc._dataset_dir(ds.id); os.makedirs(d, exist_ok=True)
+        d = svc._dataset_dir(ds.id)
+        os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, 'ref.webp'), 'wb') as fh:
             fh.write(_png())
-        ds.ref_filename = 'ref.webp'; svc.db.session.commit()
+        ds.ref_filename = 'ref.webp'
+        svc.db.session.commit()
         vs = [{'label': 'a', 'framing': 'face', 'prompt': 'p1'},
               {'label': 'b', 'framing': 'bust', 'prompt': 'p2'}]
         svc.generate_variations(LOCAL_USER, ds.id, vs, 1, 'some_model')
@@ -1062,7 +1717,8 @@ def test_klein_generate_activity_from_enqueue_to_last_completion(app, monkeypatc
 def test_klein_generate_activity_cleared_on_cancel(app, monkeypatch):
     """Stop deletes the in-flight rows (their completion callbacks never fire), so
     cancel_pending must clear the 'generate' indicator itself."""
-    import os, itertools
+    import os
+    import itertools
     from app.services import face_dataset_service as svc
     from app.services import dataset_activity as da
     from app.services import klein_edit_helper as keh
@@ -1076,10 +1732,12 @@ def test_klein_generate_activity_cleared_on_cancel(app, monkeypatch):
         import app.job_queue as jq
         monkeypatch.setattr(jq.queue_manager, 'cancel_job', lambda *a, **k: None)
         ds = svc.create_dataset(LOCAL_USER, 'KC', 'kc')
-        d = svc._dataset_dir(ds.id); os.makedirs(d, exist_ok=True)
+        d = svc._dataset_dir(ds.id)
+        os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, 'ref.webp'), 'wb') as fh:
             fh.write(_png())
-        ds.ref_filename = 'ref.webp'; svc.db.session.commit()
+        ds.ref_filename = 'ref.webp'
+        svc.db.session.commit()
         svc.generate_variations(LOCAL_USER, ds.id,
                                 [{'label': 'a', 'framing': 'face', 'prompt': 'p'}], 2, 'm')
         assert da.get(ds.id)['kind'] == 'generate' and da.get(ds.id)['total'] == 2
@@ -1090,7 +1748,8 @@ def test_klein_generate_activity_cleared_on_cancel(app, monkeypatch):
 # --- Import d'un dataset existant (ZIP kohya) --------------------------------
 def _training_zip(entries):
     """entries: list of (arcname, bytes) — builds an in-memory zip."""
-    import io as _io, zipfile as _zip
+    import io as _io
+    import zipfile as _zip
     buf = _io.BytesIO()
     with _zip.ZipFile(buf, 'w') as z:
         for name, data in entries:
@@ -1106,7 +1765,8 @@ def _patterned_png(seed):
         x = (seed * 13 + i * 7) % 56
         im.paste(((seed * 37) % 255, (i * 61) % 255, (seed * 7 + i * 29) % 255),
                  (x, i * 8, x + 8, i * 8 + 8))
-    buf = io.BytesIO(); im.save(buf, 'PNG')
+    buf = io.BytesIO()
+    im.save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -1189,7 +1849,8 @@ def test_subscription_quota_fails_remaining_rows_fast(app, monkeypatch):
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         rows = [FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='chatgpt')
                 for _ in range(3)]
-        svc.db.session.add_all(rows); svc.db.session.commit()
+        svc.db.session.add_all(rows)
+        svc.db.session.commit()
         items = [(r.id, 'p', '1:1') for r in rows]
         svc._run_nanobanana_batch(app, items, [_png()], engine='chatgpt')
         assert len(calls) == 1                      # rows 2-3 never hit the API
@@ -1227,7 +1888,8 @@ def test_subscription_disconnect_never_falls_back_to_api_key(app, monkeypatch):
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         rows = [FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='chatgpt')
                 for _ in range(3)]
-        svc.db.session.add_all(rows); svc.db.session.commit()
+        svc.db.session.add_all(rows)
+        svc.db.session.commit()
         items = [(r.id, 'p', '1:1') for r in rows]
         svc._run_nanobanana_batch(app, items, [_png()], engine='chatgpt')
         # Exactly 1 call: the FIRST row hits the disconnected subscription lane,

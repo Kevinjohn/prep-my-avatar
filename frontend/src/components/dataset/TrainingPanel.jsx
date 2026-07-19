@@ -2,9 +2,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
-import { getCsrfToken } from '../../api/fetchClient';
+import { getJson, safeDeleteJson, safePostJson as postJson } from '../../api/fetchClient';
 import { useCapabilities } from '../../context/CapabilitiesContext';
-import { postJson } from '../../hooks/useDataset';
 import {
   checkpointSelectionMatchesTraining,
   defaultCheckpointBase,
@@ -12,8 +11,13 @@ import {
   trainFamilyLabel,
 } from '../../utils/checkpointBrowser';
 import { useToast } from '../common/Toast';
+import { useConfirmDialog, usePromptDialog } from '../common/ConfirmDialog';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import TrainingProgress from './TrainingProgress';
 import PreflightModal from './PreflightModal';
+import TrainingFeedbackPanel from './TrainingFeedbackPanel';
+import CloudLaunchDialog from './CloudLaunchDialog';
 
 // Plancher dur / recommandé par famille — miroir de TRAIN_MIN_IMAGES côté serveur
 // (le preflight reste l'autorité ; ceci ne sert qu'à désactiver le bouton tôt).
@@ -52,6 +56,8 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const concept = kind === 'concept' || kind === 'style';  // style: même chemin UI
   const { caps } = useCapabilities();
   const toast = useToast();
+  const confirm = useConfirmDialog();
+  const promptDialog = usePromptDialog();
   const [status, setStatus] = useState({ in_progress: false, installed: true, queue: [], current: null });
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -60,10 +66,11 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const [ckLoaded, setCkLoaded] = useState(false);
   // {registered, version, changed, diff} — provenance du dataset (registre).
   const [datasetState, setDatasetState] = useState(null);
+  const [trainingFeedback, setTrainingFeedback] = useState(null);
   // Saves cloud synchronisés en local (y compris ceux d'un run EN COURS) —
   // liste séparée : le prompt Resume-or-Fresh ne raisonne que sur le local.
   const [cloudCkpts, setCloudCkpts] = useState([]);
-  // {run_dir_bytes, cloud_staging_bytes, deployed_bytes, total_bytes}
+  // {run_dir_bytes, training_dataset_bytes, cloud_staging_bytes, deployed_bytes, total_bytes}
   const [diskUsage, setDiskUsage] = useState(null);
   // {steps, kind, n_images, rationale} renvoyé par /train/checkpoints — le POURQUOI
   // du barème adaptatif, affiché avec le champ Steps (pédagogie, pas boîte noire).
@@ -105,9 +112,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
 
   const refreshStatus = async () => {
     try {
-      const r = await fetch('/api/dataset/train/status', { credentials: 'include' });
-      if (!r.ok) return;
-      const d = await r.json();
+      const d = await getJson('/api/dataset/train/status');
       // {'available': false}: ai-toolkit went unconfigured/invalid after this
       // panel was already shown (stale client-side caps.training_visible, or
       // the server-side 30s capability cache just expired) — degrade to safe
@@ -127,7 +132,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     refreshStatus();
     const id = setInterval(refreshStatus, 10000);
     return () => clearInterval(id);
-  }, [caps.training_visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [caps.training_visible]);
 
   useEffect(() => {
     onNavigationStateChange?.({
@@ -294,14 +299,18 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // --- Presets (save / apply / import / export / delete) ---------------------
   const loadPresets = async () => {
     try {
-      const r = await fetch('/api/train/presets', { credentials: 'include' });
-      if (r.ok) setPresets((await r.json()).presets || []);
+      setPresets((await getJson('/api/train/presets')).presets || []);
     } catch { /* list is best-effort */ }
   };
   useEffect(() => { loadPresets(); }, []);
   const selPreset = presets.find((p) => String(p.id) === presetSel) || null;
   const savePreset = async () => {
-    const name = window.prompt('Preset name (an existing name is overwritten):');
+    const name = await promptDialog({
+      title: 'Save training preset',
+      message: 'If a preset already has this name, its settings will be overwritten.',
+      inputLabel: 'Preset name',
+      confirmLabel: 'Save preset',
+    });
     if (!name || !name.trim()) return;
     const d = await postTrain('/api/train/presets',
       { name: name.trim(), dataset_id: ds.currentId, train_type: trainType });
@@ -354,12 +363,13 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   };
   const deletePreset = async () => {
     if (!selPreset || selPreset.builtin) return;   // built-ins ship with the app
-    if (!window.confirm(`Delete the preset “${selPreset.name}”?`)) return;
-    try {
-      await fetch(`/api/train/presets/${selPreset.id}`, {
-        method: 'DELETE', headers: { 'X-CSRFToken': getCsrfToken() }, credentials: 'include',
-      });
-    } catch { /* the reload below shows the truth either way */ }
+    if (!(await confirm({
+      title: `Delete preset “${selPreset.name}”?`,
+      message: 'The saved training settings will be removed. Existing runs and checkpoints are unaffected.',
+      confirmLabel: 'Delete preset',
+      tone: 'danger',
+    }))) return;
+    await safeDeleteJson(`/api/train/presets/${selPreset.id}`);
     setPresetSel('');
     loadPresets();
   };
@@ -370,41 +380,33 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // — previously this just returned the raw body, so callers checking
   // `d.ok === false` never saw the error (d.ok stayed undefined) and it was
   // silently dropped instead of reaching the confirm/toast below.
-  const postTrain = async (path, body) => {
-    try {
-      const r = await fetch(path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
-        credentials: 'include',
-        body: body ? JSON.stringify(body) : undefined,
-      });
-      let d = null;
-      try { d = await r.json(); } catch { /* non-JSON body */ }
-      if (!r.ok) return { ok: false, error: (d && d.error) || `Server error (${r.status})`, hint: d && d.hint };
-      return d || { ok: true };
-    } catch { return { ok: false, error: 'Network error' }; }
-  };
+  const postTrain = (path, body) => postJson(path, body);
   // 409 {'error','hint'} (or any other refusal) → toast, hint appended when present.
   const toastTrainError = (d, fallback) => {
     const msg = (d && d.error) || fallback;
     toast.error(d && d.hint ? `${msg} — ${d.hint}` : msg);
   };
   // Confirmable launch refusals: the server prefixes the error with a marker;
-  // the window.confirm IS the user's answer, the retry carries the matching
+  // the dialog IS the user's answer, the retry carries the matching
   // force flag. Both can fire in sequence (uncaptioned first, then mismatch) —
   // call sites loop until launched, declined, or a non-confirmable error.
   const CONFIRMABLE_REFUSALS = [
     ['MISMATCH_CAPTION: ', 'allow_caption_mismatch'],
     ['UNCAPTIONED: ', 'allow_uncaptioned'],
     // Custom-weights arch sniff couldn't positively verify the file → the
-    // window.confirm IS the answer, retry carries allow_unverified_weights.
+    // the dialog is the answer, retry carries allow_unverified_weights.
     ['CUSTOM_WEIGHTS_UNVERIFIED: ', 'allow_unverified_weights'],
   ];
-  const confirmableRetryFlag = (error, actionLabel) => {
+  const confirmableRetryFlag = async (error, actionLabel) => {
     const s = String(error || '');
     for (const [marker, flag] of CONFIRMABLE_REFUSALS) {
       if (s.includes(marker)) {
-        return window.confirm(s.replace(marker, '') + `\n\n${actionLabel}?`) ? flag : 'declined';
+        return await confirm({
+          title: actionLabel,
+          message: s.replace(marker, ''),
+          confirmLabel: actionLabel,
+          tone: 'warning',
+        }) ? flag : 'declined';
       }
     }
     return null;
@@ -423,11 +425,8 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   };
   const preflightOk = async () => {
     try {
-      const r = await fetch(
-        `/api/dataset/${ds.currentId}/train/preflight?train_type=${encodeURIComponent(trainType)}`,
-        { credentials: 'include' });
-      if (!r.ok) return true;
-      const d = await r.json();
+      const d = await getJson(
+        `/api/dataset/${ds.currentId}/train/preflight?train_type=${encodeURIComponent(trainType)}`);
       if (d.blockers?.length) { toast.error(d.blockers.join('\n')); return false; }
       if (d.warnings?.length) {
         return await new Promise((resolve) => {
@@ -445,6 +444,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // résout une promesse : 'fresh' | 'resume' | null (annuler).
   const [resumeAsk, setResumeAsk] = useState(null);   // {latest, final} | null
   const resumeResolver = useRef(null);
+  const resumeDialogRef = useRef(null);
+  useFocusTrap(resumeDialogRef, !!resumeAsk);
+  useBodyScrollLock(!!resumeAsk);
   const resolveResume = (v) => {
     setResumeAsk(null);
     resumeResolver.current?.(v);
@@ -483,7 +485,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   useEffect(() => {
     if (concept) setMaskedS(false);
     else { try { setMaskedS(localStorage.getItem('trainMasked_v1') !== '0'); } catch { setMaskedS(true); } }
-  }, [ds.currentId, concept]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ds.currentId, concept]);
   // Masked ON but rembg (person-mask backend) unavailable → the export silently
   // drops the masks and trains UNMASKED. Surface that instead of lying about it.
   // `=== false` (not `!caps.masks`) so we don't warn before caps have loaded.
@@ -503,7 +505,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     let body = { base_model: base, variant, train_type: trainType, masked, steps: stepsN,
                  ...(trainType === 'sdxl' ? { vae_path: vaePath, te_path: tePath } : {}) };
     let d = await postTrain(`/api/dataset/${ds.currentId}/train/enqueue`, body);
-    for (let flag; d && d.ok === false && (flag = confirmableRetryFlag(d.error, 'Queue anyway (force)')); ) {
+    while (d && d.ok === false) {
+      const flag = await confirmableRetryFlag(d.error, 'Queue anyway');
+      if (!flag) break;
       if (flag === 'declined') { d = null; break; }  // the confirm WAS the answer
       body = { ...body, [flag]: true };
       d = await postTrain(`/api/dataset/${ds.currentId}/train/enqueue`, body);
@@ -540,7 +544,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     let body = { at: schedAt, base_model: base, variant, train_type: trainType, masked, steps: stepsN,
                  ...(trainType === 'sdxl' ? { vae_path: vaePath, te_path: tePath } : {}) };
     let d = await postTrain(`/api/dataset/${ds.currentId}/train/schedule`, body);
-    for (let flag; d && d.ok === false && (flag = confirmableRetryFlag(d.error, 'Schedule anyway (force)')); ) {
+    while (d && d.ok === false) {
+      const flag = await confirmableRetryFlag(d.error, 'Schedule anyway');
+      if (!flag) break;
       if (flag === 'declined') { d = null; break; }  // the confirm WAS the answer
       body = { ...body, [flag]: true };
       d = await postTrain(`/api/dataset/${ds.currentId}/train/schedule`, body);
@@ -592,16 +598,30 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     }).catch(() => { /* keep the last truthful rationale */ });
     return () => { alive = false; };
   }, [base, trainType, ds.currentId, baseInfo, caps.training_visible]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!ds.currentId) { setTrainingFeedback(null); return undefined; }
+    let alive = true;
+    getJson(`/api/dataset/${ds.currentId}/train/feedback?family=${encodeURIComponent(checkpointTrainType)}`)
+      .then((data) => { if (alive) setTrainingFeedback(data); })
+      .catch(() => { if (alive) setTrainingFeedback(null); });
+    return () => { alive = false; };
+  }, [ds.currentId, checkpointTrainType, checkpoints, imported]);
   const removeImported = async (filename, label) => {
     // Guard-rail: this LoRA may be the one the Studio's ★ best settings point to —
     // deleting it silently breaks the saved winning combo.
     const best = ds.data?.best_settings;
     const isBest = best?.lora_filename
       && String(best.lora_filename).split(/[\\/]/).pop() === String(filename).split(/[\\/]/).pop();
-    const msg = isBest
-      ? `⚠ « ${label} » is the LoRA saved as this dataset's ★ BEST SETTINGS in the Test Studio.\n\nDelete it anyway? The saved combo will stop working.`
-      : `Permanently delete « ${label} » from ComfyUI's ${checkpointLorasLabel} folder?`;
-    if (!window.confirm(msg)) return;
+    const message = isBest
+      ? `« ${label} » is the LoRA saved as this dataset's best setting in the Test Studio. The saved combination will stop working, but the file remains recoverable in Settings until you empty the Trash.`
+      : `« ${label} » will be moved out of ComfyUI's ${checkpointLorasLabel} folder and remain recoverable in Settings until you empty the Trash.`;
+    if (!(await confirm({
+      title: `Move “${label}” to Trash?`,
+      message,
+      confirmLabel: 'Move to Trash',
+      tone: 'danger',
+    }))) return;
     await ds.deleteCheckpoint(filename, checkpointTrainType);
     loadCheckpoints();
   };
@@ -676,8 +696,8 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     let t;
     const tick = async () => {
       try {
-        const r = await fetch('/api/dataset/train/cloud/status', { credentials: 'include' });
-        if (r.ok && alive) setCloudStatus(await r.json());
+        const body = await getJson('/api/dataset/train/cloud/status');
+        if (alive) setCloudStatus(body);
       } catch { /* transient */ }
       if (alive) t = setTimeout(tick, 5000);
     };
@@ -729,15 +749,20 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     let body = { variant, train_type: trainType, masked,
       ...(stepsN ? { steps: stepsN } : {}), ...(gpuName ? { gpu_name: gpuName } : {}) };
     let d = await postJson(`/api/dataset/${ds.currentId}/train/cloud`, body);
-    for (let flag; d && d.ok === false && (flag = confirmableRetryFlag(d.error, 'Train anyway (force)')); ) {
+    while (d && d.ok === false) {
+      const flag = await confirmableRetryFlag(d.error, 'Train anyway');
+      if (!flag) break;
       if (flag === 'declined') { d = null; break; }  // the confirm WAS the answer
       body = { ...body, [flag]: true };
       d = await postJson(`/api/dataset/${ds.currentId}/train/cloud`, body);
     }
     if (d && d.ok === false) {
       toastTrainError(d, 'Cloud training failed');
+      return false;
     }
+    if (!d) return false;
     // Success needs no toast — the 5s cloud-status poll picks it up.
+    return true;
   };
 
   if (!caps.training_visible) {
@@ -819,7 +844,13 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
             <span className="font-semibold">Cloud run — {cloudActiveHere.status}</span>
             {cloudActiveHere.gpu && <span>{cloudActiveHere.gpu}</span>}
             {cloudActiveHere.price_per_hour != null && (
-              <span className="tabular-nums">${cloudActiveHere.price_per_hour}/h · ~${cloudActiveHere.cost_estimate} so far</span>
+              <span className="tabular-nums">
+                ${cloudActiveHere.price_per_hour}/h · $
+                {Number(cloudActiveHere.cost_usd ?? cloudActiveHere.cost_estimate ?? 0).toFixed(2)} so far
+                {cloudActiveHere.billing_seconds != null
+                  ? ` · billed ${Math.max(0, Math.floor(cloudActiveHere.billing_seconds / 60))}m`
+                  : ''}
+              </span>
             )}
             {/* Full progress bar, loss curve and samples live on the Runs hub. */}
             <Link to="/cloud" title="Open the Runs page — full progress, loss curve and samples"
@@ -827,7 +858,17 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
               View in Runs ↗
             </Link>
             <button type="button" className="px-2 py-0.5 rounded bg-red-600/80 text-white text-[0.6875rem] font-semibold"
-              onClick={async () => { await postJson('/api/dataset/train/cloud/stop', { run_id: cloudActiveHere.run_id }); }}>
+              onClick={async () => {
+                if (!(await confirm({
+                  title: 'Stop this cloud run?',
+                  message: 'The pod will be terminated and training will stop. The latest recoverable checkpoint is downloaded when possible.',
+                  confirmLabel: 'Stop run',
+                  tone: 'danger',
+                }))) return;
+                const result = await postJson(
+                  '/api/dataset/train/cloud/stop', { run_id: cloudActiveHere.run_id });
+                if (!result?.ok) toastTrainError(result, 'Could not stop cloud run');
+              }}>
               Stop cloud run
             </button>
           </div>
@@ -886,7 +927,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
             let opts = { baseModel: base, variant, trainType, masked, steps: stepsN, fresh,
                          vaePath, tePath };
             let d = await ds.train(opts);
-            for (let flag; d && d.ok === false && (flag = confirmableRetryFlag(d.error, 'Train anyway (force)')); ) {
+            while (d && d.ok === false) {
+              const flag = await confirmableRetryFlag(d.error, 'Train anyway');
+              if (!flag) break;
               if (flag === 'declined') break;        // the confirm WAS the answer
               opts = { ...opts, [OPT_FOR_FLAG[flag]]: true };
               d = await ds.train(opts);
@@ -1467,7 +1510,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
             )}
             {maskedRembgMissing && (
               <span className="text-amber-300"
-                title="rembg isn't installed, so no person masks can be generated — this run will train UNMASKED (background at full weight), not masked. Install the ML extras from the Setup tab (requirements-ml.txt, Python 3.10–3.12) to enable masked training.">
+                title="rembg isn't installed, so no person masks can be generated — this run will train UNMASKED (background at full weight), not masked. Install Person masks from the Setup tab (Python 3.11–3.12) to enable masked training.">
                 ⚠️ rembg missing — will train unmasked
               </span>
             )}
@@ -1636,6 +1679,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
               Dataset version: <span className="text-content font-semibold">v{datasetState.version}</span> — unchanged since the last training.
             </p>
           ))}
+          <TrainingFeedbackPanel feedback={trainingFeedback} />
           <div className="flex items-center gap-2 flex-wrap">
             {/* () => … sinon React passe l'event en 1er arg → forBase = PointerEvent
                 → base_model=[object Object] → run inexistant → liste vide. */}
@@ -1680,7 +1724,12 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                 <button type="button" disabled={status.in_progress || !checkpointMatchesTraining}
                   onClick={async () => {
                     const last = Math.max(...checkpoints.map((c) => c.step));
-                    if (window.confirm(`Resume training « ${checkpointBaseLabel} » from step ${last} and continue for +1000 steps (→ ${last + 1000})?`)) {
+                    if (await confirm({
+                      title: `Continue training from step ${last}?`,
+                      message: `Resume “${checkpointBaseLabel}” for 1,000 more steps, targeting step ${last + 1000}.`,
+                      confirmLabel: 'Continue training',
+                      tone: 'warning',
+                    })) {
                       await ds.continueTraining(1000, checkpointBase, variant); refreshStatus(); loadCheckpoints(checkpointBase, checkpointTrainType);
                     }
                   }}
@@ -1732,7 +1781,12 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                   </button>
                   <button type="button"
                     onClick={async () => {
-                      if (!window.confirm(`Move « ${c.filename} » to the trash?\n\nRecoverable until you empty the trash in Settings.`)) return;
+                      if (!(await confirm({
+                        title: `Move “${c.filename}” to trash?`,
+                        message: 'The checkpoint can be restored until you empty the trash in Settings.',
+                        confirmLabel: 'Move to trash',
+                        tone: 'warning',
+                      }))) return;
                       const d = await postTrain(`/api/dataset/${ds.currentId}/train/run-checkpoint/delete`,
                         { filename: c.filename, base_model: checkpointBase, train_type: checkpointTrainType });
                       if (d.ok === false) toastTrainError(d, 'Delete failed');
@@ -1757,7 +1811,12 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                     }
                     const removed = checkpoints.filter((c) => !keep.includes(c.filename)).length;
                     if (!removed) return;
-                    if (!window.confirm(`Clean up this run?\n\nKeeps ${keep.length} checkpoint(s) (${keep.join(', ')}) and moves ${removed} to the trash — recoverable until you empty the trash in Settings.`)) return;
+                    if (!(await confirm({
+                      title: 'Clean up this training run?',
+                      message: `Keep ${keep.length} checkpoint${keep.length === 1 ? '' : 's'} (${keep.join(', ')}) and move ${removed} other checkpoint${removed === 1 ? '' : 's'} to the trash. They remain recoverable until you empty the trash in Settings.`,
+                      confirmLabel: 'Clean up run',
+                      tone: 'warning',
+                    }))) return;
                     const d = await postTrain(`/api/dataset/${ds.currentId}/train/checkpoints/cleanup`,
                       { keep_filenames: keep, base_model: checkpointBase, train_type: checkpointTrainType });
                     if (d.ok === false) toastTrainError(d, 'Cleanup failed');
@@ -1805,7 +1864,12 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                   {!c.active && (
                     <button type="button"
                       onClick={async () => {
-                        if (!window.confirm(`Move « ${c.filename} » to the trash?\n\nRecoverable until you empty the trash in Settings.`)) return;
+                        if (!(await confirm({
+                          title: `Move “${c.filename}” to trash?`,
+                          message: 'The cloud checkpoint can be restored until you empty the trash in Settings.',
+                          confirmLabel: 'Move to trash',
+                          tone: 'warning',
+                        }))) return;
                         const d = await postTrain(`/api/dataset/${ds.currentId}/train/run-checkpoint/delete`,
                           { filename: c.filename, cloud_run_id: c.run_id });
                         if (d.ok === false) toastTrainError(d, 'Delete failed');
@@ -1846,9 +1910,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                     </span>
                   )}
                   <button type="button" onClick={() => removeImported(c.filename, c.label)}
-                    title={`Delete this LoRA from ComfyUI's ${checkpointLorasLabel} folder`}
+                    title={`Move this LoRA from ComfyUI's ${checkpointLorasLabel} folder to Trash`}
                     className="ml-auto px-2 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300">
-                    🗑 Delete
+                    🗑 Trash
                   </button>
                 </div>
               ))}
@@ -1876,7 +1940,8 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
         <div role="dialog" aria-modal="true" aria-label="Previous training run found"
           className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
           onKeyDown={(e) => { if (e.key === 'Escape') resolveResume(null); }}>
-          <div className="w-full max-w-md rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3">
+          <div ref={resumeDialogRef}
+            className="w-full max-w-md rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3">
             <h3 className="m-0 text-content font-bold text-sm">
               ⚠ Previous run found ({resumeAsk.final ? 'complete' : 'stopped'} · step {resumeAsk.latest})
             </h3>
@@ -1904,139 +1969,6 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-const _FAMILY_LABEL = { zimage: 'Z-Image', krea: 'Krea 2', sdxl: 'SDXL', flux: 'FLUX.1', flux2klein: 'FLUX.2 Klein' };
-
-function _fmtDuration(min) {
-  if (min == null) return '—';
-  if (min < 90) return `~${min} min`;
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  return m ? `~${h} h ${m} min` : `~${h} h`;
-}
-
-/* Launch-time GPU speed picker. Fetches live vast.ai offers grouped by GPU
-   class (slowest→fastest), each with price/h and an APPROXIMATE training time
-   and total run cost for this dataset+family. Picking a tier rents the cheapest
-   live offer of that class; the price cap in Settings still bounds what's shown. */
-function CloudLaunchDialog({ datasetId, trainType, steps, keptCount, cloudStatus, onClose, onLaunch }) {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [data, setData] = useState(null);     // {tiers, steps, family, max_price_per_hour}
-  const [selected, setSelected] = useState(null);
-  const [launching, setLaunching] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const qs = new URLSearchParams({ train_type: trainType });
-        if (steps) qs.set('steps', String(steps));
-        const r = await fetch(`/api/dataset/${datasetId}/train/cloud/offers?${qs.toString()}`,
-          { credentials: 'include' });
-        const body = await r.json().catch(() => ({}));
-        if (!alive) return;
-        if (!r.ok || body.ok === false) {
-          setError(body.error || body.hint || `Could not load offers (HTTP ${r.status})`);
-        } else {
-          setData(body);
-          if (body.tiers && body.tiers.length) setSelected(body.tiers[0].gpu_name);
-        }
-      } catch {
-        if (alive) setError('Network error while loading GPU offers');
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, [datasetId, trainType, steps]);
-
-  const go = async () => {
-    if (!selected) return;
-    setLaunching(true);
-    try {
-      await onLaunch(selected);      // owns its own error toasts
-      onClose();
-    } finally {
-      setLaunching(false);
-    }
-  };
-
-  const tiers = data?.tiers || [];
-  const budget = cloudStatus?.monthly_budget || 0;
-  const spent = cloudStatus?.month_spend || 0;
-
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Choose cloud GPU speed"
-      className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
-      onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}>
-      <div className="w-full max-w-lg rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3">
-        <h3 className="m-0 text-content font-bold text-sm">
-          <span aria-hidden>☁️</span> Choose GPU speed for this run
-        </h3>
-
-        {loading && <p className="m-0 text-content-muted text-sm">Loading live GPU offers…</p>}
-        {error && <p className="m-0 text-red-300 text-sm">⚠ {error}</p>}
-        {!loading && !error && tiers.length === 0 && (
-          <p className="m-0 text-content-muted text-sm">
-            No GPU available under ${data?.max_price_per_hour}/h right now — raise the
-            price cap in Settings, or try again shortly.
-          </p>
-        )}
-
-        {tiers.length > 0 && (
-          <div className="flex flex-col gap-1.5 max-h-[50vh] overflow-y-auto">
-            {tiers.map((t) => (
-              <label key={t.gpu_name}
-                className={`flex items-center gap-3 rounded-lg border px-3 py-2 cursor-pointer transition-colors ${
-                  selected === t.gpu_name
-                    ? 'border-sky-400/70 bg-sky-500/10'
-                    : 'border-border bg-surface hover:bg-surface-raised'}`}>
-                <input type="radio" name="gpu-tier" className="accent-sky-400"
-                  checked={selected === t.gpu_name}
-                  onChange={() => setSelected(t.gpu_name)} />
-                <span className="flex-1 min-w-0">
-                  <span className="block text-content text-sm font-semibold truncate">
-                    {t.gpu_name}
-                    {t.gpu_ram_gb ? <span className="text-content-subtle font-normal"> · {t.gpu_ram_gb} GB</span> : null}
-                  </span>
-                  <span className="block text-content-subtle text-[0.75rem] tabular-nums">
-                    {t.dph_total != null ? `$${t.dph_total.toFixed(3)}/h` : 'price n/a'}
-                    {' · '}{_fmtDuration(t.est_minutes)}
-                    {t.est_cost != null ? ` · ≈ $${t.est_cost.toFixed(2)} total` : ''}
-                  </span>
-                  {t.exceeds_cap && (
-                    <span className="block text-amber-300 text-[0.6875rem]">
-                      ⚠ Longer than the {Math.round((data?.max_runtime_minutes || 480) / 60)} h runtime cap — the run would be cut short (checkpoint rescued). Pick a faster GPU or raise the cap in Settings.
-                    </span>
-                  )}
-                </span>
-              </label>
-            ))}
-          </div>
-        )}
-
-        <p className="m-0 text-content-subtle text-[0.6875rem]">
-          {(data?.steps ?? steps ?? '—')} steps · {_FAMILY_LABEL[data?.family || trainType] || (data?.family || trainType)}
-          {keptCount != null ? ` · ${keptCount} img` : ''}
-          {budget > 0 ? ` · this month: $${spent.toFixed(2)} of $${budget.toFixed(2)}` : ''}
-          {'. '}Time & cost are approximate; the pod is auto-terminated when done.
-        </p>
-
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={go} disabled={!selected || launching}
-            className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
-            {launching ? 'Launching…' : '☁️ Rent & train'}
-          </button>
-          <button type="button" onClick={onClose} disabled={launching}
-            className="ml-auto px-3 py-1.5 rounded-lg text-content-muted hover:text-content text-sm disabled:opacity-40">
-            Cancel
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

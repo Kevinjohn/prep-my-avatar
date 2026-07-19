@@ -14,7 +14,6 @@ stop_comfyui_process were already no-ops and stay that way.
 """
 
 import os
-import time
 import socket
 import threading
 import logging

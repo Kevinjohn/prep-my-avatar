@@ -31,12 +31,13 @@ test('workspace guards rescue rows and detects a pending improvement child', () 
   assert.match(workspace, /kleinAvailable=\{Boolean\(caps\.engines\?\.klein\)\}/);
 });
 
-test('dataset hook starts improvement, reports the preserved original, then refreshes', () => {
+test('dataset hook starts improvement and follows reconstruction changes via the shared event stream', () => {
   assert.match(hook, /`\/api\/dataset\/image\/\$\{imageId\}\/improve`, \{\}/);
   assert.match(hook, /Reconstruction started from the preserved original/);
   assert.match(hook, /Could not start image improvement/);
   assert.match(hook, /resolveSmallImageRescue, improveImage, resolveImageImprovement/);
-  assert.match(hook, /repair_comparison\?\.phase === 'analyzing'/);
+  assert.match(hook, /new EventSource\(`\/api\/dataset\/\$\{currentId\}\/events`\)/);
+  assert.match(hook, /source\.addEventListener\('dataset'/);
 });
 
 test('settings explains the shared instruction for scraper and lightbox improvement', () => {

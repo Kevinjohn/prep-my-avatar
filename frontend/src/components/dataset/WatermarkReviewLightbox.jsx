@@ -19,6 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import { displayLabel } from '../../utils/labels';
 import {
   MAX_WATERMARK_REGIONS,
@@ -105,11 +106,15 @@ export default function WatermarkReviewLightbox({ datasetId, queue, caps, nonces
   const saveJobsRef = useRef({});                 // id -> latest serialized save job
 
   useFocusTrap(dialogRef, queue.length > 0);
+  useBodyScrollLock(queue.length > 0);
 
   const total = queue.length;
   const item = idx >= 0 && idx < total ? queue[idx] : null;
   const outcome = item ? outcomes[item.id] : null;
-  const regions = item ? (regionsById[item.id] || []) : [];
+  const regions = useMemo(
+    () => (item ? (regionsById[item.id] || []) : []),
+    [item, regionsById],
+  );
   const manual = item ? Boolean(manualById[item.id]) : false;
   const selectedRegion = item ? selectedById[item.id] : null;
   const addMode = item ? Boolean(addModeById[item.id]) : false;

@@ -35,8 +35,9 @@ function Stat({ label, value, tone = '' }) {
 }
 
 export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, coveragePlan,
-  onAnalyze, onClassify, onAnchorDecision, onCoverage, onStatus, onBatch, busy = false,
-  visionAvailable = false, reviewPairIds = EMPTY_IDS, faceThresholds = {} }) {
+  onAnalyze, onClassify, onAnchorDecision, onCoverage, onSourceRights, onStatus, onBatch,
+  busy = false, visionAvailable = false, reviewPairIds = EMPTY_IDS, faceThresholds = {},
+  showAnchors = true, showCoverage = true }) {
   const imported = useMemo(() => images.filter((image) => image.source === 'import'
     && image.filename && !reviewPairIds.has(image.id)), [images, reviewPairIds]);
   const selectedIds = useMemo(() => new Set(anchorPlan?.selected_import_ids || []), [anchorPlan]);
@@ -45,14 +46,19 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
   const [selectedId, setSelectedId] = useState(null);
   const selected = imported.find((image) => image.id === selectedId) || imported[0] || null;
   const [draft, setDraft] = useState({});
+  const [rightsDraft, setRightsDraft] = useState({ basis: 'unknown', license: '', consent_confirmed: false, notes: '' });
 
   useEffect(() => {
     if (!selected) { setSelectedId(null); setDraft({}); return; }
     if (selected.id !== selectedId) setSelectedId(selected.id);
     setDraft({ framing: selected.framing || '', ...(selected.coverage || {}) });
+    setRightsDraft({ basis: selected.source_rights?.basis || 'unknown',
+      license: selected.source_rights?.license || '',
+      consent_confirmed: Boolean(selected.source_rights?.consent_confirmed),
+      notes: selected.source_rights?.notes || '' });
     // Sync only when the selected server row changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, selected?.framing, selected?.coverage]);
+  }, [selected?.id, selected?.framing, selected?.coverage, selected?.source_rights]);
 
   if (!imported.length) {
     return (
@@ -100,11 +106,11 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
             className="rounded-lg border border-border bg-surface-raised px-2.5 py-1.5 text-xs font-semibold text-content disabled:opacity-40">
             📐 Refresh local analysis
           </button>
-          <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
+          {showCoverage && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
             title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up Ollama vision, or classify images manually below'}
             className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
             👁 Map visual coverage
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -112,9 +118,9 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
         <Stat label="real photos" value={imported.length} tone="good" />
         <Stat label="accepted for training" value={accepted.length} tone={accepted.length ? 'good' : 'warn'} />
         <Stat label="needs decision" value={pending.length} tone={pending.length ? 'warn' : 'good'} />
-        <Stat label="anchors/request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />
-        <Stat label="pinned" value={anchorPlan?.pinned || 0} />
-        <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />
+        {showAnchors && <Stat label="anchors/request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />}
+        {showAnchors && <Stat label="pinned" value={anchorPlan?.pinned || 0} />}
+        {showAnchors && <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />}
         <Stat label="near-duplicates" value={summary.near_duplicates || 0} tone={summary.near_duplicates ? 'warn' : ''} />
         <Stat label="needs coverage" value={summary.unclassified || 0} tone={summary.unclassified ? 'warn' : 'good'} />
       </div>
@@ -207,7 +213,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
               </div>
             </div>
 
-            <div>
+            {showAnchors && <div>
               <p className="m-0 mb-1 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Generation anchor</p>
               <div className="grid grid-cols-3 gap-1">
                 {[['auto', 'Automatic'], ['pinned', '📌 Pin'], ['excluded', '⊘ Exclude']].map(([value, label]) => (
@@ -224,9 +230,47 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
               <p className="m-0 mt-1 text-[0.5625rem] leading-relaxed text-content-subtle">
                 Excluding affects API identity references only; the photo can still remain in the training set.
               </p>
-            </div>
+            </div>}
 
-            <form className="grid grid-cols-2 gap-1.5" onSubmit={async (event) => {
+            <form className="flex flex-col gap-1.5 rounded-md border border-border p-2"
+              onSubmit={async (event) => {
+                event.preventDefault();
+                await onSourceRights?.(selected.id, rightsDraft);
+              }}>
+              <p className="m-0 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Source rights & consent</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                <label className="flex flex-col gap-0.5 text-[0.5625rem] uppercase text-content-subtle">
+                  basis
+                  <select value={rightsDraft.basis}
+                    onChange={(event) => setRightsDraft((current) => ({ ...current, basis: event.target.value }))}
+                    className="rounded border border-border bg-surface px-1.5 py-1 text-[0.625rem] normal-case text-content">
+                    {['unknown', 'owned', 'licensed', 'consented', 'public-domain'].map((value) => (
+                      <option key={value} value={value}>{value}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-0.5 text-[0.5625rem] uppercase text-content-subtle">
+                  license / terms
+                  <input value={rightsDraft.license}
+                    onChange={(event) => setRightsDraft((current) => ({ ...current, license: event.target.value }))}
+                    className="rounded border border-border bg-surface px-1.5 py-1 text-[0.625rem] normal-case text-content" />
+                </label>
+              </div>
+              <label className="flex items-center gap-1.5 text-[0.625rem] text-content-muted">
+                <input type="checkbox" checked={rightsDraft.consent_confirmed}
+                  onChange={(event) => setRightsDraft((current) => ({ ...current, consent_confirmed: event.target.checked }))} />
+                Identifiable-person consent confirmed
+              </label>
+              <textarea value={rightsDraft.notes} rows={2} placeholder="Source URL, contract, or consent note"
+                onChange={(event) => setRightsDraft((current) => ({ ...current, notes: event.target.value }))}
+                className="rounded border border-border bg-surface px-1.5 py-1 text-[0.625rem] text-content" />
+              <button type="submit" disabled={busy || !onSourceRights}
+                className="rounded-md border border-indigo-400/40 bg-indigo-500/10 px-2 py-1 text-[0.625rem] font-semibold text-indigo-200 disabled:opacity-40">
+                Save rights record
+              </button>
+            </form>
+
+            {showCoverage && <form className="grid grid-cols-2 gap-1.5" onSubmit={async (event) => {
               event.preventDefault();
               await onCoverage(selected.id, draft);
             }}>
@@ -245,7 +289,13 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan, co
                 className="col-span-2 mt-1 rounded-lg bg-gradient-primary px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40">
                 Save coverage
               </button>
-            </form>
+              {selected.coverage_provenance && (
+                <p className="col-span-2 m-0 text-[0.5625rem] text-content-subtle">
+                  Evidence: {selected.coverage_provenance.source || 'unknown'}
+                  {selected.coverage_provenance.model ? ` · ${selected.coverage_provenance.model}` : ''}
+                </p>
+              )}
+            </form>}
           </div>
         )}
       </div>

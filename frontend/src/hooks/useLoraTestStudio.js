@@ -7,8 +7,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useToast } from '../components/common/Toast';
-import { postJson } from './useDataset';
-import { getCsrfToken } from '../api/fetchClient';
+import { getJson, safeDeleteJson, safePostJson as postJson } from '../api/fetchClient';
 
 export function useLoraTestStudio(datasetId, family = null) {
   const toast = useToast();
@@ -20,8 +19,7 @@ export function useLoraTestStudio(datasetId, family = null) {
     try {
       // `family` scope la pipeline (ZIT/SDXL/Krea) ; absent → défaut résolu côté serveur.
       const qs = family ? `?family=${encodeURIComponent(family)}` : '';
-      const r = await fetch(`/api/dataset/${datasetId}/lora-test/status${qs}`, { credentials: 'include' });
-      if (r.ok) setData(await r.json());
+      setData(await getJson(`/api/dataset/${datasetId}/lora-test/status${qs}`));
     } catch { /* transient network error — the poll retries */ }
   }, [datasetId, family]);
 
@@ -128,12 +126,7 @@ export function useLoraTestStudio(datasetId, family = null) {
   const clearBest = useCallback(async (fam) => {
     const f = fam || family;
     const qs = f ? `?family=${encodeURIComponent(f)}` : '';
-    const res = await fetch(`/api/dataset/${datasetId}/lora-test/best${qs}`, {
-      method: 'DELETE',
-      headers: { 'X-CSRFToken': getCsrfToken() },
-      credentials: 'include',
-    });
-    const d = await res.json().catch(() => ({}));
+    const d = await safeDeleteJson(`/api/dataset/${datasetId}/lora-test/best${qs}`);
     if (d.ok) toast.success('Saved setting removed'); else toast.error(d.error || 'Error');
     await refresh();
     return d;

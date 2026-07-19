@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { apiFetch, postJson } from '../../api/fetchClient'
+import { apiFetch, fetchWithCsrfRetry, postJson } from '../../api/fetchClient'
 import DiagnosticReport from '../common/DiagnosticReport'
+import { useConfirmDialog } from '../common/ConfirmDialog'
 import { Card, TextField } from './primitives'
 
 /* In-app updater: "Check for updates" hits the git-aware check (commits-behind for a
@@ -40,7 +41,7 @@ function UpdatesCard() {
     for (let i = 0; i < 120; i += 1) {
       await new Promise((r) => setTimeout(r, 1000))
       try {
-        const res = await fetch('/api/health', { cache: 'no-store' })
+        const res = await fetchWithCsrfRetry('/api/health/ready', { cache: 'no-store' })
         if (res.ok) { window.location.reload(); return }
       } catch { /* still down — keep waiting */ }
     }
@@ -199,12 +200,24 @@ function LogViewer() {
    deployed LoRAs) is MOVED here — this card is the only place bytes actually
    die. Size fetched once on mount (no poll). */
 function TrashCard() {
+  const confirm = useConfirmDialog()
   const [size, setSize] = useState(null)
+  const [entries, setEntries] = useState([])
   const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const load = () => apiFetch('/api/trash')
+    .then((d) => {
+      setSize(d?.size_bytes ?? null)
+      setEntries(Array.isArray(d?.entries) ? d.entries : [])
+    })
   useEffect(() => {
     let alive = true
     apiFetch('/api/trash')
-      .then((d) => { if (alive) setSize(d?.size_bytes ?? null) })
+      .then((d) => {
+        if (!alive) return
+        setSize(d?.size_bytes ?? null)
+        setEntries(Array.isArray(d?.entries) ? d.entries : [])
+      })
       .catch(() => { /* best-effort */ })
     return () => { alive = false }
   }, [])
@@ -212,11 +225,39 @@ function TrashCard() {
     : b >= 1e6 ? `${Math.round(b / 1e6)} MB`
     : b > 0 ? `${Math.max(1, Math.round(b / 1e3))} KB` : 'empty')
   const empty = async () => {
-    if (!window.confirm('Permanently delete everything in the trash?\n\nThis is the ONLY destructive action — deleted checkpoints cannot be recovered afterwards.')) return
+    if (!(await confirm({
+      title: 'Empty the trash permanently?',
+      message: 'Everything in the trash will be deleted. Datasets, images and checkpoints cannot be recovered afterwards.',
+      confirmLabel: 'Delete everything',
+      tone: 'danger',
+    }))) return
     setBusy(true)
     try {
       const d = await postJson('/api/trash/empty', {})
-      if (d?.ok) setSize(0)
+      await load()
+      if (d?.failed) {
+        setMessage(`${d.failed} trash item${d.failed === 1 ? '' : 's'} could not be deleted`)
+      } else if (d?.ok) {
+        setMessage('Trash emptied')
+      }
+    } catch (error) {
+      setMessage(error?.message || 'Could not empty the trash')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const restore = async (entry) => {
+    setBusy(true)
+    setMessage('')
+    try {
+      const d = await postJson(`/api/trash/${encodeURIComponent(entry.id)}/restore`, {})
+      if (!d?.ok) { setMessage(d?.error || 'Could not restore this item'); return }
+      setMessage(d.kind === 'dataset_backup'
+        ? 'Dataset restored — open Datasets to continue'
+        : 'Item restored to its original location')
+      await load()
+    } catch (error) {
+      setMessage(error?.message || 'Could not restore this item')
     } finally {
       setBusy(false)
     }
@@ -233,6 +274,78 @@ function TrashCard() {
           {busy ? 'Emptying…' : 'Empty trash'}
         </button>
       </div>
+      {message && <p role="status" className="mt-2 text-xs text-content-muted">{message}</p>}
+      {entries.length > 0 && (
+        <ul className="mt-3 max-h-64 space-y-2 overflow-auto" aria-label="Recoverable trash entries">
+          {entries.map((entry) => (
+            <li key={entry.id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-app/40 px-3 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm text-content">{entry.context}</div>
+                <div className="text-[11px] text-content-muted">{fmt(entry.size_bytes)}</div>
+              </div>
+              <button type="button" onClick={() => restore(entry)}
+                disabled={busy || !entry.restorable}
+                title={entry.restorable ? 'Restore this item' : 'Legacy trash entry has no restore metadata'}
+                className="rounded-md border border-border px-2.5 py-1 text-xs text-content disabled:opacity-40">
+                Restore
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  )
+}
+
+function IntegrityCard() {
+  const [report, setReport] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const run = async () => {
+    setBusy(true); setError('')
+    try {
+      setReport(await apiFetch('/api/integrity'))
+    } catch (e) {
+      setError(e.message || 'Integrity check failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const findings = report?.findings || []
+  return (
+    <Card title="Data integrity" help="Read-only check of the SQLite database, relationships, referenced files, and untracked dataset files.">
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" onClick={run} disabled={busy}
+          className="rounded-md border border-border-strong px-3 py-1.5 text-sm font-medium text-content hover:bg-surface-raised disabled:opacity-50">
+          {busy ? 'Checking…' : 'Run integrity check'}
+        </button>
+        {report && (
+          <span role="status" className={`text-sm ${report.ok ? 'text-emerald-400' : 'text-red-300'}`}>
+            {report.ok ? '✓ No blocking integrity errors' : `⚠ ${report.counts?.errors || 0} error(s)`}
+            {report.counts?.warnings ? ` · ${report.counts.warnings} warning(s)` : ''}
+          </span>
+        )}
+      </div>
+      {error && <p role="alert" className="mt-2 text-sm text-red-300">{error}</p>}
+      {findings.length > 0 && (
+        <ul className="mt-3 max-h-64 space-y-2 overflow-auto" aria-label="Integrity findings">
+          {findings.map((finding, index) => (
+            <li key={`${finding.code}-${index}`}
+              className="rounded-md border border-border bg-app/40 px-3 py-2 text-xs text-content-muted">
+              <span className={finding.severity === 'error' ? 'font-semibold text-red-300' : 'font-semibold text-amber-300'}>
+                {finding.severity.toUpperCase()} · {finding.code}
+              </span>{' '}{finding.message}
+              {(finding.dataset_id || finding.image_id || finding.filename) && (
+                <div className="mt-1 font-mono text-[11px] text-content-subtle">
+                  {finding.dataset_id ? `dataset ${finding.dataset_id} ` : ''}
+                  {finding.image_id ? `image ${finding.image_id} ` : ''}
+                  {finding.filename || ''}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </Card>
   )
 }
@@ -242,6 +355,7 @@ export default function MaintenanceSection({ config, setField }) {
     <div className="space-y-6">
       <UpdatesCard />
       <TrashCard />
+      <IntegrityCard />
       <Card title="Data" help="Where dataset images live on disk.">
         <TextField
           id="dataset-images-root"

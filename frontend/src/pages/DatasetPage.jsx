@@ -12,7 +12,7 @@ export default function DatasetPage() {
   return (
     <div className="p-4 max-w-6xl mx-auto">
       {ds.currentId ? (
-        <DatasetWorkspace ds={ds} onBack={() => ds.setCurrentId(null)} />
+        <DatasetWorkspace ds={ds} onBack={ds.close} />
       ) : (
         <div className="max-w-4xl mx-auto">
           <DatasetListPanel datasets={ds.datasets} onOpen={ds.open} onCreate={ds.create}

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-import { postJson } from '../../api/fetchClient'
+import { fetchWithCsrfRetry, postJson } from '../../api/fetchClient'
 import { useToast } from '../common/Toast'
 import { INPUT_CLASS, Card } from './primitives'
 
@@ -26,16 +26,15 @@ export default function ServerSection({ config, setField, runtime, handleSave })
   const knownRuntime = runtime.host != null && runtime.port != null
   const dirty = knownRuntime && (runtime.host !== config.server.host || runtime.port !== config.server.port)
 
-  // The exact URL(s) a phone should open. Token is appended ONLY when the token
-  // gate is on (a tokenless URL would 403); when it's on but no token exists yet,
-  // reachUrls stays empty and the card asks the user to generate one first.
+  // The exact URL(s) a phone should open. Credentials are never embedded in the
+  // URL: authenticated clients land on a login form and enter the token there.
   const port = config.server.port
   const token = requireToken ? (config.server.access_token || '') : ''
   const tokenReady = !requireToken || !!token
-  const tokenQS = token ? `?token=${token}` : ''
+  const accessPath = requireToken ? 'remote-login' : ''
   const reachUrls = tokenReady ? [
-    lanIp && { key: 'lan', label: 'Same Wi-Fi / LAN', url: `http://${lanIp}:${port}/${tokenQS}` },
-    tsIp && { key: 'ts', label: 'From anywhere · Tailscale', url: `http://${tsIp}:${port}/${tokenQS}` },
+    lanIp && { key: 'lan', label: 'Same Wi-Fi / LAN', url: `http://${lanIp}:${port}/${accessPath}` },
+    tsIp && { key: 'ts', label: 'From anywhere · Tailscale', url: `http://${tsIp}:${port}/${accessPath}` },
   ].filter(Boolean) : []
   const qrUrl = reachUrls[0]?.url || null
 
@@ -43,7 +42,7 @@ export default function ServerSection({ config, setField, runtime, handleSave })
     for (let i = 0; i < 120; i += 1) {
       await new Promise((r) => setTimeout(r, 1000))
       try {
-        const res = await fetch('/api/health', { cache: 'no-store' })
+        const res = await fetchWithCsrfRetry('/api/health', { cache: 'no-store' })
         if (res.ok) { window.location.reload(); return }
       } catch { /* still restarting — keep waiting */ }
     }
@@ -117,15 +116,14 @@ export default function ServerSection({ config, setField, runtime, handleSave })
 
       {lan && (
         <>
-          {/* Trusted-LAN default: no token to type on a phone. The token is an
-              opt-in extra layer, off by default (see backend server.require_token). */}
+          {/* Authenticated by default; disabling this is an explicit trust choice. */}
           <div className="flex items-start justify-between gap-4 rounded-lg border border-border bg-surface-raised px-3 py-2.5">
             <div>
               <p className="text-sm font-medium text-content">Require an access token</p>
               <p className="mt-0.5 text-xs text-content-muted">
                 {requireToken
-                  ? 'On: remote devices must open the URL WITH the token once (a session cookie takes over after). Extra safety on a shared or untrusted network.'
-                  : 'Off (default): anyone on your Wi-Fi/LAN can open the app with no password. Fine for a home network; turn on if the network is shared or untrusted.'}
+                  ? 'On (default): remote devices enter the token on a login page once; a signed session cookie takes over after.'
+                  : 'Off: anyone who can reach this network address can use the app, its provider keys, datasets, and GPU. Use only on an explicitly trusted network.'}
               </p>
             </div>
             <button type="button" role="switch" aria-checked={requireToken}
@@ -147,8 +145,8 @@ export default function ServerSection({ config, setField, runtime, handleSave })
                 </button>
               </div>
               <p className="mb-1 text-xs text-content-muted">
-                Remote devices present this once (baked into the link below) — a signed session
-                cookie takes over from there. Requests from this computer never need it.
+                Remote devices enter this once on the login page — it is never placed in the URL,
+                browser history, QR code, or referrer. Requests from this computer never need it.
               </p>
               <div className="flex gap-2">
                 <input id="server-token" type="text" readOnly
@@ -177,8 +175,8 @@ export default function ServerSection({ config, setField, runtime, handleSave })
                 )}
                 <div className="min-w-0 flex-1 space-y-2">
                   <p className="text-xs text-content-muted">
-                    Point your phone camera at the code — or open a link below. The LAN link
-                    needs the phone on the same Wi-Fi; the Tailscale link works from anywhere.
+                    Point your phone camera at the code — or open a link below. Enter the access
+                    token on the login page. The LAN link needs the same Wi-Fi; Tailscale works anywhere.
                   </p>
                   {reachUrls.map((u) => (
                     <div key={u.key} className="flex items-center gap-2">

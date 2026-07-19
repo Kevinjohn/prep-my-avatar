@@ -17,10 +17,13 @@ auth tokens) is ever emitted, and the whole text is run through the shared
 home-path redaction so no local `C:\\Users\\<name>\\…` path leaks.
 """
 import json
+import ntpath
+import os
 import re
-from datetime import datetime
 
+from ..extensions import db
 from ..models import CloudTrainingRun, TrainingRunRecord
+from ..utils.time import utcnow
 from ..utils.redact import redact_user_paths
 from ..version import APP_VERSION
 from . import cloud_training as ct
@@ -42,7 +45,7 @@ def resolve_run(run_key):
         return None, None
     rid = int(sid)
     if kind == 'cloud':
-        crun = CloudTrainingRun.query.get(rid)
+        crun = db.session.get(CloudTrainingRun, rid)
         if crun is None:
             return None, None
         rec = (TrainingRunRecord.query
@@ -50,10 +53,10 @@ def resolve_run(run_key):
                .order_by(TrainingRunRecord.id.desc()).first())
         return crun, rec
     if kind == 'rec':
-        rec = TrainingRunRecord.query.get(rid)
+        rec = db.session.get(TrainingRunRecord, rid)
         if rec is None:
             return None, None
-        crun = (CloudTrainingRun.query.get(rec.cloud_run_id)
+        crun = (db.session.get(CloudTrainingRun, rec.cloud_run_id)
                 if rec.cloud_run_id else None)
         return crun, rec
     return None, None
@@ -121,6 +124,19 @@ def _variant_label(variant):
     return 'Raw' if variant == 'base' else variant
 
 
+def _shared_value(key, value):
+    """Remove machine-specific paths while retaining the useful file identity."""
+    text = str(value)
+    looks_path = (os.path.isabs(text) or ntpath.isabs(text)
+                  or text.startswith(('~/', '~\\')))
+    path_key = any(token in key.lower() for token in (
+        'path', 'model', 'vae', 'encoder', 'directory', 'folder'))
+    if looks_path or (path_key and ('/' in text or '\\' in text)):
+        basename = ntpath.basename(text.replace('/', '\\')) or 'custom file'
+        return f'{basename} (custom local file)'
+    return value
+
+
 # --- rendering ---------------------------------------------------------------
 
 def build_run_config_text(run_key):
@@ -158,6 +174,22 @@ def build_run_config_text(run_key):
     if not isinstance(settings, dict):
         settings = None
 
+    admission = None
+    overrides = None
+    if rec is not None:
+        try:
+            admission = json.loads(rec.preflight) if rec.preflight else None
+        except (TypeError, ValueError):
+            admission = None
+        try:
+            overrides = json.loads(rec.overrides) if rec.overrides else None
+        except (TypeError, ValueError):
+            overrides = None
+    if not isinstance(admission, dict):
+        admission = None
+    if not isinstance(overrides, dict):
+        overrides = None
+
     image_count = None
     if rec is not None and rec.manifest:
         try:
@@ -179,7 +211,8 @@ def build_run_config_text(run_key):
         fam_line += f'  (variant: {vlabel})'
     L.append(f'Model family:  {fam_line}')
     L.append('Base model:    '
-             + ('official Hugging Face base' if not base_model else base_model))
+             + ('official Hugging Face base' if not base_model
+                else str(_shared_value('base_model', base_model))))
     ds_bits = [dataset_name or f'#{dataset_id}']
     meta = []
     if version is not None:
@@ -200,14 +233,37 @@ def build_run_config_text(run_key):
     else:
         for key, label, fmt in _SETTING_ROWS:
             if key in settings and settings[key] is not None:
-                L.append(f'{label + ":":<24}{fmt(settings[key])}')
+                L.append(f'{label + ":":<24}{_shared_value(key, fmt(settings[key]))}')
         # any enrichment key not in the known table -> generic line
         for key in sorted(settings):
             if key not in _KNOWN_SETTING_KEYS and settings[key] is not None:
-                L.append(f'{key + ":":<24}{settings[key]}')
+                L.append(f'{key + ":":<24}{_shared_value(key, settings[key])}')
     # masked lives on the run row (not the snapshot) — always known for records.
     if masked is not None:
         L.append(f'{"Masked training:":<24}{"yes" if masked else "no"}')
+
+    # --- admission decision -------------------------------------------------
+    L.append('')
+    L.append('## Admission decision')
+    L.append('')
+    if admission is None:
+        L.append(f'Preflight snapshot is {_NOT_RECORDED}.')
+    else:
+        verdict = admission.get('verdict') or 'passed'
+        L.append(f'{"Preflight verdict:":<24}{verdict}')
+        if admission.get('kept') is not None:
+            L.append(f'{"Admitted images:":<24}{admission["kept"]}')
+        for label, key in (('Blockers', 'blockers'), ('Warnings', 'warnings')):
+            values = admission.get(key)
+            if isinstance(values, list):
+                L.append(f'{label + ":":<24}{len(values)}')
+                for value in values:
+                    L.append(f'- {value}')
+    if overrides is None:
+        L.append(f'Explicit overrides:      {_NOT_RECORDED}')
+    else:
+        enabled = sorted(key for key, value in overrides.items() if value is True)
+        L.append(f'{"Explicit overrides:":<24}{", ".join(enabled) if enabled else "none"}')
 
     # --- run outcome ---------------------------------------------------------
     L.append('')
@@ -234,7 +290,7 @@ def build_run_config_text(run_key):
              'paste-safe, no local paths or keys.')
 
     text = redact_user_paths('\n'.join(L) + '\n')
-    date = created.strftime('%Y%m%d') if created else datetime.utcnow().strftime('%Y%m%d')
+    date = created.strftime('%Y%m%d') if created else utcnow().strftime('%Y%m%d')
     filename = (f'lds-config-{_slug(dataset_name)}-{_slug(family)}'
                 f'-v{version if version is not None else "na"}-{date}.txt')
     return {'filename': filename, 'text': text}

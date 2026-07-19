@@ -4,35 +4,72 @@
  * offenders get fixed right at the confirm, not hunted down in the grid after.
  * Replaces the old blocking window.confirm: onResolve(true) = start anyway,
  * onResolve(false) = cancel. */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 export default function PreflightModal({ report, datasetId, ds, onResolve }) {
   const { warnings = [], leak_images: leaks = [], dup_pairs: dups = [] } = report || {};
-  const [rejected, setRejected] = useState({});   // imageId -> true (rejected in place)
+  const [rejected, setRejected] = useState({});   // imageId -> pending|done
+  const [pendingActions, setPendingActions] = useState(0);
+  const [actionError, setActionError] = useState('');
+  const dialogRef = useRef(null);
+  useFocusTrap(dialogRef, true);
+  useBodyScrollLock(true);
   const imgUrl = (fn) => `/api/dataset/${datasetId}/img/${encodeURIComponent(fn)}`;
 
   // Escape cancels, like dismissing a native confirm.
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onResolve(false); };
+    const onKey = (e) => {
+      if (e.key === 'Escape' && pendingActions === 0) onResolve(false);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onResolve]);
+  }, [onResolve, pendingActions]);
 
   const reject = async (id) => {
-    setRejected((m) => ({ ...m, [id]: true }));   // optimistic: mark before the round-trip
-    await ds.setStatus(id, 'reject');
+    setActionError('');
+    setRejected((m) => ({ ...m, [id]: 'pending' }));
+    setPendingActions((count) => count + 1);
+    try {
+      const saved = await ds.setStatus(id, 'reject');
+      if (saved) setRejected((m) => ({ ...m, [id]: 'done' }));
+      else {
+        setRejected((m) => { const next = { ...m }; delete next[id]; return next; });
+        setActionError(`Image ${id} could not be rejected. The pair is still unresolved.`);
+      }
+    } finally {
+      setPendingActions((count) => Math.max(0, count - 1));
+    }
+  };
+
+  const saveCaption = async (id, value, original) => {
+    if (value === original) return;
+    setActionError('');
+    setPendingActions((count) => count + 1);
+    try {
+      const saved = await ds.setCaption(id, value);
+      if (!saved) setActionError(`The caption for image ${id} was not saved.`);
+    } finally {
+      setPendingActions((count) => Math.max(0, count - 1));
+    }
   };
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Before training"
       className="fixed inset-0 z-[9990] bg-black/80 flex items-center justify-center p-3"
-      onClick={(e) => { if (e.target === e.currentTarget) onResolve(false); }}>
-      <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl border border-amber-400/40 bg-app p-4 flex flex-col gap-3">
+      onClick={(e) => {
+        if (e.target === e.currentTarget && pendingActions === 0) onResolve(false);
+      }}>
+      <div ref={dialogRef}
+        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl border border-amber-400/40 bg-app p-4 flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <span className="text-amber-300 font-semibold"><span aria-hidden>⚠️</span> Before training</span>
-          <button type="button" onClick={() => onResolve(false)}
+          <button type="button" onClick={() => onResolve(false)} disabled={pendingActions > 0}
             className="ml-auto text-content-subtle hover:text-content" aria-label="Cancel">✕</button>
         </div>
+
+        {actionError && <p role="alert" className="m-0 text-xs text-red-300">⚠ {actionError}</p>}
 
         {/* Summary — the aggregate message, kept verbatim. */}
         {warnings.length > 0 && (
@@ -53,7 +90,7 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
                   className="w-14 h-14 rounded object-cover shrink-0 bg-black" />
                 <textarea defaultValue={li.caption} rows={2}
                   aria-label={`Caption of image ${li.id}`}
-                  onBlur={(e) => { if (e.target.value !== li.caption) ds.setCaption(li.id, e.target.value); }}
+                  onBlur={(e) => saveCaption(li.id, e.target.value, li.caption)}
                   className="flex-1 bg-app/60 border border-amber-400/30 rounded px-2 py-1 text-[0.6875rem] text-content resize-y" />
               </div>
             ))}
@@ -67,16 +104,18 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
               Near-duplicate pairs ({dups.length}) — reject one of each
             </span>
             {dups.map((p, i) => {
-              const resolved = rejected[p.a.id] || rejected[p.b.id];
+              const resolved = rejected[p.a.id] === 'done' || rejected[p.b.id] === 'done';
+              const saving = rejected[p.a.id] === 'pending' || rejected[p.b.id] === 'pending';
               return (
-                <div key={i} className={`flex items-center gap-3 ${resolved ? 'opacity-60' : ''}`}>
+                <div key={`${p.a.id}-${p.b.id}-${i}`} className={`flex items-center gap-3 ${resolved ? 'opacity-60' : ''}`}>
                   {[p.a, p.b].map((im) => (
                     <div key={im.id} className="flex flex-col items-center gap-1">
                       <img src={imgUrl(im.filename)} alt={`image ${im.id}`} loading="lazy"
-                        className={`w-20 h-20 rounded object-cover bg-black ${rejected[im.id] ? 'ring-2 ring-red-500 grayscale' : ''}`} />
-                      <button type="button" disabled={resolved} onClick={() => reject(im.id)}
+                        className={`w-20 h-20 rounded object-cover bg-black ${rejected[im.id] === 'done' ? 'ring-2 ring-red-500 grayscale' : ''}`} />
+                      <button type="button" disabled={resolved || saving} onClick={() => reject(im.id)}
                         className="px-2 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300 text-[0.625rem] disabled:opacity-40">
-                        {rejected[im.id] ? '✕ rejected' : 'Reject this'}
+                        {rejected[im.id] === 'pending' ? 'Saving…'
+                          : rejected[im.id] === 'done' ? '✕ rejected' : 'Reject this'}
                       </button>
                     </div>
                   ))}
@@ -88,11 +127,11 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
         )}
 
         <div className="flex items-center gap-2 pt-1">
-          <button type="button" onClick={() => onResolve(false)}
+          <button type="button" onClick={() => onResolve(false)} disabled={pendingActions > 0}
             className="px-3 py-1.5 rounded-lg bg-surface text-content text-sm">Cancel</button>
-          <button type="button" onClick={() => onResolve(true)}
-            className="ml-auto px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold">
-            Start anyway
+          <button type="button" onClick={() => onResolve(true)} disabled={pendingActions > 0}
+            className="ml-auto px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
+            {pendingActions > 0 ? 'Saving fixes…' : 'Start anyway'}
           </button>
         </div>
       </div>

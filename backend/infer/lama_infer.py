@@ -1,4 +1,4 @@
-"""Watermark inpainting — simple-lama-inpainting (LaMa), lance par l'interprete ML
+"""Watermark inpainting — Big-LaMa TorchScript, lance par l'interprete ML
 DEDIE (le paquet est absent du venv Flask). Meme pattern subprocess que
 face_score_infer.py / mask_infer.py.
 
@@ -97,7 +97,7 @@ def main() -> int:
     try:
         from PIL import Image
         import torch
-        from simple_lama_inpainting import SimpleLama
+        from lama_model import LamaModel
     except Exception as e:
         # import KO (paquet absent / torch casse) -> JSON propre, pas de traceback muet.
         print(json.dumps({"ok": False, "error": f"import: {type(e).__name__}: {e}"}))
@@ -107,7 +107,7 @@ def main() -> int:
         if requested_device == 'cuda' and not cuda:
             raise RuntimeError('CUDA requested but torch.cuda.is_available() is false')
         actual_device = 'cuda' if requested_device in ('auto', 'cuda') and cuda else 'cpu'
-        lama = SimpleLama()
+        lama = LamaModel(torch.device(actual_device))
         results = []
         for job in raw_jobs:
             image_path = job['image_path']

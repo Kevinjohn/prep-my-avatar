@@ -26,7 +26,7 @@ automatically when their tool is detected.
 ## First launch
 
 **Windows (one command):** clone the repo, then run `start.bat`. It picks a
-compatible Python (3.10–3.12), creates a `.venv`, installs the requirements and
+ML-compatible Python (3.11–3.12), creates a `.venv`, installs the requirements and
 opens the app at `http://127.0.0.1:5050/`.
 
 **Any OS (manual venv):**
@@ -38,7 +38,9 @@ pip install -r backend/requirements.txt
 python backend/run.py
 ```
 
-**Docker (API-only):** `cp .env.example .env`, then `docker compose up --build`.
+**Docker (API-only):** `cp .env.example .env`, set `LDS_ACCESS_TOKEN` in `.env`
+to a long random value, then run `docker compose up --build`. Open
+`http://127.0.0.1:5050/remote-login` and enter that token.
 
 The full install matrix (portable bundle, GPU requirements, external tools)
 lives in the README on GitHub.

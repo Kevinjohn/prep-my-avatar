@@ -1,5 +1,5 @@
-"""Watermark inpainting via simple-lama-inpainting (LaMa), lance dans un interprete
-DEDIE (le paquet est absent du venv Flask). Meme pattern subprocess que
+"""Watermark inpainting via the local Big-LaMa adapter, run in a dedicated ML
+interpreter. Same subprocess pattern as
 person_mask.py / face_similarity.py. Le device est configurable (Auto/GPU/CPU) ;
 le routeur reserve la fenetre GPU uniquement quand CUDA est effectivement utilise.
 
@@ -27,7 +27,7 @@ _cuda_probe = {'python': None, 'checked': 0.0, 'available': False}
 
 def lama_python() -> str:
     # Cle dediee, sinon on reutilise le python ML existant (rembg/insightface), sinon
-    # l'interpreteur courant. simple-lama vit dans le MEME extra ML (requirements-ml.txt).
+    # l'interpreteur courant. LaMa dependencies live in requirements-ml.txt.
     # PUBLIC : le bouton « Install inpainting » (setup_installer) cible CE meme
     # resolveur, pour que l'install atterrisse la ou le wrapper importe ensuite.
     return cfg.get('watermark.python') or cfg.get('masks.python') or sys.executable

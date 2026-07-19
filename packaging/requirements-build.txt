@@ -1,0 +1,3 @@
+# Build tooling is intentionally pinned. Update through dependency review, never
+# implicitly during a release build.
+pyinstaller==6.16.0

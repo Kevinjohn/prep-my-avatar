@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { postJson } from '../api/fetchClient';
+import {
+  apiResponse, getJson, safePostJson as postJson,
+} from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
+import { useConfirmDialog, usePromptDialog } from '../components/common/ConfirmDialog';
 import TrainingProgress from '../components/dataset/TrainingProgress';
+import RunComparisonPanel from '../components/runs/RunComparisonPanel';
 
 /* Dedicated hub for cloud training runs across ALL datasets: watch the ones in
    progress (live progress + samples), stop them, and download finished LoRAs —
@@ -39,6 +43,25 @@ function timeAgo(iso) {
 
 function famLabel(f) { return FAMILY_LABEL[f] || f || 'LoRA'; }
 
+function durationLabel(seconds) {
+  if (!Number.isFinite(Number(seconds))) return '';
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function costLabel(run) {
+  const raw = run.cost_usd ?? run.cost_estimate;
+  const amount = Number(raw);
+  if (!Number.isFinite(amount)) return '';
+  const duration = durationLabel(run.billing_seconds);
+  return `$${amount.toFixed(2)} ${run.cost_final ? 'final' : 'so far'}${duration ? ` · billed ${duration}` : ''}`;
+}
+
 /* One compact line: the EFFECTIVE ai-toolkit settings this launch used
    (snapshotted at launch by the provenance registry). Absent on rows that
    predate the snapshot feature. */
@@ -68,11 +91,19 @@ function checkpointHref(run) {
   return `/api/dataset/${run.dataset_id}/train/cloud/checkpoint?${qs.toString()}`;
 }
 
+function compareKey(run, index = 0) {
+  return run.record_id ? `record-${run.record_id}`
+    : run.share_key || (run.run_id ? `cloud-${run.run_id}` : `legacy-${run.dataset_id}-${run.created_at || index}`);
+}
+
 export default function CloudRunsPage() {
   const toast = useToast();
+  const confirm = useConfirmDialog();
+  const promptDialog = usePromptDialog();
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [stopping, setStopping] = useState({});     // run_id -> bool
+  const [comparison, setComparison] = useState([]);
   const [recentCollapsed, setRecentCollapsed] = useState(() => {
     try { return localStorage.getItem(RECENT_COLLAPSED_KEY) === '1'; } catch { return false; }
   });
@@ -82,8 +113,7 @@ export default function CloudRunsPage() {
 
   const poll = useCallback(async () => {
     try {
-      const r = await fetch('/api/dataset/train/cloud/runs?limit=15', { credentials: 'include' });
-      if (r.ok) setData(await r.json());
+      setData(await getJson('/api/dataset/train/cloud/runs?limit=15'));
     } catch { /* transient — next tick retries */ }
   }, []);
 
@@ -102,9 +132,12 @@ export default function CloudRunsPage() {
 
   const stop = async (run) => {
     const who = run.dataset_name || run.run_name || `run #${run.run_id}`;
-    if (!window.confirm(`Stop the cloud run for « ${who} »?\n\n`
-      + 'The pod is terminated. Any checkpoint reached so far is still downloaded '
-      + 'and importable — you only lose the remaining steps.')) return;
+    if (!(await confirm({
+      title: 'Stop cloud run?',
+      message: `Stop the cloud run for « ${who} »? The pod is terminated. Any checkpoint reached so far is still downloaded and importable — you only lose the remaining steps.`,
+      confirmLabel: 'Stop run',
+      tone: 'danger',
+    }))) return;
     setStopping((m) => ({ ...m, [run.run_id]: true }));
     try {
       const d = await postJson('/api/dataset/train/cloud/stop', { run_id: run.run_id });
@@ -137,7 +170,16 @@ export default function CloudRunsPage() {
   // auto-resume — the monitor seeds the checkpoint onto the pod before start).
   const [continuing, setContinuing] = useState({});   // run_id -> bool
   const continueRun = async (run) => {
-    const raw = window.prompt('Additional steps to train from the last checkpoint:', '1000');
+    const raw = await promptDialog({
+      title: 'Continue cloud training',
+      message: 'Enter the number of additional steps to train from the last checkpoint.',
+      inputLabel: 'Additional steps',
+      inputType: 'number',
+      min: 1,
+      step: 1,
+      defaultValue: '1000',
+      confirmLabel: 'Continue training',
+    });
     if (raw == null) return;                            // cancelled
     const extra = parseInt(raw, 10);
     if (!Number.isFinite(extra) || extra <= 0) {
@@ -162,9 +204,8 @@ export default function CloudRunsPage() {
   const shareConfig = async (run) => {
     if (!run.share_key) return;
     try {
-      const r = await fetch(`/api/dataset/train/runs/${encodeURIComponent(run.share_key)}/share`,
-        { credentials: 'include' });
-      if (!r.ok) { toast.error('Could not build the config file — please retry.'); return; }
+      const r = await apiResponse(
+        `/api/dataset/train/runs/${encodeURIComponent(run.share_key)}/share`);
       const blob = await r.blob();
       const cd = r.headers.get('Content-Disposition') || '';
       const m = /filename="?([^"]+)"?/.exec(cd);
@@ -184,6 +225,22 @@ export default function CloudRunsPage() {
   const limit = data?.limit || 1;
   const budget = data?.monthly_budget || 0;
   const spent = data?.month_spend || 0;
+  const comparableRecent = recent.map((run, index) => ({
+    ...run, _compareKey: compareKey(run, index),
+  }));
+  const comparedRuns = comparison
+    .map((key) => comparableRecent.find((run) => run._compareKey === key))
+    .filter(Boolean);
+  const toggleComparison = (key) => {
+    setComparison((selected) => {
+      if (selected.includes(key)) return selected.filter((item) => item !== key);
+      if (selected.length >= 4) {
+        toast.info('Compare up to four runs at a time.');
+        return selected;
+      }
+      return [...selected, key];
+    });
+  };
 
   return (
     <section className="flex flex-col gap-5">
@@ -300,7 +357,7 @@ export default function CloudRunsPage() {
                 <span className="text-content-subtle text-[0.625rem]">{timeAgo(run.created_at)}</span>
                 <span className="ml-auto text-content-muted text-[0.6875rem] tabular-nums">
                   {run.gpu ? `${run.gpu} · ` : ''}{run.price_per_hour != null ? `$${run.price_per_hour}/h · ` : ''}
-                  ~${run.cost_estimate} so far
+                  {costLabel(run)}
                 </span>
               </div>
 
@@ -346,10 +403,14 @@ export default function CloudRunsPage() {
         )}
       </div>
 
+      <RunComparisonPanel runs={comparedRuns}
+        onRemove={(key) => setComparison((items) => items.filter((item) => item !== key))}
+        onClear={() => setComparison([])} />
+
       {/* A pod kept alive for manual recovery bills until reaped — call it out. */}
       {recent.some((r) => r.status === 'error_pod_kept') && (
         <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-amber-200 text-xs">
-          ⚠ A finished run kept its pod for manual checkpoint recovery — it keeps billing until reaped. Download its LoRA below, then it is cleaned up automatically after the recovery window.
+          ⚠ A finished run kept its pod for manual checkpoint recovery — it keeps billing until vast.ai confirms destruction. Download its LoRA below; after the recovery window the app requests cleanup and keeps retrying, but verify the provider console if the warning remains.
         </div>
       )}
 
@@ -369,9 +430,14 @@ export default function CloudRunsPage() {
             {!recentCollapsed && (
               <button type="button"
                 onClick={async () => {
-                  if (!window.confirm('Move the staging folders of all FINISHED runs to the trash?\n\nDataset copies, samples and checkpoint duplicates already imported. Active runs and pods kept for recovery are spared. Recoverable until you empty the trash in Settings.')) return;
+                  if (!(await confirm({
+                    title: 'Clean finished cloud runs?',
+                    message: 'Move the staging folders of all finished runs to the trash? Dataset copies, samples and checkpoint duplicates already imported. Active runs and pods kept for recovery are spared. Recoverable until you empty the trash in Settings.',
+                    confirmLabel: 'Move to trash',
+                    tone: 'warning',
+                  }))) return;
                   const d = await postJson('/api/dataset/train/cloud/purge', {});
-                  if (d.ok) toast.info(`Cleaned ${d.purged_runs} run(s) — ${(d.freed_bytes / 1e9).toFixed(1)} GB moved to the trash.`);
+                  if (d.ok) toast.info(`Cleaned ${d.purged_runs} run(s) — ${((d.moved_bytes || 0) / 1e9).toFixed(1)} GB moved to the trash (disk space is reclaimed when you empty it).`);
                   poll();
                 }}
                 className="ml-auto px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-200 text-xs font-semibold">
@@ -381,9 +447,14 @@ export default function CloudRunsPage() {
           </div>
           {!recentCollapsed && (
           <div className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
-            {recent.map((run, i) => (
-              <div key={run.run_id ? `c${run.run_id}` : `l${run.dataset_id}-${run.created_at || i}`}
+            {comparableRecent.map((run) => (
+              <div key={run._compareKey}
                 className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+                <input type="checkbox" checked={comparison.includes(run._compareKey)}
+                  onChange={() => toggleComparison(run._compareKey)}
+                  aria-label={`Compare ${run.dataset_name || `dataset ${run.dataset_id}`} version ${run.version || 'unknown'}`}
+                  title="Add this run to side-by-side comparison"
+                  className="h-4 w-4 accent-indigo-500" />
                 <span aria-hidden title={run.source === 'cloud' ? 'Cloud run (vast.ai)' : 'Local run'}>
                   {run.source === 'cloud' ? '☁️' : '💻'}
                 </span>
@@ -405,8 +476,13 @@ export default function CloudRunsPage() {
                   </span>
                 )}
                 <span className="ml-auto text-content-muted text-[0.6875rem] tabular-nums">
-                  {run.gpu ? `${run.gpu} · ` : ''}${run.cost_estimate}
+                  {run.gpu ? `${run.gpu} · ` : ''}{costLabel(run)}
                 </span>
+                {!run.cost_final && run.finished_at && run.source === 'cloud' && (
+                  <span className="text-amber-300 text-[0.625rem]">
+                    Provider billing may still be active
+                  </span>
+                )}
                 {run.checkpoint_ready && (
                   <a href={checkpointHref(run)}
                     className="px-2 py-1 rounded-lg border border-emerald-400/40 bg-emerald-500/10 text-emerald-200 text-xs font-semibold no-underline">

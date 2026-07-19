@@ -16,6 +16,7 @@ def _mk(app, n_keep=0, framing='face', caption='a nice varied caption with many 
             dataset_id=ds.id, filename=f'k{i}.webp', status='keep', framing=framing,
             caption=f'{caption} #{i}', source='import', training_usefulness='green',
             face_state='scorable', face_score=0.70,
+            source_rights='{"basis":"owned"}',
             analysis_json='{"face":{"quality":"green"}}', watermark_state='none'))
     for row in extra_rows:
         svc.db.session.add(FaceDatasetImage(dataset_id=ds.id, **row))
@@ -325,14 +326,36 @@ def test_assert_trainable_uncaptioned_is_confirmable(app):
         lt.assert_trainable(ds.id, allow_uncaptioned=True)   # confirm → passe
 
 
+def test_assert_trainable_enforces_family_floor_even_when_caption_checks_skipped(app):
+    from app.services import lora_training as lt
+    with app.app_context():
+        ds = _mk(app, n_keep=10, framing='body')
+        with pytest.raises(ValueError, match=r'^PREFLIGHT_BLOCKED:.*12'):
+            lt.assert_trainable(ds.id, check_captions=False)
+
+
+def test_assert_trainable_enforces_reconstruction_blocker(app):
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_training as lt
+    with app.app_context():
+        ds = _mk(app, n_keep=12, framing='body')
+        source = FaceDatasetImage.query.filter_by(dataset_id=ds.id).first()
+        svc.db.session.add(FaceDatasetImage(
+            dataset_id=ds.id, filename='double.webp', source='generated', status='keep',
+            framing='body', caption=source.caption, parent_image_id=source.id,
+            derivation_kind=svc.KLEIN_IMAGE_IMPROVE))
+        svc.db.session.commit()
+        with pytest.raises(ValueError, match=r'^PREFLIGHT_BLOCKED:.*both source'):
+            lt.assert_trainable(ds.id, check_captions=False)
+
+
 def test_preflight_route(client, app, monkeypatch):
     from app import capabilities
     monkeypatch.setattr(capabilities, 'gpu_vram_gb', lambda: None)
-    with app.app_context():
-        from app import config as cfg
-        root = __import__('pathlib').Path(cfg.get('aitoolkit.dir') or '')
     # configure a fake ai-toolkit so the gate opens
-    import pathlib, tempfile
+    import pathlib
+    import tempfile
     tmp = pathlib.Path(tempfile.mkdtemp())
     (tmp / 'venv' / 'Scripts').mkdir(parents=True)
     (tmp / 'venv' / 'Scripts' / 'python.exe').touch()

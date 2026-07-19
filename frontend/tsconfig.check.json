@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/api/**/*.js",
+    "src/utils/**/*.js",
+    "src/components/dataset/workspaceNavigation.js",
+    "src/components/dataset/captionCategory.js",
+    "src/hooks/useFocusTrap.js"
+  ],
+  "exclude": ["**/*.test.js", "dist", "node_modules"]
+}

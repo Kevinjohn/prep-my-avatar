@@ -5,6 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import { displayLabel } from '../../utils/labels';
 
 const IMPROVE_HELP = 'Klein reconstructs from the preserved original with identity references. It is generative: compare both versions, then admit exactly one.';
@@ -28,6 +29,7 @@ export default function DatasetLightbox({
 
   // Focus trap keeps Tab inside the dialog (P2-7).
   useFocusTrap(dialogRef, !!(img && img.filename));
+  useBodyScrollLock(!!(img && img.filename));
 
   // Keyboard support: Escape closes, initial focus on the close button.
   useEffect(() => {

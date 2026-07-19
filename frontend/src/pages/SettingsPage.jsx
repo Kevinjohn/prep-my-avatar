@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { apiFetch, putJson, del } from '../api/fetchClient'
 import { useToast } from '../components/common/Toast'
+import { useConfirmDialog } from '../components/common/ConfirmDialog'
 import { useCapabilities } from '../context/CapabilitiesContext'
 import { SETTINGS_SECTIONS, sectionStatus, matchesQuery } from '../components/settings/registry'
 import { SectionHeader } from '../components/settings/primitives'
@@ -45,6 +46,7 @@ function StatusLed({ status }) {
 
 export default function SettingsPage() {
   const toast = useToast()
+  const confirm = useConfirmDialog()
   const { caps, refresh } = useCapabilities()
   const { section } = useParams()
   const navigate = useNavigate()
@@ -97,7 +99,12 @@ export default function SettingsPage() {
   // by going blank — so confirm, delete server-side, then refresh presence + caps
   // so any engine that depended on it flips to unavailable right away.
   const handleDeleteSecret = async (key, label) => {
-    if (!window.confirm(`Remove the saved ${label}? Any engine that uses it stops working until you add a new key.`)) return
+    if (!(await confirm({
+      title: `Remove ${label}?`,
+      message: `Any engine that uses the saved ${label} stops working until you add a new key.`,
+      confirmLabel: 'Remove key',
+      tone: 'danger',
+    }))) return
     try {
       const data = await del(`/api/settings/secret/${key}`)
       setSecretsPresence(data.secrets)

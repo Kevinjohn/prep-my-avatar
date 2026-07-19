@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -517,7 +518,7 @@ def test_clean_manual_regions_force_one_composite_inpaint_at_edge_and_clear_on_s
         legacy_bbox = [0.0, 0.0, 1.0, 0.05]  # would take the legacy crop route
         img = _kept_image(svc, ds.id, 'manual.webp', bbox=legacy_bbox, regions=regions)
         path = svc._img_path(img)
-        before = open(path, 'rb').read()
+        before = Path(path).read_bytes()
 
         counts, err = svc.clean_watermarks(LOCAL_USER, ds.id, image_ids=[img.id])
 
@@ -527,7 +528,7 @@ def test_clean_manual_regions_force_one_composite_inpaint_at_edge_and_clear_on_s
         }
         assert calls == [(path, regions)]
         stem, ext = os.path.splitext(path)
-        assert open(f'{stem}.orig{ext}', 'rb').read() == before
+        assert Path(f'{stem}.orig{ext}').read_bytes() == before
         row = svc.db.session.get(FaceDatasetImage, img.id)
         assert row.watermark_state == 'cleaned'
         assert json.loads(row.watermark_bbox) == legacy_bbox
@@ -556,7 +557,7 @@ def test_clean_empty_manual_override_needs_review_without_touching_pixels(app, m
             svc, ds.id, 'empty.webp', bbox=[0.0, 0.0, 1.0, 0.05], regions=[],
         )
         path = svc._img_path(img)
-        before = open(path, 'rb').read()
+        before = Path(path).read_bytes()
 
         counts, err = svc.clean_watermarks(LOCAL_USER, ds.id, image_ids=[img.id])
 
@@ -564,7 +565,7 @@ def test_clean_empty_manual_override_needs_review_without_touching_pixels(app, m
         assert counts == {
             'cropped': 0, 'inpainted': 0, 'needs_review': 1, 'failed': 0, 'skipped': 0,
         }
-        assert open(path, 'rb').read() == before
+        assert Path(path).read_bytes() == before
         stem, ext = os.path.splitext(path)
         assert not os.path.exists(f'{stem}.orig{ext}')
         row = svc.db.session.get(FaceDatasetImage, img.id)
@@ -591,12 +592,12 @@ def test_clean_manual_regions_unavailable_preserves_retry_metadata(app, monkeypa
         img = _kept_image(svc, ds.id, 'unavailable.webp', bbox=[0.1, 0.1, 0.2, 0.2],
                           regions=regions)
         path = svc._img_path(img)
-        before = open(path, 'rb').read()
+        before = Path(path).read_bytes()
 
         counts, err = svc.clean_watermarks(LOCAL_USER, ds.id, image_ids=[img.id])
 
         assert err is None and counts['skipped'] == 1 and counts['inpainted'] == 0
-        assert open(path, 'rb').read() == before
+        assert Path(path).read_bytes() == before
         stem, ext = os.path.splitext(path)
         assert not os.path.exists(f'{stem}.orig{ext}')
         row = svc.db.session.get(FaceDatasetImage, img.id)
@@ -623,15 +624,15 @@ def test_clean_manual_regions_failure_preserves_retry_metadata(app, monkeypatch)
         img = _kept_image(svc, ds.id, 'failed.webp', bbox=[0.1, 0.1, 0.2, 0.2],
                           regions=regions)
         path = svc._img_path(img)
-        before = open(path, 'rb').read()
+        before = Path(path).read_bytes()
 
         counts, err = svc.clean_watermarks(LOCAL_USER, ds.id, image_ids=[img.id])
 
         assert counts['failed'] == 1 and counts['inpainted'] == 0
         assert err == failure
-        assert open(path, 'rb').read() == before
+        assert Path(path).read_bytes() == before
         stem, ext = os.path.splitext(path)
-        assert open(f'{stem}.orig{ext}', 'rb').read() == before
+        assert Path(f'{stem}.orig{ext}').read_bytes() == before
         row = svc.db.session.get(FaceDatasetImage, img.id)
         assert row.watermark_state == 'detected'
         assert json.loads(row.watermark_regions) == regions
@@ -1000,7 +1001,7 @@ def test_detect_skips_dismissed_and_include_dismissed_reexamines(app, monkeypatc
     monkeypatch.setattr(vo, 'unload_vision_model', lambda *a, **k: True)
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'W', 'w')
-        fresh = _kept_image(svc, ds.id, 'a.webp', state=None)
+        _kept_image(svc, ds.id, 'a.webp', state=None)
         dismissed = _kept_image(svc, ds.id, 'b.webp', state='dismissed')
         counts = svc.detect_watermarks(LOCAL_USER, ds.id)
         # only the fresh image is examined; the dismissed one is skipped entirely
@@ -1049,7 +1050,6 @@ def test_clean_watermarks_empty_image_ids_cleans_nothing(app, monkeypatch):
 
 def test_dismiss_route_marks_and_validates(client, app):
     from app.services import face_dataset_service as svc
-    from app.config import LOCAL_USER
     from app.models import FaceDatasetImage
     ds_id = _create(client, 'R', 'r').get_json()['id']
     with app.app_context():

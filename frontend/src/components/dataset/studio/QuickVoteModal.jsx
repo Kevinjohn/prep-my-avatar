@@ -10,10 +10,12 @@
  */
 import { useRef } from 'react';
 import { useFocusTrap } from '../../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../../hooks/useBodyScrollLock';
 
 export default function QuickVoteModal({ vote, datasetId, fmt }) {
   const ref = useRef(null);
   useFocusTrap(ref, !!vote.current);
+  useBodyScrollLock(!!vote.current);
 
   if (!vote.voteQueue || !vote.current) return null;
   const cur = vote.current;

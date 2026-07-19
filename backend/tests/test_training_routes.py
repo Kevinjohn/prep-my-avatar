@@ -31,15 +31,15 @@ def test_status_available_false_when_unconfigured(client, monkeypatch):
     assert resp.get_json() == {'available': False}
 
 
-def test_status_configured_polls_queue_then_status(client, monkeypatch):
+def test_status_configured_is_read_only(client, monkeypatch):
     _valid(monkeypatch, True)
-    calls = []
-    monkeypatch.setattr('app.services.lora_training.process_training_queue', lambda: calls.append('polled'))
+    monkeypatch.setattr(
+        'app.services.lora_training.process_training_queue',
+        lambda: (_ for _ in ()).throw(AssertionError('GET must not advance the queue')))
     monkeypatch.setattr('app.services.lora_training.training_status',
                         lambda user_id=None: {'in_progress': False, 'user': user_id})
     resp = client.get('/api/dataset/train/status')
     assert resp.status_code == 200
-    assert calls == ['polled']
     assert resp.get_json() == {'in_progress': False, 'user': 'local'}
 
 

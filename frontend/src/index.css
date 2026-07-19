@@ -39,7 +39,7 @@
   --surface-overlay: 17 18 27;     /* near-opaque dark panel for modals */
   --content: 243 244 246;          /* gray-100 */
   --content-muted: 156 163 175;    /* gray-400 */
-  --content-subtle: 107 114 128;   /* gray-500 */
+  --content-subtle: 120 127 140;   /* tertiary text; WCAG AA on app + surface */
   --border: 255 255 255;           /* used at low alpha → faint white border */
   --border-alpha: 0.10;
   --border-strong: 255 255 255;

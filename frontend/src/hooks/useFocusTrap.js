@@ -46,7 +46,7 @@ export function useFocusTrap(ref, active = true) {
 
     return () => {
       container.removeEventListener('keydown', handleKeyDown);
-      if (previouslyFocused && previouslyFocused.focus) {
+      if (previouslyFocused instanceof HTMLElement) {
         previouslyFocused.focus();
       }
     };

@@ -4,6 +4,7 @@ import { displayLabel } from '../../utils/labels';
 import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
 import CaptionEditorDialog from './CaptionEditorDialog';
 import PromptEditPopover from './PromptEditPopover';
+import { useConfirmDialog } from '../common/ConfirmDialog';
 
 const STATUS_CLS = {
   keep: 'border-green-500',
@@ -62,6 +63,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
                                           onRegenerate, onView, nonce = 0, faceThresholds,
                                           selected = false, onToggleSelect, tileSize = 'M',
                                           exclusiveLocked = false }) {
+  const confirm = useConfirmDialog();
   const [cap, setCap] = useState(img.caption || '');
   const [captionEditorOpen, setCaptionEditorOpen] = useState(false);
   // ✏️ edit-prompt bubble open state (regenerate this tile with an edited prompt).
@@ -198,8 +200,16 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
           )}
           {!isRescueDerived && !exclusiveLocked && (
             <button type="button"
-              onClick={(e) => { e.stopPropagation(); if (window.confirm('Permanently delete this image?')) onDelete(img.id); }}
-              title="Delete permanently" aria-label="Delete permanently"
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (await confirm({
+                  title: 'Move this image to Trash?',
+                  message: 'The image remains recoverable in Settings until you empty the Trash.',
+                  confirmLabel: 'Move to Trash',
+                  tone: 'danger',
+                })) onDelete(img.id);
+              }}
+              title="Move to Trash" aria-label="Move image to Trash"
               className="px-1.5 py-0.5 rounded bg-red-700/80 text-white text-[10px]">🗑</button>
           )}
         </div>
@@ -221,12 +231,18 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
             title="Keep" aria-label="Keep" aria-pressed={img.status === 'keep'}
             className={`flex-1 py-1 rounded text-[11px] ${img.status === 'keep' ? 'bg-green-600 text-white' : 'bg-surface text-content-muted'}`}>✓</button>
           <button type="button"
-            onClick={() => {
+            onClick={async () => {
               // Rejecting a GENERATED image offers an immediate retry of the same
               // variation (in place, new seed) so the composition stays on target.
               if (!isImageImproveCandidate && img.status !== 'reject'
                   && img.source === 'generated' && img.filename && onRegenerate
-                  && window.confirm('Photo rejected — regenerate a new attempt of this variation?\n(OK = replace with a new attempt · Cancel = reject only)')) {
+                  && await confirm({
+                    title: 'Regenerate this rejected photo?',
+                    message: 'Choose “Regenerate” to replace it with a new attempt of the same variation, or “Reject only” to keep it rejected without generating.',
+                    confirmLabel: 'Regenerate',
+                    cancelLabel: 'Reject only',
+                    tone: 'warning',
+                  })) {
                 onRegenerate(img.id);
                 return;
               }

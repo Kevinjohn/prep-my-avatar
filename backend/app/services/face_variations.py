@@ -153,6 +153,56 @@ def _augment_prompt(entry, *, allow_outfit=True):
     return entry
 
 
+def _coverage_metadata(entry):
+    """Attach machine-readable coverage tags to catalogue entries once.
+
+    Coverage planning consumes this field directly; it never scrapes translated
+    labels or creative prompt prose. Stable IDs are the schema here, while the
+    prompt remains free to change without silently changing recommendation logic.
+    """
+    shot_id = entry['id']
+    framing = entry['framing']
+    meta = {'pose': 'headshot' if framing == 'face' else 'standing'}
+    if framing == 'back' or '_back' in shot_id or shot_id.startswith('back_'):
+        meta['angle'] = 'back'
+    elif 'profile' in shot_id:
+        meta['angle'] = 'profile'
+    elif '_34' in shot_id:
+        meta['angle'] = 'three-quarter'
+    elif 'front' in shot_id:
+        meta['angle'] = 'front'
+    if 'laugh' in shot_id:
+        meta['expression'] = 'laugh'
+    elif 'smile' in shot_id:
+        meta['expression'] = 'smile'
+    elif 'serious' in shot_id:
+        meta['expression'] = 'serious'
+    elif 'surprise' in shot_id:
+        meta['expression'] = 'surprised'
+    elif framing != 'back':
+        meta['expression'] = 'neutral'
+    if 'golden' in shot_id:
+        meta['lighting'] = 'golden-hour'
+    elif 'studio' in shot_id:
+        meta['lighting'] = 'studio'
+    elif 'rim_light' in shot_id or 'silhouette' in shot_id:
+        meta['lighting'] = 'low-light'
+    elif 'window' in shot_id or 'outdoor' in shot_id or 'beach' in shot_id or 'field' in shot_id:
+        meta['lighting'] = 'daylight'
+    if 'sit' in shot_id or 'cafe' in shot_id:
+        meta['pose'] = 'sitting'
+    elif 'walk' in shot_id:
+        meta['pose'] = 'moving'
+    if 'studio' in shot_id:
+        meta['background'] = 'studio'
+    elif any(token in shot_id for token in ('outdoor', 'beach', 'field', 'terrace')):
+        meta['background'] = 'outdoor'
+    elif 'cafe' in shot_id:
+        meta['background'] = 'indoor'
+    meta['occlusion'] = 'none'
+    return meta
+
+
 VARIATION_CATALOG = [
     _e('face_front_neutral', 'expression', 'face', 'Visage face, neutre',
        'close-up portrait, front view, neutral expression, soft light, plain neutral background', cb=True),
@@ -338,8 +388,10 @@ NSFW_VARIATION_CATALOG = [
 # described state of (un)dress (allow_outfit=False) but still get a neutral expression.
 for _entry in VARIATION_CATALOG:
     _augment_prompt(_entry)
+    _entry['coverage'] = _coverage_metadata(_entry)
 for _entry in NSFW_VARIATION_CATALOG:
     _augment_prompt(_entry, allow_outfit=False)
+    _entry['coverage'] = _coverage_metadata(_entry)
 del _entry
 
 _NSFW_LABELS = {e['label'] for e in NSFW_VARIATION_CATALOG}
@@ -989,6 +1041,8 @@ CLASSIFY_PROMPT = (
     '"lighting":"daylight|indoor|studio|golden-hour|low-light|mixed|other",'
     '"pose":"standing|sitting|moving|headshot|other",'
     '"background":"plain|indoor|outdoor|studio|crowded|other",'
-    '"occlusion":"none|minor|major"}. framing=face for a close-up of the head, bust for '
+    '"occlusion":"none|minor|major","confidence":{"framing":0.0,"angle":0.0,'
+    '"expression":0.0,"lighting":0.0,"pose":0.0,"background":0.0,"occlusion":0.0}}. '
+    'Each confidence is a number from 0 to 1 for that field. framing=face for a close-up of the head, bust for '
     "upper body, body for full body, back if seen from behind. Use the listed values exactly. "
     "Output the JSON only.")

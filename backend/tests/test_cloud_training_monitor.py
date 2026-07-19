@@ -3,8 +3,9 @@ happy path, the stop path, max-runtime kill, unreachable-pod failure, the
 download-failure pod-kept state, and the resume contract (Task 7 needs
 _monitor to skip re-provisioning/re-submitting an already-running job).
 No sleeping: _sleep is a no-op seam."""
-import json
 import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,11 @@ def ct(app, monkeypatch):
     # no-op that seam so these monitor tests, which never mock vast_client
     # .list_instances, stay offline.
     monkeypatch.setattr(cloud_training, '_reconcile_before_launch', lambda a: None)
+    monkeypatch.setattr(
+        cloud_training, '_capture_training_snapshot',
+        lambda uid, did, dest: {
+            'registry_manifest': [], 'trigger_word': 'lola', 'kind': 'character',
+        })
     return cloud_training
 
 
@@ -87,9 +93,9 @@ class FakeRemote:
 
 def _launch(ct, app, client, monkeypatch, remote, destroy_log):
     monkeypatch.setattr(ct.lt, 'export_dataset_to_aitoolkit',
-                        lambda uid, did, masked=True, dest_dir=None:
+                        lambda uid, did, masked=True, dest_dir=None, **kw:
                         (os.makedirs(dest_dir, exist_ok=True),
-                         open(os.path.join(dest_dir, '0001.png'), 'wb').close(),
+                         Path(dest_dir, '0001.png').touch(),
                          dest_dir)[-1])
     monkeypatch.setattr(ct.lt, 'default_steps', lambda ds: 100)
     monkeypatch.setattr(ct.lt, 'assert_trainable', lambda *a, **k: None)
@@ -129,7 +135,7 @@ def test_happy_path_completes_and_terminates(ct, app, client, monkeypatch):
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'
         assert destroyed == ['777']
         # dataset + masks names, job config cloudified
@@ -140,9 +146,9 @@ def test_happy_path_completes_and_terminates(ct, app, client, monkeypatch):
         assert proc['datasets'][0]['folder_path'] == f'/pod/ds/{run.job_name}'
         # checkpoint downloaded into staging then imported
         assert run.checkpoint_local_path and run.checkpoint_local_path.endswith('.safetensors')
-        # template mode: the vast-generated per-instance token was picked up
-        # from the instance record during boot-wait
-        assert run.auth_token == 'jtok-vast'
+        # The vast-generated token was usable during the run but is scrubbed
+        # from durable history as soon as the pod is destroyed.
+        assert run.auth_token is None
         assert os.path.exists(run.checkpoint_local_path)
 
 
@@ -158,7 +164,7 @@ def test_done_run_mirrors_checkpoint_into_local_run_dir(ct, app, client, monkeyp
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'
         # pod file lds1_run_000000100.safetensors -> local lora_lola_000000100
         assert (local_run / 'lora_lola_000000100.safetensors').is_file()
@@ -178,7 +184,7 @@ def test_mirror_never_clobbers_an_existing_local_checkpoint(ct, app, client, mon
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
         ct._monitor(app, run_id)
-        assert ct.CloudTrainingRun.query.get(run_id).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
         assert prior.read_bytes() == b'LOCAL-WEIGHTS'        # untouched
 
 
@@ -189,7 +195,7 @@ def test_stop_requested_stops_job_and_terminates(ct, app, client, monkeypatch):
     ct._stop_event_for(run_id).set()
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert remote.stopped is True
         assert run.status == 'stopped'
         assert destroyed == ['777']
@@ -208,7 +214,7 @@ def test_max_runtime_cap_kills_pod(ct, app, client, monkeypatch):
     monkeypatch.setattr(ct, '_now', fake_time)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status in ('stopped', 'error')
         assert 'runtime' in (run.error or run.phase_detail or '').lower()
         assert destroyed == ['777']
@@ -217,17 +223,16 @@ def test_max_runtime_cap_kills_pod(ct, app, client, monkeypatch):
 def test_max_runtime_cap_counts_pre_restart_time(ct, app, client, monkeypatch):
     """A resumed run whose total age already exceeds the cap is stopped
     immediately — restarting the app must not grant a fresh window."""
-    from datetime import datetime, timedelta
     destroyed = []
     remote = FakeRemote(polls_to_complete=10_000)
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         ct._set(run, vast_instance_id='777', remote_job_id='j-1', status='training',
                 base_url='http://1.2.3.4:40123', auth_token='tok',
-                created_at=datetime.utcnow() - timedelta(minutes=500))  # > 480 min cap
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))  # > 480 min cap
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status in ('stopped', 'error')
         assert 'runtime' in ((run.error or '') + (run.phase_detail or '')).lower()
         assert destroyed == ['777']
@@ -239,7 +244,7 @@ def test_download_failure_keeps_pod(ct, app, client, monkeypatch):
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'error_pod_kept'
         assert destroyed == []                      # pod intentionally kept
         assert run.base_url                          # surfaced for manual recovery
@@ -262,7 +267,7 @@ def test_pod_unreachable_mid_run_blacklists_host(ct, app, client, monkeypatch):
     monkeypatch.setattr(ct, '_now', lambda: clock.__setitem__('t', clock['t'] + 120) or clock['t'])
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'error'
         assert 'unreachable' in (run.error or '')
         assert destroyed == ['777']                 # leak-safety unchanged
@@ -278,7 +283,7 @@ def test_pod_never_ready_fails_and_destroys(ct, app, client, monkeypatch):
     monkeypatch.setattr(ct, '_now', lambda: clock.__setitem__('t', clock['t'] + 120) or clock['t'])
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'error'
         assert destroyed == ['777']
         # the host that burned the whole boot budget is blacklisted for the
@@ -299,7 +304,7 @@ def test_stop_during_boot_wait_terminates_immediately(ct, app, client, monkeypat
     ct._stop_event_for(run_id).set()
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'stopped'
         assert 'boot' in (run.phase_detail or '')
         assert destroyed == ['777']
@@ -333,7 +338,7 @@ def test_midrun_checkpoint_sync_harvests_every_save(ct, app, client, monkeypatch
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'
         # intermediate saves were pulled during the run, not only at the end
         assert downloads == ['j_000000100.safetensors', 'j_000000200.safetensors',
@@ -366,7 +371,7 @@ def test_completion_retrieves_intermediates_still_on_pod(ct, app, client, monkey
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'
         staged = sorted(f for f in os.listdir(run.staging_dir)
                         if f.endswith('.safetensors'))
@@ -488,7 +493,7 @@ def test_stale_ui_port_8675_coerced_in_template_mode(ct, app, client, monkeypatc
         else ({**(orig('cloud') or {}), 'ui_port': 8675} if k == 'cloud' else orig(k, d))))(ct.cfg.get))
     with app.app_context():
         ct._monitor(app, run_id)
-        assert ct.CloudTrainingRun.query.get(run_id).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
 
 
 def test_boot_wait_tolerates_transient_vast_errors(ct, app, client, monkeypatch):
@@ -513,7 +518,7 @@ def test_boot_wait_tolerates_transient_vast_errors(ct, app, client, monkeypatch)
     monkeypatch.setattr(ct.vast_client, 'get_instance', flaky)
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'          # survived the hiccup
         assert destroyed == ['777']          # normal terminate at completion
 
@@ -527,7 +532,7 @@ def test_monitor_resume_skips_upload_and_submit(ct, app, client, monkeypatch):
     remote = FakeRemote(polls_to_complete=3)
     ds_id, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
     with app.app_context():
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         run.vast_instance_id = '777'
         run.remote_job_id = 'j-resumed'
         run.base_url = 'http://1.2.3.4:40123'
@@ -539,7 +544,7 @@ def test_monitor_resume_skips_upload_and_submit(ct, app, client, monkeypatch):
                         lambda *a, **kw: (_ for _ in ()).throw(AssertionError('should not re-provision')))
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'
         assert remote.uploaded == {}                 # upload_dataset never called
         assert remote.job_config is None              # create_job never called
@@ -569,7 +574,7 @@ def test_stall_watchdog_kills_frozen_run(ct, app, client, monkeypatch):
                         lambda: clock.__setitem__('t', clock['t'] + 600.0) or clock['t'])
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'error'
         assert 'stall' in ((run.error or '') + (run.phase_detail or '')).lower()
         assert destroyed == ['777']
@@ -591,7 +596,7 @@ def test_progressing_run_never_trips_stall_watchdog(ct, app, client, monkeypatch
                         lambda: clock.__setitem__('t', clock['t'] + 600.0) or clock['t'])
     with app.app_context():
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'done'                  # not 'error'/'stall'
         assert destroyed == ['777']                  # normal terminate at completion
 
@@ -638,8 +643,8 @@ def test_two_families_each_build_own_config_despite_ds_change(ct, app, client, m
         ct.db.session.commit()
         ct._monitor(app, run1)
         ct._monitor(app, run2)
-        assert ct.CloudTrainingRun.query.get(run1).status == 'done'
-        assert ct.CloudTrainingRun.query.get(run2).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run1).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run2).status == 'done'
     p1 = r_zimage.job_config['config']['process'][0]
     p2 = r_krea.job_config['config']['process'][0]
     assert (p1['model']['arch'], p1['variant']) == ('zimage', 'turbo')
@@ -663,7 +668,7 @@ def test_run_config_immune_to_ds_change_while_booting(ct, app, client, monkeypat
         ds.train_variant = 'turbo'
         ct.db.session.commit()
         ct._monitor(app, run_id)
-        assert ct.CloudTrainingRun.query.get(run_id).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
     proc = remote.job_config['config']['process'][0]
     assert proc['model']['arch'] == 'krea'
     assert proc['variant'] == 'base'
@@ -690,7 +695,7 @@ def test_harvest_imports_with_run_family_not_current_ds(ct, app, client, monkeyp
         ds.train_variant = 'base'
         ct.db.session.commit()
         ct._monitor(app, run_id)
-        assert ct.CloudTrainingRun.query.get(run_id).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
     assert captured['family'] == 'zimage'
 
 
@@ -700,7 +705,6 @@ def test_boot_timeout_anchored_to_created_at_on_resume(ct, app, client, monkeypa
     created_at, so a pod whose UI never answers is given up at the FIRST poll
     once total time since launch exceeds READY_TIMEOUT. Before the fix each
     restart reset the window (incident 2026-07-14: 37 min instead of 15)."""
-    from datetime import datetime, timedelta
     destroyed = []
     remote = FakeRemote()
     remote.is_ready = lambda: False                   # UI never answers
@@ -709,12 +713,12 @@ def test_boot_timeout_anchored_to_created_at_on_resume(ct, app, client, monkeypa
     # time, can trip the boot timeout here.
     monkeypatch.setattr(ct, '_now', lambda: 0.0)
     with app.app_context():
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         ct._set(run, vast_instance_id='777', staging_dir='/tmp/x',
                 base_url='http://1.2.3.4:40123',
-                created_at=datetime.utcnow() - timedelta(minutes=30))   # > 15 min
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30))   # > 15 min
         ct._monitor(app, run_id)
-        run = ct.CloudTrainingRun.query.get(run_id)
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'error'
         assert 'ready' in (run.error or '').lower()   # 'did not become ready in time'
         assert destroyed == ['777']
@@ -728,7 +732,6 @@ def test_boot_timeout_fresh_run_not_charged_for_stale_created_at(ct, app, client
     and complete. A durable-always anchor (the resume behaviour applied to a
     fresh run) would instead kill it on the FIRST poll, its age already past
     READY_TIMEOUT — so this test fails if the fresh/resume distinction is lost."""
-    from datetime import datetime, timedelta
     destroyed = []
     remote = FakeRemote(polls_to_complete=3)
     ready_calls = {'n': 0}
@@ -743,8 +746,8 @@ def test_boot_timeout_fresh_run_not_charged_for_stale_created_at(ct, app, client
     monkeypatch.setattr(ct, '_now',
                         lambda: clock.__setitem__('t', clock['t'] + 60.0) or clock['t'])
     with app.app_context():
-        run = ct.CloudTrainingRun.query.get(run_id)    # fresh, no pod yet
-        ct._set(run, created_at=datetime.utcnow() - timedelta(minutes=30))
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)    # fresh, no pod yet
+        ct._set(run, created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30))
         ct._monitor(app, run_id)
-        assert ct.CloudTrainingRun.query.get(run_id).status == 'done'
+        assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
         assert destroyed == ['777']

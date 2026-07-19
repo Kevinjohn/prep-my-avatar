@@ -31,6 +31,8 @@ log to save into or hide from (`saved_to_gallery` isn't a column on our
 """
 from __future__ import annotations
 
+import functools
+import hashlib
 import json
 import logging
 import math
@@ -38,16 +40,19 @@ import os
 import random
 import re
 import shutil
+import threading
 import uuid
-from datetime import datetime
+from pathlib import Path
 
 from .. import config as cfg
 from ..extensions import db
 from ..gpu_window import GpuBusyError
-from ..models import FaceDataset, LoraTestImage
+from ..models import FaceDataset, LoraTestImage, TrainingRunRecord
 from . import face_dataset_service as fds
 from . import lora_training as lt
+from . import trash
 from ..job_queue import queue_manager
+from ..utils.time import utcfromtimestamp, utcnow
 from ..utils.comfyui import (FAMILY_LABELS, KREA_ALLOWED_SAMPLERS, KREA_ALLOWED_SCHEDULERS,
                              KREA_ALLOWED_WEIGHT_DTYPES, apply_optimal_sampler_params,
                              family_of_lora, format_trained_lora_label, get_krea_loras,
@@ -60,6 +65,16 @@ logger = logging.getLogger(__name__)
 
 # Plafond dur d'images par run (~4-6 min de GPU max en Z-Image Turbo).
 MAX_TEST_IMAGES = 24
+_STUDIO_LAUNCH_LOCK = threading.Lock()
+
+
+def _serialized_studio_launch(fn):
+    """Make Studio admission plus row/job creation one in-process critical section."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _STUDIO_LAUNCH_LOCK:
+            return fn(*args, **kwargs)
+    return wrapped
 
 # Prompt preset d'identité (le trigger word du dataset est substitué).
 IDENTITY_PROMPT_TEMPLATE = "{trigger}, close-up portrait, neutral expression, looking at camera"
@@ -385,9 +400,9 @@ def build_matrix(checkpoints, strengths, aspects=None, cfgs=None, steps_list=Non
     """Materialize the (checkpoint, strength, aspect) grid cells, validated:
     non-empty checkpoint/strength axes, strengths in [0.0, 2.0] (0 = base model /
     LoRA off, a valid control column) (deduped, order
-    kept), aspects within the whitelist (deduped, défaut 9:16). PAS de plafond sur
-    le nombre de cellules : la file est sérielle et l'utilisateur voit le compte +
-    l'estimation de durée avant de lancer (choix assumé sur sa propre machine)."""
+    kept), aspects within the whitelist (deduped, défaut 9:16). The materialized
+    base matrix is bounded before allocation; later axes are checked again by
+    the run creator."""
     cps = [c for c in (checkpoints or []) if isinstance(c, str) and c.strip()]
     sts = []
     for s in (strengths or []):
@@ -439,10 +454,20 @@ def build_matrix(checkpoints, strengths, aspects=None, cfgs=None, steps_list=Non
         sps2 = [None]
     if not cps or not sts:
         raise ValueError('at least one checkpoint and one strength are required')
-    # Pas de plafond : la file est sérielle et l'utilisateur a déjà l'estimation
-    # du nombre de cellules / de la durée dans l'UI avant de lancer.
+    base_count = len(cps) * len(sts) * len(asp) * len(cfs) * len(sps) * len(sps2)
+    if base_count > MAX_TEST_IMAGES:
+        raise ValueError(
+            f'test grid has {base_count} cells; maximum is {MAX_TEST_IMAGES}. '
+            'Reduce checkpoints or sweep axes.')
     return [(c, s, a, cf, sp, sp2)
             for c in cps for s in sts for a in asp for cf in cfs for sp in sps for sp2 in sps2]
+
+
+def _check_final_cell_budget(total: int) -> None:
+    if total > MAX_TEST_IMAGES:
+        raise ValueError(
+            f'test run would create {total} images; maximum is {MAX_TEST_IMAGES}. '
+            'Reduce axes, base models, batch LoRAs, or images per config.')
 
 
 # --- Workflow build + enqueue -------------------------------------------------
@@ -632,7 +657,7 @@ def _build_cell_workflow(user_id, checkpoint, strength, prompt, seed, z_model,
             raise ValueError('HQ workflow not found/unreadable')
         from ..utils.comfyui import get_checkpoint_models, inject_sdxl_loras
         allowed_bases = {m.get('name') for m in get_checkpoint_models() if m.get('name')}
-        allowed_sdxl_loras = {l['filename'] for l in get_sdxl_loras()}
+        allowed_sdxl_loras = {lora['filename'] for lora in get_sdxl_loras()}
         # Comme la génération SDXL normale : régler sampler/scheduler/cfg ET surtout
         # toggler le LoRA DMD2 (ON pour checkpoints DMD-distillés type bigLove/mop, OFF
         # pour SDXL full) selon le modèle de base. Sans ça, sortie cassée. Appliqué AVANT
@@ -652,7 +677,7 @@ def _build_cell_workflow(user_id, checkpoint, strength, prompt, seed, z_model,
         workflow = load_workflow_local(str(WORKFLOW_KREA_TURBO_PATH))
         if not workflow:
             raise ValueError('Krea workflow not found/unreadable')
-        allowed_krea = {l['filename'] for l in get_krea_loras()}
+        allowed_krea = {lora['filename'] for lora in get_krea_loras()}
         apply_krea_lora_test_settings(
             workflow, lora_name=checkpoint, strength=strength, prompt=prompt,
             seed=seed, width=width, height=height, cfg=cfg, steps=steps,
@@ -802,13 +827,21 @@ def _resolve_lora_abs_path(checkpoint) -> str | None:
     rel = str(checkpoint or '').replace('\\', os.sep).replace('/', os.sep).lstrip(os.sep)
     if not rel:
         return None
-    direct = os.path.join(str(loras), rel)
+    root = os.path.realpath(str(loras))
+    direct = os.path.realpath(os.path.join(root, rel))
+    try:
+        if os.path.commonpath((root, direct)) != root:
+            return None
+    except (OSError, ValueError):
+        return None
     if os.path.isfile(direct):
         return direct
-    cur = str(loras)
+    cur = root
     for part in rel.split(os.sep):
         if not part or part == '.':
             continue
+        if part == '..':
+            return None
         nxt = os.path.join(cur, part)
         if os.path.exists(nxt):
             cur = nxt
@@ -1008,6 +1041,7 @@ def _batch_lora_label(row):
     return None
 
 
+@_serialized_studio_launch
 def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=None, z_model=None, z_models=None, aspects=None, cfgs=None, steps_list=None, steps2_list=None, count=1, family=None, permanent_loras=None, batch_loras=None, rebalance=None, rebalance_strength=None, negative=None, sampler=None, scheduler=None, weight_dtype=None, enhancer=None, enhancer_strength=None, detail_amount=None, resolution_tier=None, init_image=None, denoise=None) -> dict:
     """Validate + materialize the grid and enqueue every cell.
 
@@ -1122,6 +1156,8 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
         count = 1
     _MAX = 2**31 - 1
     seeds = [1 + ((seed + i - 1) % _MAX) for i in range(count)]  # distincts, dans [1, 2^31-1]
+    _check_final_cell_budget(
+        len(cells) * len(valid_models) * len(batch_axis) * len(seeds))
 
     # Prompt custom optionnel ; sinon prompt d'identité par défaut (trigger).
     prompt = (prompt or '').strip() or identity_prompt(ds)
@@ -1139,6 +1175,10 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
     _preflight_run(user_id, run_family, cells[0][0], valid_models, allowed,
                    prompt, seeds[0], dataset_id, ds.trigger_word)
 
+    training_record_by_checkpoint = {
+        checkpoint: training_record_for_checkpoint(dataset_id, run_family, checkpoint)
+        for checkpoint in cps_in
+    }
     ids = []
     for zm in valid_models:                       # AXE modèle de base (multi-sélection)
         for checkpoint, strength, cell_aspect, cell_cfg, cell_steps, cell_steps2 in cells:
@@ -1151,6 +1191,7 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
               for cell_seed in seeds:  # N images par config (seeds différents), bande dans la cellule
                 img = LoraTestImage(dataset_id=dataset_id, checkpoint=checkpoint,
                                     strength=strength, seed=cell_seed, run_seed=seed,
+                                    training_run_record_id=training_record_by_checkpoint.get(checkpoint),
                                     status='pending', z_model=zm, aspect=cell_aspect,
                                     prompt=prompt, cfg=cell_cfg, steps=cell_steps, steps2=cell_steps2,
                                     extra_loras=cell_extra_json, krea_rebalance=cell_rebalance,
@@ -1189,6 +1230,7 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
     return {'created': len(ids), 'seed': seed, 'count': count, 'ids': ids}
 
 
+@_serialized_studio_launch
 def create_comparison_run(user_id, selections, strengths, seed=None, prompt=None,
                           z_model=None, aspects=None, cfgs=None, steps_list=None, steps2_list=None,
                           count=1, permanent_loras=None, batch_loras=None, rebalance=None, rebalance_strength=None,
@@ -1275,37 +1317,47 @@ def create_comparison_run(user_id, selections, strengths, seed=None, prompt=None
         detail_amount=detail_amount, resolution_tier=resolution_tier,
         init_image=init_image, denoise=denoise)
 
+    # Validate every selection before reading checkpoint headers or creating the
+    # first durable cell. A bad later selection must not leave an earlier LoRA's
+    # jobs running as a surprise partial comparison.
+    validated = []
+    for selection in selections:
+        selected_ds = fds.get_dataset(user_id, selection.get('dataset_id'))
+        if not selected_ds:
+            raise ValueError(f"dataset {selection.get('dataset_id')} not found")
+        selected_allowed = {
+            candidate['filename']
+            for candidate in list_test_checkpoints(selected_ds, run_type)
+        }
+        selected_checkpoint = selection.get('checkpoint')
+        if selected_checkpoint not in selected_allowed:
+            raise ValueError(
+                f'unknown checkpoint for {selected_ds.name}: {selected_checkpoint}')
+        validated.append((selected_ds, selected_checkpoint, selected_allowed))
+
+    comparison_cells = build_matrix(
+        ['comparison-placeholder'], strengths, aspects, cfgs, steps_list, steps2_list)
+    _check_final_cell_budget(
+        len(validated) * len(comparison_cells) * len(batch_axis) * len(seeds))
+
     # Arch guard (même contrat que create_run) : l'arch RÉELLE de chaque
     # checkpoint sélectionné, lue dans son en-tête, doit correspondre à la famille
     # du run — sinon ComfyUI le droppe en silence (grille no-op). Vérifié AVANT
     # toute ligne → 409 actionnable.
-    _preflight_checkpoint_arch(run_type,
-                               [s.get('checkpoint') for s in selections if s.get('checkpoint')])
+    _preflight_checkpoint_arch(
+        run_type, [checkpoint for _ds, checkpoint, _allowed in validated])
     # Preflight (même contrat que create_run) : le ComfyUI cible peut-il vraiment
     # exécuter le workflow de cette famille ? On vérifie sur la 1re sélection valable
     # (le run est mono-famille) AVANT de créer les lignes → un seul 409 actionnable.
-    for _sel in selections:
-        _pf_ds = fds.get_dataset(user_id, _sel.get('dataset_id'))
-        if not _pf_ds:
-            continue
-        _pf_allowed = {c['filename'] for c in list_test_checkpoints(_pf_ds, run_type)}
-        _pf_cp = _sel.get('checkpoint')
-        if _pf_cp in _pf_allowed:
-            _preflight_run(user_id, run_type, _pf_cp, [z_model], _pf_allowed,
-                           common_prompt or identity_prompt(_pf_ds), seeds[0],
-                           _sel.get('dataset_id'), getattr(_pf_ds, 'trigger_word', None))
-            break
+    _pf_ds, _pf_cp, _pf_allowed = validated[0]
+    _preflight_run(user_id, run_type, _pf_cp, [z_model], _pf_allowed,
+                   common_prompt or identity_prompt(_pf_ds), seeds[0],
+                   _pf_ds.id, getattr(_pf_ds, 'trigger_word', None))
 
     run_id = uuid.uuid4().hex
     ids = []
-    for sel in selections:
-        ds = fds.get_dataset(user_id, sel.get('dataset_id'))
-        if not ds:
-            raise ValueError(f"dataset {sel.get('dataset_id')} not found")
-        allowed = {c['filename'] for c in list_test_checkpoints(ds, run_type)}
-        checkpoint = sel.get('checkpoint')
-        if checkpoint not in allowed:
-            raise ValueError(f'unknown checkpoint for {ds.name}: {checkpoint}')
+    for ds, checkpoint, allowed in validated:
+        training_record_id = training_record_for_checkpoint(ds.id, run_type, checkpoint)
         cell_prompt = common_prompt or identity_prompt(ds)
         cells = build_matrix([checkpoint], strengths, aspects, cfgs, steps_list, steps2_list)
         for cp, strength, cell_aspect, cell_cfg, cell_steps, cell_steps2 in cells:
@@ -1317,6 +1369,7 @@ def create_comparison_run(user_id, selections, strengths, seed=None, prompt=None
               for cell_seed in seeds:
                 img = LoraTestImage(dataset_id=ds.id, checkpoint=cp, strength=strength,
                                     seed=cell_seed, run_seed=seed, run_id=run_id,
+                                    training_run_record_id=training_record_id,
                                     status='pending', z_model=z_model, aspect=cell_aspect,
                                     prompt=cell_prompt, cfg=cell_cfg, steps=cell_steps, steps2=cell_steps2,
                                     extra_loras=cell_extra_json, krea_rebalance=cell_rebalance,
@@ -1326,7 +1379,8 @@ def create_comparison_run(user_id, selections, strengths, seed=None, prompt=None
                                     detail_amount=knobs['detail_amount'],
                                     resolution_tier=knobs['resolution_tier'],
                                     init_image=knobs['init_image'], denoise=knobs['denoise'])
-                db.session.add(img); db.session.commit()
+                db.session.add(img)
+                db.session.commit()
                 try:
                     workflow = _build_cell_workflow(user_id, cp, strength, cell_prompt,
                                                     cell_seed, z_model, allowed, width=width,
@@ -1341,9 +1395,13 @@ def create_comparison_run(user_id, selections, strengths, seed=None, prompt=None
                                                     trigger_word=ds.trigger_word)
                     job_id = _enqueue_cell(user_id, ds.id, workflow, cell_prompt)
                 except Exception as e:
-                    img.status = 'failed'; img.error = str(e)[:400] or 'enqueue failed'
-                    db.session.commit(); raise
-                img.job_id = job_id; db.session.commit(); ids.append(img.id)
+                    img.status = 'failed'
+                    img.error = str(e)[:400] or 'enqueue failed'
+                    db.session.commit()
+                    raise
+                img.job_id = job_id
+                db.session.commit()
+                ids.append(img.id)
     logger.info(f"lora-test: comparison run {run_id} -> {len(ids)} cellule(s), {len(selections)} LoRA, seed {seed}")
     return {'created': len(ids), 'seed': seed, 'count': count, 'run_id': run_id, 'ids': ids}
 
@@ -1390,6 +1448,7 @@ def cancel_run(user_id, dataset_id=None, run_id=None) -> int:
     return n
 
 
+@_serialized_studio_launch
 def resume_run(user_id, dataset_id=None, run_id=None) -> dict:
     """Reprend un run stoppé : ré-enfile toutes les cellules 'cancelled'/'failed'
     avec LEURS réglages stockés (même prompt/seed/modèle/format/strength). C'est
@@ -1506,9 +1565,9 @@ def resume_run(user_id, dataset_id=None, run_id=None) -> dict:
 
 # --- Completion linking (called from job_queue) --------------------------------
 def _cleanup_output_file(filename, failed):
-    """Supprime de OUTPUT_DIR un fichier de sortie orphelin (complétion d'un job
-    dont la ligne n'est plus valable) - best-effort."""
-    if failed or not filename:
+    """Move an orphaned completed output to recoverable Trash, best-effort."""
+    if (failed or not filename or not isinstance(filename, str)
+            or Path(filename).name != filename or filename in ('.', '..')):
         return
     out_dir = _comfy_output_dir()
     if not out_dir:
@@ -1516,9 +1575,52 @@ def _cleanup_output_file(filename, failed):
     try:
         p = os.path.join(out_dir, filename)
         if os.path.isfile(p):
-            os.remove(p)
-    except OSError:
-        pass
+            from . import trash
+            trash.send_paths_to_trash(
+                [p], context='orphaned-studio-output', metadata={
+                    'kind': 'orphaned_generation',
+                    'label': f'Orphaned Studio output: {os.path.basename(filename)}',
+                })
+    except (OSError, ValueError):
+        logger.exception('could not retain orphaned Studio output %s', filename)
+
+
+def _reserve_dataset_output(dataset_id, filename, row_id):
+    """Atomically claim a dataset-local output name without overwriting bytes."""
+    root = Path(fds._dataset_dir(dataset_id))
+    digest = hashlib.sha256(filename.encode('utf-8')).hexdigest()[:12]
+    suffix = Path(filename).suffix[:16]
+    candidates = [filename]
+    candidates.extend(
+        f'studio-{row_id}-{digest}{"" if index == 1 else f"-{index}"}{suffix}'
+        for index in range(1, 1001))
+    for candidate in candidates:
+        path = root / candidate
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate, path
+    raise OSError('could not allocate a collision-free Studio output filename')
+
+
+def _copy_output_into_reservation(source: Path, destination: Path) -> None:
+    """Copy across volumes atomically, then remove the ComfyUI source."""
+    temporary = destination.with_name(
+        f'.{destination.name}.part-{uuid.uuid4().hex}')
+    try:
+        shutil.copy2(source, temporary, follow_symlinks=False)
+        os.replace(temporary, destination)
+        try:
+            source.unlink()
+        except OSError:
+            logger.warning('Studio output copied but source cleanup failed: %s', source)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def link_completed_test_image(job_id, filename, failed=False, reason=None):
@@ -1531,6 +1633,12 @@ def link_completed_test_image(job_id, filename, failed=False, reason=None):
     `reason` (the job row's error_message: a ComfyUI 400 validation body / node
     execution error / timeout) is persisted on the failed cell so the tile can
     say WHY it's empty instead of a mute red square (P0-b)."""
+    if filename and (not isinstance(filename, str)
+                     or Path(filename).name != filename
+                     or filename in ('.', '..')):
+        failed = True
+        reason = 'ComfyUI returned an unsafe output filename'
+        filename = None
     img = LoraTestImage.query.filter_by(job_id=job_id).first()
     if img is None:
         db.session.rollback()  # drop the stale read snapshot, then re-read
@@ -1551,35 +1659,48 @@ def link_completed_test_image(job_id, filename, failed=False, reason=None):
         img.error = (reason
                      or 'Generation failed (see 🪵 Server log in Settings for the ComfyUI error).')
     else:
-        img.filename = filename
-        img.status = 'done'
         # Bring the completed file into the per-dataset dir (served by
         # /api/dataset/<id>/img/<filename>, cleaned with the dataset). Prefer a
         # local disk move from ComfyUI's output dir; if the file isn't there —
         # ComfyUI was pointed at a custom output path, or none is configured —
         # fetch it over the /view API instead (path-independent). See GH #2.
-        dst = os.path.join(fds._dataset_dir(img.dataset_id), filename)
+        local_name, dst = _reserve_dataset_output(img.dataset_id, filename, img.id)
         out_dir = _comfy_output_dir()
-        src = os.path.join(out_dir, filename) if out_dir else None
-        if src and os.path.exists(src):
-            shutil.move(src, dst)
-        elif not os.path.exists(dst):
-            from ..utils.comfyui import fetch_output_image_bytes
-            data = fetch_output_image_bytes(filename)
-            if data:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                with open(dst, 'wb') as f:
-                    f.write(data)
+        src = Path(out_dir) / filename if out_dir else None
+        try:
+            if src and src.is_file() and not src.is_symlink():
+                _copy_output_into_reservation(src, dst)
+                available = True
+            else:
+                from ..utils.comfyui import fetch_output_image_bytes
+                data = fetch_output_image_bytes(filename)
+                available = bool(data)
+                if available:
+                    fds._atomic_write_bytes(dst, data)
+            if available:
+                img.filename = local_name
+                img.status = 'done'
+                img.error = None
             else:
                 # The result vanished (not on disk, /view fetch failed) — mark the
                 # cell failed WITH a reason rather than leaving a 'done' row whose
                 # <img> would 404 into a mute broken tile (P0-b, mirrors the dataset
                 # fan-out's fail path).
+                dst.unlink(missing_ok=True)
                 img.filename = None
                 img.status = 'failed'
                 img.error = ('The finished image could not be retrieved from ComfyUI '
                              '(not on disk, and the /view API fetch failed).')
                 logger.warning(f"lora-test link: file not on disk and /view API fetch failed for {filename}")
+        except Exception as exc:
+            try:
+                dst.unlink(missing_ok=True)
+            except OSError:
+                pass
+            img.filename = None
+            img.status = 'failed'
+            img.error = f'Could not retain the finished Studio image: {exc}'[:400]
+            logger.exception('lora-test link: could not retain output %s', filename)
     db.session.commit()
 
 
@@ -1603,6 +1724,81 @@ def rate_image(user_id, image_id, rating) -> bool:
 
 def _model_label(z_model):
     return _basename(z_model).rsplit('.', 1)[0] if z_model else None
+
+
+_DATASET_VERSION_RE = re.compile(r'_v(\d+)(?=(?:_|\.|$))', re.IGNORECASE)
+_CHECKPOINT_STEP_RE = re.compile(r'_(\d{4,})(?=(?:_|\.|$))')
+
+
+def _checkpoint_version(checkpoint):
+    """Dataset version encoded by deployed checkpoint naming, if present."""
+    matches = _DATASET_VERSION_RE.findall(_basename(checkpoint or ''))
+    return int(matches[-1]) if matches else None
+
+
+def _checkpoint_step(checkpoint):
+    """Training step encoded by an intermediate checkpoint, if present."""
+    matches = _CHECKPOINT_STEP_RE.findall(_basename(checkpoint or ''))
+    return int(matches[-1]) if matches else None
+
+
+def _json_object(value):
+    try:
+        parsed = json.loads(value or '{}')
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _record_for_checkpoint(dataset_id, family, checkpoint, records=None,
+                           explicit_id=None):
+    """Resolve a deployed LoRA to the launch that produced it.
+
+    New Studio rows carry an explicit immutable record id.  For historical
+    rows, the deployed file preserves the source checkpoint mtime and its name
+    usually carries ``_vN``; both signals are used together.  Ambiguous rows
+    remain unlinked instead of being attributed to a convenient latest run.
+    """
+    family = (family or family_of_lora(checkpoint) or 'zimage').lower()
+    candidates = list(records) if records is not None else (
+        TrainingRunRecord.query
+        .filter_by(dataset_id=dataset_id, family=family)
+        .order_by(TrainingRunRecord.created_at.desc(),
+                  TrainingRunRecord.id.desc()).all())
+    candidates = [r for r in candidates
+                  if r.dataset_id == dataset_id and r.family == family]
+    if explicit_id:
+        linked = next((r for r in candidates if r.id == explicit_id), None)
+        if linked is not None:
+            return linked
+
+    version = _checkpoint_version(checkpoint)
+    if version is not None:
+        candidates = [r for r in candidates if r.version == version]
+    if not candidates:
+        return None
+
+    try:
+        path = _resolve_lora_abs_path(checkpoint)
+        written_at = utcfromtimestamp(os.path.getmtime(path)) if path else None
+    except (OSError, OverflowError, ValueError):
+        written_at = None
+    if written_at is not None:
+        eligible = [r for r in candidates
+                    if r.created_at is not None and r.created_at <= written_at]
+        if eligible:
+            return max(eligible, key=lambda r: (r.created_at, r.id))
+    # A version suffix is an explicit provenance signal.  If several launches
+    # reused the exact same dataset version and no usable mtime exists, prefer
+    # the newest matching recipe; without either signal, stay unlinked.
+    if version is not None:
+        return max(candidates, key=lambda r: (r.created_at or utcnow(), r.id))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def training_record_for_checkpoint(dataset_id, family, checkpoint):
+    record = _record_for_checkpoint(dataset_id, family, checkpoint)
+    return record.id if record is not None else None
 
 
 # En deçà de ce nombre de votes, un score est statistiquement fragile → drapeau
@@ -1745,6 +1941,194 @@ def checkpoint_model_breakdown(dataset_id, scores=None) -> list[dict]:
         out.append(a)
     out.sort(key=lambda a: (a['label'], -(a['like_rate'] or 0), -a['voted']))
     return out
+
+
+def _feedback_for_records(records):
+    """Aggregate Studio evidence by immutable training launch.
+
+    Returns ``(record_id -> metrics, unlinked summary)``.  Failed/pending cells
+    are not evidence; completed but unvoted cells still count as test coverage.
+    """
+    records = list(records or [])
+    records_by_id = {record.id: record for record in records}
+    by_scope = {}
+    for record in records:
+        by_scope.setdefault((record.dataset_id, record.family), []).append(record)
+    out = {}
+    cell_agg = {}
+    for record in records:
+        settings = _json_object(record.settings)
+        overrides = _json_object(record.overrides)
+        out[record.id] = {
+            'record_id': record.id, 'dataset_id': record.dataset_id,
+            'family': record.family, 'version': record.version,
+            'source': record.source, 'steps': record.steps,
+            'created_at': record.created_at.isoformat() if record.created_at else None,
+            'images': 0, 'voted': 0, 'likes': 0, 'dislikes': 0,
+            'like_rate': None, 'wilson': 0.0, 'confidence': 'none',
+            'face_scored': 0, 'mean_face_score': None,
+            'best_checkpoint': None, 'best_strength': None, 'best_step': None,
+            'checkpoints': [], 'recipe': settings,
+            'admission_override_count': sum(1 for value in overrides.values() if value),
+        }
+    unlinked = {'images': 0, 'voted': 0, 'likes': 0, 'dislikes': 0}
+    if not by_scope:
+        return out, unlinked
+    dataset_ids = sorted({key[0] for key in by_scope})
+    rows = (LoraTestImage.query
+            .filter(LoraTestImage.dataset_id.in_(dataset_ids),
+                    LoraTestImage.status == 'done',
+                    LoraTestImage.filename.isnot(None)).all())
+    face_sums = {}
+    checkpoints = {}
+    for row in rows:
+        # New rows carry exact immutable provenance.  Trust that link before
+        # filename/folder inference, but only when it belongs to this dataset;
+        # a stale/corrupt cross-dataset id must never reattribute evidence.
+        record = records_by_id.get(row.training_run_record_id)
+        if record is not None and record.dataset_id != row.dataset_id:
+            record = None
+        if record is None:
+            family = (family_of_lora(row.checkpoint) or 'zimage').lower()
+            scoped = by_scope.get((row.dataset_id, family), [])
+            record = _record_for_checkpoint(
+                row.dataset_id, family, row.checkpoint, records=scoped)
+        if record is None:
+            unlinked['images'] += 1
+            if row.rating == 1:
+                unlinked['likes'] += 1
+                unlinked['voted'] += 1
+            elif row.rating == -1:
+                unlinked['dislikes'] += 1
+                unlinked['voted'] += 1
+            continue
+        stats = out[record.id]
+        stats['images'] += 1
+        checkpoints.setdefault(record.id, set()).add(row.checkpoint)
+        if row.rating == 1:
+            stats['likes'] += 1
+            stats['voted'] += 1
+        elif row.rating == -1:
+            stats['dislikes'] += 1
+            stats['voted'] += 1
+        if row.face_score is not None:
+            face_sums[record.id] = face_sums.get(record.id, 0.0) + float(row.face_score)
+            stats['face_scored'] += 1
+        key = (record.id, row.checkpoint, row.strength)
+        cell = cell_agg.setdefault(key, {
+            'record_id': record.id, 'checkpoint': row.checkpoint,
+            'strength': row.strength, 'likes': 0, 'dislikes': 0, 'voted': 0,
+        })
+        if row.rating == 1:
+            cell['likes'] += 1
+            cell['voted'] += 1
+        elif row.rating == -1:
+            cell['dislikes'] += 1
+            cell['voted'] += 1
+
+    for record_id, stats in out.items():
+        if stats['voted']:
+            stats['like_rate'] = round(stats['likes'] / stats['voted'], 4)
+            stats['wilson'] = round(
+                _wilson_lower_bound(stats['likes'], stats['voted']), 4)
+            stats['confidence'] = ('low' if stats['voted'] < LOW_CONFIDENCE_MIN
+                                   else 'moderate' if stats['voted'] < 8
+                                   else 'higher')
+        elif stats['images']:
+            stats['confidence'] = 'unvoted'
+        if stats['face_scored']:
+            stats['mean_face_score'] = round(
+                face_sums[record_id] / stats['face_scored'], 4)
+        stats['checkpoints'] = sorted(checkpoints.get(record_id, set()))
+        candidates = [cell for key, cell in cell_agg.items()
+                      if key[0] == record_id and cell['voted']]
+        if candidates:
+            candidates.sort(key=lambda cell: (
+                -_wilson_lower_bound(cell['likes'], cell['voted']),
+                -cell['voted'], -(cell['likes'] - cell['dislikes']),
+                cell['strength']))
+            best = candidates[0]
+            stats['best_checkpoint'] = best['checkpoint']
+            stats['best_strength'] = best['strength']
+            stats['best_step'] = _checkpoint_step(best['checkpoint'])
+    return out, unlinked
+
+
+def feedback_for_records(records):
+    """Public batch helper used by the unified Runs hub."""
+    return _feedback_for_records(records)[0]
+
+
+def training_feedback(user_id, dataset_id, family=None) -> dict | None:
+    """Close Studio ratings back into the next training decision.
+
+    Recommendations are deliberately evidence-gated: fewer than three votes
+    never produces a quality verdict, and unlinked historical cells are called
+    out instead of silently assigned to the latest run.
+    """
+    ds = fds.get_dataset(user_id, dataset_id)
+    if ds is None:
+        return None
+    eff = (family or getattr(ds, 'train_type', None) or 'zimage').lower()
+    records = (TrainingRunRecord.query
+               .filter_by(dataset_id=dataset_id, family=eff)
+               .order_by(TrainingRunRecord.created_at.desc(),
+                         TrainingRunRecord.id.desc()).all())
+    mapped, unlinked = _feedback_for_records(records)
+    runs = [mapped[record.id] for record in records]
+    recommendations = []
+
+    def recommend(kind, title, detail):
+        recommendations.append({'kind': kind, 'title': title, 'detail': detail})
+
+    if not records:
+        summary = 'No training launch is registered for this family yet.'
+        recommend('train', 'Create a provenance-backed run',
+                  'Train once, import a checkpoint, then validate it in Studio.')
+    else:
+        latest = runs[0]
+        evaluated = [run for run in runs if run['voted']]
+        if not evaluated:
+            summary = f"Dataset v{latest['version']} has no rated Studio evidence yet."
+            recommend('validate', 'Test the latest run before changing the recipe',
+                      'Generate a fixed-seed Studio sweep and rate at least three outputs.')
+        else:
+            best = max(evaluated, key=lambda run: (run['wilson'], run['voted']))
+            summary = (f"Best measured run is v{best['version']}: "
+                       f"{best['likes']}/{best['voted']} liked "
+                       f"({round((best['like_rate'] or 0) * 100)}%).")
+            if latest['voted'] < LOW_CONFIDENCE_MIN:
+                recommend('validate', f"Collect more evidence for v{latest['version']}",
+                          f"Only {latest['voted']} rated output(s) are linked to the latest run; "
+                          f"{LOW_CONFIDENCE_MIN} is the minimum before drawing a direction.")
+            elif (latest['like_rate'] or 0) >= 0.7:
+                recommend('preserve', 'Keep the latest training recipe as the baseline',
+                          'Its measured approval is positive; change one variable at a time in the next run.')
+            elif (latest['like_rate'] or 0) <= 0.4:
+                recommend('dataset', 'Review data and captions before adding training steps',
+                          'Dislikes dominate the latest run; more steps can reinforce the same dataset problems.')
+            else:
+                recommend('iterate', 'Run a controlled single-variable iteration',
+                          'The latest result is mixed; preserve the dataset version and change one recipe setting.')
+            if best['record_id'] != latest['record_id'] and best['voted'] >= LOW_CONFIDENCE_MIN:
+                recommend('compare', f"Compare against v{best['version']} before proceeding",
+                          'An older run currently has stronger vote evidence than the latest launch.')
+            if (best['best_step'] and best['steps']
+                    and best['best_step'] < int(best['steps'] * 0.8)):
+                recommend('early_stop', f"Validate around step {best['best_step']}",
+                          f"The best-rated checkpoint arrived well before the {best['steps']}-step target; "
+                          'an earlier stop may avoid over-training and reduce compute.')
+            if best['best_strength'] is not None:
+                recommend('inference', f"Start validation near strength {best['best_strength']:g}",
+                          'This is the best-rated Studio strength for the strongest measured run.')
+    if unlinked['images']:
+        recommend('provenance', 'Retest historical unlinked checkpoints',
+                  f"{unlinked['images']} completed Studio image(s) predate an exact launch link and are excluded from run comparison.")
+    return {
+        'family': eff, 'summary': summary, 'runs': runs,
+        'recommendations': recommendations, 'unlinked': unlinked,
+        'minimum_votes': LOW_CONFIDENCE_MIN,
+    }
 
 
 def best_cell(dataset_id, scores=None) -> dict | None:
@@ -1907,7 +2291,7 @@ def set_best_settings(user_id, dataset_id, checkpoint, strength,
         'steps2': steps2,
         'aspect': aspect,
         'family': family,
-        'decided_at': datetime.utcnow().isoformat(),
+        'decided_at': utcnow().isoformat(),
     }
     best_map = _best_map(ds)
     best_map[family] = best
@@ -2000,11 +2384,14 @@ def face_ranking(dataset_id, family) -> list:
     return out
 
 
+@trash.serialized_transaction
 def delete_prompt(user_id, dataset_id, prompt) -> int:
     """Supprime toutes les cellules de test d'un PROMPT donné (+ leurs fichiers) :
     retire ce prompt du menu « prompts récents » et nettoie ses images de test.
-    Annule les jobs encore en vol. Ownership scoped (anti-IDOR). Retourne le nombre
-    de cellules supprimées."""
+    Annule les jobs encore en vol. Les fichiers terminés sont déplacés ensemble
+    dans la corbeille récupérable avant la suppression des lignes ; un échec de
+    commit restaure les fichiers. Ownership scoped (anti-IDOR). Retourne le
+    nombre de cellules supprimées."""
     ds = fds.get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
@@ -2014,25 +2401,45 @@ def delete_prompt(user_id, dataset_id, prompt) -> int:
     rows = LoraTestImage.query.filter_by(dataset_id=dataset_id, prompt=p).all()
     if not rows:
         return 0
-    dataset_dir = fds._dataset_dir(dataset_id)
+    from . import trash
+    dataset_dir = Path(fds._dataset_dir(dataset_id)).resolve()
+    paths = []
+    seen_paths = set()
+    for row in rows:
+        if not row.filename:
+            continue
+        candidate = (dataset_dir / row.filename).resolve(strict=False)
+        if (candidate.is_relative_to(dataset_dir) and candidate.is_file()
+                and not candidate.is_symlink() and candidate not in seen_paths):
+            seen_paths.add(candidate)
+            paths.append(candidate)
+    trashed = (trash.send_paths_to_trash(
+        paths, context=f'dataset-{dataset_id}-studio-prompt', metadata={
+            'kind': 'studio_prompt',
+            'dataset_id': dataset_id,
+            'prompt': p[:500],
+            'label': f'Studio prompt: {p[:80]}',
+        }) if paths else None)
     n = 0
-    for r in rows:
-        # Cellule encore en file → annuler le job avant de la supprimer.
-        if r.status == 'pending' and r.job_id and not r.filename:
+    try:
+        for r in rows:
+            # Cellule encore en file → annuler le job avant de la supprimer.
+            if r.status == 'pending' and r.job_id and not r.filename:
+                try:
+                    queue_manager.cancel_job(r.job_id, str(user_id), 'image')
+                except Exception:
+                    pass
+            db.session.delete(r)
+            n += 1
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if trashed is not None:
             try:
-                queue_manager.cancel_job(r.job_id, str(user_id), 'image')
+                trash.restore_entry(trashed['id'])
             except Exception:
-                pass
-        if r.filename:
-            try:
-                fp = os.path.join(dataset_dir, r.filename)
-                if os.path.exists(fp):
-                    os.remove(fp)
-            except OSError:
-                pass
-        db.session.delete(r)
-        n += 1
-    db.session.commit()
+                logger.exception('could not roll back Studio prompt trash %s', trashed['id'])
+        raise
     logger.info(f"lora-test: prompt supprimé sur dataset {dataset_id} -> {n} cellule(s)")
     return n
 
@@ -2097,6 +2504,7 @@ def studio_payload(user_id, dataset_id, family=None) -> dict | None:
                    'label': format_trained_lora_label(r.checkpoint) or _basename(r.checkpoint).rsplit('.', 1)[0],
                    'strength': r.strength, 'aspect': r.aspect, 'filename': r.filename,
                    'rating': r.rating, 'seed': r.seed, 'run_seed': r.run_seed, 'status': r.status,
+                   'training_run_record_id': r.training_run_record_id,
                    'prompt': r.prompt, 'z_model': r.z_model,
                    'z_model_label': (_basename(r.z_model).rsplit('.', 1)[0] if r.z_model else None),
                    'cfg': r.cfg, 'steps': r.steps, 'steps2': r.steps2,
@@ -2124,6 +2532,9 @@ def studio_payload(user_id, dataset_id, family=None) -> dict | None:
         'recent_prompts': user_recent_prompts(ds.user_id),
         'gpu_busy': gpu_busy_reason(),
         'best_settings': best,
+        # Human votes tied back to immutable training launches, with
+        # evidence-gated next-run recommendations.
+        'training_feedback': training_feedback(user_id, dataset_id, eff),
     }
 
 
@@ -2139,12 +2550,16 @@ def lora_net_scores(run_id) -> list[dict]:
                                           'lora_label': format_trained_lora_label(r.checkpoint)
                                           or _basename(r.checkpoint).rsplit('.', 1)[0]})
         a['total'] += 1
-        if r.rating == 1: a['likes'] += 1; a['voted'] += 1
-        elif r.rating == -1: a['dislikes'] += 1; a['voted'] += 1
+        if r.rating == 1:
+            a['likes'] += 1
+            a['voted'] += 1
+        elif r.rating == -1:
+            a['dislikes'] += 1
+            a['voted'] += 1
     for a in agg.values():
         a['net'] = a['likes'] - a['dislikes']
         a['wilson'] = _wilson_lower_bound(a['likes'], a['voted'])
-        ds = FaceDataset.query.get(a['dataset_id'])
+        ds = db.session.get(FaceDataset, a['dataset_id'])
         a['dataset_name'] = ds.name if ds else f"#{a['dataset_id']}"
     return sorted(agg.values(), key=lambda a: (a['net'], a['likes']), reverse=True)
 
@@ -2164,7 +2579,8 @@ def studio_payload_run(user_id, run_id) -> dict | None:
     def _lbl(d):
         return next((_basename(r.checkpoint).rsplit('.', 1)[0] for r in rows if r.dataset_id == d), str(d))
     def _name(d):
-        ds = FaceDataset.query.get(d); return ds.name if ds else str(d)
+        ds = db.session.get(FaceDataset, d)
+        return ds.name if ds else str(d)
     return {
         'run_id': run_id,
         'loras': [{'dataset_id': d, 'lora_label': _lbl(d), 'dataset_name': _name(d)}
@@ -2173,6 +2589,7 @@ def studio_payload_run(user_id, run_id) -> dict | None:
                    'label': _basename(r.checkpoint).rsplit('.', 1)[0], 'strength': r.strength,
                    'aspect': r.aspect, 'filename': r.filename, 'rating': r.rating, 'seed': r.seed,
                    'run_seed': r.run_seed, 'status': r.status, 'prompt': r.prompt,
+                   'training_run_record_id': r.training_run_record_id,
                    'z_model': r.z_model, 'cfg': r.cfg, 'steps': r.steps, 'steps2': r.steps2,
                    'batch_lora': _batch_lora_label(r),
                    'error': r.error if r.status == 'failed' else None} for r in rows],

@@ -1,21 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { captionCharacterLabel, isCaptionSaveShortcut } from '../../utils/captionEditor';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 export default function CaptionEditorDialog({ initialCaption, imageUrl, imageLabel, onClose, onSave }) {
   const [draft, setDraft] = useState(initialCaption || '');
   const textareaRef = useRef(null);
+  const dialogRef = useRef(null);
+  useFocusTrap(dialogRef, true);
+  useBodyScrollLock(true);
 
   useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
     textareaRef.current?.focus();
     const closeOnEscape = (event) => {
       if (event.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => {
-      document.body.style.overflow = previousOverflow;
       window.removeEventListener('keydown', closeOnEscape);
     };
   }, [onClose]);
@@ -25,7 +27,7 @@ export default function CaptionEditorDialog({ initialCaption, imageUrl, imageLab
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3 sm:p-6"
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="caption-editor-title"
+      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="caption-editor-title"
         className="flex h-[min(92vh,50rem)] w-[min(96vw,72rem)] flex-col overflow-hidden rounded-2xl border border-border bg-app shadow-2xl">
         <header className="flex items-start justify-between gap-4 border-b border-border bg-surface px-4 py-3 sm:px-5">
           <div>

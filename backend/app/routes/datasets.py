@@ -5,11 +5,12 @@ No login — single local user (`cfg.LOCAL_USER`). Vision-dependent routes borro
 the GPU-exclusive window (`gpu_exclusive_vision_window`) so a vision pass never
 fights ComfyUI for the single GPU.
 """
-import io
-import os
-import uuid
+import json
+import tempfile
+import time
 
-from flask import Blueprint, request, jsonify, send_file, send_from_directory, current_app
+from flask import (Blueprint, Response, request, jsonify, send_file,
+                   send_from_directory, current_app, stream_with_context)
 
 from ..config import LOCAL_USER
 from .. import config as cfg
@@ -114,8 +115,73 @@ def dataset_list():
 
 @bp.get('/dataset/<int:dataset_id>')
 def dataset_get(dataset_id):
-    payload = svc.dataset_payload(LOCAL_USER, dataset_id)
+    include_images = request.args.get('include_images', '1').strip().lower() not in {
+        '0', 'false', 'no',
+    }
+    payload = svc.dataset_payload(LOCAL_USER, dataset_id, include_images=include_images)
     return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+
+
+@bp.get('/dataset/<int:dataset_id>/images')
+def dataset_images(dataset_id):
+    """Cursor-paginated image payload for large-corpus clients."""
+    try:
+        payload = svc.dataset_images_page(
+            LOCAL_USER, dataset_id,
+            cursor=request.args.get('cursor'),
+            limit=request.args.get('limit', 100),
+            status=request.args.get('status'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+
+
+@bp.get('/dataset/<int:dataset_id>/events')
+def dataset_events(dataset_id):
+    """SSE change signal for image revisions and long-running dataset activity."""
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    try:
+        since = int(request.args.get('since', -1))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'since must be an integer revision'}), 400
+    once = request.args.get('once') == '1'  # deterministic one-event test/diagnostic
+
+    @stream_with_context
+    def stream():
+        last_revision = since
+        last_metadata_revision = None
+        last_activity = None
+        sent_initial = False
+        last_heartbeat = time.monotonic()
+        while True:
+            state = svc.dataset_change_state(LOCAL_USER, dataset_id)
+            if state is None:
+                yield 'event: deleted\ndata: {}\n\n'
+                break
+            activity_marker = json.dumps(
+                state.get('activity'), sort_keys=True, separators=(',', ':'))
+            changed = (not sent_initial or state['revision'] != last_revision
+                       or state.get('metadata_revision') != last_metadata_revision
+                       or activity_marker != last_activity)
+            if changed:
+                yield 'event: dataset\ndata: ' + json.dumps(state, separators=(',', ':')) + '\n\n'
+                sent_initial = True
+                last_revision = state['revision']
+                last_metadata_revision = state.get('metadata_revision')
+                last_activity = activity_marker
+                last_heartbeat = time.monotonic()
+                if once:
+                    break
+            elif time.monotonic() - last_heartbeat >= 15:
+                yield ': heartbeat\n\n'
+                last_heartbeat = time.monotonic()
+            time.sleep(1)
+
+    return Response(stream(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
+    })
 
 
 @bp.post('/dataset/<int:dataset_id>/ref')
@@ -155,19 +221,14 @@ def dataset_set_ref(dataset_id):
                 raw, pad=svc.REF_CROP_PAD, return_detected=True, use_vision=False)
     except Exception as e:
         return _map_error(e)
-    dsdir = svc._dataset_dir(dataset_id)
     # Keep the full-frame ORIGINAL (aspect-kept, capped ~2048) so the crop editor can
     # widen back out later — the auto head-crop is only the default framing, not a
     # one-way lossy door (the old behavior discarded it and re-crops could only tighten).
-    orig_fn = f"{LOCAL_USER}_datasetreforig_{uuid.uuid4().hex[:8]}.webp"
-    with open(os.path.join(dsdir, orig_fn), 'wb') as fh:
-        fh.write(svc.normalize_to_webp(raw, size=2048))
-    fn = f"{LOCAL_USER}_datasetref_{uuid.uuid4().hex[:8]}.webp"
-    with open(os.path.join(dsdir, fn), 'wb') as fh:
-        fh.write(webp)
-    ds.ref_original_filename = orig_fn
-    ds.ref_filename = fn
-    svc.db.session.commit()
+    try:
+        fn = svc.set_primary_reference(
+            LOCAL_USER, dataset_id, svc.normalize_to_webp(raw, size=2048), webp)
+    except Exception as e:
+        return _map_error(e)
     resp = {'ok': True, 'ref_filename': fn, 'head_crop': head_detected}
     if want_auto and not head_detected:
         # GUARD-RAIL: don't silently ship a body-centered crop when auto WAS asked.
@@ -334,6 +395,14 @@ def dataset_generate(dataset_id):
         return jsonify({'ok': False,
                         'error': 'NSFW variations run on the local Klein engine only — '
                                  'switch the generator to Klein.'}), 400
+    if generator in svc.API_ENGINES and not cfg.get('privacy.allow_remote_generation'):
+        return jsonify({
+            'ok': False,
+            'code': 'remote_generation_consent_required',
+            'error': ('Remote generation is off: reference images and prompts stay '
+                      'on this computer. Enable third-party generation in Settings '
+                      '▸ Image engines after reviewing the provider terms.'),
+        }), 403
     try:
         if generator in svc.API_ENGINES:
             # API path (Gemini Nano Banana Pro or OpenAI ChatGPT gpt-image-2):
@@ -444,6 +513,27 @@ def dataset_image_coverage(image_id):
     data = request.get_json(silent=True) or {}
     try:
         ok = svc.set_image_coverage(LOCAL_USER, image_id, data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+
+
+@bp.post('/dataset/image/<int:image_id>/rights')
+def dataset_image_rights(image_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        ok = svc.set_image_rights(LOCAL_USER, image_id, data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+
+
+@bp.post('/dataset/<int:dataset_id>/coverage-policy')
+def dataset_coverage_policy(dataset_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        ok = svc.set_coverage_policy(
+            LOCAL_USER, dataset_id, data.get('profile'), data.get('targets'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
@@ -721,7 +811,7 @@ def dataset_import_zip(dataset_id):
         return jsonify({'error': 'no file'}), 400
     stats = {}
     try:
-        ids, failed = svc.import_dataset_zip(LOCAL_USER, dataset_id, f.read(), stats=stats)
+        ids, failed = svc.import_dataset_zip(LOCAL_USER, dataset_id, f.stream, stats=stats)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     return jsonify({'ok': True, 'imported': len(ids), 'failed': failed,
@@ -808,6 +898,48 @@ def dataset_images_batch(dataset_id):
     return jsonify({'ok': True, 'affected': n})
 
 
+@bp.get('/dataset/<int:dataset_id>/curation/history')
+def dataset_curation_history(dataset_id):
+    """Cursor-paginated append-only history of human curation decisions."""
+    from ..services import curation_history
+    try:
+        result = curation_history.list_events(
+            LOCAL_USER, dataset_id,
+            limit=request.args.get('limit', 30, type=int),
+            before_id=request.args.get('cursor', type=int))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid history cursor or limit'}), 400
+    if result is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(result)
+
+
+@bp.post('/dataset/<int:dataset_id>/curation/undo')
+def dataset_curation_undo(dataset_id):
+    """Undo the newest atomic curation batch (or the selected event's batch)."""
+    from ..services import curation_history
+    data = request.get_json(silent=True) or {}
+    event_id = data.get('event_id')
+    if event_id is not None and (isinstance(event_id, bool)
+                                 or not str(event_id).isdigit()):
+        return jsonify({'error': 'event_id must be an integer'}), 400
+    try:
+        result = curation_history.undo(
+            LOCAL_USER, dataset_id,
+            event_id=int(event_id) if event_id is not None else None)
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith('CURATION_UNDO_CONFLICT:'):
+            return jsonify({
+                'error': message.split(':', 1)[1].strip(),
+                'code': 'curation_undo_conflict',
+            }), 409
+        return jsonify({'error': message}), 400
+    if result is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True, **result})
+
+
 @bp.post('/dataset/<int:dataset_id>/purge')
 def dataset_purge(dataset_id):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
@@ -839,26 +971,36 @@ def dataset_image_crop(image_id):
 
 @bp.get('/dataset/<int:dataset_id>/export')
 def dataset_export(dataset_id):
+    stream = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')
     try:
-        data = svc.build_export_zip(LOCAL_USER, dataset_id)
+        svc.build_export_zip(LOCAL_USER, dataset_id, destination=stream)
     except ValueError as e:
+        stream.close()
         return _map_error(e)
-    return send_file(io.BytesIO(data), mimetype='application/zip', as_attachment=True,
-                     download_name=f'dataset_{dataset_id}.zip')
+    stream.seek(0)
+    response = send_file(stream, mimetype='application/zip', as_attachment=True,
+                         download_name=f'dataset_{dataset_id}.zip')
+    response.call_on_close(stream.close)
+    return response
 
 
 @bp.get('/dataset/<int:dataset_id>/backup')
 def dataset_backup(dataset_id):
     """Full portable backup (manifest + settings + ALL images with status/captions/
     scores) — distinct from /export, the training-format ZIP."""
+    stream = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')
     try:
-        data = svc.build_backup_zip(LOCAL_USER, dataset_id)
+        svc.build_backup_zip(LOCAL_USER, dataset_id, destination=stream)
     except ValueError as e:
+        stream.close()
         return _map_error(e)
     ds = svc.get_dataset(LOCAL_USER, dataset_id)
     safe = ''.join(c if c.isalnum() or c in '-_' else '_' for c in (ds.name if ds else str(dataset_id)))
-    return send_file(io.BytesIO(data), mimetype='application/zip', as_attachment=True,
-                     download_name=f'lds_backup_{safe}.zip')
+    stream.seek(0)
+    response = send_file(stream, mimetype='application/zip', as_attachment=True,
+                         download_name=f'lds_backup_{safe}.zip')
+    response.call_on_close(stream.close)
+    return response
 
 
 @bp.post('/dataset/backup/import')
@@ -868,7 +1010,7 @@ def dataset_backup_import():
     if not f or not f.filename:
         return jsonify({'error': 'no file'}), 400
     try:
-        ds = svc.import_backup_zip(LOCAL_USER, f.read())
+        ds = svc.import_backup_zip(LOCAL_USER, f.stream)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     return jsonify({'ok': True, 'id': ds.id, 'name': ds.name})

@@ -26,6 +26,7 @@ import ModelComparison from './ModelComparison';
 import ResultsArea from './ResultsArea';
 import QuickVoteModal from './QuickVoteModal';
 import ResultLightbox from './ResultLightbox';
+import TrainingFeedbackPanel from '../TrainingFeedbackPanel';
 
 export default function LegacyDatasetStudio({ datasetId, initialFamily = null }) {
   // Famille (pipeline) sélectionnée : null = défaut résolu côté serveur. `initialFamily`
@@ -86,6 +87,7 @@ function StudioBody({ datasetId, family, onFamilyChange }) {
           <RunSetupPanel d={d} studio={studio} form={form} datasetId={datasetId} />
         </aside>
         <main id="st-results" className="flex flex-col gap-3 min-w-0 scroll-mt-16">
+          <TrainingFeedbackPanel feedback={d.training_feedback} compact />
           {/* « Best epoch » OBJECTIF : classement InsightFace des checkpoints
               (complète le best_preset issu des votes 👍/👎 juste en dessous). */}
           <FaceRankingPanel ranking={d.face_ranking} onScore={studio.scoreFaces}

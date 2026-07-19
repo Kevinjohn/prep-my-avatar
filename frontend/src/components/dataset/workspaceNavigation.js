@@ -9,6 +9,39 @@ export const PANEL_STATUS = Object.freeze({
 
 const boolStatus = (value) => value ? PANEL_STATUS.AVAILABLE : PANEL_STATUS.UNAVAILABLE;
 
+const summaryCount = (summary, key, fallback) => {
+  const value = summary?.[key];
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+};
+
+/**
+ * Replace page-local availability signals with whole-dataset aggregates when
+ * the metadata endpoint supplies them. The image list is deliberately
+ * paginated, so using only the loaded prefix can hide destinations whose
+ * qualifying images live on an older page.
+ */
+export function withDatasetImageSummary(context, imageSummary) {
+  return {
+    ...context,
+    hasSelectableImages: summaryCount(
+      imageSummary, 'selectable', context.hasSelectableImages ? 1 : 0,
+    ) > 0,
+    hasKeptImages: summaryCount(
+      imageSummary, 'kept', context.hasKeptImages ? 1 : 0,
+    ) > 0,
+    hasCaptionedKept: summaryCount(
+      imageSummary, 'kept_captioned', context.hasCaptionedKept ? 1 : 0,
+    ) > 0,
+    watermarkDetected: summaryCount(
+      imageSummary, 'watermark_detected', context.watermarkDetected || 0,
+    ),
+    unused: summaryCount(imageSummary, 'unused', context.unused || 0),
+    smallImageRescue: summaryCount(
+      imageSummary, 'small_image_rescue', context.smallImageRescue || 0,
+    ),
+  };
+}
+
 const AVAILABILITY = {
   always: () => PANEL_STATUS.AVAILABLE,
   hasSelectableImages: (c) => boolStatus(c.hasSelectableImages),

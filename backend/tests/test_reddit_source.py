@@ -144,8 +144,10 @@ def test_scan_pagination_walks_cursor_no_overlap(monkeypatch):
     monkeypatch.setattr(reddit, '_api_get', fake_get)
 
     src = reddit.RedditSource()
-    m0 = Match(url='https://www.reddit.com/r/x/top/'); m0.page = 0
-    m1 = Match(url='https://www.reddit.com/r/x/top/'); m1.page = 1
+    m0 = Match(url='https://www.reddit.com/r/x/top/')
+    m0.page = 0
+    m1 = Match(url='https://www.reddit.com/r/x/top/')
+    m1.page = 1
     i0 = [i['url'] for i in src.scan(m0)[0]]
     i1 = [i['url'] for i in src.scan(m1)[0]]
     assert i0 == ['https://i.redd.it/p0.jpg']
@@ -158,7 +160,8 @@ def test_scan_pagination_past_end_returns_empty(monkeypatch):
     # only one page exists (after=None) → requesting page 1 yields nothing new
     monkeypatch.setattr(reddit, '_api_get',
                         lambda path, params, tok: _listing([_img_post('only')], after=None))
-    m = Match(url='https://www.reddit.com/r/x/'); m.page = 1
+    m = Match(url='https://www.reddit.com/r/x/')
+    m.page = 1
     items, err = reddit.RedditSource().scan(m)
     assert err is None and items == []
 

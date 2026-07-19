@@ -25,8 +25,10 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$PyVersion = '3.11',
-  [string]$OutName   = 'LoRA-Dataset-Studio'
+  [string]$PyAsset = 'cpython-3.11.15+20260718-x86_64-pc-windows-msvc-install_only.tar.gz',
+  [ValidatePattern('^[0-9a-f]{64}$')]
+  [string]$PySha256 = 'c3d782be3733f779d585633da374ff1bd92400d4d74c0c3922aee1526446096b',
+  [string]$OutName = 'LoRA-Dataset-Studio'
 )
 $ErrorActionPreference = 'Stop'
 $Here  = $PSScriptRoot
@@ -34,7 +36,7 @@ $Root  = Split-Path -Parent $Here
 $Build = Join-Path $Here 'build'
 $Stage = Join-Path $Here "dist\$OutName"
 $Zip   = Join-Path $Here "dist\$OutName-win64.zip"
-$UA    = @{ 'User-Agent' = 'lds-build' }
+$PythonRelease = '20260718'
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
@@ -42,16 +44,17 @@ Step 'Clean workspace'
 Remove-Item -Recurse -Force $Build, $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $Build, $Stage, (Split-Path $Zip) | Out-Null
 
-# 1) Resolve a standalone CPython asset from the LATEST release (no hardcoded tag, so
-#    it never goes stale). install_only = a normal, relocatable python\ layout with pip.
-Step "Resolving python-build-standalone (CPython $PyVersion, x86_64 msvc)"
-$rel = Invoke-RestMethod -Headers $UA 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest'
-$pattern = "cpython-$([regex]::Escape($PyVersion))\.\d+\+.*-x86_64-pc-windows-msvc-install_only\.tar\.gz$"
-$asset = $rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
-if (-not $asset) { throw "No CPython $PyVersion install_only msvc asset in release $($rel.tag_name)." }
-$tar = Join-Path $Build $asset.name
-Write-Host "    $($asset.name)"
-Invoke-WebRequest -Headers $UA -Uri $asset.browser_download_url -OutFile $tar
+# 1) Fetch one immutable, reviewed CPython asset and verify its publisher digest.
+#    Updating Python is an intentional code review change to all three constants.
+Step "Downloading pinned python-build-standalone $PyAsset"
+$tar = Join-Path $Build $PyAsset
+$encodedAsset = $PyAsset.Replace('+', '%2B')
+$pythonUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$PythonRelease/$encodedAsset"
+Invoke-WebRequest -UseBasicParsing -Uri $pythonUrl -OutFile $tar
+$actualPythonHash = (Get-FileHash -Algorithm SHA256 $tar).Hash.ToLowerInvariant()
+if ($actualPythonHash -ne $PySha256.ToLowerInvariant()) {
+  throw "Standalone Python checksum mismatch: expected $PySha256, got $actualPythonHash."
+}
 
 Step 'Extracting Python into the bundle'
 tar -xzf $tar -C $Build                       # -> $Build\python\...
@@ -99,11 +102,8 @@ foreach ($v in '3.12', '3.11', '3.10', '3.9') {
 }
 if (-not $HostPy) { $HostPy = 'python' }   # last resort — may fail on 3.13+
 Write-Host "    host python for PyInstaller: $HostPy"
-& $HostPy -m pip show pyinstaller *> $null
-if ($LASTEXITCODE -ne 0) {
-  & $HostPy -m pip install --disable-pip-version-check pyinstaller
-  if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw 'pip install pyinstaller failed.' }
-}
+& $HostPy -m pip install --disable-pip-version-check -r (Join-Path $Here 'requirements-build.txt')
+if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw 'pinned PyInstaller install failed.' }
 $ErrorActionPreference = $prevEAP
 & $HostPy -m PyInstaller --noconfirm --onefile --noconsole `
   --name 'LoRA Dataset Studio' --icon (Join-Path $Here 'icon.ico') `

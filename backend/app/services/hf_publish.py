@@ -25,13 +25,13 @@ runs the whole flow in a daemon thread (mirroring `setup_installer`) and
 (HfApi mocked — no real network).
 """
 import json
+import hashlib
 import os
 import re
 import shutil
 import tempfile
 import threading
 
-from .. import config as cfg
 from ..config import LOCAL_USER
 from ..utils.redact import redact_user_paths
 from ..version import APP_VERSION
@@ -170,6 +170,39 @@ def _write_text(dest_dir, name, text):
         fh.write(text)
 
 
+def _markdown_text(value):
+    text = ' '.join(str(value or '').split())
+    return (text.replace('\\', '\\\\').replace('|', '\\|')
+            .replace('`', '\\`').replace('<', '&lt;').replace('>', '&gt;'))
+
+
+def _markdown_code(value):
+    """Render arbitrary user text as one safe CommonMark code span."""
+    text = ' '.join(str(value or '').split())
+    text = (text.replace('&', '&amp;').replace('|', '&#124;')
+            .replace('<', '&lt;').replace('>', '&gt;'))
+    longest = max((len(run) for run in re.findall(r'`+', text)), default=0)
+    delimiter = '`' * (longest + 1)
+    padding = ' ' if text.startswith(('`', ' ')) or text.endswith(('`', ' ')) else ''
+    return f'{delimiter}{padding}{text}{padding}{delimiter}'
+
+
+def _copy_verified(source, destination):
+    """Copy one immutable source version and hash the published bytes."""
+    before = os.stat(source)
+    shutil.copyfile(source, destination)
+    with open(destination, 'rb') as handle:
+        published_hash = hashlib.sha256(handle.read()).hexdigest()
+    after = os.stat(source)
+    with open(source, 'rb') as handle:
+        source_hash = hashlib.sha256(handle.read()).hexdigest()
+    if ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+            or source_hash != published_hash):
+        raise HfPublishError(
+            'dataset_changed', 'the dataset changed while it was staged; retry publish')
+    return published_hash
+
+
 def _target_family(ds) -> str:
     return (getattr(ds, 'train_type', None) or 'zimage').lower()
 
@@ -184,7 +217,7 @@ def build_readme(ds, count, license, nfaa) -> str:
     trigger, 'built with LoRA Dataset Studio' + repo link). Fully redacted."""
     fam = _FAMILY_LABEL.get(_target_family(ds), _target_family(ds))
     kind = _kind_label(ds)
-    trigger = ds.trigger_word or ''
+    trigger = ' '.join(str(ds.trigger_word or '').split())
     tags = ['lora-dataset-studio']
     if nfaa:
         tags.append('not-for-all-audiences')
@@ -193,10 +226,11 @@ def build_readme(ds, count, license, nfaa) -> str:
     fm += [f'- {t}' for t in tags]
     fm += ['size_categories:', '- n<1K', '---', '']
 
-    trig_line = (f'| Trigger word | `{trigger}` |' if trigger
+    trigger_code = _markdown_code(trigger) if trigger else ''
+    trig_line = (f'| Trigger word | {trigger_code} |' if trigger
                  else '| Trigger word | _(none — style dataset)_ |')
     body = [
-        f'# {ds.name}',
+        f'# {_markdown_text(ds.name)}',
         '',
         f'A LoRA training dataset built with '
         f'**[LoRA Dataset Studio]({GITHUB_URL})**.',
@@ -221,7 +255,7 @@ def build_readme(ds, count, license, nfaa) -> str:
         '',
     ]
     if trigger:
-        body += [f'Put the trigger word **`{trigger}`** in your prompts to summon '
+        body += [f'Put the trigger word **{trigger_code}** in your prompts to summon '
                  'this concept once the LoRA is trained.', '']
     body += [
         '---',
@@ -249,6 +283,15 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
 
     kept = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
             .order_by(FaceDatasetImage.id.asc()).all())
+    initial_dataset = (
+        int(ds.revision or 0), ds.name, ds.trigger_word, ds.kind, ds.train_type,
+        ds.ref_filename,
+    )
+    initial_rows = [(
+        img.id, img.filename, img.caption, img.status, img.source,
+        img.generation_provenance, img.source_rights, img.coverage_json,
+        img.coverage_provenance,
+    ) for img in kept]
     entries = []
     stem = _safe_stem(ds)
 
@@ -259,10 +302,13 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
         if os.path.exists(ref_path):
             ext = os.path.splitext(ds.ref_filename)[1].lower() or '.webp'
             name = f'{stem}_000_ref{ext}'
-            shutil.copyfile(ref_path, os.path.join(dest_dir, name))
+            content_sha256 = _copy_verified(
+                ref_path, os.path.join(dest_dir, name))
             text = redact_user_paths(ds.trigger_word or '')
             _write_text(dest_dir, f'{stem}_000_ref.txt', text)
-            entries.append({'file_name': name, 'text': text})
+            entries.append({'file_name': name, 'text': text,
+                            'content_sha256': content_sha256,
+                            'source': 'reference'})
 
     for n, img in enumerate(kept, 1):
         if not img.filename:
@@ -272,12 +318,33 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
             continue
         ext = os.path.splitext(img.filename)[1].lower() or '.webp'
         name = f'{stem}_{n:03d}{ext}'
-        shutil.copyfile(src, os.path.join(dest_dir, name))
+        content_sha256 = _copy_verified(src, os.path.join(dest_dir, name))
         # redact is a no-op on real captions; belt-and-suspenders so NOTHING in
         # the public repo can carry a stray home path.
         text = redact_user_paths(fds._export_caption(ds, img.caption))
         _write_text(dest_dir, f'{stem}_{n:03d}.txt', text)
-        entries.append({'file_name': name, 'text': text})
+        provenance = fds._safe_json(img.generation_provenance) or {}
+        stored_rights = fds._safe_json(img.source_rights) or {}
+        # ``notes`` and ``recorded_at`` are private curation records. Notes can
+        # contain source URLs, contract details, or consent evidence and must
+        # never be copied into a public Hugging Face repository.
+        rights = {
+            'basis': stored_rights.get('basis')
+            or ('generated' if img.source == 'generated' else 'unknown'),
+        }
+        for key in ('license', 'consent_confirmed'):
+            if key in stored_rights:
+                rights[key] = stored_rights[key]
+        entries.append({
+            'file_name': name, 'text': text,
+            'content_sha256': content_sha256,
+            'source': img.source,
+            'generation_provider': provenance.get('provider'),
+            'generation_model': provenance.get('model'),
+            'source_rights': rights,
+            'coverage': fds.parse_coverage(img.coverage_json),
+            'coverage_provenance': fds._safe_json(img.coverage_provenance),
+        })
 
     if not entries:
         raise HfPublishError('no_images', 'no kept images with files on disk to publish')
@@ -288,6 +355,25 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
 
     readme = build_readme(ds, len(entries), license, nfaa)
     _write_text(dest_dir, 'README.md', readme)
+    # The final signature check must use a new SQLite read snapshot.
+    fds.db.session.commit()
+    fds.db.session.expire_all()
+    current_ds = fds.get_dataset(user_id, dataset_id)
+    current_rows = (FaceDatasetImage.query
+                    .filter_by(dataset_id=dataset_id, status='keep')
+                    .order_by(FaceDatasetImage.id.asc()).all())
+    current_dataset = ((int(current_ds.revision or 0), current_ds.name,
+                        current_ds.trigger_word, current_ds.kind,
+                        current_ds.train_type, current_ds.ref_filename)
+                       if current_ds else None)
+    current_signature = [(
+        img.id, img.filename, img.caption, img.status, img.source,
+        img.generation_provenance, img.source_rights, img.coverage_json,
+        img.coverage_provenance,
+    ) for img in current_rows]
+    if current_dataset != initial_dataset or current_signature != initial_rows:
+        raise HfPublishError(
+            'dataset_changed', 'the dataset changed while it was staged; retry publish')
     return {'count': len(entries), 'entries': entries, 'readme': readme,
             'trigger': ds.trigger_word}
 
@@ -317,9 +403,11 @@ def publish_to_hf(dataset_id, repo_id, private, nfaa, license, include_ref, toke
     tmp = tempfile.mkdtemp(prefix='lds-hf-')
     try:
         info = build_publish_dir(user_id, dataset_id, tmp, include_ref, license, nfaa)
+        created_repo = False
         try:
             api.create_repo(repo_id=repo_id, repo_type='dataset',
                             private=bool(private), exist_ok=False)
+            created_repo = True
         except HfPublishError:
             raise
         except Exception as e:
@@ -339,12 +427,25 @@ def publish_to_hf(dataset_id, repo_id, private, nfaa, license, include_ref, toke
             api.upload_folder(folder_path=tmp, repo_id=repo_id, repo_type='dataset',
                               commit_message=f'Add dataset (LoRA Dataset Studio v{APP_VERSION})')
         except Exception as e:
+            cleanup_error = None
+            if created_repo:
+                try:
+                    api.delete_repo(repo_id=repo_id, repo_type='dataset')
+                except Exception as cleanup_exc:
+                    cleanup_error = cleanup_exc
             status = _http_status(e)
             if status in (401, 403):
                 raise HfPublishError(
                     'auth', 'Hugging Face rejected the upload (401/403) — '
                     'check the token has write access') from e
-            raise HfPublishError('network', f'the upload to Hugging Face failed: {e}') from e
+            if cleanup_error is not None:
+                raise HfPublishError(
+                    'upload_failed_repo_retained',
+                    f'the upload failed and the partial repo could not be removed; '
+                    f'delete "{repo_id}" on Hugging Face before retrying: {e}') from e
+            raise HfPublishError(
+                'network', f'the upload to Hugging Face failed; the empty repo '
+                           f'was removed and it is safe to retry: {e}') from e
 
         return {'ok': True, 'repo_id': repo_id, 'count': info['count'],
                 'repo_url': f'https://huggingface.co/datasets/{repo_id}'}
@@ -371,7 +472,26 @@ def _job_snapshot(dataset_id):
 
 def publish_status(dataset_id):
     with _lock:
-        return _job_snapshot(dataset_id)
+        current = _job_snapshot(dataset_id)
+    if current.get('state') != 'idle':
+        return current
+    try:
+        from . import background_jobs
+        saved = background_jobs.snapshot(
+            background_jobs.latest('hf_publish', str(dataset_id)))
+        if saved.get('state') == 'idle':
+            return current
+        return {
+            'state': 'error' if saved.get('state') == 'interrupted' else saved.get('state'),
+            'job_id': saved.get('job_id'),
+            'repo_url': saved.get('repo_url'),
+            'repo_id': saved.get('repo_id'),
+            'error': saved.get('error'),
+            'error_code': saved.get('error_code'),
+            'count': saved.get('count'),
+        }
+    except Exception:
+        return current
 
 
 def start_publish(app, dataset_id, repo_id, private, nfaa, license, include_ref,
@@ -382,8 +502,21 @@ def start_publish(app, dataset_id, repo_id, private, nfaa, license, include_ref,
         cur = _jobs.get(dataset_id)
         if cur and cur.get('state') == 'running':
             return {**cur, 'already': True}
+        job_id = None
+        with app.app_context():
+            from . import background_jobs
+            job, created = background_jobs.create_or_get('hf_publish', str(dataset_id), {
+                'dataset_id': dataset_id, 'repo_id': repo_id,
+                'private': bool(private), 'nfaa': bool(nfaa),
+                'license': license, 'include_ref': bool(include_ref),
+                'user_id': user_id,
+            })
+            if not created:
+                return {**background_jobs.snapshot(job), 'already': True}
+            job_id = job.id
         _jobs[dataset_id] = {'state': 'running', 'repo_url': None, 'repo_id': repo_id,
-                             'error': None, 'error_code': None, 'count': None}
+                             'error': None, 'error_code': None, 'count': None,
+                             'job_id': job_id}
     threading.Thread(
         target=_run_publish_job,
         args=(app, dataset_id, repo_id, private, nfaa, license, include_ref, token, user_id),
@@ -406,4 +539,12 @@ def _run_publish_job(app, dataset_id, repo_id, private, nfaa, license, include_r
         result = {'state': 'error', 'repo_url': None, 'repo_id': repo_id,
                   'error': f'unexpected error: {e}', 'error_code': 'unknown', 'count': None}
     with _lock:
-        _jobs[dataset_id] = result
+        job_id = (_jobs.get(dataset_id) or {}).get('job_id')
+        _jobs[dataset_id] = {**result, 'job_id': job_id}
+    if job_id:
+        with app.app_context():
+            from . import background_jobs
+            background_jobs.touch(
+                job_id, state='done' if result['state'] == 'done' else 'error',
+                result={key: result.get(key) for key in ('repo_url', 'repo_id', 'count')},
+                error=result.get('error'), error_code=result.get('error_code'))

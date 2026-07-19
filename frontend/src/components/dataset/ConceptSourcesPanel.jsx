@@ -13,7 +13,7 @@
  */
 import { useState, useCallback, useEffect } from 'react';
 import { useToast } from '../common/Toast';
-import { postJson } from '../../hooks/useDataset';
+import { safePostJson as postJson } from '../../api/fetchClient';
 import { useCapabilities } from '../../context/CapabilitiesContext';
 import InstallRunner from '../setup/InstallRunner';
 import { clearScraperScanState, loadScraperScanState, saveScraperScanState } from './scraperState';

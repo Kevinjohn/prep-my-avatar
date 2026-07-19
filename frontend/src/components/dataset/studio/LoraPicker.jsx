@@ -19,6 +19,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useToast } from '../../common/Toast';
+import { safeJson } from '../../../api/fetchClient';
 
 // Famille de l'entrée (le backend la fournit ; `train_type` = alias rétro-compat).
 const famOf = (l) => l.family || l.train_type || 'zimage';
@@ -46,10 +47,10 @@ export default function LoraPicker({ preselectDataset, onSelectionChange }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/studio/checkpoints', { credentials: 'include' })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    safeJson('/api/studio/checkpoints')
       .then((d) => {
         if (cancelled) return;
+        if (d.ok === false) throw new Error(d.error || 'Could not load checkpoints');
         setLoras(d.loras || []);
         setLoading(false);
       })

@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import logging
+from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -19,12 +20,32 @@ DOWNLOAD_TIMEOUT = 300
 DEFAULT_MAX_ITEMS = 120
 DEFAULT_MAX_ALBUMS = 8
 _VIDEO_EXTS = ('mp4', 'webm', 'mov', 'm4v')
+_GENERIC_EXTRACTOR_DOMAINS = (
+    'youtube.com', 'youtu.be', 'pornhub.com', 'xvideos.com', 'redgifs.com',
+    'vimeo.com', 'dailymotion.com', 'x.com', 'twitter.com', 'tiktok.com',
+    'coomer.st', 'coomer.su', 'coomer.party', 'coomer.cr',
+    'kemono.cr', 'kemono.su', 'kemono.party',
+    'cyberdrop.me', 'cyberdrop.cr', 'cyberdrop.to',
+)
 
 # Codes de sortie gallery-dl (bitmask, gallery_dl/exception.py) — vérifié sur 1.32.3.
 EXIT_HTTP = 4
 EXIT_NOTFOUND = 8
 EXIT_AUTH = 16
 EXIT_UNSUPPORTED = 64
+
+
+def _subprocess_url_allowed(url):
+    """Only recognized platform hosts may reach an extractor subprocess."""
+    from ..validators import Platform, url_validator
+    host = (urlparse(url).hostname or '').lower()
+    if url_validator.detect_platform(url) != Platform.UNKNOWN:
+        return True
+    labels = host.split('.')
+    if len(labels) >= 2 and labels[-2].startswith('bunkr'):
+        return True
+    return any(host == domain or host.endswith('.' + domain)
+               for domain in _GENERIC_EXTRACTOR_DOMAINS)
 
 
 def classify_exit(returncode):
@@ -70,6 +91,12 @@ def _run_simulate(url, max_items, cookies, extra_opts, image_range=None):
     défaut '1-{max_items}'. Sert la pagination « Charger plus » des sources à images
     directes (Civitai) où `--range` borne le flux (≠ pornpics qui empile des galeries
     → `--chapter-range` dans extra_opts)."""
+    from ..netfetch import _validate_public_http_url
+    valid, validation_error = _validate_public_http_url(url)
+    if not valid:
+        return None, validation_error or 'gallery-dl : URL réseau refusée.'
+    if not _subprocess_url_allowed(url):
+        return None, 'gallery-dl : hôte non autorisé pour un extracteur externe.'
     cmd = [sys.executable, '-m', 'gallery_dl', '--ignore-config',
            '--simulate', '-j', '--range', image_range or f'1-{max_items}']
     if cookies:
@@ -196,6 +223,12 @@ def download(url, dest_dir, filename, *, cookies=None, extra_opts=None):
     """Télécharge RÉELLEMENT via gallery-dl dans `dest_dir` avec un nom déterministe.
     Retourne (ok, abs_path|None, error|None). Ne lève jamais. Sécurité : --ignore-config,
     shell=False, args en liste, séparateur -- avant l'URL."""
+    from ..netfetch import _validate_public_http_url
+    valid, validation_error = _validate_public_http_url(url)
+    if not valid:
+        return False, None, validation_error or 'gallery-dl : URL réseau refusée.'
+    if not _subprocess_url_allowed(url):
+        return False, None, 'gallery-dl : hôte non autorisé pour un extracteur externe.'
     cmd = [sys.executable, '-m', 'gallery_dl', '--ignore-config',
            '-D', dest_dir, '-o', f'filename={filename}_{{num}}.{{extension}}',
            '--no-part', '--no-mtime']
@@ -204,31 +237,64 @@ def download(url, dest_dir, filename, *, cookies=None, extra_opts=None):
     if extra_opts:
         cmd += list(extra_opts)
     cmd += ['--', url]
+    os.makedirs(dest_dir, exist_ok=True)
+    before = set(os.listdir(dest_dir))
+
+    def cleanup_new_outputs():
+        for name in set(os.listdir(dest_dir)) - before:
+            path = Path(dest_dir) / name
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    import shutil
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning('gallery-dl cleanup failed for %s', path)
+
     try:
-        os.makedirs(dest_dir, exist_ok=True)
-        before = set(os.listdir(dest_dir))
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=DOWNLOAD_TIMEOUT, shell=False)
     except subprocess.TimeoutExpired:
-        # NB : un éventuel fichier partiel n'est pas nettoyé ici (hors périmètre).
+        cleanup_new_outputs()
         return False, None, "gallery-dl : téléchargement trop long (timeout)."
     except Exception as e:
+        cleanup_new_outputs()
         logger.warning("gallery-dl download: échec %s: %s", url, e)
         return False, None, f"gallery-dl : échec ({e})."
 
     if proc.returncode:
+        cleanup_new_outputs()
         kind = classify_exit(proc.returncode)
         last = ((proc.stderr or '').strip().splitlines() or [''])[-1]
         return False, None, f"gallery-dl : {kind or 'échec'} ({last[:200]})."
 
     # Chemin produit : 1) parser le stdout (gallery-dl imprime les chemins écrits) ;
     # 2) repli = le fichier le plus récent apparu dans dest_dir.
+    root = Path(dest_dir).resolve()
+
+    def safe_output(candidate):
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if path.is_symlink():
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return None
+        return resolved if resolved.is_file() else None
+
     for line in reversed((proc.stdout or '').splitlines()):
         line = line.strip()
-        if line and os.path.isfile(line):
-            return True, line, None
+        produced = safe_output(line) if line else None
+        if produced is not None:
+            return True, str(produced), None
     after = set(os.listdir(dest_dir)) - before
-    if after:
-        newest = max((os.path.join(dest_dir, f) for f in after), key=os.path.getmtime)
-        return True, newest, None
+    produced = [safe_output(Path(dest_dir) / name) for name in after]
+    produced = [path for path in produced if path is not None]
+    if produced:
+        newest = max(produced, key=lambda path: path.stat().st_mtime)
+        return True, str(newest), None
     return False, None, "gallery-dl : aucun fichier produit."

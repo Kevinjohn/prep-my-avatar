@@ -3,6 +3,7 @@ run name, not the trigger alone -- otherwise a zimage run and a krea run of the
 same trigger both write `{trigger}.json` and the second clobbers the first, and
 purge_training_artifacts (which keyed by trigger too) would destroy the wrong
 family's record. Runtime verification (agent C) reproduced this."""
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,8 +42,24 @@ def test_write_job_config_is_run_name_scoped(training):
     assert os.path.isfile(p_zimage) and os.path.isfile(p_krea) and os.path.isfile(p_krea_turbo)
 
 
+def test_launch_tokens_preserve_immutable_job_configs(training):
+    lt, _generated = training
+    with patch('app.services.lora_training.build_job_config',
+               side_effect=({'launch': 1}, {'launch': 2})):
+        first = lt.write_job_config(
+            _ds('zimage'), 'folderA', launch_token='20260718-first')
+        second = lt.write_job_config(
+            _ds('zimage'), 'folderB', launch_token='20260718-second')
+    assert first != second
+    with open(first, encoding='utf-8') as handle:
+        assert json.load(handle) == {'launch': 1}
+    with open(second, encoding='utf-8') as handle:
+        assert json.load(handle) == {'launch': 2}
+
+
 def test_purge_removes_all_family_configs_but_not_sibling_trigger(training):
     lt, generated = training
+    from app.services import trash
     with patch('app.services.lora_training.build_job_config', return_value={'x': 1}):
         p1 = lt.write_job_config(_ds('zimage'), 'folderA')
         p2 = lt.write_job_config(_ds('krea'), 'folderB')
@@ -53,3 +70,8 @@ def test_purge_removes_all_family_configs_but_not_sibling_trigger(training):
     removed = lt.purge_training_artifacts('local', 'AgentCTest')
     assert not os.path.isfile(p1) and not os.path.isfile(p2)
     assert os.path.isfile(sibling)  # trigger-boundary guard: AgentCTest2 survives
+    assert set(removed) == {p1, p2}
+    entry = next(item for item in trash.list_entries()
+                 if item['kind'] == 'training_artifacts')
+    trash.restore_entry(entry['id'])
+    assert os.path.isfile(p1) and os.path.isfile(p2)

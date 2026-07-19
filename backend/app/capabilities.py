@@ -243,22 +243,19 @@ def probe_masks() -> dict:
 
 
 def probe_watermark_inpaint() -> dict:
-    """LaMa inpainting availability (simple-lama-inpainting, ML extra). Dedicated
+    """LaMa inpainting availability (local adapter plus ML dependencies). Dedicated
     interpreter key, else reuse the ML python (masks.python) then sys.executable —
     same subprocess-probe pattern/timeout handling as probe_masks. When False the
     Clean pass still runs crop-only (LaMa-routed images are skipped, not failed)."""
     python = cfg.get('watermark.python') or cfg.get('masks.python') or sys.executable
-    ok = _cached_import('watermark', python, 'import simple_lama_inpainting')
-    return {'ok': ok, 'detail': 'simple-lama-inpainting import OK' if ok else 'import failed'}
+    ok = _cached_import('watermark', python, 'import cv2, numpy, torch; from PIL import Image')
+    return {'ok': ok, 'detail': 'LaMa runtime imports OK' if ok else 'import failed'}
 
 
-# Prebuilt wheels for the ML extras (insightface 0.7.3, numpy<2, onnxruntime,
-# rembg, opencv) exist for CPython 3.10–3.12 only. On a newer interpreter (3.13+)
-# there is no numpy<2 / insightface wheel, so `pip install -r requirements-ml.txt`
-# falls back to source builds that can't resolve (numpy build-dep clash) — the
-# cryptic failure a fresh-clone user hits. Surface the version so the setup can
-# warn UP FRONT instead of after a 200-line pip traceback.
-_ML_PY_MIN = (3, 10)
+# The reviewed ML graph uses current rembg/ONNX/NumPy releases, whose common
+# supported window for this app is CPython 3.11–3.12. Core and scraping features
+# remain compatible with Python 3.10; this status is specifically for ML setup.
+_ML_PY_MIN = (3, 11)
 _ML_PY_MAX = (3, 12)
 
 

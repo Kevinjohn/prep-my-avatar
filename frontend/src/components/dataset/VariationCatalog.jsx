@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Flux2KleinModelPicker from '../shared/Flux2KleinModelPicker';
 import { useToast } from '../common/Toast';
+import { useConfirmDialog, usePromptDialog } from '../common/ConfirmDialog';
 import { useCapabilities } from '../../context/CapabilitiesContext';
 import { apiFetch } from '../../api/fetchClient';
 import ShotIllustration, { contextEmoji } from './ShotIllustration';
@@ -85,6 +86,8 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
   hasPrimaryRef = hasRef, composition, images = [], bodyFidelity = false,
   recommendedIds = [], anchorPlan = null }) {
   const toast = useToast();
+  const confirm = useConfirmDialog();
+  const promptDialog = usePromptDialog();
   const { caps } = useCapabilities();
   const [catalog, setCatalog] = useState([]);
   const appliedRecommendationKey = useRef('');
@@ -140,10 +143,10 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
   // dx8152 consistency LoRA: anchors STRUCTURE, its guide recommends ~0.5 and
   // warns 0.8-1.0 can stop edits from applying (0.9 made variations near-copies).
   const [loraStrength, setLoraStrength] = useState(0.5);
-  // Generator backend: Nano Banana Pro (Gemini API, ~0,15 $/image, zero GPU,
-  // best face fidelity — user-validated default) or local Klein (GPU, free).
+  // Generator backend defaults to local-only Klein. API engines become usable
+  // only after the explicit privacy consent in Settings.
   const [generator, setGenerator] = useState(() => {
-    try { return localStorage.getItem('datasetGenerator') || 'nanobanana'; } catch { return 'nanobanana'; }
+    try { return localStorage.getItem('datasetGenerator') || 'klein'; } catch { return 'klein'; }
   });
   useEffect(() => {
     try { localStorage.setItem('datasetGenerator', generator); } catch { /* ignore */ }
@@ -154,7 +157,8 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
 
   // Which engines the user actually enabled in Settings (config.engines.enabled),
   // on top of the live reachability probe in `caps.engines`.
-  const [enabledEngines, setEnabledEngines] = useState(['nanobanana', 'chatgpt', 'klein']);
+  const [enabledEngines, setEnabledEngines] = useState(['klein']);
+  const [remoteAllowed, setRemoteAllowed] = useState(false);
   // ChatGPT auth lane (auto|api|subscription) — decides whether the card shows a
   // per-image API price or "uses your ChatGPT subscription quota".
   const [chatgptAuth, setChatgptAuth] = useState('auto');
@@ -165,12 +169,13 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
         if (cancelled) return;
         setEnabledEngines(d.config?.engines?.enabled || []);
         setChatgptAuth(d.config?.engines?.chatgpt_auth || 'auto');
+        setRemoteAllowed(!!d.config?.privacy?.allow_remote_generation);
       })
       .catch(() => { /* keep the permissive default on a transient failure */ });
     return () => { cancelled = true; };
   }, []);
-  const nbAvailable = enabledEngines.includes('nanobanana') && caps.engines.nanobanana;
-  const gptAvailable = enabledEngines.includes('chatgpt') && caps.engines.chatgpt;
+  const nbAvailable = remoteAllowed && enabledEngines.includes('nanobanana') && caps.engines.nanobanana;
+  const gptAvailable = remoteAllowed && enabledEngines.includes('chatgpt') && caps.engines.chatgpt;
   const klAvailable = enabledEngines.includes('klein') && caps.engines.klein;
   const currentAvailable = isKlein ? klAvailable : isNB ? nbAvailable : gptAvailable;
 
@@ -201,8 +206,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/dataset/variations', { credentials: 'include' })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    apiFetch('/api/dataset/variations')
       .then((d) => {
         if (cancelled) return;
         setCatalog(d.catalog || []);
@@ -310,8 +314,12 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
     setSelected(activePreset === key ? new Set() : new Set(ids));
   };
 
-  const saveCurrentPreset = () => {
-    const name = window.prompt('Name this shot preset:');
+  const saveCurrentPreset = async () => {
+    const name = await promptDialog({
+      title: 'Save shot preset',
+      inputLabel: 'Preset name',
+      confirmLabel: 'Save preset',
+    });
     if (name == null) return;
     try {
       const next = saveShotPreset(customPresets, name, selected, customShots);
@@ -330,19 +338,29 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
     setSelected(new Set(restored.selectedIds));
   };
 
-  const renameCustomPreset = (preset) => {
-    const name = window.prompt('Rename shot preset:', preset.name);
+  const renameCustomPreset = async (preset) => {
+    const name = await promptDialog({
+      title: 'Rename shot preset',
+      inputLabel: 'Preset name',
+      defaultValue: preset.name,
+      confirmLabel: 'Rename preset',
+    });
     if (name == null) return;
     try { setCustomPresets((items) => renameShotPreset(items, preset.id, name)); }
     catch (error) { toast.error(error.message || 'Could not rename preset'); }
   };
 
-  const removeCustomPreset = (preset) => {
-    if (!window.confirm(`Delete the preset “${preset.name}”?`)) return;
+  const removeCustomPreset = async (preset) => {
+    if (!(await confirm({
+      title: `Delete preset “${preset.name}”?`,
+      message: 'The saved shot selection will be removed. Generated images are unaffected.',
+      confirmLabel: 'Delete preset',
+      tone: 'danger',
+    }))) return;
     setCustomPresets((items) => deleteShotPreset(items, preset.id));
   };
 
-  const go = () => {
+  const go = async () => {
     const variations = catalog.filter((e) => selected.has(e.id))
       .map((e) => ({ id: e.id, label: e.label, prompt: e.prompt, framing: e.framing }));
     // NSFW shots: local Klein only (the toggle is gated on the Klein engine,
@@ -364,15 +382,21 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
     const dupes = variations.filter((v) => doneByLabel.get(v.label));
     let toGen = variations;
     if (dupes.length === variations.length) {
-      if (!window.confirm(
-        `All ${dupes.length} selected shot(s) already exist in the dataset (green ✓×N cards).\n\n`
-        + 'Generate them AGAIN anyway (duplicates)?')) return;
+      if (!(await confirm({
+        title: 'Generate duplicate shots?',
+        message: `All ${dupes.length} selected shots already exist in the dataset. Generate every selected shot again anyway?`,
+        confirmLabel: 'Generate duplicates',
+        tone: 'warning',
+      }))) return;
     } else if (dupes.length > 0) {
       const fresh = variations.length - dupes.length;
-      if (!window.confirm(
-        `${dupes.length} of the ${variations.length} selected shot(s) already exist in the dataset.\n\n`
-        + `OK — generate everything (including ${dupes.length} duplicate(s))\n`
-        + `Cancel — only generate the ${fresh} new one(s)`)) {
+      if (!(await confirm({
+        title: 'Include existing shots?',
+        message: `${dupes.length} of ${variations.length} selected shots already exist. Generate all shots, including duplicates, or only the ${fresh} new shots?`,
+        confirmLabel: 'Generate all',
+        cancelLabel: 'Only new shots',
+        tone: 'warning',
+      }))) {
         toGen = variations.filter((v) => !doneByLabel.get(v.label));
       }
     }
@@ -382,9 +406,12 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
     // ChatGPT subscription lane, which spends plan quota, not dollars).
     const rate = isNB ? 0.15 : (isGPT && !gptViaSub) ? 0.17 : 0;
     const cost = toGen.length * multiplier * rate;
-    if (cost > 5 && !window.confirm(
-      `This will launch ${toGen.length * multiplier} API generation(s) `
-      + `≈ $${cost.toFixed(2)} (${isNB ? 'Nano Banana' : 'ChatGPT'}).\n\nProceed?`)) return;
+    if (cost > 5 && !(await confirm({
+      title: `Spend about $${cost.toFixed(2)}?`,
+      message: `This will launch ${toGen.length * multiplier} paid API generations with ${isNB ? 'Nano Banana' : 'ChatGPT'}. The final charge may vary by provider.`,
+      confirmLabel: 'Launch paid generation',
+      tone: 'warning',
+    }))) return;
     onGenerate(toGen, multiplier, klein, loraStrength, generator);
   };
 
@@ -460,7 +487,9 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
                 Best face fidelity · estimated cost ≈ ${(selected.size * multiplier * 0.15).toFixed(2)}
               </span>
             ) : (
-              <span className="text-amber-300 text-[0.625rem]">⚠ Add GEMINI_API_KEY in Settings</span>
+              <span className="text-amber-300 text-[0.625rem]">
+                ⚠ {remoteAllowed ? 'Add GEMINI_API_KEY in Settings' : 'Enable remote generation in Settings ▸ Image engines'}
+              </span>
             )}
           </span>
         </button>
@@ -487,7 +516,9 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
                   : `gpt-image-2 · estimated cost ≈ $${(selected.size * multiplier * 0.17).toFixed(2)}`}
               </span>
             ) : (
-              <span className="text-amber-300 text-[0.625rem]">⚠ Add an API key or connect a subscription in Settings</span>
+              <span className="text-amber-300 text-[0.625rem]">
+                ⚠ {remoteAllowed ? 'Add an API key or connect a subscription in Settings' : 'Enable remote generation in Settings ▸ Image engines'}
+              </span>
             )}
           </span>
         </button>

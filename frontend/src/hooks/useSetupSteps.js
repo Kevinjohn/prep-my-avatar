@@ -83,7 +83,7 @@ export function deriveSetupSteps(caps) {
 }
 
 // The user's live capability checklist (Summary card). Watermark inpainting is a
-// distinct ML extra (simple-lama-inpainting) — an existing install that never ran
+// distinct ML runtime (Torch/Pillow/OpenCV) — an existing install that never added
 // it must SEE it as still missing here, not be told "everything's ready".
 export function deriveCapabilitySummary(caps) {
   const c = caps || {}

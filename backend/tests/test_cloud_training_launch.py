@@ -2,7 +2,7 @@
 stop request, and boot reconciliation. vast_client and the monitor thread are
 always mocked -- no network, no thread started for real."""
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -20,6 +20,11 @@ def ct(app, monkeypatch):
     # reconcile_orphans itself) leaves the reconcile-policy tests below,
     # which call reconcile_orphans() directly, exercising the real thing.
     monkeypatch.setattr(cloud_training, '_reconcile_before_launch', lambda a: None)
+    monkeypatch.setattr(
+        cloud_training, '_capture_training_snapshot',
+        lambda uid, did, dest: {
+            'registry_manifest': [], 'trigger_word': 'lola', 'kind': 'character',
+        })
     return cloud_training
 
 
@@ -32,7 +37,7 @@ def seeded_dataset(app, client):
 
 def _fake_export(monkeypatch, ct):
     monkeypatch.setattr(ct.lt, 'export_dataset_to_aitoolkit',
-                        lambda uid, did, masked=True, dest_dir=None: dest_dir)
+                        lambda uid, did, masked=True, dest_dir=None, **kw: dest_dir)
     monkeypatch.setattr(ct.lt, 'default_steps', lambda ds: 1200)
     # The seeded_dataset fixture has 0 kept images -- the real assert_trainable
     # (lora_training.py, already a standalone helper: dataset_id, train_type=None,
@@ -47,6 +52,16 @@ def test_launch_rejects_custom_base(ct, app, seeded_dataset, monkeypatch):
     with app.app_context():
         with pytest.raises(ValueError, match='local'):
             ct.launch_cloud_training('local', seeded_dataset, base_model='myBase.safetensors')
+
+
+def test_launch_rejects_persisted_local_base(ct, app, seeded_dataset):
+    with app.app_context():
+        from app.services import face_dataset_service as fds
+        ds = fds.get_dataset('local', seeded_dataset)
+        ds.train_base_model = 'converted-local-merge.safetensors'
+        ct.db.session.commit()
+        with pytest.raises(ValueError, match='local'):
+            ct.launch_cloud_training('local', seeded_dataset)
 
 
 def test_launch_rejects_sdxl(ct, app, seeded_dataset):
@@ -116,12 +131,154 @@ def test_launch_creates_run_and_staging(ct, app, seeded_dataset, monkeypatch):
         assert run.job_name.startswith('lds')
 
 
+def test_monitor_start_failure_discards_unstarted_provenance(
+        ct, app, seeded_dataset, monkeypatch):
+    _fake_export(monkeypatch, ct)
+    monkeypatch.setattr(
+        ct, '_start_monitor',
+        lambda run_id: (_ for _ in ()).throw(RuntimeError('thread unavailable')))
+    with app.app_context():
+        with pytest.raises(RuntimeError, match='thread unavailable'):
+            ct.launch_cloud_training('local', seeded_dataset)
+        run = ct.CloudTrainingRun.query.one()
+        assert run.status == 'error'
+        assert 'thread unavailable' in run.error
+        assert ct.TrainingRunRecord.query.count() == 0
+        params = json.loads(run.train_params or '{}')
+        assert 'record_id' not in params and 'version' not in params
+
+
+def test_staging_records_mask_generation_fallback(
+        ct, app, seeded_dataset, monkeypatch):
+    _fake_export(monkeypatch, ct)
+    with app.app_context():
+        ct.launch_cloud_training('local', seeded_dataset, masked=True)
+        run = ct.get_active_run()
+        params = json.loads(run.train_params)
+        assert params['masked'] is True
+        assert params['record_id']
+
+        ct._prepare_staging(run)
+
+        from app.models import TrainingRunRecord
+        record = ct.db.session.get(TrainingRunRecord, params['record_id'])
+        params = json.loads(run.train_params)
+        overrides = json.loads(record.overrides)
+        assert params['masked'] is False
+        assert record.masked is False
+        assert overrides['masked'] is False
+        assert overrides['masked_requested'] is True
+        assert overrides['mask_fallback'] == 'generation_unavailable'
+
+
+def test_cloud_run_config_is_frozen_at_launch(
+        ct, app, seeded_dataset, monkeypatch):
+    _fake_export(monkeypatch, ct)
+    with app.app_context():
+        from app.services import face_dataset_service as fds
+        ds = fds.get_dataset('local', seeded_dataset)
+        ds.train_settings = json.dumps({'rank': 16, 'resolution': '768'})
+        ct.db.session.commit()
+        ct.launch_cloud_training(
+            'local', seeded_dataset, train_type='krea', variant='base')
+        run = ct.get_active_run()
+        params = json.loads(run.train_params)
+
+        ds.trigger_word = 'edited_later'
+        ds.kind = 'style'
+        ds.train_type = 'zimage'
+        ds.train_variant = 'turbo'
+        ds.train_settings = json.dumps({'rank': 64, 'resolution': '1024'})
+        ct.db.session.commit()
+
+        frozen = ct._run_config_dataset(ds, params)
+        assert frozen.trigger_word == 'lola'
+        assert frozen.kind == 'character'
+        assert frozen.train_type == 'krea'
+        assert frozen.train_variant == 'base'
+        assert json.loads(frozen.train_settings)['rank'] == 16
+
+
+def test_retry_reuses_frozen_snapshot_and_recipe_after_dataset_edits(
+        ct, app, seeded_dataset, monkeypatch):
+    """A modern retry is the same admitted run, not today's mutable dataset."""
+    _fake_export(monkeypatch, ct)
+    from app.services import training_snapshot
+    monkeypatch.setattr(ct, '_capture_training_snapshot', training_snapshot.capture)
+    with app.app_context():
+        from app.models import FaceDatasetImage
+        from app.services import face_dataset_service as fds
+        ds = fds.get_dataset('local', seeded_dataset)
+        ds.train_settings = json.dumps({'rank': 16, 'resolution': '768'})
+        image_path = ct.cfg.dataset_images_root() / str(seeded_dataset) / 'kept.png'
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b'original admitted bytes')
+        row = FaceDatasetImage(
+            dataset_id=seeded_dataset, filename='kept.png', status='keep',
+            caption='lola portrait', source='import')
+        ct.db.session.add(row)
+        ct.db.session.commit()
+
+        first = ct.launch_cloud_training(
+            'local', seeded_dataset, train_type='krea', variant='base')
+        source = ct.db.session.get(ct.CloudTrainingRun, first['run_id'])
+        source.status = 'error'
+        source.finished_at = datetime.now(timezone.utc)
+        ds.trigger_word = 'edited_later'
+        ds.train_settings = json.dumps({'rank': 64, 'resolution': '1024'})
+        ds.train_base_model = 'local-only.safetensors'
+        ds.train_vae_path = 'local-only-vae.safetensors'
+        image_path.write_bytes(b'new mutable bytes')
+        ct.db.session.commit()
+
+        retried = ct.retry_cloud_run('local', source.id)
+        new_run = ct.db.session.get(ct.CloudTrainingRun, retried['run_id'])
+        params = json.loads(new_run.train_params)
+        copied = training_snapshot.load(
+            ct.Path(new_run.staging_dir) / 'snapshot')
+        copied_path = training_snapshot.entry_path(
+            ct.Path(new_run.staging_dir) / 'snapshot', copied['entries'][0])
+
+        assert params['config_snapshot']['trigger_word'] == 'lola'
+        assert json.loads(params['config_snapshot']['train_settings'])['rank'] == 16
+        assert copied_path.read_bytes() == b'original admitted bytes'
+
+
 def test_launch_refuses_second_active_run(ct, app, seeded_dataset, monkeypatch):
     _fake_export(monkeypatch, ct)
     with app.app_context():
         ct.launch_cloud_training('local', seeded_dataset)
         with pytest.raises(RuntimeError, match='already'):
             ct.launch_cloud_training('local', seeded_dataset)
+
+
+def test_simultaneous_launches_reserve_only_one_active_slot(
+        ct, app, seeded_dataset, monkeypatch):
+    import threading
+    _fake_export(monkeypatch, ct)
+    barrier = threading.Barrier(2)
+    results = []
+    results_lock = threading.Lock()
+
+    def launch():
+        barrier.wait()
+        try:
+            with app.app_context():
+                value = ('ok', ct.launch_cloud_training('local', seeded_dataset))
+        except Exception as exc:
+            value = ('error', exc)
+        with results_lock:
+            results.append(value)
+
+    threads = [threading.Thread(target=launch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert [kind for kind, _value in results].count('ok') == 1
+    errors = [value for kind, value in results if kind == 'error']
+    assert len(errors) == 1 and 'already' in str(errors[0])
 
 
 def test_launch_persists_family_and_variant(ct, app, seeded_dataset, monkeypatch):
@@ -172,6 +329,20 @@ def test_retry_relaunches_failed_run_with_same_params(ct, app, seeded_dataset, m
     assert captured['gpu_name'] == 'RTX 5090'
     assert captured['allow_caption_mismatch'] is True
     assert captured['allow_uncaptioned'] is True
+
+
+def test_retry_refuses_modern_run_when_snapshot_is_missing(
+        ct, app, seeded_dataset, tmp_path):
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=seeded_dataset, status='error', run_name='x',
+            staging_dir=str(tmp_path / 'cleaned'),
+            train_params=json.dumps({'record_id': 123, 'train_type': 'zimage'}))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+
+        with pytest.raises(ValueError, match='verified training snapshot'):
+            ct.retry_cloud_run('local', run.id)
 
 
 def test_retry_refuses_non_error_or_unknown_run(ct, app, seeded_dataset):
@@ -281,7 +452,7 @@ def test_reconcile_spares_recent_error_pod_kept(ct, app, monkeypatch):
         run = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
                                   vast_instance_id='555', vast_label='lds-1',
                                   job_name='j', error='checkpoint download failed',
-                                  finished_at=datetime.utcnow() - timedelta(minutes=10))
+                                  finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=10))
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'list_instances',
@@ -298,7 +469,7 @@ def test_reconcile_spares_recent_error_pod_kept(ct, app, monkeypatch):
         # snapshot so the assertions below see what was actually committed,
         # not a transaction-start-time view.
         ct.db.session.expire_all()
-        kept = ct.CloudTrainingRun.query.get(run.id)
+        kept = ct.db.session.get(ct.CloudTrainingRun, run.id)
         assert kept.status == 'error_pod_kept'
         assert kept.error == 'checkpoint download failed'   # untouched
 
@@ -312,7 +483,7 @@ def test_reconcile_reaps_expired_error_pod_kept(ct, app, monkeypatch):
         run = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
                                   vast_instance_id='555', vast_label='lds-1',
                                   job_name='j', error='checkpoint download failed',
-                                  finished_at=datetime.utcnow() - timedelta(minutes=500))
+                                  finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'list_instances',
@@ -324,21 +495,23 @@ def test_reconcile_reaps_expired_error_pod_kept(ct, app, monkeypatch):
         assert n == 1
         # see the sibling test above for why expire_all() is needed here
         ct.db.session.expire_all()
-        kept = ct.CloudTrainingRun.query.get(run.id)
+        kept = ct.db.session.get(ct.CloudTrainingRun, run.id)
         assert kept.status == 'error_pod_kept'               # terminal stays terminal
         assert kept.error.startswith('checkpoint download failed')
         assert kept.error.endswith('pod reaped after the recovery window')
+        assert kept.billing_ended_at is not None
+        assert kept.auth_token is None
 
 
-def test_reconcile_error_pod_kept_absent_from_instances_is_noop(ct, app, monkeypatch):
+def test_reconcile_closes_billing_when_kept_pod_is_absent(ct, app, monkeypatch):
     """The kept pod may already be gone (destroyed by hand, or a previous
-    reconcile pass) -- if vast.ai no longer lists it, there is nothing to
-    destroy or annotate."""
+    reconcile pass).  It needs no destroy call, but the durable billing window
+    must close so history does not claim it is charging forever."""
     with app.app_context():
         run = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
                                   vast_instance_id='555', vast_label='lds-1',
                                   job_name='j', error='checkpoint download failed',
-                                  finished_at=datetime.utcnow() - timedelta(minutes=500))
+                                  finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'list_instances', lambda: [])
@@ -348,8 +521,55 @@ def test_reconcile_error_pod_kept_absent_from_instances_is_noop(ct, app, monkeyp
         n = ct.reconcile_orphans(app)
         assert n == 0
         ct.db.session.expire_all()
-        kept = ct.CloudTrainingRun.query.get(run.id)
-        assert kept.error == 'checkpoint download failed'   # untouched
+        kept = ct.db.session.get(ct.CloudTrainingRun, run.id)
+        assert kept.billing_ended_at is not None
+        assert kept.error.endswith('provider instance is no longer active')
+
+
+def test_failed_destroy_stays_active_and_billable_until_reconciled(
+        ct, app, monkeypatch):
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='training', vast_instance_id='555',
+            vast_label='lds-1', job_name='j', price_per_hour=1.0,
+            billing_started_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                               - timedelta(hours=1))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        monkeypatch.setattr(ct.vast_client, 'destroy_instance', lambda _iid: False)
+
+        assert ct._finish(run, 'done', detail='Training complete') is False
+        assert run.status == 'terminating'
+        assert run.finished_at is None
+        assert run.billing_ended_at is None
+        assert ct._run_payload(run)['cost_final'] is False
+
+        monkeypatch.setattr(ct.vast_client, 'list_instances', lambda: [
+            {'instance_id': '555', 'label': 'lds-1'},
+        ])
+        monkeypatch.setattr(ct.vast_client, 'destroy_instance', lambda _iid: True)
+        assert ct.reconcile_orphans(app) == 1
+        ct.db.session.expire_all()
+        cleaned = ct.db.session.get(ct.CloudTrainingRun, run.id)
+        assert cleaned.status == 'done'
+        assert cleaned.billing_ended_at is not None
+        assert cleaned.finished_at is not None
+
+
+def test_request_stop_can_terminate_recovery_pod(ct, app, monkeypatch):
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='error_pod_kept', vast_instance_id='555',
+            vast_label='lds-1', job_name='j', error='download failed',
+            billing_started_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            finished_at=datetime.now(timezone.utc).replace(tzinfo=None))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        monkeypatch.setattr(ct.vast_client, 'destroy_instance', lambda _iid: True)
+
+        assert ct.request_stop(run.id) is True
+        assert run.status == 'stopped'
+        assert run.billing_ended_at is not None
 
 
 def test_reconcile_keeps_active_and_spares_error_pod_kept_together(ct, app, monkeypatch):
@@ -364,7 +584,7 @@ def test_reconcile_keeps_active_and_spares_error_pod_kept_together(ct, app, monk
         kept_run = ct.CloudTrainingRun(dataset_id=2, status='error_pod_kept',
                                        vast_instance_id='555', vast_label='lds-2',
                                        job_name='j2', error='checkpoint download failed',
-                                       finished_at=datetime.utcnow() - timedelta(minutes=10))
+                                       finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=10))
         ct.db.session.add_all([active, kept_run])
         ct.db.session.commit()
         active_id, kept_id = active.id, kept_run.id
@@ -479,7 +699,7 @@ def _seed_finished_run(ct, price, start_h, end_h, dataset_id=999):
     month_start + end_h), never to `now` — a now-relative seed run during the
     first UTC hours of the 1st would land in the PREVIOUS month and genuinely
     fail the spend assertions. cost = price x (end_h - start_h)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     month_start = datetime(now.year, now.month, 1)
     run = ct.CloudTrainingRun(
         dataset_id=dataset_id, status='done', job_name='j', vast_label='lds-9',
@@ -516,7 +736,7 @@ def test_budget_ignores_previous_month_runs(ct, app, seeded_dataset, monkeypatch
     _fake_export(monkeypatch, ct)
     ct.cfg.save_config({'cloud': {'monthly_budget_usd': 3}})
     with app.app_context():
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         month_start = datetime(now.year, now.month, 1)
         run = ct.CloudTrainingRun(
             dataset_id=999, status='done', job_name='j', vast_label='lds-9',
@@ -527,6 +747,24 @@ def test_budget_ignores_previous_month_runs(ct, app, seeded_dataset, monkeypatch
         ct.db.session.commit()
         res = ct.launch_cloud_training('local', seeded_dataset)
         assert res['status'] == 'preparing'
+
+
+def test_month_spend_prorates_a_run_crossing_the_month_boundary(ct, app, monkeypatch):
+    with app.app_context():
+        fixed_now = datetime(2026, 7, 10, 12, 0, 0)
+        month_start = fixed_now.replace(day=1, hour=0, minute=0, second=0)
+        monkeypatch.setattr(ct, 'utcnow', lambda: fixed_now)
+        run = ct.CloudTrainingRun(
+            dataset_id=999, status='done', job_name='boundary',
+            price_per_hour=2.0,
+            created_at=month_start - timedelta(hours=2),
+            billing_started_at=month_start - timedelta(hours=2),
+            billing_ended_at=month_start + timedelta(hours=3),
+            finished_at=month_start + timedelta(hours=3))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+
+        assert ct.month_spend_usd() == 6.0
 
 
 def test_cloud_status_reports_month_spend_budget_and_cap(ct, app, monkeypatch):
@@ -540,6 +778,50 @@ def test_cloud_status_reports_month_spend_budget_and_cap(ct, app, monkeypatch):
         assert s['monthly_budget'] == 20
         assert s['month_spend'] == 2.0
         assert s['max_runtime_minutes'] == 480
+
+
+def test_run_payload_uses_exact_provider_billing_window(ct, app):
+    """Provisioning delay before instance creation and post-destroy history
+    must not inflate provider cost.  The payload exposes estimate-vs-final and
+    separate billing/training durations for the UI and run comparison."""
+    with app.app_context():
+        base = datetime(2026, 7, 10, 12, 0, 0)
+        run = ct.CloudTrainingRun(
+            dataset_id=999, status='done', job_name='j', price_per_hour=0.6,
+            created_at=base, billing_started_at=base + timedelta(minutes=10),
+            training_started_at=base + timedelta(minutes=20),
+            billing_ended_at=base + timedelta(minutes=50),
+            finished_at=base + timedelta(minutes=50), estimated_minutes=25,
+            estimated_cost_usd=0.3)
+        ct.db.session.add(run)
+        ct.db.session.commit()
+
+        payload = ct._run_payload(run)
+
+        assert payload['cost_usd'] == 0.4
+        assert payload['cost_final'] is True
+        assert payload['billing_seconds'] == 40 * 60
+        assert payload['training_seconds'] == 30 * 60
+        assert payload['estimated_minutes'] == 25
+        assert payload['estimated_cost_usd'] == 0.3
+
+
+def test_legacy_terminal_run_cost_stops_at_finished_time(ct, app):
+    """Rows predating explicit billing timestamps retain a stable fallback
+    cost instead of accumulating cost on every page refresh."""
+    with app.app_context():
+        base = datetime(2026, 7, 10, 12, 0, 0)
+        run = ct.CloudTrainingRun(
+            dataset_id=999, status='done', job_name='j', price_per_hour=0.5,
+            created_at=base, finished_at=base + timedelta(hours=4))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+
+        payload = ct._run_payload(run)
+
+        assert payload['cost_usd'] == 2.0
+        assert payload['cost_final'] is True
+        assert payload['billing_seconds'] == 4 * 60 * 60
 
 
 # --- Per-(dataset, family) uniqueness: a zimage run and a krea run may share
@@ -561,8 +843,8 @@ def test_launch_allows_two_families_on_same_dataset(ct, app, seeded_dataset, mon
         # not from the shared (now-krea) dataset row — the root of the 2026-07-14
         # parallel multi-family incident (the audit noted this test only checked
         # ids). Build through the real config path + the monitor's config view.
-        run1 = ct.CloudTrainingRun.query.get(r1['run_id'])
-        run2 = ct.CloudTrainingRun.query.get(r2['run_id'])
+        run1 = ct.db.session.get(ct.CloudTrainingRun, r1['run_id'])
+        run2 = ct.db.session.get(ct.CloudTrainingRun, r2['run_id'])
         cfg1 = ct.lt.build_job_config(
             ct._run_config_dataset(ds, json.loads(run1.train_params)),
             '/staging/ds', steps=500, training_folder='__POD__')
@@ -715,6 +997,19 @@ def test_filter_offers_keeps_small_class_and_falls_back(ct, app):
         assert len(ct._filter_offers(small)) == 2
 
 
+def test_bad_host_file_ignores_malformed_timestamps(ct, app):
+    with app.app_context():
+        ct._bad_hosts_path().write_text(
+            json.dumps({'broken': {'ts': 'not-a-number'},
+                        'also-broken': 'wrong-shape'}), encoding='utf-8')
+        assert ct._load_bad_hosts() == {}
+
+
+def test_best_of_empty_group_has_actionable_error(ct, app):
+    with app.app_context(), pytest.raises(RuntimeError, match='no eligible'):
+        ct._best_of([])
+
+
 def test_best_of_prefers_reliability_within_price_window(ct, app):
     with app.app_context():
         group = [
@@ -746,6 +1041,54 @@ def test_provision_stamps_machine_id(ct, app, seeded_dataset, monkeypatch):
         run = ct.get_active_run()
         ct._provision(run)
         assert json.loads(run.train_params)['machine_id'] == 141481
+
+
+def test_provision_blocks_projected_budget_overrun_before_rental(
+        ct, app, seeded_dataset, monkeypatch):
+    _fake_export(monkeypatch, ct)
+    monkeypatch.setattr(ct.vast_client, 'search_offers', lambda **kw: [
+        {'offer_id': 9, 'gpu_name': 'RTX 4090', 'dph_total': 1.0,
+         'gpu_ram_gb': 24.0, 'machine_id': 141481, 'reliability': 0.99}])
+    monkeypatch.setattr(ct.gpu_speed, 'estimate_minutes', lambda *args: 120)
+    rentals = []
+    monkeypatch.setattr(
+        ct.vast_client, 'create_instance',
+        lambda *args, **kwargs: rentals.append(args) or 'should-not-exist')
+    with app.app_context():
+        ct.launch_cloud_training('local', seeded_dataset)
+        run = ct.get_active_run()
+        ct.cfg.save_config({'cloud': {'monthly_budget_usd': 1.0,
+                                      'pod_overhead_minutes': 0}})
+
+        with pytest.raises(RuntimeError, match='projected.*cap'):
+            ct._provision(run)
+
+        assert rentals == []
+        assert run.vast_instance_id is None
+
+
+def test_projected_budget_reservations_are_visible_to_concurrent_runs(
+        ct, app, monkeypatch):
+    monkeypatch.setattr(ct.gpu_speed, 'estimate_minutes', lambda *args: 120)
+    with app.app_context():
+        ct.cfg.save_config({'cloud': {'monthly_budget_usd': 3.0,
+                                      'pod_overhead_minutes': 0}})
+        first = ct.CloudTrainingRun(
+            dataset_id=101, status='preparing', job_name='first', vast_label='first')
+        second = ct.CloudTrainingRun(
+            dataset_id=102, status='preparing', job_name='second', vast_label='second')
+        ct.db.session.add_all((first, second))
+        ct.db.session.commit()
+        offer = {'gpu_name': 'RTX 4090', 'dph_total': 1.0}
+
+        assert ct._assert_projected_budget(
+            first, offer, 'zimage', {'steps': 3000}) == 2.0
+        assert first.estimated_cost_usd == 2.0
+        with pytest.raises(RuntimeError, match='projected.*cap'):
+            ct._assert_projected_budget(
+                second, offer, 'zimage', {'steps': 3000})
+
+        assert second.estimated_cost_usd is None
 
 
 # --- Launch-time GPU speed picker: requested_gpu is a preference, not a lock ---
@@ -1039,11 +1382,13 @@ def test_continue_seeds_checkpoint_in_monitor_flow(ct, app, seeded_dataset,
         src = _seed_done_run(ct, seeded_dataset, src_staging, ckpt_name=None)
         res = ct.continue_cloud_run('local', src.id, extra_steps=500)
         new_id = res['run_id']
-        new_run = ct.CloudTrainingRun.query.get(new_id)
+        new_run = ct.db.session.get(ct.CloudTrainingRun, new_id)
         job_name = new_run.job_name
         ct._monitor(app, new_id)
+        copied_resume = new_run.staging_dir + '/resume/' + ckpt.name
     assert fake.seeded is not None
-    assert fake.seeded['local_path'] == str(ckpt)
+    assert fake.seeded['local_path'] == copied_resume
+    assert ct.Path(copied_resume).read_bytes() == b'weights'
     assert fake.seeded['remote_name'] == f'{job_name}_000000750.safetensors'
     assert fake.seeded['dest_dir'] == f'/root/ai-toolkit/output/{job_name}'
     # ordering: create_job -> seed -> start_job
@@ -1086,5 +1431,5 @@ def test_cloud_progress_selects_run_by_family(ct, app, seeded_dataset, tmp_path)
         assert ct.cloud_progress('local', seeded_dataset, train_type='krea')['step'] == 60
         # no filter -> newest run (behavior unchanged)
         assert ct.cloud_progress('local', seeded_dataset)['step'] == 60
-        # family with no matching run -> fall back to the newest run
-        assert ct.cloud_progress('local', seeded_dataset, train_type='sdxl')['step'] == 60
+        # An explicitly different family must never bleed into this panel.
+        assert ct.cloud_progress('local', seeded_dataset, train_type='sdxl')['step'] is None

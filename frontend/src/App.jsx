@@ -1,18 +1,23 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { HashRouter, Routes, Route, Navigate, Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { apiFetch, postJson } from './api/fetchClient'
+import { apiFetch, fetchWithCsrfRetry, postJson } from './api/fetchClient'
 import { JobsProvider } from './context/JobsContext'
 import { ToastProvider, useToast } from './components/common/Toast'
 import { CapabilitiesProvider, useCapabilities } from './context/CapabilitiesContext'
 import { setToastRef } from './api/fetchClient'
 import ErrorBoundary from './components/common/ErrorBoundary'
-import DatasetPage from './pages/DatasetPage'
-import StudioPage from './pages/StudioPage'
-import SettingsPage from './pages/SettingsPage'
-import SetupPage from './pages/SetupPage'
-import GuidePage from './pages/GuidePage'
-import CloudRunsPage from './pages/CloudRunsPage'
+import { ConfirmDialogProvider } from './components/common/ConfirmDialog'
 import { recommendedMet } from './hooks/useSetupSteps'
+
+// Route-level chunks keep the first app shell small. The dataset workspace is
+// intentionally its own chunk because its training/curation tools dominate the
+// bundle, while Setup, Settings and Runs are visited independently.
+const DatasetPage = lazy(() => import('./pages/DatasetPage'))
+const StudioPage = lazy(() => import('./pages/StudioPage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const SetupPage = lazy(() => import('./pages/SetupPage'))
+const GuidePage = lazy(() => import('./pages/GuidePage'))
+const CloudRunsPage = lazy(() => import('./pages/CloudRunsPage'))
 
 const NAV_ITEM_BASE =
   'px-3 py-1.5 rounded-md text-sm font-medium no-underline transition-colors'
@@ -187,7 +192,7 @@ function UpdateBanner() {
     for (let i = 0; i < 120; i += 1) {
       await new Promise((r) => setTimeout(r, 1000))
       try {
-        const res = await fetch('/api/health', { cache: 'no-store' })
+        const res = await fetchWithCsrfRetry('/api/health/ready', { cache: 'no-store' })
         if (res.ok) { window.location.reload(); return }
       } catch { /* still restarting — keep waiting */ }
     }
@@ -294,7 +299,9 @@ function Shell() {
       <OnboardingRedirect />
       <UpdateBanner />
       <main id="main-content" tabIndex={-1} className="mx-auto max-w-5xl px-4 py-6">
-        <Outlet />
+        <Suspense fallback={<div role="status" className="p-6 text-sm text-content-muted">Loading…</div>}>
+          <Outlet />
+        </Suspense>
       </main>
     </>
   )
@@ -346,9 +353,11 @@ export default function App() {
     <ErrorBoundary showReload>
       <JobsProvider>
         <ToastProvider>
-          <CapabilitiesProvider>
-            <AppInner />
-          </CapabilitiesProvider>
+          <ConfirmDialogProvider>
+            <CapabilitiesProvider>
+              <AppInner />
+            </CapabilitiesProvider>
+          </ConfirmDialogProvider>
         </ToastProvider>
       </JobsProvider>
     </ErrorBoundary>

@@ -18,6 +18,7 @@ from ..config import LOCAL_USER
 from ..services import cloud_training as ct
 from ..services import face_dataset_service as svc
 from ..services import lora_training as lt
+from ..services import lora_test_studio as lts
 from ..services import zimage_convert as zc
 from ..utils.comfyui import get_zimage_models, get_checkpoint_models
 from ._common import _map_error
@@ -39,6 +40,15 @@ def _require_cloud():
         return jsonify({'error': 'Cloud training is not configured',
                         'hint': 'Add your vast.ai API key in Settings'}), 409
     return None
+
+
+@bp.get('/dataset/<int:dataset_id>/train/feedback')
+def dataset_training_feedback(dataset_id):
+    """Studio outcomes mapped to immutable training runs and next-run advice."""
+    payload = lts.training_feedback(
+        LOCAL_USER, dataset_id, family=request.args.get('family'))
+    return ((jsonify(payload), 200) if payload is not None
+            else (jsonify({'error': 'not found'}), 404))
 
 
 @bp.post('/dataset/<int:dataset_id>/train')
@@ -105,11 +115,9 @@ def dataset_train_status():
     # le polling UI.
     if not capabilities.probe()['aitoolkit']['valid']:
         return jsonify({'available': False})
-    # Le poll fait avancer la file : fin du training courant → lancement du suivant.
-    try:
-        lt.process_training_queue()
-    except Exception:
-        pass
+    # Read-only status polling must never launch queued work.  The independent
+    # scheduler and the process watcher advance the queue even with no browser
+    # open.
     return jsonify(lt.training_status(LOCAL_USER))
 
 
@@ -236,20 +244,9 @@ def dataset_train_checkpoints(dataset_id):
     kw = {} if bm is None else {'base_model': bm}
     if fam:
         kw['family'] = fam
-    from ..models import CloudTrainingRun
     from ..services import checkpoint_registry
     ds = svc.get_dataset(LOCAL_USER, dataset_id)
     fam_resolved = lt._train_type(ds, fam)
-    # Retrofit for datasets trained BEFORE the provenance registry existed:
-    # training evidence without records -> record the current state as the v1
-    # baseline, so versioning covers the past, not only future runs. Runs
-    # BEFORE list_checkpoints so the fresh baseline annotates this response.
-    had_training = (bool(lt.list_checkpoints(LOCAL_USER, dataset_id, **kw))
-                    or any((ct._run_family(r) or fam_resolved) == fam_resolved
-                           for r in CloudTrainingRun.query
-                           .filter_by(dataset_id=dataset_id).all()))
-    checkpoint_registry.ensure_baseline(LOCAL_USER, dataset_id, fam_resolved,
-                                        had_training)
     return jsonify({'checkpoints': lt.list_checkpoints(LOCAL_USER, dataset_id, **kw),
                     # cloud saves synced locally (incl. an ACTIVE run's latest)
                     # — separate field: the resume-or-fresh prompt reasons on
@@ -679,7 +676,7 @@ def dataset_train_import(dataset_id):
     # to this dataset; its dataset version rides along into the deployed name.
     if body.get('cloud_run_id'):
         from ..models import CloudTrainingRun
-        crun = CloudTrainingRun.query.get(int(body['cloud_run_id']))
+        crun = svc.db.session.get(CloudTrainingRun, int(body['cloud_run_id']))
         if not crun or crun.dataset_id != dataset_id or not crun.staging_dir:
             return jsonify({'error': 'unknown cloud run'}), 404
         kw['src_dir'] = crun.staging_dir
@@ -829,7 +826,7 @@ def dataset_train_cloud_checkpoint(dataset_id):
     rid = request.args.get('run_id', type=int)
     if rid is not None:
         from ..models import CloudTrainingRun
-        run = CloudTrainingRun.query.get(rid)
+        run = svc.db.session.get(CloudTrainingRun, rid)
         if run and run.dataset_id != dataset_id:
             run = None
     else:

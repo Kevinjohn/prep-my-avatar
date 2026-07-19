@@ -1,6 +1,7 @@
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 from .extensions import db
+from .utils.time import utcnow
 from sqlalchemy import Integer, String, Text, DateTime, Float
 
 class FaceDataset(db.Model):
@@ -57,8 +58,38 @@ class FaceDataset(db.Model):
     # leaks — both are additive columns (migration in create_app).
     concept_desc = db.Column(Text, nullable=True)
     concept_terms = db.Column(Text, nullable=True)
+    # Coverage policy is dataset-scoped: strict|balanced|experimental plus an
+    # optional JSON override for framing/dimension targets.
+    coverage_profile = db.Column(String(16), nullable=True)
+    coverage_targets = db.Column(Text, nullable=True)
+    # Recoverable deletion keeps the database graph intact while its folder is
+    # in app Trash. Service queries hide rows with trashed_at set; restoring the
+    # trash entry clears it and preserves the stable dataset/image ids.
+    trashed_at = db.Column(DateTime, nullable=True, index=True)
+    trash_entry_id = db.Column(String(160), nullable=True)
+    # Monotonic child-change revision. SQLite triggers increment it for every
+    # image insert/update/delete so metadata aggregates can be cached without
+    # risking stale counts after an image mutation.
+    revision = db.Column(Integer, nullable=False, default=0)
     created_at = db.Column(DateTime, default=db.func.current_timestamp())
     updated_at = db.Column(DateTime, default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "kind IS NULL OR kind IN ('', 'character', 'concept', 'style')",
+            name='ck_face_dataset_kind'),
+        db.CheckConstraint(
+            "fidelity IS NULL OR fidelity IN ('', 'face', 'body')",
+            name='ck_face_dataset_fidelity'),
+        db.CheckConstraint(
+            "train_type IS NULL OR train_type IN "
+            "('zimage', 'krea', 'sdxl', 'flux', 'flux2klein')",
+            name='ck_face_dataset_train_type'),
+        db.CheckConstraint(
+            "coverage_profile IS NULL OR coverage_profile IN "
+            "('', 'strict', 'balanced', 'experimental')",
+            name='ck_face_dataset_coverage_profile'),
+    )
 
     def __repr__(self):
         return f'<FaceDataset {self.id} {self.name}>'
@@ -83,7 +114,8 @@ class FaceDatasetImage(db.Model):
     # (hex); duplicate_of_id points at the representative image for a near-
     # duplicate group. Near duplicates remain in the corpus for human review.
     perceptual_hash = db.Column(String(16), nullable=True, index=True)
-    duplicate_of_id = db.Column(Integer, nullable=True)
+    duplicate_of_id = db.Column(
+        Integer, db.ForeignKey('face_dataset_image.id', ondelete='SET NULL'), nullable=True)
     # auto (NULL/legacy) | pinned | excluded. Pinned rows lead the bounded API
     # anchor pack; excluded rows remain valid training images but are never sent
     # to a generation provider as identity references.
@@ -92,6 +124,11 @@ class FaceDatasetImage(db.Model):
     # occlusion. Kept separate from the caption and technical analysis so users
     # can correct classification without rewriting either.
     coverage_json = db.Column(Text, nullable=True)
+    # Evidence for visual labels and source-use rights. Both are structured JSON
+    # kept separate from the labels themselves so manual corrections do not
+    # masquerade as model classifications and export can carry rights metadata.
+    coverage_provenance = db.Column(Text, nullable=True)
+    source_rights = db.Column(Text, nullable=True)
     framing = db.Column(String(12), nullable=True)              # face|bust|body|back|unknown
     variation_label = db.Column(String(120), nullable=True)
     status = db.Column(String(10), nullable=False, default='pending')    # pending|keep|reject|failed
@@ -102,7 +139,8 @@ class FaceDatasetImage(db.Model):
     # Provenance for derived dataset images. Small scraped sources rescued through
     # Klein keep their own row/file and the generated candidate points back to it;
     # both stay outside training until the user resolves the pair explicitly.
-    parent_image_id = db.Column(Integer, nullable=True)
+    parent_image_id = db.Column(
+        Integer, db.ForeignKey('face_dataset_image.id', ondelete='SET NULL'), nullable=True)
     derivation_kind = db.Column(String(32), nullable=True)
     # JSON list of imported FaceDatasetImage ids selected as identity anchors for
     # an API-generated candidate. Primary/additional reference photos are still
@@ -113,6 +151,9 @@ class FaceDatasetImage(db.Model):
     generation_anchor_metadata = db.Column(Text, nullable=True)
     generation_engine = db.Column(String(24), nullable=True)
     generation_gap_ids = db.Column(Text, nullable=True)
+    # JSON request/response provenance for remote generations: provider/model,
+    # actual auth lane, consent, timestamp and content hashes. No credentials.
+    generation_provenance = db.Column(Text, nullable=True)
     # Ressemblance faciale vs la reference (face analyzer Lot A). face_score = cosinus
     # ArcFace brut (NULL si non note) ; face_state = scorable|no_face|low_det|too_small|
     # extreme_pose|multi_face|unreadable|error. Score brut persiste -> seuils recalibrables cote UI.
@@ -147,6 +188,31 @@ class FaceDatasetImage(db.Model):
     watermark_regions = db.Column(Text, nullable=True)
     created_at = db.Column(DateTime, default=db.func.current_timestamp())
 
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('pending', 'keep', 'reject', 'failed', 'trashed')",
+            name='ck_face_dataset_image_status'),
+        db.CheckConstraint(
+            "source IN ('generated', 'import', 'upload')",
+            name='ck_face_dataset_image_source'),
+        db.CheckConstraint(
+            "training_usefulness IS NULL OR training_usefulness IN ('green', 'amber', 'red')",
+            name='ck_face_dataset_image_usefulness'),
+        db.CheckConstraint(
+            "coverage_value IS NULL OR coverage_value IN ('green', 'amber', 'unknown')",
+            name='ck_face_dataset_image_coverage_value'),
+        db.CheckConstraint(
+            "anchor_decision IS NULL OR anchor_decision IN ('', 'auto', 'pinned', 'excluded')",
+            name='ck_face_dataset_image_anchor'),
+        db.CheckConstraint(
+            "framing IS NULL OR framing IN ('face', 'bust', 'body', 'back', 'unknown')",
+            name='ck_face_dataset_image_framing'),
+        db.CheckConstraint(
+            "watermark_state IS NULL OR watermark_state IN "
+            "('none', 'detected', 'dismissed', 'cleaned', 'failed')",
+            name='ck_face_dataset_image_watermark'),
+    )
+
     def __repr__(self):
         return f'<FaceDatasetImage {self.id} ds={self.dataset_id} {self.status}>'
 
@@ -174,6 +240,11 @@ class LoraTestImage(db.Model):
     # cellules de dataset_id différents partageant ce run_id. null = anciens runs
     # (backfillés par add_lora_test_run_id).
     run_id = db.Column(String(36), nullable=True, index=True)
+    # Exact training launch that produced ``checkpoint``.  Studio feedback is
+    # useful only when it closes the loop back to the recipe/dataset version
+    # that was tested.  Nullable for historical rows; the service performs an
+    # mtime/version-based honest fallback when old evidence can be linked.
+    training_run_record_id = db.Column(Integer, nullable=True, index=True)
     status = db.Column(String(10), nullable=False, default='pending')  # pending|done|failed|cancelled
     # Pourquoi status='failed' : raison réelle remontée du chemin de génération
     # ComfyUI (validation 400 « modèle/node introuvable », node error, timeout,
@@ -207,8 +278,48 @@ class LoraTestImage(db.Model):
     face_state = db.Column(String(16), nullable=True)
     created_at = db.Column(DateTime, default=db.func.current_timestamp())
 
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('pending', 'done', 'failed', 'cancelled')",
+            name='ck_lora_test_image_status'),
+        db.CheckConstraint('rating IN (-1, 0, 1)', name='ck_lora_test_image_rating'),
+        db.CheckConstraint(
+            'training_run_record_id IS NULL OR training_run_record_id > 0',
+            name='ck_lora_test_image_training_run'),
+    )
+
     def __repr__(self):
         return f'<LoraTestImage {self.id} ds={self.dataset_id} {self.checkpoint}@{self.strength} {self.status}>'
+
+
+class CurationEvent(db.Model):
+    """Append-only human curation audit trail with conflict-safe undo.
+
+    Each event stores only the image fields changed by one user action. Batch
+    actions share ``batch_id`` so one Undo restores the complete selection in a
+    single transaction. Rows and files are soft-deleted elsewhere, so these FKs
+    remain stable for the lifetime of a dataset.
+    """
+    __tablename__ = 'curation_event'
+    id = db.Column(Integer, primary_key=True)
+    dataset_id = db.Column(
+        Integer, db.ForeignKey('face_dataset.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    image_id = db.Column(
+        Integer, db.ForeignKey('face_dataset_image.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    batch_id = db.Column(String(36), nullable=False, index=True)
+    actor_user_id = db.Column(String(36), nullable=False, default='local')
+    action = db.Column(String(40), nullable=False)
+    before_state = db.Column(Text, nullable=False)
+    after_state = db.Column(Text, nullable=False)
+    reverted_at = db.Column(DateTime, nullable=True, index=True)
+    created_at = db.Column(DateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.CheckConstraint('length(action) > 0', name='ck_curation_event_action'),
+        db.Index('idx_curation_event_history', 'dataset_id', 'id'),
+    )
 
 
 class JobQueueMixin:
@@ -235,11 +346,11 @@ class JobQueueMixin:
             self.comfyui_prompt_id = comfyui_prompt_id
 
         if new_status == 'processing':
-            self.started_at = datetime.utcnow()
+            self.started_at = utcnow()
         elif new_status in ('completed', 'failed', 'cancelled'):
-            self.completed_at = datetime.utcnow()
+            self.completed_at = utcnow()
 
-        self.last_heartbeat = datetime.utcnow()
+        self.last_heartbeat = utcnow()
 
     def is_stuck(self, timeout_minutes=10):
         """True if the job is in-progress but heartbeat is missing/stale."""
@@ -247,7 +358,7 @@ class JobQueueMixin:
             return False
         if not self.last_heartbeat:
             return True
-        return datetime.utcnow() - self.last_heartbeat > timedelta(minutes=timeout_minutes)
+        return utcnow() - self.last_heartbeat > timedelta(minutes=timeout_minutes)
 
 
 class ImageGenerationQueue(JobQueueMixin, db.Model):
@@ -273,6 +384,11 @@ class ImageGenerationQueue(JobQueueMixin, db.Model):
     job_metadata = db.Column(Text, nullable=True)
 
     __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('pending', 'processing', 'sent_to_comfy', "
+            "'completed', 'failed', 'cancelled')",
+            name='ck_image_generation_queue_status'),
+        db.CheckConstraint('retry_count >= 0', name='ck_image_generation_queue_retry'),
         db.Index('idx_img_status', 'status'),
         db.Index('idx_img_user_id', 'user_id'),
         db.Index('idx_img_created_at', 'created_at'),
@@ -338,7 +454,43 @@ class SystemState(db.Model):
     __tablename__ = 'system_state'
     key = db.Column(db.String(64), primary_key=True)
     value = db.Column(db.Text)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+
+
+class BackgroundJob(db.Model):
+    """Durable lifecycle record for non-Comfy background operations.
+
+    Image generation and cloud training keep their richer, domain-specific
+    tables.  Setup installs, provider exports and other request-spawned work use
+    this common ledger so a process restart can never turn a running UI badge
+    into an unexplained idle state.
+    """
+    __tablename__ = 'background_job'
+    id = db.Column(String(36), primary_key=True)
+    kind = db.Column(String(32), nullable=False, index=True)
+    dedupe_key = db.Column(String(160), nullable=False, index=True)
+    state = db.Column(String(20), nullable=False, default='pending', index=True)
+    payload = db.Column(Text, nullable=False, default='{}')
+    result = db.Column(Text, nullable=True)
+    error = db.Column(Text, nullable=True)
+    error_code = db.Column(String(64), nullable=True)
+    log = db.Column(Text, nullable=False, default='[]')
+    progress = db.Column(Text, nullable=True)
+    attempts = db.Column(Integer, nullable=False, default=1)
+    resumable = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(DateTime, nullable=False, default=utcnow)
+    started_at = db.Column(DateTime, nullable=True)
+    heartbeat_at = db.Column(DateTime, nullable=True)
+    completed_at = db.Column(DateTime, nullable=True)
+    updated_at = db.Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "state IN ('pending', 'running', 'done', 'error', 'cancelled', 'interrupted')",
+            name='ck_background_job_state'),
+        db.CheckConstraint('attempts >= 1', name='ck_background_job_attempts'),
+        db.Index('idx_background_job_lookup', 'kind', 'dedupe_key', 'created_at'),
+    )
 
 
 class CloudTrainingRun(db.Model):
@@ -347,7 +499,11 @@ class CloudTrainingRun(db.Model):
     against these rows to kill orphaned pods — the expensive failure mode."""
     __tablename__ = 'cloud_training_run'
     id = db.Column(db.Integer, primary_key=True)
-    dataset_id = db.Column(db.Integer, nullable=False)
+    # Historical cloud runs deliberately survive a dataset's eventual hard
+    # purge, so this is an indexed historical identifier rather than a
+    # cascading FK. The integrity report still surfaces an orphan while the
+    # dataset is expected to exist.
+    dataset_id = db.Column(db.Integer, nullable=False, index=True)
     run_name = db.Column(db.String(255))          # local run identity (lt._run_name)
     job_name = db.Column(db.String(255))          # unique remote job/dataset name
     status = db.Column(db.String(32), default='preparing')
@@ -356,6 +512,11 @@ class CloudTrainingRun(db.Model):
     vast_label = db.Column(db.String(64))
     gpu_name = db.Column(db.String(64))
     price_per_hour = db.Column(db.Float)
+    billing_started_at = db.Column(db.DateTime)
+    billing_ended_at = db.Column(db.DateTime)
+    training_started_at = db.Column(db.DateTime)
+    estimated_minutes = db.Column(db.Float)
+    estimated_cost_usd = db.Column(db.Float)
     remote_job_id = db.Column(db.String(64))
     base_url = db.Column(db.String(255))
     auth_token = db.Column(db.String(128))
@@ -363,9 +524,19 @@ class CloudTrainingRun(db.Model):
     checkpoint_local_path = db.Column(db.Text)
     train_params = db.Column(db.Text)             # JSON: steps/variant/train_type/masked
     error = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
     finished_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('preparing', 'provisioning', 'uploading', 'training', "
+            "'downloading', 'terminating', 'done', 'stopped', 'error', 'error_pod_kept')",
+            name='ck_cloud_training_run_status'),
+        db.CheckConstraint(
+            'price_per_hour IS NULL OR price_per_hour >= 0',
+            name='ck_cloud_training_run_price'),
+    )
 
 
 class TrainingRunRecord(db.Model):
@@ -380,22 +551,37 @@ class TrainingRunRecord(db.Model):
     New table — created by db.create_all(), no migration of existing rows."""
     __tablename__ = 'training_run_record'
     id = db.Column(db.Integer, primary_key=True)
+    # Immutable provenance may outlive the source dataset after permanent
+    # cleanup; retain its stable id rather than cascading/deleting history.
     dataset_id = db.Column(db.Integer, nullable=False, index=True)
     family = db.Column(db.String(16), nullable=False)
     source = db.Column(db.String(8), nullable=False)        # 'local' | 'cloud'
-    cloud_run_id = db.Column(db.Integer)                    # FK-ish, cloud only
+    cloud_run_id = db.Column(db.Integer)
     base_model = db.Column(db.String(255), default='')      # '' = official base
     variant = db.Column(db.String(32))
     masked = db.Column(db.Boolean, default=True)
     steps = db.Column(db.Integer)
-    fingerprint = db.Column(db.String(16), nullable=False)
+    fingerprint = db.Column(db.String(64), nullable=False)
     manifest = db.Column(db.Text)                           # JSON, see docstring
     # JSON launch_settings_snapshot: the EFFECTIVE ai-toolkit settings this
     # launch used (rank/alpha/resolution/optimizer/...) — shown per run on the
     # unified Runs page. NULL on pre-feature rows.
     settings = db.Column(db.Text)
+    preflight = db.Column(db.Text)
+    overrides = db.Column(db.Text)
     version = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "family IN ('zimage', 'krea', 'sdxl', 'flux', 'flux2klein')",
+            name='ck_training_run_record_family'),
+        db.CheckConstraint(
+            "source IN ('local', 'cloud', 'legacy')",
+            name='ck_training_run_record_source'),
+        db.CheckConstraint('version >= 1', name='ck_training_run_record_version'),
+        db.CheckConstraint('steps IS NULL OR steps >= 0', name='ck_training_run_record_steps'),
+    )
 
 
 class TrainingPreset(db.Model):
@@ -412,4 +598,10 @@ class TrainingPreset(db.Model):
     name = db.Column(db.String(80), nullable=False, unique=True)
     train_type = db.Column(db.String(16), nullable=False, default='zimage')
     settings = db.Column(db.Text, nullable=False, default='{}')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "train_type IN ('zimage', 'krea', 'sdxl', 'flux', 'flux2klein')",
+            name='ck_training_preset_type'),
+    )

@@ -6,7 +6,9 @@
  * Changing the concept description is what drives the caption avoid-list, so editing
  * it resets that list; the parent's toast nudges a re-caption for existing captions.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 const FIELD =
   'px-3 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm ' +
@@ -17,6 +19,19 @@ export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
   const [name, setName] = useState(d.name || '');
   const [trigger, setTrigger] = useState(d.trigger_word || '');
   const [desc, setDesc] = useState(d.concept_desc || '');
+  const dialogRef = useRef(null);
+  useFocusTrap(dialogRef, true);
+  useBodyScrollLock(true);
+
+  useEffect(() => {
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape' && !busy) onClose();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [busy, onClose]);
 
   const canSave = name.trim() && trigger.trim() && (!concept || desc.trim());
   const save = async () => {
@@ -31,9 +46,11 @@ export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Dataset settings"
+      aria-busy={busy || undefined}
       className="fixed inset-0 z-[9990] bg-black/80 flex items-center justify-center p-3"
-      onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3"
+      onClick={() => { if (!busy) onClose(); }}>
+      <div ref={dialogRef}
+        className="w-full max-w-md rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3"
         onClick={(e) => e.stopPropagation()}>
         <h2 className="text-content font-semibold flex items-center gap-1.5">⚙️ Dataset settings</h2>
 
@@ -67,13 +84,13 @@ export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
         )}
 
         <div className="flex justify-end gap-2 pt-1">
-          <button type="button" onClick={onClose}
-            className="px-3 py-1.5 rounded-lg border border-border bg-surface text-content-muted hover:text-content text-sm">
+          <button type="button" onClick={onClose} disabled={busy}
+            className="px-3 py-1.5 rounded-lg border border-border bg-surface text-content-muted hover:text-content text-sm disabled:opacity-40">
             Cancel
           </button>
           <button type="button" onClick={save} disabled={!canSave || busy}
             className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
-            Save
+            {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>

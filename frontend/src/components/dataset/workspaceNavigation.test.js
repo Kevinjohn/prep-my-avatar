@@ -5,6 +5,7 @@ import {
   getWorkspacePanelStatus,
   getWorkspacePanels,
   resolveWorkspaceLocation,
+  withDatasetImageSummary,
   withWorkspaceLocation,
 } from './workspaceNavigation.js';
 
@@ -69,6 +70,37 @@ test('data and capability predicates expose only destinations that currently exi
   assert.deepEqual(ids('training', { studioVisible: true }), ['launch', 'advanced']);
   assert.deepEqual(ids('checkpoints'), ['manager']);
   assert.deepEqual(ids('studio', { studioVisible: true }), ['launcher']);
+});
+
+test('whole-dataset summaries keep older-page destinations available', () => {
+  const context = withDatasetImageSummary({
+    ...BASE,
+    hasKeptImages: false,
+    hasCaptionedKept: false,
+    hasSelectableImages: false,
+    watermarkDetected: 0,
+    smallImageRescue: 0,
+    unused: 0,
+  }, {
+    selectable: 5,
+    kept: 3,
+    kept_captioned: 2,
+    watermark_detected: 1,
+    small_image_rescue: 2,
+    unused: 4,
+  });
+
+  assert.equal(context.hasSelectableImages, true);
+  assert.equal(context.hasKeptImages, true);
+  assert.equal(context.hasCaptionedKept, true);
+  assert.equal(context.watermarkDetected, 1);
+  assert.equal(context.smallImageRescue, 2);
+  assert.equal(context.unused, 4);
+  assert.ok(ids('images', context).includes('bulk'));
+  assert.ok(ids('curation', context).includes('small-image-rescue'));
+  assert.ok(ids('export', { ...context, hfPublish: true }).includes('hugging-face'));
+  assert.ok(ids('curation', context).includes('review-flagged'));
+  assert.ok(ids('curation', context).includes('rejected-cleanup'));
 });
 
 test('legacy training checkpoint and studio links normalize to their new sections', () => {

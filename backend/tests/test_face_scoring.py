@@ -124,7 +124,6 @@ def test_score_dataset_faces_unavailable_returns_empty_without_subprocess(app, m
     """is_available() False (capability probe) -> score_dataset_faces returns {}
     WITHOUT ever invoking subprocess.run (the never-raise/never-shell-out contract)."""
     from app.services import face_similarity as fsim
-    from app.capabilities import probe_face_scoring
 
     monkeypatch.setattr(fsim, 'is_available', lambda: False)
 
@@ -170,7 +169,7 @@ def test_analyze_faces_returns_cleanly_when_scorer_unavailable(app, monkeypatch)
 
 def test_score_dataset_faces_stdin_payload_includes_models_root(app, monkeypatch):
     from app.services import face_similarity as fsim
-    from app.config import LOCAL_USER, save_config
+    from app.config import save_config
 
     monkeypatch.setattr(fsim, 'is_available', lambda: True)
     captured = {}
@@ -269,7 +268,8 @@ def test_score_dataset_faces_crash_reports_stderr_tail(app, monkeypatch):
     """A subprocess that dies with a traceback and no JSON must surface the
     traceback's LAST LINE as the error detail — that line named the real
     problem (nested antelopev2 AssertionError) in the field."""
-    import os, tempfile
+    import os
+    import tempfile
     from app.services import face_similarity as fsim
 
     monkeypatch.setattr(fsim, 'is_available', lambda: True)
@@ -281,7 +281,8 @@ def test_score_dataset_faces_crash_reports_stderr_tail(app, monkeypatch):
         lambda *a, **k: _Proc('', stderr=_stderr, returncode=1))
     with app.app_context():
         with tempfile.TemporaryDirectory() as d:
-            ref = os.path.join(d, 'ref.png'); img_path = os.path.join(d, 'img.png')
+            ref = os.path.join(d, 'ref.png')
+            img_path = os.path.join(d, 'img.png')
             for f in (ref, img_path):
                 with open(f, 'wb') as fh:
                     fh.write(_png())

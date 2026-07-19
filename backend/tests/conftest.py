@@ -1,6 +1,26 @@
-import sys, pathlib
+import sys
+import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import pytest
+from flask.testing import FlaskClient
+
+
+class TrackingFlaskClient(FlaskClient):
+    """Keep responses alive and close every streamed body at fixture teardown."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tracked_responses = []
+
+    def open(self, *args, **kwargs):
+        response = super().open(*args, **kwargs)
+        self._tracked_responses.append(response)
+        return response
+
+    def close_responses(self):
+        for response in reversed(self._tracked_responses):
+            response.close()
+        self._tracked_responses.clear()
 
 @pytest.fixture(autouse=True)
 def _restore_secret_env():
@@ -42,8 +62,11 @@ def app(tmp_path, monkeypatch):
     from app import create_app
     application = create_app({'TESTING': True, 'WTF_CSRF_ENABLED': False,
                               'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:'})
+    application.test_client_class = TrackingFlaskClient
     yield application
 
 @pytest.fixture()
 def client(app):
-    return app.test_client()
+    test_client = app.test_client()
+    yield test_client
+    test_client.close_responses()

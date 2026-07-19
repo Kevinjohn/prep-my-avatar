@@ -1,7 +1,7 @@
 import re
 
 from app.services.face_variations import (VARIATION_CATALOG, NSFW_VARIATION_CATALOG,
-    select_preset, aspect_for_framing, composition_counts, drop_identity_tags,
+    select_preset, aspect_for_framing, composition_counts,
     OUTFIT_VARY, EXPRESSION_NEUTRAL, _HAS_OUTFIT, _HAS_EXPRESSION,
     wrap_variation, wrap_variation_klein)
 

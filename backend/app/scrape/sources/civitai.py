@@ -15,6 +15,7 @@ exige une `api-key` (Bearer) pour réellement servir le contenu adulte. L'app la
 gallery-dl avec `--ignore-config`, on passe la clé en `-o api-key=<token>` (cf. gdl_opts).
 """
 import os
+from pathlib import Path
 
 from ..validators import Platform
 from .base import Capabilities
@@ -38,7 +39,7 @@ def civitai_api_key():
     for path in (resolve_cookies('civitai_api_key'), _SKILL_TOKEN_PATH):
         try:
             if path and os.path.isfile(path):
-                val = open(path, encoding='utf-8').read().strip()
+                val = Path(path).read_text(encoding='utf-8').strip()
                 if val:
                     return val
         except OSError:

@@ -21,12 +21,18 @@ import logging
 import math
 import os
 import re
+import signal
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
+import time
+import uuid
 from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 
@@ -57,6 +63,11 @@ KREA_TRAIN_RESOLUTION = 1024
 # `process_training_queue` re-arme de toute façon les flags à chaque poll tant que
 # le PID vit, donc c'est une ceinture, pas la bretelle.
 _TRAIN_STATE_TTL = 12 * 3600
+# Serialize the whole read-admit-snapshot-spawn sequence. The process lock keeps
+# a second server away from this data directory, but Flask can still serve two
+# launch requests on different threads; checking the durable flag without this
+# lock lets both requests observe an idle GPU and start competing trainers.
+_TRAIN_LAUNCH_LOCK = threading.Lock()
 
 
 # --- Path accessors (replace SRC's module-level AITOOLKIT_DIR/HF_HOME/... constants) --
@@ -838,8 +849,8 @@ def _resolved_default_sample_prompts(ds, trigger) -> list:
     """Défauts (selon le kind) avec `{trigger}` substitué — pour l'aperçu UI."""
     if fds.is_style(ds):   # style : pas de trigger, jamais injecté
         return list(_default_sample_prompts(ds))
-    return [_inject_trigger(l.replace('{trigger}', trigger), trigger)
-            for l in _default_sample_prompts(ds)]
+    return [_inject_trigger(line.replace('{trigger}', trigger), trigger)
+            for line in _default_sample_prompts(ds)]
 
 
 def _sample_prompts(ds, trigger) -> list:
@@ -1287,7 +1298,7 @@ def _custom_combo_hash(ds, base_model=_PERSISTED, family=None) -> str:
     if not (_is_custom_weights(weights) or vae or te):
         return ''
     raw = f'{weights or ""}|{vae or ""}|{te or ""}'
-    return '_h' + hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]
+    return '_h' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]
 
 
 def _run_name(ds, base_model=_PERSISTED, family=None) -> str:
@@ -1350,7 +1361,30 @@ def _mask_fields(dataset_folder: str) -> dict:
     return {}
 
 
-def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_dir=None) -> str:
+_EXPORTED_MANIFEST = '.training-manifest.json'
+
+
+def _sha256_file(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def export_registry_manifest(dataset_folder) -> list:
+    """Return provenance for the exact PNG/caption pairs handed to ai-toolkit."""
+    try:
+        payload = json.loads(Path(dataset_folder, _EXPORTED_MANIFEST).read_text(
+            encoding='utf-8'))
+        manifest = payload.get('registry_manifest')
+        return manifest if isinstance(manifest, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_dir=None,
+                                snapshot_dir=None) -> str:
     """Écrit les images `keep` en paires .png/.txt dans
     DATASETS_DIR/<trigger>. Le caption = caption éditée + trigger (le trigger
     est toujours présent même si la caption est vide). Retourne le dossier.
@@ -1366,7 +1400,14 @@ def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_d
     ds = fds.get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
-    if masked and fds.is_conceptual(ds):
+    snapshot = None
+    if snapshot_dir is not None:
+        from . import training_snapshot
+        snapshot = training_snapshot.load(snapshot_dir)
+        if int(snapshot.get('dataset_id')) != int(dataset_id):
+            raise ValueError('training snapshot belongs to another dataset')
+    snapshot_kind = snapshot.get('kind') if snapshot else None
+    if masked and ((snapshot_kind in ('concept', 'style')) if snapshot else fds.is_conceptual(ds)):
         # A person-mask would erase the very thing we want the LoRA to learn (the
         # recurring act for a concept; the whole-image rendering for a style - which
         # lives as much in backgrounds as in people). Force masked training OFF for
@@ -1374,7 +1415,11 @@ def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_d
         logger.info('dataset %s %s -> masked training forced OFF (server guard)',
                     dataset_id, ds.kind)
         masked = False
-    trigger = _safe_trigger(ds)
+    trigger_value = snapshot.get('trigger_word') if snapshot else ds.trigger_word
+    trigger = ''.join(
+        char if (char.isalnum() or char in '_-') else '_'
+        for char in (trigger_value or f'dataset{dataset_id}').strip()
+    ) or f'dataset{dataset_id}'
     out = str(dest_dir) if dest_dir else str(_datasets_dir() / _run_name(ds))
     if os.path.isdir(out):
         shutil.rmtree(out)  # ré-export propre
@@ -1382,25 +1427,41 @@ def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_d
     if os.path.isdir(masks_out):
         shutil.rmtree(masks_out)  # jamais de masques périmés (ré-export ou toggle OFF)
     os.makedirs(out, exist_ok=True)
-    kept = (FaceDatasetImage.query
-            .filter_by(dataset_id=dataset_id, status='keep')
-            .filter(FaceDatasetImage.filename.isnot(None)).all())
-    if not kept:
+    if snapshot is not None:
+        from . import training_snapshot
+        inputs = [
+            (entry['image_id'], training_snapshot.entry_path(snapshot_dir, entry),
+             entry.get('caption') or '')
+            for entry in snapshot['entries']
+        ]
+    else:
+        kept = (FaceDatasetImage.query
+                .filter_by(dataset_id=dataset_id, status='keep')
+                .filter(FaceDatasetImage.filename.isnot(None))
+                .order_by(FaceDatasetImage.id.asc()).all())
+        inputs = [(img.id, Path(fds._img_path(img)), img.caption or '') for img in kept]
+    if not inputs:
         raise ValueError('no kept images to export')
     n = 0
     exported = []
-    for img in kept:
-        src = os.path.join(fds._dataset_dir(img.dataset_id), img.filename)
-        if not os.path.isfile(src):
+    registry_manifest = []
+    for image_id, src, caption in inputs:
+        if not Path(src).is_file():
             continue
         stem = f'{trigger}_{n:03d}'
         dst = os.path.join(out, f'{stem}.png')
-        Image.open(src).convert('RGB').save(dst, 'PNG')
+        with Image.open(src) as opened, opened.convert('RGB') as converted:
+            converted.save(dst, 'PNG')
         exported.append(dst)
-        cap = (img.caption or '').strip()
+        cap = caption.strip()
         body = f'{trigger}, {cap}' if cap else trigger
         with open(os.path.join(out, f'{stem}.txt'), 'w', encoding='utf-8') as fh:
             fh.write(body)
+        registry_manifest.append([
+            image_id,
+            hashlib.sha256(caption.encode('utf-8')).hexdigest(),
+            _sha256_file(dst),
+        ])
         n += 1
     if n == 0:
         raise ValueError('no valid image file found on disk')
@@ -1426,8 +1487,30 @@ def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_d
     # they never set this flag.
     queue_manager._set_system_state('training_masks_skipped', bool(masked and not masked_ok),
                                     ttl_seconds=_TRAIN_STATE_TTL)
+    Path(out, _EXPORTED_MANIFEST).write_text(json.dumps({
+        'format': 'prep-my-avatar-materialized-training-set',
+        'version': 1,
+        'dataset_id': dataset_id,
+        'registry_manifest': registry_manifest,
+    }, indent=2), encoding='utf-8')
     logger.info(f'export dataset {dataset_id} -> {out} ({n} paires)')
     return out
+
+
+def _materialize_local_training_dataset(user_id, dataset_id, *, masked, destination):
+    """Freeze local inputs before the potentially slow conversion/mask pass."""
+    from . import training_snapshot
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+            prefix='.lds-local-launch-', dir=destination.parent) as temporary:
+        snapshot_dir = Path(temporary) / 'snapshot'
+        snapshot = training_snapshot.capture(
+            user_id, dataset_id, snapshot_dir)
+        output = export_dataset_to_aitoolkit(
+            user_id, dataset_id, masked=masked, dest_dir=destination,
+            snapshot_dir=snapshot_dir)
+    return output, snapshot
 
 
 # --- Overrides STYLE (communs aux 3 familles) -----------------------------------
@@ -2249,12 +2332,26 @@ def _dir_size(path) -> int:
 
 def dataset_disk_usage(user_id, dataset_id, base_model=_PERSISTED, family=None) -> dict:
     """Where this dataset's training bytes live: the selected run dir, the
-    cloud staging dirs of its runs, and its deployed LoRA. Best-effort."""
-    out = {'run_dir_bytes': 0, 'cloud_staging_bytes': 0, 'deployed_bytes': 0}
+    immutable materialized inputs, cloud staging dirs, and deployed LoRA."""
+    out = {'run_dir_bytes': 0, 'training_dataset_bytes': 0,
+           'cloud_staging_bytes': 0, 'deployed_bytes': 0}
     try:
         rd = _run_dir(user_id, dataset_id, base_model, family)
         if os.path.isdir(rd):
             out['run_dir_bytes'] = _dir_size(rd)
+    except Exception:
+        pass
+    try:
+        ds = fds.get_dataset(user_id, dataset_id)
+        prefix = _run_name(ds, base_model, family)
+        root = _datasets_dir()
+        if root.is_dir():
+            for candidate in root.iterdir():
+                # Includes the legacy exact folder, immutable launch-token
+                # folders, and their `_masks` companions for this selected run.
+                if (candidate.is_dir() and not candidate.is_symlink()
+                        and _trigger_boundary(candidate.name, prefix)):
+                    out['training_dataset_bytes'] += _dir_size(candidate)
     except Exception:
         pass
     try:
@@ -2291,9 +2388,11 @@ def _trigger_boundary(name: str, prefix: str) -> bool:
 
 
 def purge_training_artifacts(user_id, trigger_safe) -> list[str]:
-    """Supprime TOUS les artefacts d'entraînement d'un (user, trigger), appelé à la
-    suppression d'un dataset : LoRA déployés dans ComfyUI (z image + sdxl + krea), run
-    ai-toolkit (output/), export (datasets/) et job config (config/generated/).
+    """Move every matching training artifact into one recoverable Trash entry.
+
+    This is an explicit cleanup utility (dataset soft-deletion deliberately
+    retains training runs): deployed ComfyUI LoRAs, ai-toolkit run/export
+    folders, and generated job configs are moved together transactionally.
 
     Sécurité : matching sur la FRONTIÈRE EXACTE du trigger (jamais un sibling type
     Lola vs Lola2) ; les noms viennent d'os.listdir (bare, pas de path-traversal) ;
@@ -2301,13 +2400,11 @@ def purge_training_artifacts(user_id, trigger_safe) -> list[str]:
     retirés (pour log/affichage). Idempotent : un 2e appel ne retire plus rien.
 
     Each backend (ComfyUI loras dir / ai-toolkit output+datasets dirs) is probed
-    independently -- an unconfigured backend just yields no roots to sweep for
-    that step instead of aborting the whole purge (this runs from
-    face_dataset_service.delete_dataset as best-effort cleanup)."""
+    independently; an unconfigured backend just yields no roots to sweep."""
     trigger_safe = (trigger_safe or '').strip()
     if not trigger_safe or user_id in (None, ''):
         return []
-    removed: list[str] = []
+    targets: list[Path] = []
     run_prefix = f'u{user_id}_{trigger_safe}'    # ex. u1_Lola69382
     lora_prefix = f'lora_{trigger_safe}'         # ex. lora_Lola69382
     # 1) LoRA déployés dans ComfyUI (z image + sdxl + krea + flux + flux2klein séparés)
@@ -2324,10 +2421,9 @@ def purge_training_artifacts(user_id, trigger_safe) -> list[str]:
         for fn in os.listdir(root):
             p = os.path.join(root, fn)
             if fn.endswith('.safetensors') and _trigger_boundary(fn, lora_prefix) and os.path.isfile(p):
-                try:
-                    os.remove(p); removed.append(p)
-                except OSError as e:
-                    logger.warning('purge: remove %s échoué : %s', p, e)
+                path = Path(p)
+                if not path.is_symlink():
+                    targets.append(path)
     # 2) run output + 3) export datasets (dossiers entiers)
     output_datasets_roots = []
     for accessor in (_output_dir, _datasets_dir):
@@ -2341,7 +2437,9 @@ def purge_training_artifacts(user_id, trigger_safe) -> list[str]:
         for name in os.listdir(root):
             p = os.path.join(root, name)
             if _trigger_boundary(name, run_prefix) and os.path.isdir(p):
-                shutil.rmtree(p, ignore_errors=True); removed.append(p)
+                path = Path(p)
+                if not path.is_symlink():
+                    targets.append(path)
     # 4) job configs : nommés d'après le run name (base/famille), donc un même
     #    trigger peut en avoir plusieurs (ex. un run zimage + un run krea). On
     #    balaie tout config dont le stem est sur la frontière de ce trigger,
@@ -2356,24 +2454,52 @@ def purge_training_artifacts(user_id, trigger_safe) -> list[str]:
                 continue
             p = os.path.join(jobs_dir, fn)
             if _trigger_boundary(fn[:-len('.json')], run_prefix) and os.path.isfile(p):
-                try:
-                    os.remove(p); removed.append(p)
-                except OSError as e:
-                    logger.warning('purge: remove %s échoué : %s', p, e)
+                path = Path(p)
+                if not path.is_symlink():
+                    targets.append(path)
+    removed = [str(path) for path in targets]
+    if targets:
+        from . import trash
+        trash.send_paths_to_trash(
+            targets, context=f'training-artifacts-{user_id}-{trigger_safe}', metadata={
+                'kind': 'training_artifacts',
+                'user_id': str(user_id),
+                'trigger': trigger_safe,
+                'label': f'Training artifacts: {trigger_safe}',
+            })
     logger.info('purge_training_artifacts u%s/%s : %d artefact(s) retiré(s)',
                 user_id, trigger_safe, len(removed))
     return removed
 
 
-def write_job_config(ds, dataset_folder: str, steps: int = 3000) -> str:
+def write_job_config(ds, dataset_folder: str, steps: int = 3000,
+                     launch_token: str | None = None) -> str:
     job_cfg = build_job_config(ds, dataset_folder, steps=steps)
     # Name by the base/family-aware run name, NOT the trigger alone: a zimage run
     # and a krea run of the same trigger have distinct run names everywhere else
     # (training_folder, dataset_folder), so keying this file by trigger only made
     # the second launch silently clobber the first's config record.
-    path = _jobs_dir() / f'{_run_name(ds)}.json'
-    with open(path, 'w', encoding='utf-8') as fh:
-        json.dump(job_cfg, fh, indent=2)
+    suffix = ''
+    if launch_token is not None:
+        token = str(launch_token)
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', token):
+            raise ValueError('invalid launch config token')
+        suffix = f'_{token}'
+    path = _jobs_dir() / f'{_run_name(ds)}{suffix}.json'
+    # Atomic replace prevents a crash or full disk from leaving a truncated
+    # config. Normal launches supply a unique token, preserving the exact config
+    # of every attempt rather than overwriting the previous launch's evidence.
+    temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            json.dump(job_cfg, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return str(path)
 
 
@@ -2393,7 +2519,7 @@ def recommended_steps(dataset_id) -> int:
     de style → ~3000 steps (guides Z-Image/SDXL), ~400 images → ~9500 steps
     (~24 vues/image, retours communautaires sur les gros sets concept/style).
     """
-    ds = FaceDataset.query.get(dataset_id)
+    ds = fds.db.session.get(FaceDataset, dataset_id)
     n = FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep').count()
     if ds is not None and (ds.kind or 'character') in ('concept', 'style'):
         target = int(round(475 * math.sqrt(max(n, 1)), -2))
@@ -2414,7 +2540,7 @@ def recommended_steps_info(dataset_id) -> dict:
     """Version « transparente » de recommended_steps pour l'UI : le nombre + le
     pourquoi, afin que l'app apprenne au débutant au lieu de décider en boîte
     noire. Ne mute rien."""
-    ds = FaceDataset.query.get(dataset_id)
+    ds = fds.db.session.get(FaceDataset, dataset_id)
     n = FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep').count()
     kind = (ds.kind or 'character') if ds is not None else 'character'
     steps = recommended_steps(dataset_id)
@@ -2465,7 +2591,7 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
     NB : le check 'captioned' (images gardées sans caption) est un fail dans
     `checks` (assert_trainable refusera le launch) mais volontairement PAS un
     blocker ici — le flux modal existant (launch → erreur explicite) est conservé."""
-    from .face_variations import caption_has_identity_leak
+    from .face_variations import caption_has_concept_leak, caption_has_identity_leak
     ds = fds.get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
@@ -2486,9 +2612,15 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
     # l'invariant du set n'est pas une identité — on les saute pour ne pas générer
     # de faux avertissements.
     concept = fds.is_conceptual(ds)
+    coverage_profile = (ds.coverage_profile or 'balanced').lower()
 
     # 1) minimum d'images par famille
     floor, reco = TRAIN_MIN_IMAGES.get(ttype, (12, 20))
+    if coverage_profile == 'strict':
+        floor = reco
+    elif coverage_profile == 'experimental':
+        floor = max(4, int(math.ceil(floor * 0.7)))
+        reco = max(floor, int(math.ceil(reco * 0.7)))
     if n < floor:
         blockers.append(f'{n} kept image(s) — the hard minimum for a {label} LoRA is {floor}. '
                         'Generate or import more before training.')
@@ -2570,20 +2702,49 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
     # On saute entièrement cette dimension (comme le badge caption_leak du payload), sinon
     # CHAQUE caption concept déclenche un faux avertissement au preflight.
     body = fds.is_body_fidelity(ds)
-    leak_images = [] if concept else [
-        {'id': r.id, 'filename': r.filename, 'caption': (r.caption or '').strip()}
-        for r in kept
-        if (r.caption or '').strip()
-        and caption_has_identity_leak((r.caption or '').strip(), body=body)]
+    if fds.is_concept(ds):
+        leak_images = [
+            {'id': r.id, 'filename': r.filename, 'caption': (r.caption or '').strip()}
+            for r in kept if (r.caption or '').strip()
+            and caption_has_concept_leak(
+                (r.caption or '').strip(), ds.concept_desc, ds.concept_terms)]
+    elif fds.is_style(ds):
+        leak_images = []
+    else:
+        leak_images = [
+            {'id': r.id, 'filename': r.filename, 'caption': (r.caption or '').strip()}
+            for r in kept if (r.caption or '').strip()
+            and caption_has_identity_leak((r.caption or '').strip(), body=body)]
     if leak_images:
-        warnings.append(f'{len(leak_images)} caption(s) still describe the identity (face/hair'
-                        f'{"/body marks" if body else ""}) — it will bind to those words '
-                        'instead of the trigger. Re-caption or edit them.')
-        _check('leaks', 'No identity leaks', 'warn',
-               f'{len(leak_images)} caption(s) describe hair/face/skin — identity will bind '
-               'to those words, not the trigger', 'gf-images')
-    elif caps and not concept:
-        _check('leaks', 'No identity leaks', 'ok', '0 leaking caption')
+        leak_kind = 'concept' if fds.is_concept(ds) else 'identity'
+        message = (f'{len(leak_images)} caption(s) explicitly name the concept — remove '
+                   'those terms so the trigger learns it.' if fds.is_concept(ds) else
+                   f'{len(leak_images)} caption(s) still describe the identity — it will '
+                   'bind to those words instead of the trigger.')
+        warnings.append(message)
+        _check('leaks', f'No {leak_kind} leaks', 'warn', message, 'gf-images')
+    elif caps and not fds.is_style(ds):
+        _check('leaks', f'No {"concept" if fds.is_concept(ds) else "identity"} leaks',
+               'ok', '0 leaking caption')
+
+    if fds.is_concept(ds):
+        if not (ds.concept_desc or '').strip():
+            blockers.append('concept datasets require a concrete concept description before training.')
+            _check('concept_definition', 'Concept explicitly defined', 'fail',
+                   'concept description is empty', 'ds-more-settings')
+        else:
+            _check('concept_definition', 'Concept explicitly defined', 'ok', ds.concept_desc[:120])
+    if fds.is_conceptual(ds) and n:
+        source_labels = {(r.source_name or '').strip().lower() for r in kept
+                         if (r.source_name or '').strip()}
+        if len(source_labels) < 3:
+            warnings.append('concept/style admission has fewer than 3 distinct source labels — '
+                            'broaden the corpus to reduce source-specific overfitting.')
+            _check('source_diversity', 'Source diversity', 'warn',
+                   f'{len(source_labels)}/3 distinct source labels', 'ds-add-import')
+        else:
+            _check('source_diversity', 'Source diversity', 'ok',
+                   f'{len(source_labels)} distinct source labels')
 
     # 5) quasi-doublons parmi les kept (dHash pairwise, n<=~60 -> négligeable). On
     # retient les PAIRES (leurs deux images) pour que l'UI montre lesquelles rejeter.
@@ -2782,6 +2943,39 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
             _check('source_mix', 'Real-photo foundation', 'ok',
                    f'{len(real)} real · {len(synthetic)} generated/reconstructed')
 
+    if n:
+        imported_kept = [r for r in kept if r.source == 'import']
+        unknown_rights = [r for r in imported_kept
+                          if (fds._safe_json(r.source_rights) or {}).get('basis', 'unknown')
+                          == 'unknown']
+        if unknown_rights:
+            detail = f'{len(unknown_rights)}/{len(imported_kept)} imported image(s) have unknown rights'
+            if coverage_profile == 'strict':
+                blockers.append(detail + ' — record ownership, licence, public-domain basis, or consent.')
+                _check('source_rights', 'Source rights recorded', 'fail', detail, 'ds-corpus-review')
+            else:
+                warnings.append(detail + ' — record the source basis before sharing or training.')
+                _check('source_rights', 'Source rights recorded', 'warn', detail, 'ds-corpus-review')
+        elif imported_kept:
+            _check('source_rights', 'Source rights recorded', 'ok',
+                   f'{len(imported_kept)}/{len(imported_kept)} imported images documented')
+
+        mapped = [r for r in imported_kept if fds.parse_coverage(r.coverage_json)]
+        low_confidence = []
+        for row in mapped:
+            evidence = fds._safe_json(row.coverage_provenance) or {}
+            confidence = [float(value) for value in (evidence.get('confidence') or {}).values()
+                          if isinstance(value, (int, float)) and not isinstance(value, bool)]
+            if not evidence or (confidence and sum(confidence) / len(confidence) < 0.7):
+                low_confidence.append(row)
+        if low_confidence:
+            _check('coverage_evidence', 'Coverage labels have evidence', 'warn',
+                   f'{len(low_confidence)} mapped image(s) missing or below 0.70 confidence',
+                   'ds-corpus-review')
+        elif mapped:
+            _check('coverage_evidence', 'Coverage labels have evidence', 'ok',
+                   f'{len(mapped)} mapped image(s) carry provenance')
+
     # 11) images encore en attente de tri (elles ne s'entraînent PAS)
     untriaged = sum(1 for r in rows
                     if r.status == 'pending' and r.filename
@@ -2896,13 +3090,13 @@ def archive_previous_run(ds) -> str | None:
     jamais de suppression) pour que le prochain lancement reparte de ZÉRO au lieu
     de l'auto-resume ai-toolkit — le cas « j'ai remanié le dataset, je veux un
     LoRA neuf ». Les checkpoints archivés restent sur disque (récupérables à la
-    main) et tombent avec le dataset : le nom garde le préfixe `lora_<trigger>`
-    donc purge_training_artifacts les balaie aussi. Les copies déjà importées
+    main) et restent éligibles au nettoyage explicite et récupérable : le nom
+    conserve la frontière de trigger que purge_training_artifacts balaie. Les copies déjà importées
     dans ComfyUI (loras/<famille>) ne sont pas touchées. None si aucun run."""
     run_dir = _output_dir() / _run_name(ds)
     if not run_dir.is_dir():
         return None
-    dest = f'{run_dir}_archived_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
+    dest = f'{run_dir}_archived_{datetime.now().strftime("%Y%m%d-%H%M%S-%f")}'
     try:
         os.rename(run_dir, dest)
     except OSError as e:
@@ -2913,12 +3107,123 @@ def archive_previous_run(ds) -> str | None:
     return dest
 
 
+def _discard_failed_launch_record(record) -> None:
+    if record is None:
+        return
+    try:
+        fds.db.session.delete(record)
+        fds.db.session.commit()
+    except Exception:
+        fds.db.session.rollback()
+        logger.exception('could not remove provenance row for a launch that never started')
+
+
+def _clear_failed_training_state() -> None:
+    for key in ('training_in_progress', 'training_pid', 'training_dataset_id',
+                'training_target_step', 'training_log_path',
+                'training_checkpoint_dir', 'training_trigger'):
+        try:
+            queue_manager._set_system_state(key, False if key == 'training_in_progress' else None,
+                                            ttl_seconds=None)
+        except Exception:
+            logger.exception('could not clear failed training state %s', key)
+
+
+def _restore_fresh_archive(ds, archived: str | None) -> None:
+    """Put the previous run back if a fresh launch fails before a process exists."""
+    if not archived:
+        return
+    archived_path = Path(archived)
+    run_dir = _output_dir() / _run_name(ds)
+    try:
+        if run_dir.exists():
+            from . import trash
+            trash.send_paths_to_trash(
+                [run_dir], context=f'failed-fresh-training-{ds.id}', metadata={
+                    'kind': 'failed_training_launch',
+                    'dataset_id': ds.id,
+                    'label': f'Failed fresh training launch for dataset {ds.id}',
+                })
+        os.rename(archived_path, run_dir)
+    except Exception:
+        logger.exception('could not restore previous run after failed fresh launch: %s',
+                         archived)
+
+
+def _restore_previous_training_log(log_path: str | None,
+                                   previous_log: Path | None) -> None:
+    """Undo log rotation when a resume fails before the trainer process exists."""
+    if previous_log is None:
+        return
+    current = Path(log_path) if log_path else None
+    try:
+        if current is not None and current.exists():
+            from . import trash
+            trash.send_paths_to_trash(
+                [current], context='failed-training-log', metadata={
+                    'kind': 'failed_training_launch',
+                    'label': 'Failed training launch log',
+                })
+        os.rename(previous_log, current)
+    except Exception:
+        logger.exception('could not restore previous training log %s', previous_log)
+
+
+def _trash_failed_launch_inputs(config_path: str | None,
+                                dataset_folder: str | Path | None) -> None:
+    """Retain prepared config/dataset artifacts without leaving live orphans."""
+    try:
+        jobs_root = _jobs_dir().resolve()
+        datasets_root = _datasets_dir().resolve()
+        candidates = []
+        if config_path:
+            candidates.append(Path(config_path))
+        if dataset_folder:
+            candidates.extend([
+                Path(dataset_folder), Path(_masks_dir(str(dataset_folder))),
+            ])
+        safe = []
+        for candidate in candidates:
+            if not candidate.exists() or candidate.is_symlink():
+                continue
+            resolved = candidate.resolve()
+            if (resolved.is_relative_to(jobs_root)
+                    or resolved.is_relative_to(datasets_root)):
+                safe.append(candidate)
+        if safe:
+            from . import trash
+            trash.send_paths_to_trash(
+                safe, context='failed-training-inputs', metadata={
+                    'kind': 'failed_training_launch',
+                    'label': 'Prepared inputs for a training launch that did not start',
+                })
+    except Exception:
+        logger.exception('could not retain prepared inputs for failed training launch')
+
+
 def launch_training(user_id, dataset_id, steps: int | None = None, check_captions: bool = True,
                     base_model=None, variant: str | None = None, train_type: str | None = None,
                     allow_caption_mismatch: bool = False, masked: bool = True,
                     fresh: bool = False, allow_uncaptioned: bool = False,
                     vae_path=_PERSISTED, te_path=_PERSISTED,
                     allow_unverified_weights: bool = False) -> dict:
+    with _TRAIN_LAUNCH_LOCK:
+        return _launch_training(
+            user_id, dataset_id, steps=steps, check_captions=check_captions,
+            base_model=base_model, variant=variant, train_type=train_type,
+            allow_caption_mismatch=allow_caption_mismatch, masked=masked,
+            fresh=fresh, allow_uncaptioned=allow_uncaptioned,
+            vae_path=vae_path, te_path=te_path,
+            allow_unverified_weights=allow_unverified_weights)
+
+
+def _launch_training(user_id, dataset_id, steps: int | None = None,
+                     check_captions: bool = True, base_model=None,
+                     variant: str | None = None, train_type: str | None = None,
+                     allow_caption_mismatch: bool = False, masked: bool = True,
+                     fresh: bool = False, allow_uncaptioned: bool = False,
+                     vae_path=_PERSISTED, te_path=_PERSISTED,
+                     allow_unverified_weights: bool = False) -> dict:
     """Export + config + pause ComfyUI (flag) + lance l'entraînement ai-toolkit
     en CLI headless (`run.py <config>`).
 
@@ -2945,10 +3250,15 @@ def launch_training(user_id, dataset_id, steps: int | None = None, check_caption
     if (queue_manager._get_system_state('training_in_progress', False)
             and _pid_alive(queue_manager._get_system_state('training_pid', None))):
         raise ValueError('a training is already in progress - wait for it to finish or queue this dataset')
-    if check_captions:
-        assert_trainable(dataset_id, train_type=train_type,
-                         allow_caption_mismatch=allow_caption_mismatch,
-                         allow_uncaptioned=allow_uncaptioned)
+    # One authoritative admission gate for every launch. ``check_captions`` is
+    # retained for continuation/internal callers, but it now skips only caption
+    # rules; hard preflight blockers (family floor, unresolved double-admission)
+    # can no longer be bypassed through the service API.
+    preflight_report = assert_trainable(
+        dataset_id, train_type=train_type,
+        allow_caption_mismatch=allow_caption_mismatch,
+        allow_uncaptioned=allow_uncaptioned,
+        check_captions=check_captions)
     # Base d'entraînement : None/'' = officielle ; sinon un merge ComfyUI qui DOIT
     # avoir été converti en diffusers d'abord (gate). On persiste le choix sur le
     # dataset → _run_name/_run_dir/list_checkpoints deviennent base-aware (run isolé).
@@ -3025,46 +3335,109 @@ def launch_training(user_id, dataset_id, steps: int | None = None, check_caption
     ds.train_vae_path = eff_vae
     ds.train_te_path = eff_te
     fds.db.session.commit()
-    # Repartir de zéro : écarter le run existant APRÈS la persistance base/variante
-    # (_run_name lit les valeurs persistées → on archive bien LE run qui serait repris).
-    archived = archive_previous_run(ds) if fresh else None
+    fds.db.session.refresh(ds)
+    # Freeze every persisted column used by path/config builders. A settings
+    # request racing after admission may change the dataset for the *next* run,
+    # but it cannot retarget this launch after its immutable input capture.
+    launch_ds = SimpleNamespace(**{
+        column.name: getattr(ds, column.name)
+        for column in FaceDataset.__table__.columns
+    })
+    launch_settings = launch_settings_snapshot(launch_ds, launch_fam)
     # Steps adaptatifs si non imposés ; sinon override borné (jamais < 500).
-    steps = default_steps(ds) if steps is None else max(500, int(steps))
+    steps = default_steps(launch_ds) if steps is None else max(500, int(steps))
+    launch_token = f'{datetime.now().strftime("%Y%m%d-%H%M%S-%f")}-{uuid.uuid4().hex[:8]}'
     # masked (défaut ON) : masques personne exportés à côté du dataset → la
     # job-config passe en masked training (fond 10 %). OFF ou indispo = historique.
-    dataset_folder = export_dataset_to_aitoolkit(user_id, dataset_id, masked=masked)
-    config_path = write_job_config(ds, dataset_folder, steps=steps)
-    # Provenance registry: record WHICH dataset version this launch trains on
-    # (fingerprint + manifest -> human version v1/v2/...). Best-effort — a
-    # registry failure must never block a training launch.
-    from . import checkpoint_registry
-    checkpoint_registry.register_launch(
-        user_id, dataset_id, family=_train_type(ds), source='local',
-        base_model=base_model or '', variant=variant, masked=bool(masked),
-        steps=int(steps), settings=launch_settings_snapshot(ds))
-    # Pause GPU longue durée : le superviseur stoppe ComfyUI -> comfyui_ready=False
-    # -> le dispatch worker se met en pause tout seul.
-    queue_manager._set_system_state('training_error', None, ttl_seconds=1)  # reset crash précédent
-    queue_manager._set_system_state('training_in_progress', True, ttl_seconds=_TRAIN_STATE_TTL)
-    queue_manager._set_system_state('training_dataset_id', int(dataset_id), ttl_seconds=_TRAIN_STATE_TTL)
-    # Step cible : sert à snapshotter le final en nom NUMÉROTÉ à la fin (cf.
-    # _snapshot_final_checkpoint) - ai-toolkit écrit le final sans numéro.
-    queue_manager._set_system_state('training_target_step', int(steps), ttl_seconds=_TRAIN_STATE_TTL)
-    # HF_HOME route les poids base/adapter sur le disque configuré. PYTHONIOENCODING
-    # évite les crashs cp1252 sur les logs unicode. Jamais shell=True ; args en liste.
-    env = dict(os.environ, HF_HOME=str(_hf_home()), PYTHONIOENCODING='utf-8')
-    run_dir = _output_dir() / _run_name(ds)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = str(run_dir / 'training.log')
+    # Every launch gets its own materialized folder. Reusing the run-name folder
+    # made an unchanged resume overwrite the exact bytes referenced by every
+    # earlier config/provenance record, so old runs were not actually immutable.
+    dataset_destination = _datasets_dir() / f'{_run_name(launch_ds)}_{launch_token}'
+    assert_free_disk(
+        dataset_destination.parent, MIN_FREE_GB_TRAIN,
+        'an immutable training dataset snapshot')
+    dataset_folder = None
+    config_path = None
+    archived = None
+    launch_record = None
+    log_path = None
+    previous_log = None
     try:
-        logf = open(log_path, 'w', encoding='utf-8')
-        proc = subprocess.Popen([str(_venv_python()), 'run.py', config_path],
-                                cwd=str(_aitoolkit_dir()), env=env, shell=False,
-                                stdout=logf, stderr=subprocess.STDOUT,
-                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    except (FileNotFoundError, OSError) as e:
-        queue_manager._set_system_state('training_in_progress', False, ttl_seconds=None)
-        raise ValueError(f"could not start training: {e}")
+        dataset_folder, admitted_snapshot = _materialize_local_training_dataset(
+            user_id, dataset_id, masked=masked, destination=dataset_destination)
+        effective_masked = bool(masked and _mask_fields(dataset_folder))
+        config_path = write_job_config(
+            launch_ds, dataset_folder, steps=steps, launch_token=launch_token)
+        # Provenance registry: record WHICH immutable dataset version this launch
+        # trains on (fingerprint + manifest -> human version v1/v2/...). Required:
+        # an unregistered launch would make its checkpoints ambiguous.
+        from . import checkpoint_registry
+        # Archive only after every snapshot/config preparation succeeds. From here
+        # through Popen, provenance + filesystem state are rolled back together if
+        # no trainer process is created.
+        archived = archive_previous_run(launch_ds) if fresh else None
+        launch_record = checkpoint_registry.register_launch(
+            user_id, dataset_id, family=_train_type(launch_ds), source='local',
+            base_model=base_model or '', variant=variant, masked=effective_masked,
+            steps=int(steps), settings=launch_settings,
+            manifest=export_registry_manifest(dataset_folder),
+            preflight=preflight_report,
+            overrides={
+                'allow_caption_mismatch': bool(allow_caption_mismatch),
+                'allow_uncaptioned': bool(allow_uncaptioned),
+                'check_captions': bool(check_captions),
+                'allow_unverified_weights': bool(allow_unverified_weights),
+                'masked': effective_masked,
+                'masked_requested': bool(masked),
+                'fresh': bool(fresh),
+            },
+            trigger=admitted_snapshot['trigger_word'],
+            kind=admitted_snapshot['kind'],
+            required=True)
+        # Pause GPU longue durée : le superviseur stoppe ComfyUI -> comfyui_ready=False
+        # -> le dispatch worker se met en pause tout seul.
+        queue_manager._set_system_state('training_error', None, ttl_seconds=1)
+        queue_manager._set_system_state(
+            'training_in_progress', True, ttl_seconds=_TRAIN_STATE_TTL)
+        queue_manager._set_system_state(
+            'training_dataset_id', int(dataset_id), ttl_seconds=_TRAIN_STATE_TTL)
+        # Step cible : sert à snapshotter le final en nom NUMÉROTÉ à la fin.
+        queue_manager._set_system_state(
+            'training_target_step', int(steps), ttl_seconds=_TRAIN_STATE_TTL)
+        # HF_HOME routes base/adapter weights to the configured disk.
+        env = dict(os.environ, HF_HOME=str(_hf_home()), PYTHONIOENCODING='utf-8')
+        run_dir = _output_dir() / _run_name(launch_ds)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log_path = str(run_dir / 'training.log')
+        checkpoint_dir = run_dir / f'lora_{_safe_trigger(launch_ds)}'
+        queue_manager._set_system_state(
+            'training_log_path', log_path, ttl_seconds=_TRAIN_STATE_TTL)
+        queue_manager._set_system_state(
+            'training_checkpoint_dir', str(checkpoint_dir),
+            ttl_seconds=_TRAIN_STATE_TTL)
+        queue_manager._set_system_state(
+            'training_trigger', _safe_trigger(launch_ds),
+            ttl_seconds=_TRAIN_STATE_TTL)
+        if Path(log_path).is_file():
+            previous_log = run_dir / f'training-{launch_token}-previous.log'
+            os.rename(log_path, previous_log)
+        with open(log_path, 'w', encoding='utf-8') as logf:
+            proc = subprocess.Popen([str(_venv_python()), 'run.py', config_path],
+                                    cwd=str(_aitoolkit_dir()), env=env, shell=False,
+                                    stdout=logf, stderr=subprocess.STDOUT,
+                                    start_new_session=(os.name != 'nt'),
+                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except Exception as exc:
+        _clear_failed_training_state()
+        _discard_failed_launch_record(launch_record)
+        if archived:
+            _restore_fresh_archive(launch_ds, archived)
+        else:
+            _restore_previous_training_log(log_path, previous_log)
+        _trash_failed_launch_inputs(config_path, dataset_folder or dataset_destination)
+        if isinstance(exc, (FileNotFoundError, OSError)):
+            raise ValueError(f"could not start training: {exc}") from exc
+        raise
     queue_manager._set_system_state('training_pid', proc.pid, ttl_seconds=_TRAIN_STATE_TTL)
     # Watcher event-driven : libère ComfyUI / enchaîne la file dès la fin du
     # process (le poll de /train/status reste le filet de secours).
@@ -3114,33 +3487,83 @@ def continue_training(user_id, dataset_id, extra_steps: int = 1000,
     return res
 
 
+def _terminate_training_process(pid, timeout=10.0) -> bool:
+    """Terminate a trainer and every descendant, waiting for confirmation."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return True
+    if os.name == 'nt':
+        result = subprocess.run(
+            ['taskkill', '/F', '/T', '/PID', str(pid)], shell=False,
+            capture_output=True)
+        return result.returncode == 0 or not _pid_alive(pid)
+    try:
+        import psutil
+        parent = psutil.Process(pid)
+        processes = parent.children(recursive=True) + [parent]
+        for process in processes:
+            try:
+                process.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _gone, alive = psutil.wait_procs(processes, timeout=max(0.1, timeout))
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+        if alive:
+            _gone, alive = psutil.wait_procs(alive, timeout=2.0)
+        return not alive
+    except ImportError:
+        # New launches are session leaders, so the group contains the trainer
+        # and its dataloaders without including this server process.
+        try:
+            pgid = os.getpgid(pid)
+            if pgid == pid:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        deadline = time.monotonic() + max(0.1, timeout)
+        while time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                return True
+            time.sleep(0.1)
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        return not _pid_alive(pid)
+    except Exception as exc:
+        logger.warning('stop_training: process-tree termination failed: %s', exc)
+        return not _pid_alive(pid)
+
+
 def stop_training() -> None:
     """Tue le process d'entraînement (s'il tourne) PUIS lève le flag → le
     superviseur relance ComfyUI. L'ordre compte : si on levait le flag d'abord,
     ComfyUI reprendrait le GPU pendant que l'entraînement tourne encore."""
     pid = queue_manager._get_system_state('training_pid', None)
-    if pid:
-        try:
-            if os.name == 'nt':
-                # /T tue aussi les sous-process (dataloaders, etc.).
-                subprocess.run(['taskkill', '/F', '/T', '/PID', str(int(pid))],
-                               shell=False, capture_output=True)
-            else:
-                os.kill(int(pid), 15)
-        except (ValueError, OSError) as e:
-            logger.warning(f"stop_training: kill pid {pid} échoué : {e}")
+    if pid and not _terminate_training_process(pid):
+        raise RuntimeError(
+            'the training process is still running; ComfyUI remains paused')
     # Stop = arrêt voulu : on VIDE la file D'ABORD (sinon le prochain poll
     # relancerait l'entraînement suivant), PUIS on lève le flag EN DERNIER (c'est
     # lui qui signale à ComfyUI de reprendre le GPU - l'ordre compte).
     _save_queue([])
-    queue_manager._set_system_state('training_pid', None, ttl_seconds=None)
-    queue_manager._set_system_state('training_in_progress', False, ttl_seconds=None)
+    _clear_failed_training_state()
 
 
 def _dataset_name(dataset_id):
     if dataset_id is None:
         return None
-    ds = FaceDataset.query.get(int(dataset_id))
+    ds = fds.db.session.get(FaceDataset, int(dataset_id))
     return ds.name if ds else f'#{dataset_id}'
 
 
@@ -3153,7 +3576,7 @@ def kept_uncaptioned_count(dataset_id) -> int:
 
 
 def assert_trainable(dataset_id, train_type=None, allow_caption_mismatch=False,
-                     allow_uncaptioned=False) -> None:
+                     allow_uncaptioned=False, check_captions=True) -> dict:
     """Lève ValueError si le dataset n'est pas prêt : trop peu d'images gardées,
     captions manquantes, ou STYLE de caption incohérent avec le type de modèle
     (SDXL booru-native attend des tags booru ; Z-Image attend de la prose). Le
@@ -3163,10 +3586,14 @@ def assert_trainable(dataset_id, train_type=None, allow_caption_mismatch=False,
     manquantes ne sont plus un mur, juste un « êtes-vous sûr ? » (demande
     utilisateur — pouvoir expérimenter), le préfixe UNCAPTIONED: déclenche le
     confirm côté front comme MISMATCH_CAPTION:."""
-    kept = FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep').count()
-    if kept < 10:
-        raise ValueError(f"not enough kept images ({kept}/10)")
-    ds_ = FaceDataset.query.get(dataset_id)
+    ds_ = fds.db.session.get(FaceDataset, dataset_id)
+    if ds_ is None or ds_.trashed_at is not None:
+        raise ValueError('dataset not found')
+    report = training_preflight(str(ds_.user_id), dataset_id, train_type=train_type)
+    if report['blockers']:
+        raise ValueError('PREFLIGHT_BLOCKED: ' + ' | '.join(report['blockers']))
+    if not check_captions:
+        return report
     # STYLE : les captions sont OPTIONNELLES (le rendu se lie au LoRA, pas aux mots ;
     # dropout à 30 % de toute façon) → on ne bloque PAS sur les captions manquantes.
     # Mais si des captions EXISTENT, le garde prose↔booru plus bas reste pertinent
@@ -3179,12 +3606,12 @@ def assert_trainable(dataset_id, train_type=None, allow_caption_mismatch=False,
             "strongly recommended — whatever a caption does NOT explain binds to "
             "the trigger — but you can train without them.")
     if allow_caption_mismatch:
-        return
+        return report
     # Garde-fou style ↔ type : un LoRA SDXL entraîné sur des captions PROSE = mismatch
     # booru-native → « images disjointes » (recherche 2026-06-14) ; et l'inverse pour Z-Image.
     ttype = (train_type or '').strip().lower()
     if not ttype:
-        ds = FaceDataset.query.get(dataset_id)
+        ds = fds.db.session.get(FaceDataset, dataset_id)
         ttype = (getattr(ds, 'train_type', None) or 'zimage').lower() if ds else 'zimage'
     expected = 'booru' if ttype == 'sdxl' else 'prose'
     from .face_variations import caption_style
@@ -3204,6 +3631,7 @@ def assert_trainable(dataset_id, train_type=None, allow_caption_mismatch=False,
             raise ValueError(
                 "MISMATCH_CAPTION: this Z-Image dataset has booru TAG captions, but Z-Image "
                 "expects prose. Re-caption in 'Prose' mode, or force the training.")
+    return report
 
 
 def training_status(user_id=None) -> dict:
@@ -3281,21 +3709,26 @@ def _samples_dir(user_id, dataset_id, base_model=_PERSISTED, family=None) -> str
     return os.path.join(_run_dir(user_id, dataset_id, base_model, family), 'samples')
 
 
+def _list_training_samples_dir(directory, limit=_PROG_SAMPLES_MAX) -> list[dict]:
+    if not os.path.isdir(directory):
+        return []
+    out = []
+    for filename in os.listdir(directory):
+        match = _SAMPLE_RE.search(filename)
+        if match:
+            out.append({'filename': filename, 'step': int(match.group(1)),
+                        'prompt_idx': int(match.group(2))})
+    out.sort(key=lambda sample: (-sample['step'], sample['prompt_idx']))
+    return out if limit is None else out[:limit]
+
+
 def list_training_samples(user_id, dataset_id, base_model=_PERSISTED, family=None,
                           limit=_PROG_SAMPLES_MAX) -> list[dict]:
     """Sample previews ai-toolkit writes every sample_every steps
     (<run>/samples/<ts>__<step>_<promptidx>.jpg). Newest steps first, capped
     (limit=None → all, for the best-epoch scoring pass)."""
-    d = _samples_dir(user_id, dataset_id, base_model, family)
-    if not os.path.isdir(d):
-        return []
-    out = []
-    for f in os.listdir(d):
-        m = _SAMPLE_RE.search(f)
-        if m:
-            out.append({'filename': f, 'step': int(m.group(1)), 'prompt_idx': int(m.group(2))})
-    out.sort(key=lambda s: (-s['step'], s['prompt_idx']))
-    return out if limit is None else out[:limit]
+    return _list_training_samples_dir(
+        _samples_dir(user_id, dataset_id, base_model, family), limit=limit)
 
 
 def score_checkpoint_samples(user_id, dataset_id, base_model=_PERSISTED, family=None) -> dict:
@@ -3357,7 +3790,16 @@ def training_progress(user_id, dataset_id, base_model=_PERSISTED, family=None) -
     active = (bool(queue_manager._get_system_state('training_in_progress', False))
               and cur_id is not None and int(cur_id) == int(dataset_id)
               and _pid_alive(queue_manager._get_system_state('training_pid', None)))
-    log_path = os.path.join(str(_output_dir() / _run_name(ds, base_model, family)), 'training.log')
+    if active:
+        log_path = queue_manager._get_system_state('training_log_path', None)
+        checkpoint_dir = queue_manager._get_system_state(
+            'training_checkpoint_dir', None)
+    else:
+        log_path = None
+        checkpoint_dir = None
+    if not log_path:
+        log_path = os.path.join(
+            str(_output_dir() / _run_name(ds, base_model, family)), 'training.log')
     parsed = {'step': None, 'total': None, 'loss': None, 'speed': None, 'eta': None,
               'loss_curve': []}
     log_exists = os.path.isfile(log_path)
@@ -3370,9 +3812,13 @@ def training_progress(user_id, dataset_id, base_model=_PERSISTED, family=None) -
                 parsed = _parse_training_log(fh.read())
         except OSError:
             log_exists = False
+    samples = (_list_training_samples_dir(
+        os.path.join(checkpoint_dir, 'samples'))
+        if checkpoint_dir else
+        list_training_samples(user_id, dataset_id, base_model, family))
     return {'active': active, 'log_exists': log_exists, **parsed,
             'masks_skipped': bool(active and queue_manager._get_system_state('training_masks_skipped', False)),
-            'samples': list_training_samples(user_id, dataset_id, base_model, family)}
+            'samples': samples}
 
 
 # --- File d'attente d'entraînement -------------------------------------------
@@ -3496,7 +3942,9 @@ def enqueue_training(user_id, dataset_id, extra_steps=None,
               # SDXL custom overrides ride along so the deferred launch reproduces
               # the exact triplet (they're also persisted on ds above).
               'vae_path': eff_vae, 'te_path': eff_te,
-              'allow_unverified_weights': bool(allow_unverified_weights)})
+              'allow_unverified_weights': bool(allow_unverified_weights),
+              'allow_caption_mismatch': bool(allow_caption_mismatch),
+              'allow_uncaptioned': bool(allow_uncaptioned)})
     _save_queue(q)
     return {'queued': True, 'position': len(q), 'not_before': not_before}
 
@@ -3539,6 +3987,8 @@ def _launch_queued_item(item) -> None:
                         variant=item.get('variant'),
                         train_type=item.get('train_type'),
                         masked=item.get('masked', True),
+                        allow_caption_mismatch=bool(item.get('allow_caption_mismatch')),
+                        allow_uncaptioned=bool(item.get('allow_uncaptioned')),
                         # SDXL custom overrides snapshotted at enqueue time; the file
                         # was already preflighted, so re-clear the confirmable gate.
                         vae_path=item.get('vae_path', _PERSISTED),
@@ -3575,11 +4025,14 @@ def _snapshot_final_checkpoint(dataset_id, step) -> str | None:
         return None
     if step <= 0 or dataset_id is None:
         return None
-    ds = FaceDataset.query.get(int(dataset_id))
-    if not ds:
-        return None
-    trigger = _safe_trigger(ds)
-    run = str(_output_dir() / _run_name(ds) / f'lora_{trigger}')
+    run = queue_manager._get_system_state('training_checkpoint_dir', None)
+    trigger = queue_manager._get_system_state('training_trigger', None)
+    if not run or not trigger:
+        ds = fds.db.session.get(FaceDataset, int(dataset_id))
+        if not ds:
+            return None
+        trigger = _safe_trigger(ds)
+        run = str(_output_dir() / _run_name(ds) / f'lora_{trigger}')
     final = os.path.join(run, f'lora_{trigger}.safetensors')
     numbered = os.path.join(run, f'lora_{trigger}_{step:09d}.safetensors')
     if not os.path.isfile(final) or os.path.exists(numbered):
@@ -3630,6 +4083,12 @@ def _advance_training_queue() -> str | None:
             cur_target_step = queue_manager._get_system_state('training_target_step', None)
             if cur_target_step is not None:
                 queue_manager._set_system_state('training_target_step', cur_target_step, ttl_seconds=_TRAIN_STATE_TTL)
+            for key in ('training_log_path', 'training_checkpoint_dir',
+                        'training_trigger'):
+                value = queue_manager._get_system_state(key, None)
+                if value is not None:
+                    queue_manager._set_system_state(
+                        key, value, ttl_seconds=_TRAIN_STATE_TTL)
             return None  # toujours en cours
         # Process mort alors que le flag est levé → training terminé.
         # Snapshot du final en nom NUMÉROTÉ (immuable) AVANT d'enchaîner/libérer :
@@ -3689,9 +4148,9 @@ _scheduler_started = False
 
 def start_training_scheduler(app, interval_seconds=60):
     """Ticker de fond : avance la file toutes les `interval_seconds` MÊME sans
-    navigateur ouvert. Sans lui, seuls le poll /train/status et le watcher de fin
-    de process faisaient avancer la file - un entraînement programmé à 3 h du
-    matin ne serait jamais parti. Idempotent (un seul thread par process)."""
+    navigateur ouvert. Sans lui, seul le watcher de fin de process ferait avancer
+    la file - un entraînement programmé à 3 h du matin ne serait jamais parti.
+    Idempotent (un seul thread par process)."""
     global _scheduler_started
     if _scheduler_started:
         return

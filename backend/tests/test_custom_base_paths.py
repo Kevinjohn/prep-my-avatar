@@ -162,11 +162,17 @@ def test_vae_te_refused_off_sdxl_at_launch(app, tmp_path, monkeypatch):
     support-guard fires before the whitelist)."""
     from app.services import lora_training as lt
     from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
     _configure_aitoolkit(tmp_path, app)
     monkeypatch.setattr(lt.shutil, 'disk_usage', lambda p: type('u', (), {'free': 500e9})())
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'FX', 'zchar_fx', train_type='flux')
+        svc.db.session.add_all([
+            FaceDatasetImage(dataset_id=ds.id, status='keep', filename=f'{i}.webp')
+            for i in range(15)
+        ])
+        svc.db.session.commit()
         with pytest.raises(ValueError, match='SDXL-only'):
             lt.launch_training(LOCAL_USER, ds.id, check_captions=False, vae_path='C:\\x\\vae.safetensors')
         with pytest.raises(ValueError, match='SDXL-only'):

@@ -15,7 +15,8 @@ from PIL import Image
 
 
 def _png(color=(0, 128, 255)):
-    buf = io.BytesIO(); Image.new('RGB', (64, 64), color).save(buf, 'PNG')
+    buf = io.BytesIO()
+    Image.new('RGB', (64, 64), color).save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -134,7 +135,8 @@ def test_base_lora_node_kept_when_its_file_is_present(app, tmp_path, monkeypatch
         # Materialise the exact base LoRA the workflow references (node 139).
         _install(base, 'models', 'loras', 'klein', 'realistic.safetensors')
         cfg.save_config({'klein': {'consistency_lora': 'klein/Flux2-Klein-9B-consistency-V2.safetensors'}})
-        src = tmp_path / 'ref.png'; src.write_bytes(_png())
+        src = tmp_path / 'ref.png'
+        src.write_bytes(_png())
         captured = {}
         monkeypatch.setattr(queue_manager, 'add_job', lambda **kw: (captured.update(kw), kw['job_id'])[1])
         keh.enqueue_klein_edit(user_id='local', source_filename='ref.png',
@@ -224,7 +226,8 @@ def test_lora_strength_zero_skips_consistency_lora(app, tmp_path, monkeypatch):
     with app.app_context():
         _comfy(tmp_path, cfg, lora=True)
         cfg.save_config({'klein': {'consistency_lora': 'klein/Flux2-Klein-9B-consistency-V2.safetensors'}})
-        src = tmp_path / 'ref.png'; src.write_bytes(_png())
+        src = tmp_path / 'ref.png'
+        src.write_bytes(_png())
         captured = {}
         monkeypatch.setattr(queue_manager, 'add_job', lambda **kw: (captured.update(kw), kw['job_id'])[1])
         keh.enqueue_klein_edit(user_id='local', source_filename='ref.png',
@@ -244,9 +247,12 @@ def test_extra_refs_chain_native_reference_latents(app, tmp_path, monkeypatch):
     from app.job_queue import queue_manager
     with app.app_context():
         _comfy(tmp_path, cfg, lora=True)
-        src = tmp_path / 'ref.png'; src.write_bytes(_png())
-        r1 = tmp_path / 'extra1.webp'; r1.write_bytes(_png((10, 200, 10)))
-        r2 = tmp_path / 'extra2.webp'; r2.write_bytes(_png((200, 10, 10)))
+        src = tmp_path / 'ref.png'
+        src.write_bytes(_png())
+        r1 = tmp_path / 'extra1.webp'
+        r1.write_bytes(_png((10, 200, 10)))
+        r2 = tmp_path / 'extra2.webp'
+        r2.write_bytes(_png((200, 10, 10)))
         captured = {}
         monkeypatch.setattr(queue_manager, 'add_job', lambda **kw: (captured.update(kw), kw['job_id'])[1])
         keh.enqueue_klein_edit(user_id='local', source_filename='ref.png',
@@ -373,7 +379,6 @@ def test_generate_route_refuses_nsfw_on_api_engines(client):
 
 
 def test_service_fanout_refuses_nsfw_on_api_engines(app):
-    import pytest
     from app.services import face_dataset_service as svc
     from app.config import LOCAL_USER
     with app.app_context():
@@ -662,7 +667,8 @@ def test_regenerate_missing_nodes_409(app, client, tmp_path, monkeypatch):
             fh.write(_png())
         ds.ref_filename = 'ref.webp'
         img = svc.FaceDatasetImage(dataset_id=ds.id, source='generated',
-                                   status='finished', variation_prompt='p')
+                                   status='keep', filename='old.webp',
+                                   variation_prompt='p')
         svc.db.session.add(img)
         svc.db.session.commit()
         img_id = img.id
@@ -677,4 +683,4 @@ def test_regenerate_missing_nodes_409(app, client, tmp_path, monkeypatch):
     assert body['klein_nodes_missing'][0]['pack'] == 'RES4LYF'
     with app.app_context():
         row = svc.db.session.get(svc.FaceDatasetImage, img_id)
-        assert row.status == 'finished'   # untouched — blocked before any reset
+        assert row.status == 'keep'   # untouched — blocked before any reset

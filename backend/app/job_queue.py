@@ -12,20 +12,31 @@ imports the services that create jobs (avoids import cycles).
 from __future__ import annotations
 import json
 import logging
+from pathlib import Path
 import threading
 import time
 import uuid
-from datetime import datetime
 
 from .extensions import db
 from .models import ImageGenerationQueue, SystemState
+from .utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 2
 POLL_TIMEOUT_SECONDS = 15 * 60
-STUCK_TIMEOUT_MINUTES = 10
 IDLE_SLEEP_SECONDS = 1
+
+
+def _validated_output_filename(image) -> str:
+    filename = image.get('filename') if isinstance(image, dict) else None
+    subfolder = image.get('subfolder') if isinstance(image, dict) else None
+    if (not isinstance(filename, str) or not filename
+            or Path(filename).name != filename or filename in ('.', '..')):
+        raise ValueError('ComfyUI returned an unsafe output filename')
+    if subfolder not in (None, '', '.'):
+        raise ValueError('ComfyUI output subfolders are not accepted')
+    return filename
 
 
 def _claim(job_id) -> bool:
@@ -34,8 +45,8 @@ def _claim(job_id) -> bool:
     claimed = (ImageGenerationQueue.query
                .filter_by(job_id=job_id, status='pending')
                .update({'status': 'processing',
-                        'started_at': datetime.utcnow(),
-                        'last_heartbeat': datetime.utcnow()}))
+                        'started_at': utcnow(),
+                        'last_heartbeat': utcnow()}))
     db.session.commit()
     return bool(claimed)
 
@@ -88,7 +99,15 @@ def _poll_outputs(prompt_id, timeout=POLL_TIMEOUT_SECONDS):
         for node_output in outputs.values():
             for img in (node_output or {}).get('images') or []:
                 if isinstance(img, dict) and img.get('filename') and img.get('type', 'output') != 'temp':
-                    return img['filename'], False
+                    try:
+                        return _validated_output_filename(img), False
+                    except ValueError as exc:
+                        job = ImageGenerationQueue.query.filter_by(
+                            comfyui_prompt_id=prompt_id).first()
+                        if job:
+                            job.error_message = str(exc)
+                            db.session.commit()
+                        return None, True
         status = (entry or {}).get('status') or {}
         if status.get('status_str') == 'error' or (status.get('completed') and not outputs):
             # ComfyUI errored, or finished with no image. Stash the execution
@@ -106,7 +125,7 @@ def _poll_outputs(prompt_id, timeout=POLL_TIMEOUT_SECONDS):
 
         job = ImageGenerationQueue.query.filter_by(comfyui_prompt_id=prompt_id).first()
         if job:
-            job.last_heartbeat = datetime.utcnow()
+            job.last_heartbeat = utcnow()
             db.session.commit()
 
         if time.monotonic() >= deadline:
@@ -178,6 +197,7 @@ class JobQueueManager:
         self._app = None
         self._thread = None
         self._running = False
+        self._lifecycle_lock = threading.Lock()
 
     def init_app(self, app):
         self._app = app
@@ -185,20 +205,28 @@ class JobQueueManager:
     # -- lifecycle ------------------------------------------------------
     def start(self):
         """Idempotent: a no-op if the worker thread is already running."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        with self._app.app_context():
-            self._recover_stuck_jobs()
-        self._running = True
-        self._thread = threading.Thread(target=self._run_loop, name='job-queue-worker', daemon=True)
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            with self._app.app_context():
+                self._recover_stuck_jobs()
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._run_loop, name='job-queue-worker', daemon=True)
+            self._thread.start()
 
     def stop(self, timeout=5):
         """For tests: stop the loop and wait for the thread to exit."""
-        self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-            self._thread = None
+        with self._lifecycle_lock:
+            self._running = False
+            thread = self._thread
+            if thread is not None:
+                thread.join(timeout=timeout)
+                # Preserve the live handle after a timeout. A later start() must
+                # not create a second consumer while the first is still exiting.
+                if not thread.is_alive():
+                    self._thread = None
+            return self._thread is None
 
     def _run_loop(self):
         while self._running:
@@ -211,13 +239,17 @@ class JobQueueManager:
             time.sleep(0 if worked else IDLE_SLEEP_SECONDS)
 
     def _recover_stuck_jobs(self):
-        """Boot recovery: rows left in processing/sent_to_comfy past the
-        timeout (a prior crash) are failed and their callback dispatched."""
-        stuck = [j for j in ImageGenerationQueue.query
-                 .filter(ImageGenerationQueue.status.in_(('processing', 'sent_to_comfy'))).all()
-                 if j.is_stuck(STUCK_TIMEOUT_MINUTES)]
-        for job in stuck:
-            job.update_status('failed', error_message='stale job recovered at boot')
+        """Recover the exact in-flight states left by a dead worker process.
+
+        ``processing`` is the ambiguous submit window: ComfyUI may or may not
+        have accepted it, so fail it explicitly instead of duplicating work.
+        ``sent_to_comfy`` owns a durable prompt id and remains resumable; the
+        normal worker picks it up and continues polling after startup.
+        """
+        ambiguous = ImageGenerationQueue.query.filter_by(status='processing').all()
+        for job in ambiguous:
+            job.update_status(
+                'failed', error_message='app restarted during ComfyUI submission')
             db.session.commit()
             _dispatch_completion(job, None, True)
 
@@ -230,31 +262,39 @@ class JobQueueManager:
             return False  # GPU held by training/vision - leave jobs pending, retry later
 
         job = (ImageGenerationQueue.query
-               .filter_by(status='pending')
-               .order_by(ImageGenerationQueue.priority.desc(), ImageGenerationQueue.created_at.asc())
+               .filter(ImageGenerationQueue.status.in_(('sent_to_comfy', 'pending')))
+               # Resume paid/submitted work before starting another prompt.
+               .order_by(
+                   (ImageGenerationQueue.status == 'sent_to_comfy').desc(),
+                   ImageGenerationQueue.priority.desc(),
+                   ImageGenerationQueue.created_at.asc())
                .first())
         if job is None:
             return False
 
-        if not _claim(job.job_id):
-            return True  # Job was cancelled/claimed while we were selecting
-        db.session.refresh(job)
-
         try:
-            workflow = json.loads(job.workflow_data or '{}')
-            prompt_id = _submit(workflow, job.job_id)
-            # Mirror _claim: only advance to sent_to_comfy from 'processing'. If a
-            # cancel landed between _submit() returning and this write, rowcount
-            # is 0 - the job was already sent to ComfyUI but must not be polled
-            # nor resurrected out of 'cancelled'.
-            claimed = (ImageGenerationQueue.query
-                       .filter_by(job_id=job.job_id, status='processing')
-                       .update({'status': 'sent_to_comfy', 'comfyui_prompt_id': prompt_id}))
-            db.session.commit()
-            if not claimed:
+            if job.status == 'pending':
+                if not _claim(job.job_id):
+                    return True  # cancelled/claimed while we were selecting
                 db.session.refresh(job)
-                _dispatch_completion(job, None, True)
-                return True
+                workflow = json.loads(job.workflow_data or '{}')
+                prompt_id = _submit(workflow, job.job_id)
+                # Mirror _claim: only advance from 'processing'. If a cancel
+                # landed during submit, never resurrect or poll the row.
+                claimed = (ImageGenerationQueue.query
+                           .filter_by(job_id=job.job_id, status='processing')
+                           .update({'status': 'sent_to_comfy',
+                                    'comfyui_prompt_id': prompt_id}))
+                db.session.commit()
+                if not claimed:
+                    db.session.refresh(job)
+                    _dispatch_completion(job, None, True)
+                    return True
+            else:
+                prompt_id = job.comfyui_prompt_id
+                if not prompt_id:
+                    raise RuntimeError(
+                        'submitted ComfyUI job has no durable prompt id')
             filename, failed = _poll_outputs(prompt_id, POLL_TIMEOUT_SECONDS)
             error_detail = None   # a poll failure already stashed its detail on the row
         except Exception as exc:

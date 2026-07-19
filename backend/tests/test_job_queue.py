@@ -1,4 +1,5 @@
-import json, time
+import json
+import time
 from unittest.mock import patch
 import pytest
 
@@ -218,10 +219,8 @@ def test_cancel_already_completed_job_returns_false(app):
         assert queue_manager.cancel_job(jid) is False
 
 
-def test_boot_recovery_fails_stuck_jobs_and_dispatches(app):
-    """Rows stuck in processing/sent_to_comfy past the timeout must be marked
-    failed and dispatched with failed=True at boot."""
-    from datetime import datetime, timedelta
+def test_boot_recovery_fails_ambiguous_submit_window_and_dispatches(app):
+    """A dead process cannot safely know whether its processing submit landed."""
     from app.job_queue import queue_manager
     from app.models import ImageGenerationQueue
     from app.extensions import db
@@ -230,8 +229,7 @@ def test_boot_recovery_fails_stuck_jobs_and_dispatches(app):
         jid = queue_manager.add_job(workflow_data={'1': {}},
                                     metadata={'model_name': 'klein_edit_dataset'})
         row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
-        row.update_status('sent_to_comfy')
-        row.last_heartbeat = datetime.utcnow() - timedelta(minutes=11)
+        row.update_status('processing')
         db.session.commit()
 
         queue_manager.init_app(app)
@@ -241,16 +239,18 @@ def test_boot_recovery_fails_stuck_jobs_and_dispatches(app):
 
         row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
         assert row.status == 'failed'
+        assert 'submission' in row.error_message
         assert done == {'fn': None, 'failed': True}
 
 
-def test_boot_recovery_leaves_fresh_jobs_alone(app):
+def test_boot_recovery_resumes_submitted_prompt_without_resubmitting(app):
     from app.job_queue import queue_manager
     from app.models import ImageGenerationQueue
     with app.app_context():
         jid = queue_manager.add_job(workflow_data={'1': {}})
         row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
-        row.update_status('processing')  # fresh heartbeat, not stuck
+        row.update_status('sent_to_comfy')
+        row.comfyui_prompt_id = 'durable-prompt-1'
         from app.extensions import db
         db.session.commit()
 
@@ -260,7 +260,15 @@ def test_boot_recovery_leaves_fresh_jobs_alone(app):
             dispatch.assert_not_called()
 
         row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
-        assert row.status == 'processing'
+        assert row.status == 'sent_to_comfy'
+        with patch('app.job_queue._submit') as submit, \
+             patch('app.job_queue._poll_outputs', return_value=('recovered.png', False)), \
+             patch('app.job_queue._dispatch_completion'):
+            assert queue_manager.process_one() is True
+            submit.assert_not_called()
+        row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
+        assert row.status == 'completed'
+        assert row.result_filename == 'recovered.png'
 
 
 def test_start_stop_idempotent_and_clean(app):
@@ -283,7 +291,6 @@ def test_claim_on_pending_returns_true_and_sets_status(app):
     """_claim on a pending row must atomically set status='processing' and heartbeat."""
     from app.job_queue import queue_manager, _claim
     from app.models import ImageGenerationQueue
-    from datetime import datetime
     with app.app_context():
         jid = queue_manager.add_job(workflow_data={'1': {}})
         assert _claim(jid) is True
@@ -314,7 +321,6 @@ def test_cancel_during_claim_race_guard(app):
     The atomic _claim must fail, returning False, preventing submission to ComfyUI."""
     from app.job_queue import queue_manager, _claim
     from app.models import ImageGenerationQueue
-    from app.extensions import db
     with app.app_context():
         jid = queue_manager.add_job(workflow_data={'1': {}},
                                     metadata={'model_name': 'klein_edit_dataset'})

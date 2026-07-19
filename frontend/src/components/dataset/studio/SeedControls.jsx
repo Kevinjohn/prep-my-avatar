@@ -2,7 +2,7 @@
 // Extrait behavior-preserving de LoraTestStudio.jsx (barre seed/lock/×N/compteur).
 // IMPORTANT a11y : le compteur d'images N'A PAS d'aria-live (correctif déjà acté) —
 // il se recalcule à chaque clic de config, une région live le ré-annoncerait sans cesse.
-export default function SeedControls({ seed, seedLocked, onReroll, onToggleLock, genCount, onGenCount, total, batchMult = 1, fmt }) {
+export default function SeedControls({ seed, seedLocked, onReroll, onToggleLock, genCount, onGenCount, total, batchMult = 1 }) {
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <span className="text-content-subtle text-[0.6875rem] tabular-nums">

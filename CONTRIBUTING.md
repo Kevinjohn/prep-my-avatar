@@ -17,7 +17,7 @@ You only need the backend to work on backend code. You need Node and pnpm 10.21.
 
 ### Backend
 
-Use **CPython 3.10–3.12**. This matters: the optional ML extras (`insightface`, `onnxruntime`, `numpy<2`, …) publish no wheels for 3.13+, so a venv built on a newer Python (a bare `python`/`py -3` often grabs 3.13/3.14) can't install them. Pick the version explicitly.
+The core app supports **CPython 3.10–3.12**. Use **3.11 or 3.12** if you need the optional ML extras: their current, security-reviewed InsightFace/rembg/ONNX/Torch graph is tested on that narrower range. Pick the version explicitly; a bare `python`/`py -3` can select an unsupported newer interpreter.
 
 ```bash
 git clone https://github.com/perfectgf/lora-dataset-studio.git
@@ -25,7 +25,7 @@ cd lora-dataset-studio
 
 python -m venv .venv                 # on Windows: py -3.12 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt
 
 # optional, only if you're touching face scoring / masks / watermark inpainting:
 pip install -r backend/requirements-ml.txt
@@ -45,10 +45,10 @@ The repo **ships the frontend prebuilt** in `frontend/dist/` (that folder is com
 cd frontend
 pnpm install
 pnpm run dev      # live-reload dev server; proxies /api using frontend/vite.config.js
-pnpm run build    # writes frontend/dist/
+pnpm run gate     # lint + typecheck + contract tests + production build
 ```
 
-**If you change anything under `frontend/src`, run `pnpm run build` and commit the regenerated `frontend/dist/` in the same PR** — otherwise people running from source won't see your change. There's no TypeScript/ESLint step; a clean `pnpm run build` is the bar.
+**If you change anything under `frontend/src`, run `pnpm run gate` and commit the regenerated `frontend/dist/` in the same PR** — otherwise people running from source won't see your change. The gate runs ESLint, the JavaScript typecheck, contract tests, and the production build.
 
 ## Tests
 
@@ -56,17 +56,26 @@ The backend has a large test suite (1,100+ tests) and it must stay green:
 
 ```bash
 python -m pytest backend/tests -q
+python -m pytest tests -q
+python -m ruff check backend
+python -m pip_audit -r backend/requirements.txt --progress-spinner off
+python -m pip_audit -r backend/requirements-scrape.txt --progress-spinner off
+python -m pip_audit -r backend/requirements-ml.txt --progress-spinner off
 ```
 
 This is exactly what CI runs on a release tag, so run it locally before you open a PR. If you add or change behavior, add or update a test for it. The suite mocks external tools (ComfyUI, ai-toolkit, Ollama), so it runs without a GPU or any of those installed.
 
-For the frontend, run the contract tests and production build:
+For the frontend, run the complete quality gate and production dependency audit:
 
 ```bash
 cd frontend
-node --test
-pnpm run build
+pnpm run gate
+pnpm audit --prod --audit-level high
+pnpm run e2e
 ```
+
+The E2E suite starts a local server and Chromium, then checks the primary flow,
+dialog keyboard behavior, accessibility, and desktop/mobile overflow.
 
 ## Versions and releases
 

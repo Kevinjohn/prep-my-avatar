@@ -1,4 +1,22 @@
-import sys, os
+import sys
+import os
+
+
+def _recover_interrupted_update():
+    """Fallback for direct ``python backend/run.py`` launches.
+
+    Supported launchers execute the private pre-update bootstrap before reaching
+    this mutable checkout. This call keeps direct developer launches recoverable.
+    """
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parent.parent
+    data_dir = Path(os.environ.get('LDS_DATA_DIR', str(repo_root / 'data')))
+    try:
+        from update_recovery import recover
+        recover(repo_root, data_dir, python=sys.executable)
+    except Exception as exc:
+        print(f'[LDS] interrupted update recovery failed: {exc}', file=sys.stderr, flush=True)
+        raise SystemExit(70) from exc
 
 
 def _reexec_into_venv():
@@ -8,8 +26,8 @@ def _reexec_into_venv():
     into it before anything else imports. This makes every launch method — the
     start.bat/start.sh flow, a bare `python backend/run.py`, a double-click, an
     IDE, a shell with a newer Python first on PATH — converge on the SAME
-    interpreter. That is what lets the optional ML extras (insightface / numpy<2
-    / onnxruntime, which only publish wheels for CPython 3.10-3.12) install into
+    interpreter. That is what lets the optional ML extras (InsightFace, rembg,
+    ONNX Runtime and Torch, reviewed for CPython 3.11-3.12) install into
     a supported Python: the in-app installer and the capability probes both key
     off sys.executable, so if run.py runs on e.g. the machine's default 3.14 the
     extras can never install. Skipped for the frozen/portable build (it bundles
@@ -39,14 +57,31 @@ def _reexec_into_venv():
 
 
 _reexec_into_venv()
-
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-from app import create_app
+from pathlib import Path  # noqa: E402 - re-exec must happen before project imports
+from process_lock import (  # noqa: E402 - path is inserted after the re-exec
+    AlreadyRunning, acquire as acquire_process_lock)
+
+_repo_root = Path(__file__).resolve().parent.parent
+_data_dir = Path(os.environ.get('LDS_DATA_DIR', str(_repo_root / 'data')))
+try:
+    # Keep the handle alive for the lifetime of this process. The OS releases
+    # the lock automatically on exit or updater re-exec.
+    _server_instance_lock = acquire_process_lock(_data_dir)
+except AlreadyRunning as exc:
+    print(f'[LDS] {exc}', file=sys.stderr, flush=True)
+    raise SystemExit(73) from exc
+
+_recover_interrupted_update()
+
+from app import create_app  # noqa: E402 - recovery must precede app import
 
 try:
     from app.config import get as cfg_get
 except ImportError:
-    cfg_get = lambda k, d=None: {'server.host': '127.0.0.1', 'server.port': 5000}.get(k, d)
+    def cfg_get(key, default=None):
+        return {'server.host': '127.0.0.1', 'server.port': 5050}.get(
+            key, default)
 
 app = create_app()
 
@@ -72,8 +107,9 @@ if __name__ == '__main__':
                 pass   # config module unavailable (see cfg_get fallback above) -> ephemeral this run
         os.environ['LDS_ACCESS_TOKEN'] = token
         print(f"\n[LDS] server.host={host} reachable from the network -> access token REQUIRED.")
-        print(f"[LDS] Open from another device:  http://<this-machine>:{port}/?token={os.environ['LDS_ACCESS_TOKEN']}")
-        print("[LDS] (turn the token off in Settings -> Server to open the LAN without one)\n")
+        print(f"[LDS] Open from another device:  http://<this-machine>:{port}/remote-login")
+        print("[LDS] Copy the token from Settings -> Server on this computer. It is never put in a URL.")
+        print("[LDS] (turn the token off in Settings -> Server only for an explicitly trusted network)\n")
     elif is_lan:
         print(f"\n[LDS] server.host={host} reachable from the network (no token — trusted-LAN mode).")
         print(f"[LDS] Open from another device:  http://<this-machine>:{port}/\n")
@@ -84,6 +120,6 @@ if __name__ == '__main__':
     app.config['LDS_BOUND_PORT'] = port
     app.run(debug=os.environ.get('FLASK_DEBUG', '0') == '1',
             host=host,
-            # LDS_PORT wins over config so the launcher can dodge a busy 5000
+            # LDS_PORT wins over config so the launcher can dodge a busy port
             # (macOS AirPlay, another Flask app, …) without touching config.json.
             port=port, threaded=True, use_reloader=False)

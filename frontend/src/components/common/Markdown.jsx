@@ -112,7 +112,7 @@ function renderBlock(b, idx, guide = false) {
             </blockquote>
           );
           case 'code': return (
-            <pre key={key} className="m-0 rounded-lg border border-border bg-app/60 p-3 overflow-x-auto text-[0.8125rem] text-content-muted font-mono">{b.body}</pre>
+            <pre key={key} tabIndex={0} className="m-0 rounded-lg border border-border bg-app/60 p-3 overflow-x-auto text-[0.8125rem] text-content-muted font-mono">{b.body}</pre>
           );
           case 'table': return (
             <div key={key} className="overflow-x-auto rounded-lg border border-border">

@@ -2,17 +2,15 @@
 thread and expose their live state for polling. Actions:
 
   ml_extras          -> pip install -r backend/requirements-ml.txt (the app's own venv):
-                        installs ALL the ML extras at once — kept for a first-time setup
+                        installs ALL the ML extras at once on Python 3.11–3.12
   face_scoring       -> pip install JUST the face-scoring packages (insightface + onnx-
                         runtime, versions read from requirements-ml.txt) into the inter-
                         preter probe_face_scoring resolves — install/repair ONE feature
   masks              -> pip install JUST the person-mask package (rembg) into the inter-
                         preter probe_masks resolves — install/repair ONE feature
-  watermark_inpaint  -> pip install JUST the watermark-inpainting package (simple-lama-
-                        inpainting, version floor read from requirements-ml.txt) into the
-                        interpreter the LaMa wrapper resolves — the scoped install shown
-                        next to the Curate 🧽 tools, so a user who already has rembg/
-                        insightface doesn't redo the whole ML extras step
+  watermark_inpaint  -> pip install JUST the secure Torch/Pillow/OpenCV dependencies used
+                        by the repository's LaMa adapter into the interpreter that adapter
+                        resolves — the scoped install shown next to the Curate 🧽 tools
   (face_scoring/masks/watermark_inpaint all follow the same shape: ML interpreter resolved
    per capability, requirements-ml.txt pinned as a -c constraint, probe cache invalidated
    on success so the capability flips without a restart.)
@@ -33,8 +31,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import requests
+from flask import current_app, has_app_context
 
 from . import capabilities
 from . import config as cfg
@@ -75,34 +75,23 @@ _SCRAPE_REQUIREMENTS = cfg.BACKEND_DIR / 'requirements-scrape.txt'
 # pip -r installers share one worker; both target THIS interpreter (the scrape
 # stack runs in-process, so any other environment would be invisible to the app).
 _PIP_REQUIREMENTS = {'ml_extras': _ML_REQUIREMENTS, 'scrape_extras': _SCRAPE_REQUIREMENTS}
-# The single package the watermark-inpaint scoped install adds. The NAME lives
-# here (an identifier), but the VERSION SPEC is parsed from requirements-ml.txt
-# so there's exactly one place a version floor is ever written.
-_WATERMARK_PKG = 'simple-lama-inpainting'
-
 # --- ML extras, split per capability -------------------------------------------
 # requirements-ml.txt is a FLAT pip file (not grouped by feature), so the
 # package->capability grouping lives HERE. The VERSIONS are never duplicated: each
 # package's exact requirement line is read from requirements-ml.txt via
-# _requirement_spec(), and that same file rides along as a `-c` constraint so a
-# scoped install can't bump numpy past insightface's <2 ABI ceiling. A dedicated
+# _requirement_spec(), and that same file rides along as a `-c` constraint. A dedicated
 # test (test_no_orphan_ml_package) asserts EVERY line in requirements-ml.txt is
 # owned by at least one capability below — a package added to the file but
 # forgotten here would silently never be installed by any scoped action.
 #
-#   face_scoring  insightface (face embeddings) + onnxruntime (its runtime). numpy
-#                 is pinned <2 *for insightface's* ABI; opencv-python-headless is
-#                 the server-safe cv2 that insightface & rembg both pull — listed so
-#                 the scoped install prefers the headless variant, matching the
-#                 monolithic `-r` install.
-#   masks         rembg (u2net background removal), + the same shared numpy /
-#                 headless-opencv floor.
-#   watermark_inpaint  simple-lama-inpainting (has its own dedicated worker below;
-#                 listed here only so the anti-orphan test sees its package covered).
+#   face_scoring  insightface (face embeddings), onnxruntime, NumPy and headless cv2.
+#   masks         rembg (u2net background removal), ONNX, NumPy, Pillow and cv2.
+#   watermark_inpaint  TorchScript runtime plus NumPy, Pillow and cv2 for the local
+#                 hash-verifying LaMa adapter.
 _CAPABILITY_PACKAGES = {
     'face_scoring': ('insightface', 'onnxruntime', 'numpy', 'opencv-python-headless'),
-    'masks': ('rembg', 'numpy', 'opencv-python-headless'),
-    'watermark_inpaint': (_WATERMARK_PKG,),
+    'masks': ('rembg', 'onnxruntime', 'numpy', 'opencv-python-headless', 'pillow'),
+    'watermark_inpaint': ('torch', 'numpy', 'opencv-python-headless', 'pillow'),
 }
 # The capabilities served by the GENERIC per-capability pip worker
 # (_run_ml_capability). watermark_inpaint keeps its own worker, so it's excluded.
@@ -117,6 +106,7 @@ _LOG_MAX = 400  # ring-buffer the log so a chatty pip can't grow unbounded
 
 _lock = threading.Lock()
 _runs = {}  # action -> {'state', 'returncode', 'log'}
+_persisted_progress = {}  # action -> (monotonic time, byte count)
 
 
 class AlreadyRunning(Exception):
@@ -128,7 +118,20 @@ class Precondition(Exception):
 
 
 def _new_run():
-    return {'state': 'running', 'returncode': None, 'log': [], 'progress': None}
+    return {'state': 'running', 'returncode': None, 'log': [], 'progress': None,
+            'job_id': None}
+
+
+def _persist(action, **changes):
+    run = _runs.get(action) or {}
+    job_id = run.get('job_id')
+    if not job_id or not has_app_context():
+        return
+    try:
+        from .services import background_jobs
+        background_jobs.touch(job_id, **changes)
+    except Exception:
+        logger.debug('could not persist setup job %s', action, exc_info=True)
 
 
 def _append(action, line):
@@ -136,6 +139,7 @@ def _append(action, line):
     log.append(line.rstrip('\n'))
     if len(log) > _LOG_MAX:
         del log[:-_LOG_MAX]
+    _persist(action, log=line.rstrip('\n'))
 
 
 def _set_progress(action, done, total):
@@ -150,6 +154,16 @@ def _set_progress(action, done, total):
         'total': total,
         'pct': (done * 100 // total) if total else None,
     }
+    # The UI gets every in-memory update, but a multi-GB download must not fsync
+    # SQLite once per 8 MB network chunk. Persist at most every 2 seconds or
+    # 64 MB, plus the first/final snapshot.
+    now = time.monotonic()
+    last_time, last_done = _persisted_progress.get(action, (0.0, -1))
+    terminal = bool(total and done >= total)
+    if (done == 0 or terminal or now - last_time >= 2.0
+            or done - last_done >= 64 * 1024 * 1024):
+        _persisted_progress[action] = (now, done)
+        _persist(action, progress=run['progress'])
 
 
 def _quote(p: str) -> str:
@@ -165,7 +179,7 @@ def _canon(name: str) -> str:
 
 def _requirement_spec(name: str, requirements=_ML_REQUIREMENTS) -> str:
     """The full requirement line for `name` as written in a requirements file
-    (e.g. 'simple-lama-inpainting>=0.1.2') — the version floor lives in ONE place
+    (e.g. 'torch==2.13.0') — the version pin lives in ONE place
     (requirements-ml.txt), never duplicated in this module. Package-name match is
     canonicalised (PEP 503: -_. all fold together, case-insensitive) and tolerant
     of version/marker/extras suffixes. Falls back to the bare name if the file or
@@ -238,9 +252,11 @@ def manual_command(action) -> str:
         return (f'{_quote(_capability_python(action))} -m pip install {specs} '
                 f'-c {_quote(str(_ML_REQUIREMENTS))}')
     if action == 'watermark_inpaint':
-        # Quote the spec: the '>=' in 'simple-lama-inpainting>=0.1.2' is shell
-        # redirection unquoted. Interpreter = the wrapper's resolved python.
-        return f'{_quote(_watermark_python())} -m pip install "{_requirement_spec(_WATERMARK_PKG)}"'
+        specs = ' '.join(
+            f'"{_requirement_spec(p)}"'
+            for p in _CAPABILITY_PACKAGES['watermark_inpaint'])
+        return (f'{_quote(_watermark_python())} -m pip install {specs} '
+                f'-c {_quote(str(_ML_REQUIREMENTS))}')
     if action == 'ollama_model':
         model = (cfg.get('ollama.vision_model') or '').strip() or '<vision-model>'
         return f'ollama pull {model}'
@@ -258,10 +274,33 @@ def status(action) -> dict:
     run = _runs.get(action)
     cmd = manual_command(action)
     if run is None:
+        if has_app_context():
+            try:
+                from .services import background_jobs
+                saved = background_jobs.snapshot(background_jobs.latest('setup', action))
+                if saved.get('state') != 'idle':
+                    state = saved['state']
+                    if state == 'done':
+                        state = 'success'
+                    elif state == 'interrupted':
+                        state = 'error'
+                    return {
+                        'state': state,
+                        'returncode': saved.get('returncode'),
+                        'log': saved.get('log') or [],
+                        'progress': saved.get('progress'),
+                        'error': saved.get('error'),
+                        'error_code': saved.get('error_code'),
+                        'job_id': saved.get('job_id'),
+                        'manual_command': cmd,
+                    }
+            except Exception:
+                logger.debug('could not load persisted setup job %s', action, exc_info=True)
         return {'state': 'idle', 'returncode': None, 'log': [], 'progress': None,
                 'manual_command': cmd}
     return {'state': run['state'], 'returncode': run['returncode'],
             'log': list(run['log']), 'progress': run.get('progress'),
+            'job_id': run.get('job_id'),
             'manual_command': cmd}
 
 
@@ -272,13 +311,48 @@ def start(action) -> dict:
         run = _runs.get(action)
         if run and run['state'] == 'running':
             raise AlreadyRunning(action)
+        if action == 'ml_extras' and not capabilities.python_ml_status()['ml_supported']:
+            ml_status = capabilities.python_ml_status()
+            raise Precondition(
+                f"ML extras require Python {ml_status['ml_range']}; this app uses "
+                f"Python {ml_status['version']}")
+        if action in (*_CAPABILITY_ML_ACTIONS, 'watermark_inpaint') \
+                and _capability_python(action) == sys.executable \
+                and not capabilities.python_ml_status()['ml_supported']:
+            ml_status = capabilities.python_ml_status()
+            raise Precondition(
+                f"{action} requires Python {ml_status['ml_range']}; configure a supported "
+                f"feature interpreter or run the app with one (current: {ml_status['version']})")
         if action == 'ollama_model':
             _check_ollama_precondition()
         if action in _KLEIN_DOWNLOADS:
             _check_klein_precondition(action)
-        _runs[action] = _new_run()
-    threading.Thread(target=_execute, args=(action,), daemon=True).start()
+        run = _new_run()
+        app = current_app._get_current_object() if has_app_context() else None
+        if app is not None:
+            try:
+                from .services import background_jobs
+                job, created = background_jobs.create_or_get(
+                    'setup', action, {'action': action})
+                if not created:
+                    raise AlreadyRunning(action)
+                if job.state in background_jobs.ACTIVE_STATES and job.started_at:
+                    run['job_id'] = job.id
+            except AlreadyRunning:
+                raise
+            except Exception:
+                logger.exception('could not create durable setup job %s', action)
+        _runs[action] = run
+    threading.Thread(target=_execute_with_app, args=(app, action), daemon=True).start()
     return status(action)
+
+
+def _execute_with_app(app, action):
+    if app is None:
+        _execute(action)
+        return
+    with app.app_context():
+        _execute(action)
 
 
 def _check_ollama_precondition():
@@ -316,6 +390,11 @@ def _execute(action):
         rc = _WORKERS[action](action)
         _runs[action]['returncode'] = rc
         _runs[action]['state'] = 'success' if rc == 0 else 'error'
+        _persist(action, state='done' if rc == 0 else 'error',
+                 result={'returncode': rc},
+                 error=None if rc == 0 else f'installer exited with status {rc}',
+                 error_code=None if rc == 0 else 'nonzero_exit')
+        _persisted_progress.pop(action, None)
         if action in _IMPORT_CACHE_ACTIONS and rc == 0:
             try:
                 capabilities.clear_import_cache()
@@ -334,12 +413,15 @@ def _execute(action):
         _append(action, f'error: {e}')
         _runs[action]['returncode'] = -1
         _runs[action]['state'] = 'error'
+        _persist(action, state='error', result={'returncode': -1},
+                 error=str(e), error_code='installer_exception')
+        _persisted_progress.pop(action, None)
 
 
 def _run_ml_extras(action) -> int:
     """Generic `pip install -r` worker (name kept for existing callers/tests):
     serves ml_extras AND scrape_extras via _PIP_REQUIREMENTS."""
-    # ml_extras (insightface/numpy<2/onnx) has no wheels outside Python 3.10–3.12;
+    # The reviewed ML graph is supported on Python 3.11–3.12;
     # on a newer interpreter pip source-builds and fails with a cryptic numpy
     # conflict. Lead the log with a plain-English explanation + the fix so the
     # traceback that follows is already contextualized. (scrape_extras is pure
@@ -350,7 +432,7 @@ def _run_ml_extras(action) -> int:
             for line in (
                 '=' * 64,
                 f"NOTE: this app runs on Python {ps['version']}, but the ML extras",
-                f"need Python {ps['ml_range']} (insightface / numpy<2 / onnxruntime",
+                f"need Python {ps['ml_range']} (insightface / rembg / onnxruntime",
                 "publish no wheels for newer versions → pip will try to BUILD them",
                 "from source and the install will likely fail below.",
                 "",
@@ -374,20 +456,18 @@ def _run_ml_extras(action) -> int:
 
 
 def _run_watermark_inpaint(action) -> int:
-    """Install JUST the watermark-inpainting package (simple-lama-inpainting, plus
-    its torch/opencv deps) into the interpreter the LaMa wrapper resolves — NOT
-    necessarily this app's venv (the ML extras can live in a separate 3.10–3.12
-    env pointed to by watermark.python/masks.python). A user who already ran the
-    ML extras step keeps rembg/insightface: pip skips the already-satisfied ones.
-    The version floor is READ from requirements-ml.txt (single source of truth),
-    and that file rides along as a CONSTRAINT (-c) so pulling torch can never bump
-    numpy past insightface's <2 ceiling and silently break face scoring."""
+    """Install the dependencies for the repository's LaMa adapter into the
+    interpreter the LaMa wrapper resolves — NOT
+    necessarily this app's venv (the ML extras can live in a separate 3.11–3.12
+    env pointed to by watermark.python/masks.python). Versions are read from
+    requirements-ml.txt and the same file is used as a constraint."""
     python = _watermark_python()
-    spec = _requirement_spec(_WATERMARK_PKG)
+    specs = [_requirement_spec(p)
+             for p in _CAPABILITY_PACKAGES['watermark_inpaint']]
     _append(action, f'target interpreter: {python}')
-    _append(action, f'installing {spec}  (constraints: requirements-ml.txt)')
+    _append(action, f"installing {', '.join(specs)}  (constraints: requirements-ml.txt)")
     proc = subprocess.Popen(
-        [python, '-m', 'pip', 'install', spec, '-c', str(_ML_REQUIREMENTS)],
+        [python, '-m', 'pip', 'install', *specs, '-c', str(_ML_REQUIREMENTS)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     for line in proc.stdout:
@@ -401,12 +481,12 @@ def _run_ml_capability(action) -> int:
     into the interpreter that capability's probe resolves — so a user can install
     or REPAIR a single feature without the monolithic `-r requirements-ml.txt`.
     Versions come solely from requirements-ml.txt (via _requirement_spec) and that
-    file rides along as a `-c` constraint, so pulling insightface/rembg deps can
-    never bump numpy past the <2 ABI ceiling and break the other ML capabilities.
+    file rides along as a `-c` constraint so every scoped install uses the same
+    reviewed dependency graph.
     Same shape as _run_watermark_inpaint (resolved ML python, -c constraint)."""
     python = _capability_python(action)
     specs = [_requirement_spec(p) for p in _CAPABILITY_PACKAGES[action]]
-    # face_scoring pulls insightface, which only has wheels for Python 3.10–3.12.
+    # The reviewed ML graph is supported on Python 3.11–3.12.
     # When targeting THIS interpreter (no dedicated env) and it's out of range,
     # lead with the plain-English reason so the pip source-build failure below is
     # already contextualised — same courtesy the monolithic ml_extras worker gives.

@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useToast } from '../components/common/Toast';
-import { postJson } from '../api/fetchClient';
+import { getJson, safePostJson as postJson } from '../api/fetchClient';
 
 export function useStudioRun(runId) {
   const toast = useToast();
@@ -25,8 +25,7 @@ export function useStudioRun(runId) {
   const refresh = useCallback(async () => {
     if (!runId) return;
     try {
-      const r = await fetch(`/api/studio/run/${runId}/status`, { credentials: 'include' });
-      if (r.ok) setData(await r.json());
+      setData(await getJson(`/api/studio/run/${runId}/status`));
     } catch { /* transient network error — the poll retries */ }
   }, [runId]);
 

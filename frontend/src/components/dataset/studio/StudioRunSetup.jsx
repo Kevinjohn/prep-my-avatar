@@ -10,9 +10,9 @@
  * possède la sélection de LoRA et déclenche le POST.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { STRENGTH_CHOICES } from './constants';
+import { MAX_TEST_IMAGES, STRENGTH_CHOICES } from './constants';
 import { fmt } from '../../../utils/studioFormat';
-import { postJson } from '../../../api/fetchClient';
+import { postJson, safeJson } from '../../../api/fetchClient';
 import StrengthPicker from './StrengthPicker';
 import RecentPrompts from './RecentPrompts';
 
@@ -24,17 +24,17 @@ export default function StudioRunSetup({
   // batchMult = 1 + nb de LoRA cochés « ⚖ batch » (axe sans/avec) — le backend
   // multiplie les cellules d'autant, le compteur de coût doit suivre.
   const cells = selectionCount * strengths.length * count * batchMult;
-  const canLaunch = selectionCount > 0 && strengths.length > 0 && cells > 0 && !launching && !gpuBusy;
+  const overLimit = cells > MAX_TEST_IMAGES;
+  const canLaunch = selectionCount > 0 && strengths.length > 0 && cells > 0
+    && !overLimit && !launching && !gpuBusy;
 
   // Prompts de test récents GLOBAUX (tous datasets — la comparaison n'en avait
   // aucun avant). Rechargé après un lancement (nouveau prompt mémorisé) et après
   // une suppression.
   const [recentPrompts, setRecentPrompts] = useState([]);
   const loadRecent = useCallback(() => {
-    fetch('/api/studio/recent-prompts', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.ok) setRecentPrompts(d.prompts || []); })
-      .catch(() => { /* menu facultatif — silencieux */ });
+    safeJson('/api/studio/recent-prompts')
+      .then((d) => { if (d?.ok) setRecentPrompts(d.prompts || []); });
   }, []);
   useEffect(() => { loadRecent(); }, [loadRecent, launching]);
   const deleteRecent = useCallback(async (p) => {
@@ -99,6 +99,11 @@ export default function StudioRunSetup({
       </div>
       {selectionCount === 0 && (
         <p className="m-0 text-amber-300 text-[0.6875rem]">Check at least one LoRA above.</p>
+      )}
+      {overLimit && (
+        <p className="m-0 text-amber-300 text-[0.6875rem]" role="alert">
+          This run has {cells} images; the maximum is {MAX_TEST_IMAGES}. Reduce LoRAs, strengths, batch axes, or images per config.
+        </p>
       )}
     </div>
   );

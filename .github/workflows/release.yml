@@ -16,7 +16,7 @@ jobs:
   build-and-release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Tag must match APP_VERSION
         shell: pwsh
@@ -27,19 +27,71 @@ jobs:
           }
 
       # Host python for PyInstaller only (the bundle ships its own standalone CPython).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
       - name: Run the test suite
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pip install --disable-pip-version-check -e . -r backend/requirements-dev.txt
           python -m pytest backend/tests -q
+          python -m pytest tests -q
+          python -m ruff check backend
+          python -m pip_audit -r backend/requirements.txt --progress-spinner off
+          python -m pip_audit -r backend/requirements-scrape.txt --progress-spinner off
+          python -m pip_audit -r backend/requirements-ml.txt --progress-spinner off
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.21.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Verify the frontend
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run gate
+          pnpm audit --prod --audit-level high
+
+      - name: Install release browser
+        shell: pwsh
+        working-directory: frontend
+        run: pnpm exec playwright install chromium
+
+      - name: Run browser E2E and accessibility checks
+        shell: pwsh
+        working-directory: frontend
+        run: pnpm run e2e
+
+      - name: Frontend build must be committed
+        shell: pwsh
+        run: git diff --exit-code -- frontend/dist
 
       - name: Build the portable bundle
         shell: pwsh
         run: ./packaging/build_portable.ps1
+
+      - name: Smoke-test portable archive contents
+        shell: pwsh
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP 'portable-smoke'
+          Expand-Archive packaging/dist/LoRA-Dataset-Studio-win64.zip $smoke
+          $bundle = Join-Path $smoke 'LoRA-Dataset-Studio'
+          & (Join-Path $bundle 'python/python.exe') -m compileall -q (Join-Path $bundle 'backend')
+          if ($LASTEXITCODE -ne 0) { throw 'portable backend compile smoke failed' }
+          if (-not (Test-Path (Join-Path $bundle 'frontend/dist/index.html'))) {
+            throw 'portable frontend bundle is missing'
+          }
+          if (-not (Test-Path (Join-Path $bundle 'LoRA Dataset Studio.exe'))) {
+            throw 'portable launcher is missing'
+          }
 
       - name: Publish the release
         shell: pwsh

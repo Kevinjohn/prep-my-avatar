@@ -1,6 +1,5 @@
 """Checkpoint management: app-wide trash (nothing destroyed directly),
 selective delete, run cleanup, cloud staging purge, source-side save cap."""
-import json
 import os
 
 import pytest
@@ -25,6 +24,21 @@ def test_trash_roundtrip(app, tmp_path):
         res = trash.empty_trash()
         assert res['removed'] >= 1 and res['freed_bytes'] >= 5
         assert trash.trash_size() == 0
+
+
+def test_trash_entry_can_restore_original_path(app, tmp_path):
+    from app.services import trash
+    with app.app_context():
+        original = tmp_path / 'restore-me.bin'
+        original.write_bytes(b'recoverable')
+        moved = trash.send_to_trash(original, context='restore test')
+        entry_id = os.path.basename(os.path.dirname(moved))
+        entries = trash.list_entries()
+        assert any(item['id'] == entry_id and item['restorable'] for item in entries)
+        restored = trash.restore_entry(entry_id)
+        assert restored['restored'] == 1
+        assert original.read_bytes() == b'recoverable'
+        assert all(item['id'] != entry_id for item in trash.list_entries())
 
 
 def test_delete_checkpoint_goes_to_trash_and_is_whitelisted(app, ds, tmp_path, monkeypatch):
@@ -87,7 +101,8 @@ def test_purge_finished_runs_spares_active_and_pod_kept(app, ds, tmp_path):
         active_dir = mk('training', 'r_active')
         kept_dir = mk('error_pod_kept', 'r_kept')
         res = ct.purge_finished_runs()
-        assert res['purged_runs'] == 1 and res['freed_bytes'] >= 10
+        assert res['purged_runs'] == 1
+        assert res['moved_bytes'] >= 10 and res['freed_bytes'] == 0
         assert not done_dir.exists()                 # trashed
         assert active_dir.exists() and kept_dir.exists()   # spared
 
@@ -143,3 +158,17 @@ def test_trash_routes(app, client, tmp_path):
     res = client.post('/api/trash/empty').get_json()
     assert res['ok'] is True and res['freed_bytes'] >= 3
     assert client.get('/api/trash').get_json()['size_bytes'] == 0
+
+
+def test_trash_restore_route(app, client, tmp_path):
+    from app.services import trash
+    with app.app_context():
+        original = tmp_path / 'route-restore.bin'
+        original.write_bytes(b'abc')
+        moved = trash.send_to_trash(original, context='route-restore')
+        entry_id = os.path.basename(os.path.dirname(moved))
+    info = client.get('/api/trash').get_json()
+    assert any(item['id'] == entry_id for item in info['entries'])
+    response = client.post(f'/api/trash/{entry_id}/restore')
+    assert response.status_code == 200
+    assert original.read_bytes() == b'abc'

@@ -3,7 +3,30 @@
 ComfyUI is never contacted: `queue_manager.add_job`/`_build_cell_workflow` are
 monkeypatched for the enqueue-path tests, and the workflow-build test loads
 the real copied workflow JSON but stops short of a network call."""
+from pathlib import Path
+
 import pytest
+
+
+def test_orphaned_studio_output_moves_to_recoverable_trash(app, tmp_path):
+    from app import config as cfg
+    from app.services import lora_test_studio as lts
+    from app.services import trash
+    with app.app_context():
+        comfy = tmp_path / 'ComfyUI'
+        output = comfy / 'output'
+        output.mkdir(parents=True)
+        cfg.save_config({'comfyui': {'base_dir': str(comfy)}})
+        orphan = output / 'late-studio.webp'
+        orphan.write_bytes(b'expensive pixels')
+
+        lts._cleanup_output_file(orphan.name, failed=False)
+
+        assert not orphan.exists()
+        entry = next(item for item in trash.list_entries()
+                     if item['kind'] == 'orphaned_generation')
+        trash.restore_entry(entry['id'])
+        assert orphan.read_bytes() == b'expensive pixels'
 
 
 def test_build_matrix_shape_and_validation(app):
@@ -11,10 +34,22 @@ def test_build_matrix_shape_and_validation(app):
     m = build_matrix(['a.safetensors', 'b.safetensors'], [0.8, 1.0], aspects=['9:16'])
     assert len(m) == 4 and all(len(t) == 6 for t in m)
     try:
-        build_matrix(['a'], [99.0]); ok = False
+        build_matrix(['a'], [99.0])
+        ok = False
     except Exception:
         ok = True
     assert ok
+
+
+def test_build_matrix_rejects_unbounded_gpu_fanout(app):
+    from app.services.lora_test_studio import MAX_TEST_IMAGES, build_matrix
+
+    with pytest.raises(ValueError, match=f'maximum is {MAX_TEST_IMAGES}'):
+        build_matrix(
+            ['a.safetensors', 'b.safetensors'],
+            [0.1, 0.2, 0.3],
+            aspects=['9:16', '3:4', '1:1', '4:3', '16:9'],
+        )
 
 
 def test_wilson_ranking_prefers_confident_likes(app):
@@ -56,6 +91,54 @@ def test_face_ranking_aggregates_by_checkpoint(app):
         assert rk[0]['checkpoint'].endswith('000002000.safetensors') and rk[0]['n'] == 2
 
 
+def test_delete_prompt_moves_completed_images_to_recoverable_trash(app):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.services import trash
+    from app.models import LoraTestImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Recover Studio prompt', 'studio_trash')
+        folder = Path(svc._dataset_dir(ds.id))
+        image = folder / 'studio-result.webp'
+        image.write_bytes(b'studio pixels')
+        svc.db.session.add(LoraTestImage(
+            dataset_id=ds.id, checkpoint='z image\\lora.safetensors',
+            strength=1.0, prompt='recover me', status='done', filename=image.name))
+        svc.db.session.commit()
+
+        assert lts.delete_prompt(LOCAL_USER, ds.id, 'recover me') == 1
+        assert not image.exists()
+        assert LoraTestImage.query.filter_by(dataset_id=ds.id).count() == 0
+        entry = next(item for item in trash.list_entries() if item['kind'] == 'studio_prompt')
+        trash.restore_entry(entry['id'])
+        assert image.read_bytes() == b'studio pixels'
+
+
+def test_delete_prompt_restores_files_when_database_commit_fails(app, monkeypatch):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.services import trash
+    from app.models import LoraTestImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Studio delete transaction', 'studio_tx')
+        folder = Path(svc._dataset_dir(ds.id))
+        image = folder / 'studio-transaction.webp'
+        image.write_bytes(b'studio pixels')
+        svc.db.session.add(LoraTestImage(
+            dataset_id=ds.id, checkpoint='z image\\lora.safetensors',
+            strength=1.0, prompt='keep me', status='done', filename=image.name))
+        svc.db.session.commit()
+        monkeypatch.setattr(
+            svc.db.session, 'commit',
+            lambda: (_ for _ in ()).throw(RuntimeError('commit failed')))
+
+        with pytest.raises(RuntimeError, match='commit failed'):
+            lts.delete_prompt(LOCAL_USER, ds.id, 'keep me')
+
+        assert image.read_bytes() == b'studio pixels'
+        assert not any(item['kind'] == 'studio_prompt' for item in trash.list_entries())
+
+
 def test_create_run_commits_rows_before_enqueue(app, monkeypatch, tmp_path):
     from app.services import lora_test_studio as lts, face_dataset_service as svc
     from app.models import LoraTestImage
@@ -85,10 +168,13 @@ def test_create_run_commits_rows_before_enqueue(app, monkeypatch, tmp_path):
         # -- patch _enqueue_cell itself so the assertion below can pin the job_id.
         monkeypatch.setattr(lts, '_enqueue_cell', lambda *a, **k: 'job-xyz')
         monkeypatch.setattr(lts, 'gpu_busy_reason', lambda: None)
+        monkeypatch.setattr(lts, 'training_record_for_checkpoint',
+                            lambda *a, **k: 42)
         out = lts.create_run(LOCAL_USER, ds.id, [ck], [1.0], prompt='p', count=1)
         rows = LoraTestImage.query.filter_by(dataset_id=ds.id).all()
         assert out['created'] == len(rows) >= 1
-        assert all(r.job_id == 'job-xyz' and r.status == 'pending' for r in rows)
+        assert all(r.job_id == 'job-xyz' and r.status == 'pending'
+                   and r.training_run_record_id == 42 for r in rows)
 
 
 def test_create_run_with_resolution_tier_resolves_dims_via_lifted_resolution_module(app, monkeypatch, tmp_path):
@@ -164,6 +250,80 @@ def test_create_comparison_run_commits_rows_before_enqueue(app, monkeypatch, tmp
                   for r in rows)
 
 
+def test_comparison_validates_every_selection_before_creating_rows(
+        app, monkeypatch, tmp_path):
+    from app import config
+    from app.config import LOCAL_USER
+    from app.models import LoraTestImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_test_studio as lts
+
+    with app.app_context():
+        base = tmp_path / 'Comfy'
+        lora_dir = base / 'models' / 'loras' / 'z image'
+        lora_dir.mkdir(parents=True)
+        checkpoint = 'z image\\lora_valid_000002000.safetensors'
+        (lora_dir / 'lora_valid_000002000.safetensors').touch()
+        unet_dir = base / 'models' / 'unet' / 'z image'
+        unet_dir.mkdir(parents=True)
+        (unet_dir / 'zmodel.safetensors').touch()
+        config.save_config({'comfyui': {'base_dir': str(base)}})
+        import app.utils.comfyui as comfyui_utils
+        monkeypatch.setattr(
+            comfyui_utils, '_zimage_models_cache', {'data': None, 'timestamp': 0})
+        valid = svc.create_dataset(LOCAL_USER, 'Valid', 'valid')
+        invalid = svc.create_dataset(LOCAL_USER, 'Invalid', 'invalid')
+        monkeypatch.setattr(lts, 'gpu_busy_reason', lambda: None)
+
+        with pytest.raises(ValueError, match='unknown checkpoint'):
+            lts.create_comparison_run(LOCAL_USER, [
+                {'dataset_id': valid.id, 'checkpoint': checkpoint},
+                {'dataset_id': invalid.id, 'checkpoint': checkpoint},
+            ], [1.0], prompt='p')
+
+        assert LoraTestImage.query.count() == 0
+
+
+def test_studio_launch_admission_is_serialized():
+    import threading
+    import time
+    from app.services import lora_test_studio as lts
+
+    state = {'active': 0, 'max_active': 0}
+    state_lock = threading.Lock()
+
+    def fake_launch():
+        with state_lock:
+            state['active'] += 1
+            state['max_active'] = max(state['max_active'], state['active'])
+        time.sleep(0.03)
+        with state_lock:
+            state['active'] -= 1
+
+    serialized = lts._serialized_studio_launch(fake_launch)
+    threads = [threading.Thread(target=serialized) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert state['max_active'] == 1
+
+
+def test_lora_path_resolution_cannot_escape_models_directory(app, tmp_path):
+    from app import config
+    from app.services import lora_test_studio as lts
+
+    with app.app_context():
+        base = tmp_path / 'Comfy'
+        (base / 'models' / 'loras').mkdir(parents=True)
+        escaped = base / 'models' / 'outside.safetensors'
+        escaped.write_bytes(b'header')
+        config.save_config({'comfyui': {'base_dir': str(base)}})
+
+        assert lts._resolve_lora_abs_path('../outside.safetensors') is None
+
+
 def test_rate_image_accepts_only_valid_ratings(app):
     from app.services import lora_test_studio as lts, face_dataset_service as svc
     from app.models import LoraTestImage
@@ -179,6 +339,126 @@ def test_rate_image_accepts_only_valid_ratings(app):
         assert lts.rate_image(LOCAL_USER, img.id, 0) is True
         assert lts.rate_image(LOCAL_USER, img.id, 2) is False
         assert lts.rate_image(LOCAL_USER, img.id, 'like') is False
+
+
+def test_training_feedback_links_votes_to_runs_and_gates_recommendations(app):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.models import LoraTestImage, TrainingRunRecord
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Feedback', 'feedback')
+        run1 = TrainingRunRecord(
+            dataset_id=ds.id, family='zimage', source='local', version=1,
+            fingerprint='first', steps=2000, settings='{"rank": 16}')
+        run2 = TrainingRunRecord(
+            dataset_id=ds.id, family='zimage', source='cloud', version=2,
+            fingerprint='second', steps=2000, settings='{"rank": 32}')
+        svc.db.session.add_all([run1, run2])
+        svc.db.session.commit()
+        for i, rating in enumerate((1, 1, 1)):
+            svc.db.session.add(LoraTestImage(
+                dataset_id=ds.id,
+                checkpoint='z image\\lora_feedback_000001000_v1.safetensors',
+                strength=0.8, status='done', filename=f'v1-{i}.png',
+                rating=rating, training_run_record_id=run1.id))
+        for i, rating in enumerate((1, -1, -1)):
+            svc.db.session.add(LoraTestImage(
+                dataset_id=ds.id,
+                checkpoint='z image\\lora_feedback_000002000_v2.safetensors',
+                strength=1.0, status='done', filename=f'v2-{i}.png',
+                rating=rating, training_run_record_id=run2.id))
+        svc.db.session.commit()
+
+        result = lts.training_feedback(LOCAL_USER, ds.id, 'zimage')
+
+        assert result['runs'][0]['record_id'] == run2.id
+        assert result['runs'][0]['like_rate'] == pytest.approx(1 / 3, abs=0.0001)
+        assert result['runs'][1]['record_id'] == run1.id
+        assert result['runs'][1]['best_step'] == 1000
+        assert 'Best measured run is v1' in result['summary']
+        kinds = {item['kind'] for item in result['recommendations']}
+        assert {'dataset', 'compare', 'early_stop', 'inference'} <= kinds
+        assert result['unlinked']['images'] == 0
+
+
+def test_training_feedback_excludes_ambiguous_historical_cells(app):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.models import LoraTestImage, TrainingRunRecord
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Ambiguous', 'ambiguous')
+        for fingerprint in ('one', 'two'):
+            svc.db.session.add(TrainingRunRecord(
+                dataset_id=ds.id, family='zimage', source='local', version=1,
+                fingerprint=fingerprint, steps=1000))
+        svc.db.session.commit()
+        svc.db.session.add(LoraTestImage(
+            dataset_id=ds.id,
+            checkpoint='z image\\lora_ambiguous_000001000.safetensors',
+            strength=1.0, status='done', filename='legacy.png', rating=1))
+        svc.db.session.commit()
+
+        result = lts.training_feedback(LOCAL_USER, ds.id, 'zimage')
+
+        assert all(run['voted'] == 0 for run in result['runs'])
+        assert result['unlinked'] == {
+            'images': 1, 'voted': 1, 'likes': 1, 'dislikes': 0}
+        assert any(item['kind'] == 'provenance'
+                   for item in result['recommendations'])
+
+
+def test_training_feedback_trusts_explicit_run_over_checkpoint_family(app):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.models import LoraTestImage, TrainingRunRecord
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Exact feedback', 'exact')
+        run = TrainingRunRecord(
+            dataset_id=ds.id, family='krea', source='local', version=1,
+            fingerprint='exact', steps=1000)
+        svc.db.session.add(run)
+        svc.db.session.commit()
+        # This legacy/misfiled path is inferred as Z-Image, but the immutable
+        # launch id is the stronger provenance signal.
+        svc.db.session.add(LoraTestImage(
+            dataset_id=ds.id,
+            checkpoint='z image\\lora_exact_000001000.safetensors',
+            strength=1.0, status='done', filename='exact.png', rating=1,
+            training_run_record_id=run.id))
+        svc.db.session.commit()
+
+        result = lts.training_feedback(LOCAL_USER, ds.id, 'krea')
+
+        assert result['runs'][0]['voted'] == 1
+        assert result['unlinked']['images'] == 0
+
+
+def test_training_feedback_rejects_cross_dataset_explicit_run(app):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.models import LoraTestImage, TrainingRunRecord
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Evidence owner', 'owner')
+        other = svc.create_dataset(LOCAL_USER, 'Other recipe', 'other')
+        target_run = TrainingRunRecord(
+            dataset_id=ds.id, family='krea', source='local', version=1,
+            fingerprint='target', steps=1000)
+        wrong_run = TrainingRunRecord(
+            dataset_id=other.id, family='krea', source='local', version=1,
+            fingerprint='other', steps=1000)
+        svc.db.session.add_all([target_run, wrong_run])
+        svc.db.session.commit()
+        svc.db.session.add(LoraTestImage(
+            dataset_id=ds.id,
+            checkpoint='z image\\lora_owner_000001000.safetensors',
+            strength=1.0, status='done', filename='owner.png', rating=1,
+            training_run_record_id=wrong_run.id))
+        svc.db.session.commit()
+
+        mapped, unlinked = lts._feedback_for_records([target_run])
+
+        assert mapped[target_run.id]['images'] == 0
+        assert unlinked['images'] == 1
 
 
 def test_studio_payload_on_fresh_dataset_is_well_formed_and_empty(app):
@@ -266,6 +546,35 @@ def test_link_completed_test_image_moves_file_into_dataset_dir(app, tmp_path):
         assert not (base / 'output' / 'out.png').exists()
         import os
         assert os.path.exists(os.path.join(svc._dataset_dir(ds.id), 'out.png'))
+
+
+def test_link_completed_test_image_never_overwrites_existing_output(app, tmp_path):
+    from app.services import lora_test_studio as lts, face_dataset_service as svc
+    from app.models import LoraTestImage
+    from app.config import LOCAL_USER
+    from app import config
+    with app.app_context():
+        base = tmp_path / 'Comfy'
+        (base / 'output').mkdir(parents=True)
+        config.save_config({'comfyui': {'base_dir': str(base)}})
+        ds = svc.create_dataset(LOCAL_USER, 'Collision', 'collision')
+        dataset_dir = Path(svc._dataset_dir(ds.id))
+        (dataset_dir / 'same.png').write_bytes(b'older-result')
+        (base / 'output' / 'same.png').write_bytes(b'new-result')
+        img = LoraTestImage(
+            dataset_id=ds.id,
+            checkpoint='z image\\lora_collision_000001000.safetensors',
+            strength=1.0, status='pending', job_id='job-collision')
+        svc.db.session.add(img)
+        svc.db.session.commit()
+
+        lts.link_completed_test_image('job-collision', 'same.png', failed=False)
+
+        refreshed = svc.db.session.get(LoraTestImage, img.id)
+        assert refreshed.status == 'done'
+        assert refreshed.filename != 'same.png'
+        assert (dataset_dir / 'same.png').read_bytes() == b'older-result'
+        assert (dataset_dir / refreshed.filename).read_bytes() == b'new-result'
 
 
 def test_build_cell_workflow_zimage_loads_real_json_and_injects_lora(app):
@@ -562,7 +871,8 @@ def test_run_owned_and_owned_test_image_are_single_user_no_ops(app):
 
 def _all_workflow_files():
     from app.services import lora_test_studio as lts
-    import glob, os
+    import glob
+    import os
     wf_dir = os.path.join(str(lts.cfg.BACKEND_DIR), 'workflows')
     return sorted(glob.glob(os.path.join(wf_dir, '*.json')))
 

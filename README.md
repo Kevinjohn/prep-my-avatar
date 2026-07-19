@@ -40,6 +40,11 @@ large photo corpus → analyse → plan coverage → generate missing combinatio
 - Export ordinary image/text training pairs plus a model-neutral JSON manifest;
   portable backups retain originals, analysis, anchor decisions, coverage, and
   provenance.
+- Freeze every admitted training run into an immutable, hashed snapshot and
+  link fixed-seed Studio evidence back to that exact launch record.
+- Keep destructive work recoverable through curation undo, app-wide Trash and
+  validated portable-backup restore; provide a read-only database/filesystem
+  integrity report in Settings.
 
 The full corpus stays local. Only the visible bounded anchor pack is sent to an
 API generation engine; images marked **Exclude** never enter that pack.
@@ -56,6 +61,54 @@ The forked application lives in the upstream layout:
 
 See [`docs/specs/import-first-multi-reference-design.md`](docs/specs/import-first-multi-reference-design.md)
 for the fork-specific architecture and data contracts.
+
+## Process and health model
+
+Run the application through `python backend/run.py` (or the bundled launcher).
+One server process owns a data directory at a time: the launcher enforces this
+with `data/server.lock` because the schedulers, provider monitors, and SQLite job
+dispatcher are intentionally in-process. Multi-worker WSGI deployment is not
+supported; scale expensive image work through the existing external engines and
+durable queue instead of starting additional web workers.
+
+`GET /api/health/live` reports process liveness. `GET /api/health/ready` also
+checks the database schema, writable data storage, and committed frontend build;
+launchers and container probes should use the readiness endpoint. The legacy
+`GET /api/health` remains available for compatibility.
+
+Git-checkout updates are fast-forward-only transactions: a private journal is
+written before code changes, dependency and isolated-startup/frontend gates run
+before restart, and failures restore the previous revision without overwriting
+local edits. Remote generation is disabled by default, and non-loopback access
+is protected by a login token unless the operator explicitly opts out.
+
+## Exposing the app beyond localhost
+
+The default `127.0.0.1` bind is intentionally local-only. If you enable LAN
+access or bind `LDS_HOST=0.0.0.0`, keep **Require access token** enabled and use
+the `/remote-login` form from the other device. Put `LDS_ACCESS_TOKEN` in the
+environment (Docker users set it in `.env`) or let the desktop app create and
+persist a token. Tokens belong in the login form or an `Authorization: Bearer`
+header—never in a URL or QR-code query string.
+
+Only disable the token on a network you deliberately trust or behind an
+authenticated VPN/reverse proxy. This is a single-user application with access
+to local datasets, API keys, generation engines, and paid cloud training; it is
+not designed as a public multi-user service.
+
+## Legal and responsible use
+
+Use images you own, license, or have permission to process. Record the source
+basis and identifiable-person consent in the Corpus Workbench before training;
+the preflight reports missing rights metadata. Publishing additionally requires
+an explicit confirmation that you have the right and consent to share the
+selected material.
+
+Remote generation is opt-in because it sends the displayed bounded anchor pack
+and prompt to the selected provider. Review that provider's terms and the rights
+of every identifiable person before enabling it. Images excluded from provider
+anchors stay local, and local Klein generation remains available without this
+consent toggle.
 
 ## Versioning
 

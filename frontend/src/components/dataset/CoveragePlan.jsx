@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 const FRAME_LABELS = { face: 'Face', bust: 'Bust', body: 'Body', back: 'Back' };
 const STATE_LABELS = {
   covered: { icon: '✓', label: 'covered', cls: 'text-emerald-300 border-emerald-400/40 bg-emerald-500/10' },
@@ -28,9 +30,46 @@ function CountChip({ label, value, tone = 'neutral' }) {
   );
 }
 
-export default function CoveragePlan({ plan, onGoToGenerate }) {
+export default function CoveragePlan({ plan, onGoToGenerate, onPolicyChange }) {
+  const [profile, setProfile] = useState('balanced');
+  const [targetDraft, setTargetDraft] = useState({});
+  useEffect(() => {
+    setProfile(plan?.profile || 'balanced');
+    setTargetDraft({ ...(plan?.targets || {}) });
+  }, [plan?.profile, plan?.targets]);
   if (!plan?.available) return null;
   const summary = plan.summary || {};
+  const savePolicy = () => onPolicyChange?.(profile, plan.mode === 'character'
+    ? { framing: targetDraft, dimensions: {} } : {});
+
+  if (plan.mode === 'concept' || plan.mode === 'style') {
+    return (
+      <section id="ds-coverage-plan" tabIndex={-1}
+        className="flex flex-col gap-2 rounded-lg border border-indigo-400/40 bg-indigo-500/[0.06] px-3 py-2 scroll-mt-20">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="m-0 text-sm font-semibold text-content">🧭 {plan.mode === 'style' ? 'Style' : 'Concept'} coverage & admission</h3>
+          <select value={profile} onChange={(event) => setProfile(event.target.value)}
+            aria-label="Coverage profile"
+            className="ml-auto rounded border border-border bg-surface px-2 py-1 text-xs text-content">
+            <option value="strict">Strict</option><option value="balanced">Balanced</option><option value="experimental">Experimental</option>
+          </select>
+          <button type="button" onClick={savePolicy} disabled={!onPolicyChange}
+            className="rounded border border-indigo-400/40 bg-indigo-500/10 px-2 py-1 text-xs text-indigo-200 disabled:opacity-40">Save policy</button>
+        </div>
+        <p className="m-0 text-[0.6875rem] text-content-muted">
+          Admission tracks example count, caption completeness, source diversity, duplicates, and rights evidence; character-only pose targets do not apply.
+        </p>
+        <div className="grid gap-1.5 sm:grid-cols-3">
+          {(plan.admission || []).map((item) => (
+            <div key={item.id} className="rounded-md border border-border bg-app/40 px-2 py-1.5">
+              <div className="flex justify-between gap-2 text-[0.6875rem] text-content"><span>{item.label}</span><StateBadge state={item.state} /></div>
+              <p className="m-0 mt-1 text-[0.625rem] text-content-muted">{item.have}/{item.target}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  }
   const technical = plan.technical || {};
   const gaps = (plan.framing || []).filter((item) => item.deficit > 0);
   const unresolved = (plan.combinations || [])
@@ -56,9 +95,16 @@ export default function CoveragePlan({ plan, onGoToGenerate }) {
             imported photos without classification remain <em>unknown</em>, not falsely missing.
           </p>
         </div>
+        <select value={profile} onChange={(event) => setProfile(event.target.value)}
+          aria-label="Coverage profile"
+          className="ml-auto rounded border border-border bg-surface px-2 py-1 text-xs text-content">
+          <option value="strict">Strict</option><option value="balanced">Balanced</option><option value="experimental">Experimental</option>
+        </select>
+        <button type="button" onClick={savePolicy} disabled={!onPolicyChange}
+          className="rounded border border-indigo-400/40 bg-indigo-500/10 px-2 py-1 text-xs text-indigo-200 disabled:opacity-40">Save targets</button>
         {recommended.length > 0 && onGoToGenerate && (
           <button type="button" onClick={onGoToGenerate}
-            className="ml-auto shrink-0 rounded-lg bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-white">
+            className="shrink-0 rounded-lg bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-white">
             ⚡ Review {recommended.length} gap shots
           </button>
         )}
@@ -82,7 +128,12 @@ export default function CoveragePlan({ plan, onGoToGenerate }) {
                 <StateBadge state={gap.state} />
               </div>
               <div className="mt-1 text-[0.625rem] text-content-muted">
-                {gap.have}/{gap.target} · {gap.deficit} needed
+                {gap.have}/
+                <input type="number" min="0" max="100" value={targetDraft[gap.framing] ?? gap.target}
+                  onChange={(event) => setTargetDraft((current) => ({ ...current, [gap.framing]: Number(event.target.value) }))}
+                  aria-label={`${FRAME_LABELS[gap.framing] || gap.framing} target`}
+                  className="mx-0.5 w-10 rounded border border-border bg-surface px-1 text-center text-content" />
+                · {Math.max(0, (targetDraft[gap.framing] ?? gap.target) - gap.have)} needed
               </div>
               <div className="mt-1 h-1 overflow-hidden rounded-full bg-app">
                 <span className="block h-full rounded-full bg-amber-400"
@@ -140,6 +191,28 @@ export default function CoveragePlan({ plan, onGoToGenerate }) {
             </p>
           )}
         </details>
+      )}
+
+      {(plan.joint_coverage || []).length > 0 && (
+        <details className="rounded-md border border-border bg-app/30 px-2 py-1.5">
+          <summary className="cursor-pointer text-[0.6875rem] font-semibold text-content-muted">
+            Joint coverage · {(plan.joint_coverage || []).filter((item) => item.state === 'missing').length} missing combinations
+          </summary>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {(plan.joint_coverage || []).map((item) => (
+              <span key={item.id} className="rounded-full border border-border bg-surface px-1.5 py-px text-[0.625rem] text-content-muted">
+                {Object.values(item.values || {}).join(' + ')} · {item.have}/{item.target}
+              </span>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {(plan.recommendations || []).length > 0 && (
+        <div className="rounded-md border border-border bg-app/30 px-2 py-1.5 text-[0.625rem] text-content-muted">
+          <strong className="text-content">Next best actions:</strong>{' '}
+          {(plan.recommendations || []).slice(0, 4).map((item) => item.reason).join(' · ')}
+        </div>
       )}
 
       <div className="flex flex-wrap gap-2 text-[0.625rem] text-content-subtle">

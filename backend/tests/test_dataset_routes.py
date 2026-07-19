@@ -1,11 +1,13 @@
 import io
 import zipfile
+from pathlib import Path
 
 from PIL import Image
 
 
 def _png_bytes(color=(255, 0, 0)):
-    buf = io.BytesIO(); Image.new('RGB', (64, 64), color).save(buf, 'PNG')
+    buf = io.BytesIO()
+    Image.new('RGB', (64, 64), color).save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -63,6 +65,110 @@ def test_get_unknown_id_404(client):
     assert resp.status_code == 404
 
 
+def test_remote_generation_requires_explicit_privacy_consent(client):
+    response = client.post('/api/dataset/999/generate', json={
+        'generator': 'nanobanana',
+        'variations': [{'label': 'Portrait', 'prompt': 'portrait'}],
+    })
+    assert response.status_code == 403
+    assert response.get_json()['code'] == 'remote_generation_consent_required'
+
+
+def test_remote_regeneration_requires_explicit_privacy_consent(client, app):
+    client.put('/api/settings', json={
+        'config': {
+            'engines': {'enabled': ['klein', 'nanobanana']},
+            'privacy': {'allow_remote_generation': False},
+        },
+    })
+    created = _create(client).get_json()
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        row = FaceDatasetImage(
+            dataset_id=created['id'], source='generated', status='keep',
+            klein_model='nanobanana', variation_label='portrait',
+            variation_prompt='a portrait')
+        db.session.add(row)
+        db.session.commit()
+        image_id = row.id
+
+    response = client.post(
+        f'/api/dataset/image/{image_id}/regenerate',
+        json={'engine': 'nanobanana'})
+
+    assert response.status_code == 403
+    assert response.get_json()['code'] == 'remote_generation_consent_required'
+
+
+def test_images_endpoint_is_cursor_paginated(client, app):
+    ds_id = _create(client).get_json()['id']
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        for index in range(5):
+            db.session.add(FaceDatasetImage(
+                dataset_id=ds_id, source='generated', status='pending',
+                variation_label=f'row-{index}'))
+        db.session.commit()
+    first = client.get(f'/api/dataset/{ds_id}/images?limit=2').get_json()
+    assert [row['variation_label'] for row in first['images']] == ['row-4', 'row-3']
+    assert first['page']['has_more'] is True
+    second = client.get(
+        f"/api/dataset/{ds_id}/images?limit=2&cursor={first['page']['next_cursor']}").get_json()
+    assert [row['variation_label'] for row in second['images']] == ['row-2', 'row-1']
+    assert {row['id'] for row in first['images']}.isdisjoint(
+        {row['id'] for row in second['images']})
+
+
+def test_images_endpoint_validates_cursor_and_status(client):
+    ds_id = _create(client).get_json()['id']
+    assert client.get(f'/api/dataset/{ds_id}/images?cursor=nope').status_code == 400
+    assert client.get(f'/api/dataset/{ds_id}/images?status=trashed').status_code == 400
+
+
+def test_dataset_metadata_can_omit_images_and_keeps_global_summary(client, app):
+    ds_id = _create(client).get_json()['id']
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        db.session.add_all([
+            FaceDatasetImage(dataset_id=ds_id, source='import', status='keep',
+                             filename='kept.webp', caption='portrait'),
+            FaceDatasetImage(dataset_id=ds_id, source='generated', status='pending'),
+        ])
+        db.session.commit()
+    body = client.get(f'/api/dataset/{ds_id}?include_images=0').get_json()
+    assert body['images'] == []
+    assert body['image_summary'] == {
+        'total': 2, 'kept': 1, 'kept_captioned': 1,
+        'pending_generation': 1, 'awaiting_triage': 0,
+        'unused': 0, 'watermark_detected': 0,
+        'selectable': 1, 'small_image_rescue': 0,
+    }
+
+    # The aggregate cache is revision-keyed by DB triggers, so a child update
+    # invalidates it without every mutation call site having to remember.
+    with app.app_context():
+        row = FaceDatasetImage.query.filter_by(dataset_id=ds_id, status='pending').one()
+        row.status = 'failed'
+        db.session.commit()
+    updated = client.get(f'/api/dataset/{ds_id}?include_images=0').get_json()
+    assert updated['image_summary']['pending_generation'] == 0
+    assert updated['image_summary']['unused'] == 1
+
+
+def test_dataset_event_stream_exposes_revision_and_activity(client):
+    ds_id = _create(client).get_json()['id']
+    response = client.get(f'/api/dataset/{ds_id}/events?once=1')
+    assert response.status_code == 200
+    assert response.mimetype == 'text/event-stream'
+    body = response.get_data(as_text=True)
+    assert 'event: dataset' in body
+    assert '"revision":' in body
+    assert '"metadata_revision":' in body
+
+
 def test_corpus_workbench_routes(client):
     ds_id = _create(client, 'Corpus API', 'corpus_api').get_json()['id']
     files = {'files': (io.BytesIO(_png_bytes((40, 80, 120))), 'portrait.png')}
@@ -80,11 +186,20 @@ def test_corpus_workbench_routes(client):
                 'occlusion': 'none'}
     assert client.post(f'/api/dataset/image/{image_id}/coverage',
                        json=coverage).status_code == 200
+    assert client.post(f'/api/dataset/image/{image_id}/rights', json={
+        'basis': 'owned', 'consent_confirmed': True,
+    }).status_code == 200
+    assert client.post(f'/api/dataset/{ds_id}/coverage-policy', json={
+        'profile': 'experimental', 'targets': {'framing': {'face': 5}},
+    }).status_code == 200
     analyzed = client.post(f'/api/dataset/{ds_id}/corpus/analyze', json={})
     assert analyzed.status_code == 200 and analyzed.get_json()['analyzed'] == 1
     payload = client.get(f'/api/dataset/{ds_id}').get_json()
     assert payload['anchor_plan']['pinned'] == 1
     assert payload['images'][0]['coverage']['lighting'] == 'studio'
+    assert payload['images'][0]['coverage_provenance']['source'] == 'manual'
+    assert payload['images'][0]['source_rights']['basis'] == 'owned'
+    assert payload['coverage_profile'] == 'experimental'
 
 
 def test_list_carries_library_stats(client, app):
@@ -120,10 +235,12 @@ def test_images_batch_route_validates_and_applies(client, app):
         import os
         from app.services import face_dataset_service as svc
         from app.models import FaceDatasetImage
-        d = svc._dataset_dir(ds_id); os.makedirs(d, exist_ok=True)
-        open(os.path.join(d, 'a.webp'), 'wb').write(_png_bytes())
+        d = svc._dataset_dir(ds_id)
+        os.makedirs(d, exist_ok=True)
+        Path(d, 'a.webp').write_bytes(_png_bytes())
         img = FaceDatasetImage(dataset_id=ds_id, filename='a.webp', status='pending', framing='face')
-        svc.db.session.add(img); svc.db.session.commit()
+        svc.db.session.add(img)
+        svc.db.session.commit()
         img_id = img.id
     assert client.post(f'/api/dataset/{ds_id}/images/batch',
                        json={'ids': [img_id], 'action': 'nope'}).status_code == 400
@@ -170,8 +287,10 @@ def test_import_route_reports_duplicates(client):
         ramp = list(range(0, 256, 32))
         if direction == 'rtl':
             ramp = ramp[::-1]
-        small = PILImage.new('L', (8, 8)); small.putdata([ramp[x] for _ in range(8) for x in range(8)])
-        buf = io.BytesIO(); small.resize((800, 800), PILImage.BILINEAR).convert('RGB').save(buf, 'PNG')
+        small = PILImage.new('L', (8, 8))
+        small.putdata([ramp[x] for _ in range(8) for x in range(8)])
+        buf = io.BytesIO()
+        small.resize((800, 800), PILImage.BILINEAR).convert('RGB').save(buf, 'PNG')
         return buf.getvalue()
     ds_id = client.post('/api/dataset/create', json={
         'name': 'CDup', 'trigger_word': 'cdup', 'kind': 'concept',
@@ -217,14 +336,15 @@ def test_captions_write_files_route(client, app):
         from app.models import FaceDatasetImage
         d = svc._dataset_dir(ds_id)
         for name in ('a.webp', 'b.webp', 'c.webp'):
-            open(os.path.join(d, name), 'wb').write(_png_bytes())
+            Path(d, name).write_bytes(_png_bytes())
         rows = [FaceDatasetImage(dataset_id=ds_id, filename='a.webp', status='keep',
                                  caption='a red dress'),
                 FaceDatasetImage(dataset_id=ds_id, filename='b.webp', status='keep',
                                  caption=''),
                 FaceDatasetImage(dataset_id=ds_id, filename='c.webp', status='reject',
                                  caption='rejected caption')]
-        svc.db.session.add_all(rows); svc.db.session.commit()
+        svc.db.session.add_all(rows)
+        svc.db.session.commit()
         captioned_id = rows[0].id
     assert client.post('/api/dataset/999999/captions/write-files').status_code == 404
     resp = client.post(f'/api/dataset/{ds_id}/captions/write-files')
@@ -289,7 +409,7 @@ def test_export_zip_content_type(client):
     assert resp.status_code == 200
     assert resp.mimetype == 'application/zip'
     z = zipfile.ZipFile(io.BytesIO(resp.data))
-    assert any(n.endswith('_000_ref.png') for n in z.namelist())
+    assert not any(n.endswith('_000_ref.png') for n in z.namelist())
 
 
 def test_export_no_kept_images_400(client):
@@ -312,6 +432,8 @@ def test_generate_chatgpt_no_key_accepts_and_creates_pending_rows(client, monkey
     calls = []
     monkeypatch.setattr('app.services.face_dataset_service.threading.Thread',
                         lambda target, args=(), daemon=True: type('T', (), {'start': lambda s: calls.append(args)})())
+    client.put('/api/settings', json={
+        'config': {'privacy': {'allow_remote_generation': True}}})
     ds_id = _create(client, 'Nyx', 'nyx').get_json()['id']
     data = {'file': (io.BytesIO(_png_bytes()), 'ref.png')}
     client.post(f'/api/dataset/{ds_id}/ref', data=data, content_type='multipart/form-data')
@@ -375,7 +497,8 @@ def _patterned_png(seed, base=(255, 255, 255)):
         x = (seed * 13 + i * 7) % 56
         im.paste(((seed * 37) % 255, (i * 61) % 255, (seed * 7 + i * 29) % 255),
                  (x, i * 8, x + 8, i * 8 + 8))
-    buf = io.BytesIO(); im.save(buf, 'PNG')
+    buf = io.BytesIO()
+    im.save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -384,7 +507,8 @@ def test_import_folder_route_images_captions_and_nonimage(client, app, tmp_path)
     captions, the caption lands on the MATCHING image, non-image files are ignored."""
     import os
     ds_id = _create(client, 'Folder', 'folder').get_json()['id']
-    src = tmp_path / 'kohya'; (src / 'sub').mkdir(parents=True)
+    src = tmp_path / 'kohya'
+    (src / 'sub').mkdir(parents=True)
     (src / 'a.png').write_bytes(_patterned_png(1, base=(220, 30, 30)))     # red
     (src / 'a.txt').write_text('a red patterned square', encoding='utf-8')
     (src / 'sub' / 'b.png').write_bytes(_patterned_png(2, base=(30, 30, 220)))  # blue
@@ -422,7 +546,8 @@ def test_import_folder_route_reimport_dedupes(client, tmp_path):
     """Importing the same folder twice must not duplicate anything (dHash vs the
     dataset's existing rows)."""
     ds_id = _create(client, 'FolderDup', 'folderdup').get_json()['id']
-    src = tmp_path / 'kohya'; src.mkdir()
+    src = tmp_path / 'kohya'
+    src.mkdir()
     (src / 'a.png').write_bytes(_patterned_png(3))
     (src / 'b.png').write_bytes(_patterned_png(4))
     first = client.post(f'/api/dataset/{ds_id}/import-folder', json={'path': str(src)}).get_json()

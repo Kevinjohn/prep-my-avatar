@@ -10,10 +10,12 @@
  */
 import { useEffect, useRef } from 'react';
 import { useFocusTrap } from '../../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../../hooks/useBodyScrollLock';
 
 export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt }) {
   const ref = useRef(null);
   useFocusTrap(ref, !!img);
+  useBodyScrollLock(!!img);
 
   // Fermeture clavier : Échap (comme DatasetLightbox).
   useEffect(() => {
@@ -29,7 +31,7 @@ export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt })
     <div ref={ref}
       className="fixed inset-0 z-[9998] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={onClose} role="dialog" aria-modal="true" aria-label="Result preview">
-      <button type="button" onClick={onClose} aria-label="Close"
+      <button type="button" onClick={(event) => { event.stopPropagation(); onClose(); }} aria-label="Close"
         className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 border border-white/20 text-white text-lg z-10 hover:bg-white/20">×</button>
       <div className="flex flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
         <img src={`/api/dataset/${datasetId}/img/${encodeURIComponent(img.filename)}`}

@@ -11,7 +11,18 @@ export function setToastRef(toast) {
 export function getCsrfToken() {
   const match = document.cookie.match(/csrf_token=([^;]+)/);
   if (match) return decodeURIComponent(match[1]);
-  return document.querySelector('meta[name="csrf-token"]')?.content || '';
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta instanceof HTMLMetaElement ? meta.content : '';
+}
+
+export class ApiError extends Error {
+  constructor(message, status, body = null, requestId = null) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+    this.requestId = requestId;
+  }
 }
 
 /* The single human, actionable message shown when a CSRF 400 survives the
@@ -26,6 +37,7 @@ export const CSRF_EXPIRED_MESSAGE =
    a genuine 400 from our own handlers is application/json and is left untouched. */
 function isCsrfRejection(res) {
   if (res.status !== 400) return false;
+  if (res.headers.get('x-csrf-error') === '1') return true;
   const ct = res.headers.get('content-type') || '';
   return !ct.includes('application/json');
 }
@@ -33,20 +45,24 @@ function isCsrfRejection(res) {
 // A request carries an X-CSRFToken header only when it mutates state (our
 // post/put/del/postForm helpers). Only those can be rejected for a stale token
 // and only those are meaningful to replay — a bare GET never enters the retry.
+/** @param {HeadersInit | undefined} headers */
 function csrfHeaderName(headers) {
-  return Object.keys(headers || {}).find((k) => k.toLowerCase() === 'x-csrftoken');
+  return [...new Headers(headers).keys()].find((key) => key.toLowerCase() === 'x-csrftoken');
 }
 
 // Rebuild request options with a freshly-read CSRF token: the header for JSON
 // bodies, plus the csrf_token field for FormData bodies (the generation path
 // sends the token both ways). FormData is mutable, so it is reused in place.
+/** @param {RequestInit} options */
 function withFreshCsrf(options) {
   const token = getCsrfToken();
   const name = csrfHeaderName(options.headers) || 'X-CSRFToken';
   if (typeof FormData !== 'undefined' && options.body instanceof FormData) {
     options.body.set?.('csrf_token', token);
   }
-  return { ...options, headers: { ...(options.headers || {}), [name]: token } };
+  const headers = new Headers(options.headers);
+  headers.set(name, token);
+  return { ...options, headers };
 }
 
 /**
@@ -59,7 +75,12 @@ function withFreshCsrf(options) {
  * somehow didn't. Returns the raw Response so both parsed-JSON and raw-Response
  * callers reuse the same recovery. Network errors propagate to the caller.
  */
+/**
+ * @param {RequestInfo | URL} url
+ * @param {RequestInit} [options]
+ */
 export async function fetchWithCsrfRetry(url, options = {}) {
+  /** @type {RequestInit} */
   const opts = { credentials: 'include', ...options };
   let res = await fetch(url, opts);
   if (isCsrfRejection(res) && csrfHeaderName(opts.headers)) {
@@ -101,15 +122,71 @@ export async function apiFetch(url, options = {}) {
       toastRef?.error('Server error. Please try again later.');
     }
 
-    const err = new Error(msg);
-    err.status = res.status;
     // Carry the parsed error body so callers can read structured fields (e.g. a
     // 409's `studio_missing`) instead of just the flat message.
-    err.body = body;
-    throw err;
+    throw new ApiError(msg, res.status, body,
+      body?.request_id || res.headers.get('x-request-id') || null);
   }
 
   return res.json();
+}
+
+export const getJson = (url, options = {}) => apiFetch(url, options);
+
+/** Raw response variant for downloads/streams. It keeps the same credentials,
+ * CSRF retry and structured error contract as apiFetch without consuming a
+ * successful body as JSON. */
+export async function apiResponse(url, options = {}) {
+  let res;
+  try {
+    res = await fetchWithCsrfRetry(url, options);
+  } catch {
+    toastRef?.error('Connection lost. Please check your network.');
+    throw new Error('Network error');
+  }
+  if (res.ok) return res;
+  let body = null;
+  try { body = await res.clone().json(); } catch { /* non-JSON response */ }
+  throw new ApiError(body?.error || body?.detail || body?.message || `HTTP ${res.status}`,
+    res.status, body, body?.request_id || res.headers.get('x-request-id') || null);
+}
+
+/** Envelope-returning client for mutation-heavy screens. Unlike apiFetch it
+ * never throws: callers always receive `{ok:false,error,status,...body}` and can
+ * render domain-specific errors while sharing the same transport behavior. */
+export async function safeJson(url, options = {}) {
+  try {
+    const res = await fetchWithCsrfRetry(url, options);
+    let body = null;
+    let parsed = false;
+    try { body = await res.json(); parsed = true; } catch { /* proxy/empty body */ }
+    if (!res.ok) {
+      const fallback = (!parsed && res.status === 400)
+        ? CSRF_EXPIRED_MESSAGE : `Server error (${res.status})`;
+      return { ...(body || {}), ok: false, status: res.status,
+        error: body?.error || body?.detail || body?.message || fallback };
+    }
+    return body || { ok: true };
+  } catch (error) {
+    return { ok: false, status: 0, error: error?.message || 'Network error' };
+  }
+}
+
+export function safePostJson(url, body, isForm = false) {
+  return safeJson(url, {
+    method: 'POST',
+    headers: isForm
+      ? { 'X-CSRFToken': getCsrfToken() }
+      : { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+    body: isForm ? body : JSON.stringify(body || {}),
+  });
+}
+
+export function safeDeleteJson(url) {
+  return safeJson(url, {
+    method: 'DELETE',
+    headers: { 'X-CSRFToken': getCsrfToken() },
+  });
 }
 
 export function postJson(url, body) {
@@ -168,6 +245,11 @@ export async function refreshCsrfToken() {
  * raw Response so callers can do their own status-based handling (the /generate /
  * /generate_edit call sites need the Response, not just JSON). Thin wrapper over
  * the shared fetchWithCsrfRetry — kept as a named export for those call sites.
+ */
+/**
+ * @param {RequestInfo | URL} url
+ * @param {FormData} formData
+ * @param {{signal?: AbortSignal}} [options]
  */
 export async function postFormWithCsrfRetry(url, formData, { signal } = {}) {
   formData.set?.('csrf_token', getCsrfToken());

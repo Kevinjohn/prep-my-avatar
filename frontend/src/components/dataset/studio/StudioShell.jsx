@@ -26,6 +26,7 @@ import { useCallback, useEffect, useState } from 'react';
 import LoraPicker from './LoraPicker';
 import LegacyDatasetStudio from './LegacyDatasetStudio';
 import ComparisonStudio from './ComparisonStudio';
+import { getJson } from '../../../api/fetchClient';
 
 export default function StudioShell({ preselectDataset = null, datasetId = null }) {
   // `datasetId` legacy est un alias de preselectDataset.
@@ -43,8 +44,7 @@ export default function StudioShell({ preselectDataset = null, datasetId = null 
   useEffect(() => {
     if (!runType) { setBaseModels([]); return; }
     let cancelled = false;
-    fetch(`/api/studio/base-models?type=${encodeURIComponent(runType)}`, { credentials: 'include' })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    getJson(`/api/studio/base-models?type=${encodeURIComponent(runType)}`)
       .then((d) => { if (!cancelled) setBaseModels(d.models || []); })
       .catch(() => { if (!cancelled) setBaseModels([]); });
     return () => { cancelled = true; };

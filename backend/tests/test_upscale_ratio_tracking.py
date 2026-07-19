@@ -6,6 +6,7 @@ LANCZOS enlargement factor (size / box_side) so it can be persisted per image an
 surfaced per framing bucket via dataset_payload()['composition_upscaled'].
 """
 import io
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -82,10 +83,12 @@ def test_manual_crop_image_stores_upscale_ratio(app):
         ds = svc.create_dataset(LOCAL_USER, 'Cro', 'zchar_cro')
         d = svc._dataset_dir(ds.id)
         os.makedirs(d, exist_ok=True)
-        buf = io.BytesIO(); Image.new('RGB', (1600, 1200), (90, 30, 30)).save(buf, 'PNG')
-        open(os.path.join(d, 'w.webp'), 'wb').write(buf.getvalue())
+        buf = io.BytesIO()
+        Image.new('RGB', (1600, 1200), (90, 30, 30)).save(buf, 'PNG')
+        Path(d, 'w.webp').write_bytes(buf.getvalue())
         img = FaceDatasetImage(dataset_id=ds.id, filename='w.webp', status='keep', framing='face')
-        svc.db.session.add(img); svc.db.session.commit()
+        svc.db.session.add(img)
+        svc.db.session.commit()
 
         assert svc.crop_image(LOCAL_USER, img.id, 0, 0, 400, 400) is True
         refreshed = svc.db.session.get(FaceDatasetImage, img.id)

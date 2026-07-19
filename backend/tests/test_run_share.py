@@ -155,3 +155,28 @@ def test_all_runs_exposes_share_keys(client, app):
     assert any(k.startswith('cloud-') for k in keys)
     # the active run is shareable via its pod-row key
     assert out['actives'] and all(a['share_key'].startswith('cloud-') for a in out['actives'])
+
+
+def test_all_runs_and_share_expose_admission_provenance(client, app):
+    ds = _mkds(client)
+    from app.extensions import db
+    from app.models import TrainingRunRecord
+    from app.services import cloud_training as ct
+    with app.app_context():
+        rec = TrainingRunRecord(
+            dataset_id=ds, family='zimage', source='local', fingerprint='fp-admit',
+            version=1, steps=1000, masked=True,
+            preflight=json.dumps({'verdict': 'warning', 'kept': 12,
+                                  'blockers': [], 'warnings': ['pose gap']}),
+            overrides=json.dumps({'allow_uncaptioned': True, 'masked': True}))
+        db.session.add(rec)
+        db.session.commit()
+        key = f'rec-{rec.id}'
+        recent = ct.all_runs(limit=10)['recent']
+        row = next(item for item in recent if item['share_key'] == key)
+        assert row['preflight']['verdict'] == 'warning'
+        assert row['overrides']['allow_uncaptioned'] is True
+    body = client.get(f'/api/dataset/train/runs/{key}/share').get_data(as_text=True)
+    assert '## Admission decision' in body
+    assert 'pose gap' in body
+    assert 'allow_uncaptioned' in body

@@ -5,53 +5,11 @@
  * classify/caption/status/caption-edit/crop/regenerate/export).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getCsrfToken, fetchWithCsrfRetry, CSRF_EXPIRED_MESSAGE, putJson } from '../api/fetchClient';
+import { getJson, safePostJson as postJson, putJson } from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
 import { useJobs } from '../context/JobsContext';
 import { serializeWatermarkRegions } from '../utils/watermarkRegions';
 import { summarizeScrapeImport } from '../utils/smallImageRescue';
-
-function post(url, body, isForm) {
-  // Routes through the shared fetchWithCsrfRetry: a token that aged out mid-session
-  // (WTF_CSRF_TIME_LIMIT) is refreshed and the request replayed once, exactly like
-  // apiFetch — so a long-lived dataset page no longer starts failing every mutation
-  // with a cryptic HTML 400 until a hard refresh.
-  return fetchWithCsrfRetry(url, {
-    method: 'POST',
-    headers: isForm
-      ? { 'X-CSRFToken': getCsrfToken() }
-      : { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
-    body: isForm ? body : JSON.stringify(body || {}),
-  });
-}
-
-/**
- * POST + defensive JSON parse (I1 + I4). Never throws: returns the parsed
- * payload on success, `{ok:false, error}` on HTTP / network / non-JSON
- * failures, so every caller can surface a toast instead of failing silently
- * or crashing on `.json()` of an HTML error page.
- * Exported for reuse by the dataset-adjacent hooks (useLoraTestStudio).
- */
-export async function postJson(url, body, isForm) {
-  try {
-    const r = await post(url, body, isForm);
-    let d = null;
-    let parsed = false;
-    try { d = await r.json(); parsed = true; } catch { /* non-JSON body (proxy page, empty) */ }
-    // Preserve any structured fields the error body carries (e.g. `studio_missing`,
-    // `klein_missing`) so callers can render an itemized banner, not just a toast.
-    if (!r.ok) {
-      // A 400 that STILL isn't our JSON envelope after the shared retry = a CSRF
-      // token that aged out mid-session → actionable message, not "Server error (400)".
-      const fallback = (!parsed && r.status === 400)
-        ? CSRF_EXPIRED_MESSAGE : `Server error (${r.status})`;
-      return { ...(d || {}), ok: false, error: (d && d.error) || fallback };
-    }
-    return d || { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message || 'Network error' };
-  }
-}
 
 /**
  * Compose the 🧽 Clean summary toast from the server's counts — PURE (no React,
@@ -87,6 +45,26 @@ export function summarizeClean(d) {
   return { severity: skipped ? 'warning' : 'success', message: parts.join(' · ') };
 }
 
+const DATASET_PAGE_SIZE = 100;
+
+async function fetchImageWindow(datasetId, targetCount) {
+  const images = [];
+  let cursor = null;
+  let hasMore = true;
+  while (hasMore && images.length < targetCount) {
+    const remaining = Math.max(1, targetCount - images.length);
+    const limit = Math.min(DATASET_PAGE_SIZE, remaining);
+    const suffix = cursor == null ? '' : `&cursor=${encodeURIComponent(cursor)}`;
+    const result = await getJson(
+      `/api/dataset/${datasetId}/images?limit=${limit}${suffix}`,
+    );
+    images.push(...(result.images || []));
+    hasMore = Boolean(result.page?.has_more);
+    cursor = result.page?.next_cursor ?? null;
+  }
+  return { images, hasMore, nextCursor: cursor };
+}
+
 export function useDataset() {
   const toast = useToast();
   const [datasets, setDatasets] = useState([]);
@@ -95,7 +73,14 @@ export function useDataset() {
     try { const v = localStorage.getItem('datasetCurrentId'); return v ? Number(v) : null; }
     catch { return null; }
   });
+  const currentIdRef = useRef(currentId);
+  currentIdRef.current = currentId;
   const [data, setData] = useState(null);
+  const [imagePage, setImagePage] = useState({ hasMore: false, nextCursor: null });
+  const [loadingMoreImages, setLoadingMoreImages] = useState(false);
+  const loadingMoreImagesRef = useRef(false);
+  const [imageHydrationError, setImageHydrationError] = useState(null);
+  const loadedTargetRef = useRef(DATASET_PAGE_SIZE);
   const [busy, setBusy] = useState(false);
   // Tracks an in-flight captioning pass so the UI can poll progressively.
   const [captioning, setCaptioning] = useState(false);
@@ -105,27 +90,84 @@ export function useDataset() {
   // plus a separate version counter for the reference photo.
   const [nonces, setNonces] = useState({});
   const [refNonce, setRefNonce] = useState(0);
-  const pollRef = useRef(null);
+  const refreshRef = useRef(null);
+  // Every payload-producing request receives a monotonic ticket. Dataset-id
+  // checks alone are not enough: two SSE events for the same open dataset can
+  // overlap and the older response can otherwise overwrite the newer one.
+  const dataRequestSequenceRef = useRef(0);
+  // Pagination/full-review hydration has an independent lifecycle. Routine SSE
+  // refreshes must not cancel a multi-page load that is already in progress.
+  const imageRequestSequenceRef = useRef(0);
   const busyRef = useRef(false); // re-entrancy guard for GPU-bound actions (I2)
 
   const fetchList = useCallback(async () => {
     try {
-      const r = await fetch('/api/dataset/list', { credentials: 'include' });
-      if (r.ok) setDatasets((await r.json()).datasets || []);
+      const result = await getJson('/api/dataset/list');
+      setDatasets(result.datasets || []);
     } catch { /* transient network error — keep the last list */ }
   }, []);
 
   const refresh = useCallback(async (id) => {
     const dsId = id ?? currentId;
     if (!dsId) return;
+    const requestSequence = ++dataRequestSequenceRef.current;
+    const imageSequenceAtStart = imageRequestSequenceRef.current;
+    const hydrationWasActive = loadingMoreImagesRef.current;
     try {
-      const r = await fetch(`/api/dataset/${dsId}`, { credentials: 'include' });
-      if (r.ok) setData(await r.json());
+      const target = Math.max(DATASET_PAGE_SIZE, loadedTargetRef.current);
+      const [result, page] = await Promise.all([
+        getJson(`/api/dataset/${dsId}?include_images=0`),
+        fetchImageWindow(dsId, target),
+      ]);
+      // A slower response for dataset A must not overwrite dataset B after a
+      // rapid switch (or repopulate a workspace the user already closed).
+      if (currentIdRef.current !== dsId
+          || dataRequestSequenceRef.current !== requestSequence) return;
+      const retainHydratedImages = hydrationWasActive
+        || imageRequestSequenceRef.current !== imageSequenceAtStart;
+      const retainedTarget = loadedTargetRef.current;
+      loadedTargetRef.current = retainHydratedImages
+        ? Math.max(retainedTarget, page.images.length) : page.images.length;
+      setData((previous) => ({
+        ...result,
+        images: retainHydratedImages && previous?.id === dsId
+          && (previous.images || []).length > page.images.length
+          ? previous.images : page.images,
+      }));
+      if (!retainHydratedImages || retainedTarget <= page.images.length) {
+        setImagePage({ hasMore: page.hasMore, nextCursor: page.nextCursor });
+      }
       // Only a definitive 404 ejects back to the list (dataset gone). Transient
       // failures (500, gateway hiccup) keep the open workspace untouched (M4).
-      else if (r.status === 404) { setData(null); setCurrentId(null); }
-    } catch { /* network blip — keep current workspace, the poll will retry */ }
-  }, [currentId]);
+    } catch (error) {
+      if (error?.status === 404 && currentIdRef.current === dsId
+          && dataRequestSequenceRef.current === requestSequence) {
+        currentIdRef.current = null;
+        setData(null);
+        setCurrentId(null);
+        // A delete in another tab should not reveal a stale tile when this
+        // workspace closes in response to the SSE notification.
+        await fetchList();
+      }
+      /* otherwise keep current workspace; the poll retries */
+    }
+  }, [currentId, fetchList]);
+  refreshRef.current = refresh;
+
+  const close = useCallback(() => {
+    // Invalidate same-dataset responses too: close -> reopen of the same id
+    // must not accept work launched before the close.
+    dataRequestSequenceRef.current += 1;
+    imageRequestSequenceRef.current += 1;
+    currentIdRef.current = null;
+    loadedTargetRef.current = DATASET_PAGE_SIZE;
+    setImagePage({ hasMore: false, nextCursor: null });
+    setImageHydrationError(null);
+    loadingMoreImagesRef.current = false;
+    setLoadingMoreImages(false);
+    setData(null);
+    setCurrentId(null);
+  }, []);
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
@@ -140,10 +182,10 @@ export function useDataset() {
   // Navbar title = home: closes the open workspace even when already on /datasets
   // (same-route NavLink clicks don't remount the page).
   useEffect(() => {
-    const goHome = () => setCurrentId(null);
+    const goHome = () => close();
     window.addEventListener('lds:home', goHome);
     return () => window.removeEventListener('lds:home', goHome);
-  }, []);
+  }, [close]);
 
   // Mirror in-flight dataset generations into the global JobsContext so the
   // floating jobs dock shows (and can cancel) them like other generations.
@@ -171,46 +213,133 @@ export function useDataset() {
     syncedRef.current = new Set();
   }, [gRemove]);
 
-  // Poll while generation jobs are still pending (no filename yet), and while a
-  // completed reconstruction's asynchronous identity/face QA is still running.
-  // Without the latter, the first payload containing the result file would stop
-  // polling and leave the comparison stuck on "analyzing" until a manual refresh.
+  // One dataset event stream replaces the former generation, caption, and
+  // activity timers. The server emits only when the DB child revision or the
+  // in-memory batch state changes. EventSource reconnects automatically; the
+  // fallback is one consolidated timer for older embedded browsers.
   useEffect(() => {
-    const pending = (data?.images || []).some((i) => (
-      (i.status === 'pending' && !i.filename)
-      || i.analysis?.repair_comparison?.phase === 'analyzing'
-    ));
-    if (pending && currentId) {
-      pollRef.current = setInterval(() => refresh(currentId), 4000);
-      return () => clearInterval(pollRef.current);
+    if (!currentId) return undefined;
+    if (typeof EventSource === 'undefined') {
+      const timer = setInterval(() => refreshRef.current?.(currentId), 4000);
+      return () => clearInterval(timer);
     }
-    return undefined;
-  }, [data, currentId, refresh]);
+    const source = new EventSource(`/api/dataset/${currentId}/events`);
+    let fallbackTimer = null;
+    source.addEventListener('open', () => {
+      if (fallbackTimer) clearInterval(fallbackTimer);
+      fallbackTimer = null;
+    });
+    source.addEventListener('error', () => {
+      // EventSource reconnects itself, but some embedded proxies leave it in a
+      // permanent error loop. Reconcile at a low rate until the stream opens.
+      if (!fallbackTimer) {
+        fallbackTimer = setInterval(() => refreshRef.current?.(currentId), 15000);
+      }
+    });
+    const reconcile = () => {
+      refreshRef.current?.(currentId);
+      fetchList();
+    };
+    source.addEventListener('dataset', reconcile);
+    source.addEventListener('deleted', reconcile);
+    return () => {
+      if (fallbackTimer) clearInterval(fallbackTimer);
+      source.close();
+    };
+  }, [currentId, fetchList]);
 
-  // Poll every 2s while a captioning pass is running so captions appear live.
-  useEffect(() => {
-    if (!captioning || !currentId) return undefined;
-    const id = setInterval(() => refresh(currentId), 2000);
-    return () => clearInterval(id);
-  }, [captioning, currentId, refresh]);
+  const open = useCallback(async (id) => {
+    imageRequestSequenceRef.current += 1;
+    loadedTargetRef.current = DATASET_PAGE_SIZE;
+    setImagePage({ hasMore: false, nextCursor: null });
+    setImageHydrationError(null);
+    loadingMoreImagesRef.current = false;
+    setLoadingMoreImages(false);
+    currentIdRef.current = id;
+    setCurrentId(id);
+    await refresh(id);
+  }, [refresh]);
 
-  // Persistence layer: a server-side batch (watermark detect/clean, caption,
-  // re-caption, analyze faces, classify) advertises itself in the payload's
-  // `activity` field. Whenever it's non-null — INCLUDING after a page reload that
-  // dropped the local captioning/analyzing/watermarking flags — poll the dataset
-  // every ~3.5s to track progress and detect the end. Keyed on the boolean
-  // `hasActivity` (not the activity object, whose identity changes each fetch) so
-  // the interval isn't torn down and rebuilt on every poll; it stops the moment
-  // `activity` clears (the following refresh brings the final state; the completion
-  // toast can't be restored — accepted, only the visual state is).
-  const hasActivity = !!data?.activity;
-  useEffect(() => {
-    if (!hasActivity || !currentId) return undefined;
-    const id = setInterval(() => refresh(currentId), 3500);
-    return () => clearInterval(id);
-  }, [hasActivity, currentId, refresh]);
+  const loadMoreImages = useCallback(async () => {
+    if (!currentId || !imagePage.hasMore || loadingMoreImages) return;
+    const requestSequence = ++imageRequestSequenceRef.current;
+    loadingMoreImagesRef.current = true;
+    setLoadingMoreImages(true);
+    try {
+      const result = await getJson(
+        `/api/dataset/${currentId}/images?limit=${DATASET_PAGE_SIZE}`
+        + `&cursor=${encodeURIComponent(imagePage.nextCursor)}`,
+      );
+      if (currentIdRef.current !== currentId
+          || imageRequestSequenceRef.current !== requestSequence) return;
+      const incoming = result.images || [];
+      setData((previous) => {
+        if (!previous || previous.id !== currentId) return previous;
+        const seen = new Set((previous.images || []).map((image) => image.id));
+        return { ...previous, images: [
+          ...(previous.images || []), ...incoming.filter((image) => !seen.has(image.id)),
+        ] };
+      });
+      loadedTargetRef.current += incoming.length;
+      setImagePage({
+        hasMore: Boolean(result.page?.has_more),
+        nextCursor: result.page?.next_cursor ?? null,
+      });
+    } catch { /* leave the current page intact; a later scroll/click can retry */ }
+    finally {
+      if (imageRequestSequenceRef.current === requestSequence) {
+        loadingMoreImagesRef.current = false;
+        setLoadingMoreImages(false);
+      }
+    }
+  }, [currentId, imagePage, loadingMoreImages]);
 
-  const open = useCallback(async (id) => { setCurrentId(id); await refresh(id); }, [refresh]);
+  const loadAllImages = useCallback(async () => {
+    if (!currentId || !imagePage.hasMore || loadingMoreImages) return;
+    const requestSequence = ++imageRequestSequenceRef.current;
+    setImageHydrationError(null);
+    loadingMoreImagesRef.current = true;
+    setLoadingMoreImages(true);
+    try {
+      const accumulated = [...(data?.images || [])];
+      const seen = new Set(accumulated.map((image) => image.id));
+      let cursor = imagePage.nextCursor;
+      let hasMore = imagePage.hasMore;
+      while (hasMore && cursor != null) {
+        const result = await getJson(
+          `/api/dataset/${currentId}/images?limit=250&cursor=${encodeURIComponent(cursor)}`,
+        );
+        if (currentIdRef.current !== currentId
+            || imageRequestSequenceRef.current !== requestSequence) return;
+        for (const image of result.images || []) {
+          if (!seen.has(image.id)) { seen.add(image.id); accumulated.push(image); }
+        }
+        hasMore = Boolean(result.page?.has_more);
+        cursor = result.page?.next_cursor ?? null;
+      }
+      if (currentIdRef.current !== currentId
+          || imageRequestSequenceRef.current !== requestSequence) return;
+      loadedTargetRef.current = accumulated.length;
+      setData((previous) => (
+        previous?.id === currentId ? { ...previous, images: accumulated } : previous
+      ));
+      setImagePage({ hasMore, nextCursor: cursor });
+    } catch (error) {
+      if (currentIdRef.current === currentId
+          && imageRequestSequenceRef.current === requestSequence) {
+        setImageHydrationError(
+          error?.message || 'Could not load every image for this review.',
+        );
+      }
+      /* preserve the loaded prefix; automatic hydration pauses until explicit retry */
+    }
+    finally {
+      if (imageRequestSequenceRef.current === requestSequence) {
+        loadingMoreImagesRef.current = false;
+        setLoadingMoreImages(false);
+      }
+    }
+  }, [currentId, data, imagePage, loadingMoreImages]);
 
   const create = useCallback(async (name, trigger, kind, conceptDesc, trainType, fidelity) => {
     const d = await postJson('/api/dataset/create',
@@ -260,10 +389,12 @@ export function useDataset() {
   const deleteDataset = useCallback(async (id) => {
     const d = await postJson(`/api/dataset/${id}/delete`);
     if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
-    toast.success('Dataset deleted');
-    if (currentId === id) { setCurrentId(null); setData(null); }
+    toast.success('Dataset moved to Trash');
+    if (currentId === id) {
+      close();
+    }
     await fetchList();
-  }, [currentId, fetchList, toast]);
+  }, [currentId, close, fetchList, toast]);
 
   // Run a GPU-bound action exclusively (I2): re-entrancy guard + busy flag.
   // A second call while one is in flight is dropped instead of double-firing.
@@ -450,6 +581,20 @@ export function useDataset() {
     return true;
   }, [refresh, toast]);
 
+  const setSourceRights = useCallback(async (imageId, rights) => {
+    const d = await postJson(`/api/dataset/image/${imageId}/rights`, rights);
+    if (!d.ok) { toast.error(d.error || 'Could not save source rights'); return false; }
+    await refresh();
+    return true;
+  }, [refresh, toast]);
+
+  const setCoveragePolicy = useCallback(async (profile, targets) => {
+    const d = await postJson(`/api/dataset/${currentId}/coverage-policy`, { profile, targets });
+    if (!d.ok) { toast.error(d.error || 'Could not save coverage policy'); return false; }
+    await refresh();
+    return true;
+  }, [currentId, refresh, toast]);
+
   const caption = useCallback((mode) => wrap(async () => {
     setCaptioning(true);
     try {
@@ -598,14 +743,16 @@ export function useDataset() {
 
   const setStatus = useCallback(async (imageId, status) => {
     const d = await postJson(`/api/dataset/image/${imageId}/status`, { status });
-    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
+    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return false; }
     await refresh();
+    return true;
   }, [refresh, toast]);
 
   const setCaption = useCallback(async (imageId, captionText) => {
     const d = await postJson(`/api/dataset/image/${imageId}/caption`, { caption: captionText });
-    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
+    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return false; }
     await refresh();
+    return true;
   }, [refresh, toast]);
 
   const crop = useCallback(async (imageId, box) => {
@@ -677,6 +824,22 @@ export function useDataset() {
     return d.affected;
   }, [currentId, refresh, toast]);
 
+  const undoCuration = useCallback(async (eventId) => {
+    const d = await postJson(`/api/dataset/${currentId}/curation/undo`,
+      eventId == null ? {} : { event_id: eventId });
+    if (!d.ok) {
+      toast.error(d.error || 'Could not undo the curation change');
+      return false;
+    }
+    if (!d.undone) {
+      toast.warning('There is no curation change left to undo');
+      return false;
+    }
+    toast.success(`${d.undone} curation change(s) restored`);
+    await refresh();
+    return true;
+  }, [currentId, refresh, toast]);
+
   const cancelPending = useCallback(async () => {
     const d = await postJson(`/api/dataset/${currentId}/cancel`);
     if (d.ok) toast.success(`${d.cancelled} generation(s) cancelled`);
@@ -708,7 +871,7 @@ export function useDataset() {
 
   const purgeUnused = useCallback(async () => {
     const d = await postJson(`/api/dataset/${currentId}/purge`);
-    if (d.ok) { toast.success(`${d.purged} image(s) deleted`); await refresh(); }
+    if (d.ok) { toast.success(`${d.purged} image(s) moved to Trash`); await refresh(); }
     else toast.error(d.error || 'Unexpected error');
   }, [currentId, refresh, toast]);
 
@@ -749,8 +912,8 @@ export function useDataset() {
 
   // Bases entraînables + base/variante choisies + statut de conversion.
   const trainBaseInfo = useCallback(async () => {
-    const r = await fetch(`/api/dataset/${currentId}/train/base-info`, { credentials: 'include' });
-    return r.ok ? await r.json() : null;
+    try { return await getJson(`/api/dataset/${currentId}/train/base-info`); }
+    catch { return null; }
   }, [currentId]);
 
   // Persiste un patch de réglages avancés ai-toolkit (rank / resolution /
@@ -796,8 +959,8 @@ export function useDataset() {
     if (baseModel !== undefined && baseModel !== null) p.set('base_model', baseModel);
     if (trainType) p.set('train_type', trainType);
     const qs = p.toString() ? `?${p.toString()}` : '';
-    const r = await fetch(`/api/dataset/${currentId}/train/checkpoints${qs}`, { credentials: 'include' });
-    return r.ok ? await r.json() : { checkpoints: [], imported: [] };
+    try { return await getJson(`/api/dataset/${currentId}/train/checkpoints${qs}`); }
+    catch { return { checkpoints: [], imported: [] }; }
   }, [currentId]);
 
   const importCheckpoint = useCallback(async (filename, baseModel, trainType) => {
@@ -820,7 +983,7 @@ export function useDataset() {
     const body = { filename };
     if (trainType) body.train_type = trainType;
     const d = await postJson(`/api/dataset/${currentId}/train/checkpoint/delete`, body);
-    if (d.ok) toast.success(`Checkpoint deleted: ${d.removed}`); else toast.error(d.error || 'Unexpected error');
+    if (d.ok) toast.success(`Checkpoint moved to Trash: ${d.removed}`); else toast.error(d.error || 'Unexpected error');
     return d;
   }, [currentId, toast]);
 
@@ -893,13 +1056,16 @@ export function useDataset() {
 
   return { datasets, currentId, data, busy: busyLive, captioning: captioningLive,
            analyzing: analyzingLive, watermarking: watermarkingLive, activity,
+           hasMoreImages: imagePage.hasMore, loadingMoreImages, imageHydrationError,
            nonces, refNonce, create, open,
-           deleteDataset, updateSettings, setCurrentId, setRef, addExtraRef, removeExtraRef,
+           deleteDataset, updateSettings, close, setRef, addExtraRef, removeExtraRef,
            generate, importFiles, scrapeImport, resolveSmallImageRescue, improveImage, resolveImageImprovement,
-           classify, analyzeCorpus, setAnchorDecision, setCoverage, caption, recaption,
-           setStatus, setCaption, crop, cropRef, recropRefAuto, setDatasetTrainType, setDatasetFidelity, deleteImage, batchImages, replaceCaptions, writeCaptionFiles, openDatasetFolder, cancelPending, regenerate, analyzeFaces,
+           classify, analyzeCorpus, setAnchorDecision, setCoverage, setSourceRights,
+           setCoveragePolicy, caption, recaption,
+           setStatus, setCaption, crop, cropRef, recropRefAuto, setDatasetTrainType, setDatasetFidelity, deleteImage, batchImages, undoCuration, replaceCaptions, writeCaptionFiles, openDatasetFolder, cancelPending, regenerate, analyzeFaces,
            findWatermarks, cleanWatermarks, cleanWatermarkImages, dismissWatermarks, saveWatermarkRegions,
-           purgeUnused, exportZip, exportBackup, importBackup, importDatasetZip, importDatasetFolder, refresh, train, stopTraining, continueTraining,
+           purgeUnused, exportZip, exportBackup, importBackup, importDatasetZip, importDatasetFolder,
+           refresh, loadMoreImages, loadAllImages, train, stopTraining, continueTraining,
            listCheckpoints, importCheckpoint, deleteCheckpoint,
            trainBaseInfo, setTrainSettings, prepareBase };
 }

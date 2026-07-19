@@ -97,7 +97,8 @@ def test_import_concept_keeps_aspect(app):
         ids, failed = svc.import_images(LOCAL_USER, c.id, [_png(800, 400)], crop=False)
         assert failed == 0 and len(ids) == 1
         img = db.session.get(FaceDatasetImage, ids[0])
-        w, h = Image.open(svc._img_path(img)).size
+        with Image.open(svc._img_path(img)) as imported:
+            w, h = imported.size
         # ratio PRÉSERVÉ (paysage 2:1) → jamais carré, pas de letterbox.
         assert w > h and w <= 1024
 
@@ -109,7 +110,8 @@ def test_import_character_no_crop_keeps_aspect(app):
         p = svc.create_dataset(LOCAL_USER, 'Emma', 'z')  # character
         ids, _ = svc.import_images(LOCAL_USER, p.id, [_png(800, 400)], crop=False)
         img = db.session.get(FaceDatasetImage, ids[0])
-        w, h = Image.open(svc._img_path(img)).size
+        with Image.open(svc._img_path(img)) as imported:
+            w, h = imported.size
         assert (w, h) == (800, 400)  # ratio d'origine, pas de padding
 
 
@@ -288,7 +290,6 @@ def test_refine_output_rejects_degenerate_but_usable_allows_terse():
 
 
 def test_refine_output_accepts_clean_caption():
-    prior = 'joy draft'
     good = ('Full-body shot framed by a wooden doorway, a woman with dark hair tied back '
             'stands in a sunlit bedroom, her expression calm, soft warm light across the floor.')
     assert svc._refine_output_ok(good, good) is True

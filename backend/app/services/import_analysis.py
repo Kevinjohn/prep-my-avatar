@@ -26,7 +26,7 @@ def _bounded_score(value: float) -> int:
 
 def _pixels(image: Image.Image) -> list[int]:
     grey = ImageOps.grayscale(image)
-    return list(grey.getdata())
+    return list(grey.get_flattened_data())
 
 
 def _sharpness_score(image: Image.Image) -> int:

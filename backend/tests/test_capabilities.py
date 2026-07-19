@@ -31,20 +31,20 @@ def test_probe_all_off_when_unconfigured(app):
 
 def test_python_ml_status_reports_version_and_range(app):
     """The probe exposes the interpreter version + whether it's inside the ML-wheel
-    range (3.10–3.12), so the setup can warn before a doomed pip install."""
+    range (3.11–3.12), so the setup can warn before a doomed pip install."""
     with app.app_context():
         from app import capabilities
         with patch('app.capabilities._http_ok', return_value=False):
             caps = capabilities.probe(force=True)
     py = caps['python']
-    assert py['ml_range'] == '3.10–3.12'
+    assert py['ml_range'] == '3.11–3.12'
     assert isinstance(py['ml_supported'], bool)
     # ml_supported must agree with the reported version's minor.
     major, minor = (int(x) for x in py['version'].split('.')[:2])
-    assert py['ml_supported'] == (major == 3 and 10 <= minor <= 12)
+    assert py['ml_supported'] == (major == 3 and 11 <= minor <= 12)
 
 
-@pytest.mark.parametrize('info,ok', [((3, 9, 1), False), ((3, 10, 0), True),
+@pytest.mark.parametrize('info,ok', [((3, 9, 1), False), ((3, 10, 0), False),
                                      ((3, 12, 9), True), ((3, 13, 0), False), ((3, 14, 0), False)])
 def test_python_ml_status_boundaries(app, info, ok):
     import types
@@ -196,7 +196,6 @@ def test_import_probe_cache_key_includes_interpreter_path(app, monkeypatch):
     """Changing interpreter path should invalidate the import cache."""
     with app.app_context():
         from app import capabilities, config
-        import sys
 
         # First call: interpreter A returns True
         monkeypatch.setattr(capabilities, '_import_ok', lambda *a, **k: True)
@@ -382,7 +381,8 @@ def test_clear_import_cache_empties_caches(app, monkeypatch):
         monkeypatch.setattr(capabilities, '_import_ok', lambda *a, **k: True)
         capabilities.probe_face_scoring()          # populates _import_cache
         assert capabilities._import_cache
-        capabilities._cache = {'x': 1}; capabilities._cache_ts = 123.0
+        capabilities._cache = {'x': 1}
+        capabilities._cache_ts = 123.0
         capabilities.clear_import_cache()
     assert capabilities._import_cache == {}
     assert capabilities._cache is None

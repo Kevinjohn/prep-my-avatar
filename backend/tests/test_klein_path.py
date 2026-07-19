@@ -10,7 +10,8 @@ from PIL import Image
 
 
 def _png(color=(255, 0, 0)):
-    buf = io.BytesIO(); Image.new('RGB', (64, 64), color).save(buf, 'PNG')
+    buf = io.BytesIO()
+    Image.new('RGB', (64, 64), color).save(buf, 'PNG')
     return buf.getvalue()
 
 
@@ -247,7 +248,8 @@ def test_save_prefix_is_unique_per_job(app, tmp_path, monkeypatch):
     from app.job_queue import queue_manager
     with app.app_context():
         _configure_comfy_dirs(tmp_path, cfg)
-        src = tmp_path / 'ref.png'; src.write_bytes(_png())
+        src = tmp_path / 'ref.png'
+        src.write_bytes(_png())
         prefixes = []
         monkeypatch.setattr(queue_manager, 'add_job',
                             lambda **kw: (prefixes.append(kw['workflow_data']['9']['inputs']['filename_prefix']),

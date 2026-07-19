@@ -1,7 +1,10 @@
 // Vignettes des prompts récents (clic pour recharger) — rétro-compat string vs objet.
 // Extrait behavior-preserving de LoraTestStudio.jsx (bloc « Prompts récents »),
 // + bouton 🗑 par preset (supprime le prompt et ses cellules/images de test).
+import { useConfirmDialog } from '../../common/ConfirmDialog';
+
 export default function RecentPrompts({ items, datasetId, selectedPrompt, onPick, onDelete }) {
+  const confirm = useConfirmDialog();
   return (
     <div className="flex flex-col gap-1">
       <span className="text-content-subtle text-[0.5625rem] uppercase">Recent prompts (click to reload · 🗑 to delete) — thumbnail = image 👍</span>
@@ -32,9 +35,14 @@ export default function RecentPrompts({ items, datasetId, selectedPrompt, onPick
               </button>
               {onDelete && (
                 <button type="button"
-                  onClick={() => {
+                  onClick={async () => {
                     const n = pr.count ? ` and its ${pr.count} test image(s)` : '';
-                    if (window.confirm(`Delete this recent prompt${n}?`)) onDelete(pr.prompt);
+                    if (await confirm({
+                      title: 'Delete this recent prompt?',
+                      message: `The prompt${n} will be permanently deleted. This cannot be undone.`,
+                      confirmLabel: 'Delete permanently',
+                      tone: 'danger',
+                    })) onDelete(pr.prompt);
                   }}
                   title="Delete this recent prompt (and its test images)"
                   aria-label="Delete this recent prompt"

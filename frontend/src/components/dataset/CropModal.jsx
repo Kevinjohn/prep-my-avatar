@@ -8,6 +8,8 @@
  * Custom implementation (no react-easy-crop): that lib pins a fixed frame and
  * moves the image under it — it cannot stretch the selection itself. */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 const ASPECTS = [
   ['free', null],
@@ -59,8 +61,11 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
   const [box, setBox] = useState(null);        // crop box in NATURAL px
   const [aspect, setAspect] = useState(lockSquare ? 1 : defaultAspect);   // null = free
   const imgRef = useRef(null);
+  const dialogRef = useRef(null);
   const cancelRef = useRef(null);
   const dragRef = useRef(null);                // {mode, start, startBox}
+  useFocusTrap(dialogRef, true);
+  useBodyScrollLock(true);
 
   const onImgLoad = (e) => {
     const W = e.target.naturalWidth; const H = e.target.naturalHeight;
@@ -92,10 +97,10 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  const scale = () => {
+  const scale = useCallback(() => {
     const el = imgRef.current;
     return el && nat ? el.getBoundingClientRect().width / nat.W : 1;
-  };
+  }, [nat]);
 
   const startDrag = (e, mode) => {
     e.preventDefault(); e.stopPropagation();
@@ -141,7 +146,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
       if (nb.y + nb.h > H) { nb.h = H - nb.y; nb.w = nb.h * ratio; if (edges.left) nb.x = x2 - nb.w; }
     }
     setBox(clampBox(nb, W, H));
-  }, [nat, aspect, lockSquare]);
+  }, [nat, aspect, lockSquare, scale]);
 
   const endDrag = useCallback(() => { dragRef.current = null; }, []);
   useEffect(() => {
@@ -157,7 +162,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
 
   const s = scale();
   return (
-    <div role="dialog" aria-modal="true" aria-label="Crop image"
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Crop image"
       className="fixed inset-0 z-[9995] bg-black/85 flex flex-col p-3 sm:p-4">
       <div className="relative flex-1 min-h-0 w-full max-w-4xl mx-auto flex items-center justify-center overflow-hidden">
         <div className="relative inline-block max-h-full max-w-full">

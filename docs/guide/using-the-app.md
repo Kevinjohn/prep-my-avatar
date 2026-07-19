@@ -53,7 +53,7 @@ hide.
    exact prompt that made it and regenerate in place, without losing the rest.
 10. **Train** — the pre-flight check runs the full checklist (count, balance,
    captions, leaks, duplicates, pixel/identity QA, watermarks, enlarged crops,
-   reconstruction provenance and real/generated source mix). Most findings warn;
+   reconstruction provenance, source rights and real/generated source mix). Most findings warn;
    an impossible double-kept reconstruction pair blocks until resolved. Leaking captions and
    near-duplicates are editable right inside the confirm, and missing captions
    just ask you to **Start anyway** (captions stay strongly recommended). Steps
@@ -63,14 +63,51 @@ hide.
    No GPU? **☁️ Train in cloud** rents one per run. Watch this run — and every
    other, cloud or local — from the **🏋️ Runs** tab, where you can retry a
    failed run (↻), continue a finished cloud run for more steps (▶), and download
-   the LoRA.
+   the LoRA. At admission, the app makes an immutable training snapshot and
+   hashes its files and recipe. If the dataset changes while that snapshot is
+   being captured, launch stops cleanly instead of training a mixed revision.
 11. **Pick the best checkpoint** — open the **Test Studio** from the dataset:
-    grid-test checkpoint × strength, vote, rank by face similarity, and star ★
-    the winning settings. The last checkpoint is almost never the best one.
+    grid-test checkpoint × strength with fixed seeds, vote, rank by face
+    similarity, and star ★ the winning settings. Results link to the exact
+    training-run record—not a filename guess—so the feedback panel can compare
+    recipes, suggest an earlier step or strength, and recommend a controlled
+    next iteration. The last checkpoint is almost never the best one.
 12. **Export** — at any point, **Export ZIP** gives you standard image/text
     training pairs plus `_prep_my_avatar_manifest.json` with source mix,
     coverage and provenance. Trainers ignore the manifest; other tools can use
     it. Portable Backup additionally preserves exact originals and decisions.
+
+## Privacy, recovery and operational safety
+
+- **Remote generation is off by default.** Enable it explicitly in **Settings →
+  Image engines → Remote-generation privacy** before Nano Banana or ChatGPT can
+  receive prompts or the bounded reference pack. Local Klein stays on-device.
+  Record source rights and identifiable-person consent in the Corpus Workbench;
+  publishing to Hugging Face requires a separate confirmation.
+- **Curation is reversible.** Use the curation-history control to undo recent
+  keep/reject changes. Deleting a dataset, checkpoint, cloud staging directory,
+  or deployed LoRA moves it to **Settings → Maintenance → Trash**; restore it
+  there before choosing **Empty trash**, which is the permanent step.
+- **Portable backup is the move/copy format.** It creates a new dataset when
+  restored and carries originals, normalized files, captions, settings,
+  relationships, decisions and provenance. A training ZIP is deliberately
+  smaller and is not a complete backup.
+- **Integrity checking is read-only.** Run **Settings → Maintenance → Data
+  integrity** to inspect SQLite consistency, relationships, referenced files,
+  unsafe links and untracked files without modifying the dataset.
+- **Cloud safeguards are launch boundaries, not a provider bill.** The maximum
+  hourly price, concurrency limit and monthly budget can block a new launch;
+  runtime/stall timeouts terminate unhealthy runs. The Runs page shows measured
+  billing time and cost, but the provider console remains authoritative.
+- **Updates are transactional for clean Git checkouts.** The in-app updater
+  accepts fast-forwards only, installs pinned dependencies, verifies isolated
+  startup and the committed frontend build, then restarts. A failed or
+  interrupted update keeps a private recovery journal and restores the previous
+  revision; it refuses an automatic reset if local work appeared meanwhile.
+- **LAN access is authenticated by default.** Turning on **Available on the
+  local network** requires an access token unless you explicitly disable it.
+  The token is entered on the remote login page and never embedded in a URL or
+  QR code. Loopback access remains local-only and token-free.
 
 ## Concept datasets (an object or action, not a person)
 

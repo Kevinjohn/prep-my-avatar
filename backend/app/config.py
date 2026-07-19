@@ -1,5 +1,10 @@
 """Config core: layered config.json over DEFAULTS, secrets in .env."""
-import copy, json, os, secrets as _secrets, threading
+import copy
+import json
+import os
+import secrets as _secrets
+import tempfile
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -28,11 +33,10 @@ DEFAULTS = {
     # (phone, tablet, another PC) — the Settings "Server" card's LAN toggle just
     # flips this. Port defaults to 5050 to match start.bat's default bind (so the
     # Settings port field shows what's actually running, not a phantom mismatch).
-    # require_token (default OFF): a home LAN is trusted, so LAN access is open by
-    # default — no token to type on a phone. Turn it ON to demand a token from
-    # remote devices (access_token is then generated + persisted here so it
-    # survives restarts and is copyable from Settings). Loopback never needs it.
-    'server': {'host': '127.0.0.1', 'port': 5050, 'require_token': False, 'access_token': ''},
+    # Non-loopback access is authenticated by default. The token is entered on a
+    # dedicated login page (never placed in a URL) and becomes a signed session.
+    # Loopback never needs it; an explicit Settings opt-out remains available.
+    'server': {'host': '127.0.0.1', 'port': 5050, 'require_token': True, 'access_token': ''},
     'paths': {'dataset_images_root': ''},                      # '' -> DATA_DIR/datasets
     'comfyui': {'api_url': 'http://127.0.0.1:8188', 'base_dir': '',
                 'output_dir': '', 'input_dir': '', 'models_dir': '', 'loras_dir': ''},
@@ -41,10 +45,13 @@ DEFAULTS = {
                   # Explicit interpreter for installs without venv/.venv
                   # (conda, uv, system python). Empty = auto-detect.
                   'python': ''},
-    'engines': {'default': 'chatgpt', 'enabled': ['nanobanana', 'chatgpt', 'klein'],
+    'engines': {'default': 'klein', 'enabled': ['klein'],
                 # chatgpt_auth: 'auto' = subscription when connected, else API key.
                 'chatgpt_auth': 'auto',            # auto|api|subscription
                 'chatgpt_subscription_model': 'gpt-5.4-mini'},   # Codex router model (image model is gpt-image-2 regardless)
+    # Reference pixels and prompts stay on-device until the user explicitly
+    # enables third-party generation in Settings.
+    'privacy': {'allow_remote_generation': False},
     'captioning': {'backend': 'auto'},                         # auto|joycaption|ollama|none
     'training': {'default_family': 'zimage'},
     # Cloud GPU training (vast.ai). Everything has a sane default: the only
@@ -79,7 +86,7 @@ DEFAULTS = {
     },
     'face_scoring': {'python': '', 'models_root': '', 'green': 0.50, 'orange': 0.45},
     'masks': {'python': ''},
-    # Watermark inpainting (simple-lama-inpainting, extra ML). Dedicated key so a
+    # Watermark inpainting (local Big-LaMa adapter, extra ML). Dedicated key so a
     # user can override it, but defaults empty -> reuse the same ML interpreter as
     # rembg/insightface (masks.python) then sys.executable. Never imported in-process.
     'watermark': {'python': '', 'device': 'auto'},  # auto|cuda|cpu
@@ -98,6 +105,44 @@ DEFAULTS = {
 
 _lock = threading.Lock()
 _cache = None
+
+
+def _restrict_private_file(path: Path) -> None:
+    """Best-effort owner-only permissions for files containing local secrets.
+
+    Windows applies its own ACL model, while POSIX systems otherwise inherit a
+    potentially permissive umask. Permission hardening must never make saving a
+    valid configuration fail on an unsupported filesystem.
+    """
+    if os.name == 'nt':
+        return
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    """Atomically replace sensitive text without a permissive creation window."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent,
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _restrict_private_file(temporary_path)
+        temporary_path.replace(path)
+        _restrict_private_file(path)
+    except Exception:
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
 
 def _deep_merge(base, override):
     out = copy.deepcopy(base)
@@ -134,9 +179,7 @@ def save_config(partial: dict) -> dict:
             except (OSError, ValueError):
                 current = {}
         merged = _deep_merge(current, partial or {})
-        tmp = p.with_suffix('.json.tmp')
-        tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding='utf-8')
-        tmp.replace(p)
+        _write_private_text(p, json.dumps(merged, indent=2, ensure_ascii=False))
         _cache = None
     return load_config()
 
@@ -156,17 +199,21 @@ def secret(name: str):
     return val or None
 
 def set_secrets(d: dict) -> None:
-    lines = []
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text(encoding='utf-8').splitlines()
-    for name, value in (d or {}).items():
-        if name not in SECRET_KEYS or not value:
-            continue
-        lines = [l for l in lines if not l.startswith(f'{name}=')]
-        lines.append(f'{name}={value}')
-        os.environ[name] = value
-    ENV_PATH.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    load_dotenv(ENV_PATH, override=True)
+    # Settings requests run in parallel. Keep the read/modify/replace cycle
+    # inside one critical section so two simultaneous key saves cannot silently
+    # discard each other's update.
+    with _lock:
+        lines = []
+        if ENV_PATH.exists():
+            lines = ENV_PATH.read_text(encoding='utf-8').splitlines()
+        for name, value in (d or {}).items():
+            if name not in SECRET_KEYS or not value:
+                continue
+            lines = [line for line in lines if not line.startswith(f'{name}=')]
+            lines.append(f'{name}={value}')
+            os.environ[name] = value
+        _write_private_text(ENV_PATH, '\n'.join(lines) + '\n')
+        load_dotenv(ENV_PATH, override=True)
 
 def delete_secrets(names) -> None:
     """Remove saved secrets outright (clear a key). Separate from set_secrets,
@@ -175,12 +222,13 @@ def delete_secrets(names) -> None:
     names = [n for n in (names or []) if n in SECRET_KEYS]
     if not names:
         return
-    lines = ENV_PATH.read_text(encoding='utf-8').splitlines() if ENV_PATH.exists() else []
-    for name in names:
-        lines = [l for l in lines if not l.startswith(f'{name}=')]
-        os.environ.pop(name, None)   # load_dotenv won't unset a removed line, so drop it here
-    ENV_PATH.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    load_dotenv(ENV_PATH, override=True)
+    with _lock:
+        lines = ENV_PATH.read_text(encoding='utf-8').splitlines() if ENV_PATH.exists() else []
+        for name in names:
+            lines = [line for line in lines if not line.startswith(f'{name}=')]
+            os.environ.pop(name, None)   # load_dotenv won't unset a removed line, so drop it here
+        _write_private_text(ENV_PATH, '\n'.join(lines) + '\n')
+        load_dotenv(ENV_PATH, override=True)
 
 _COMFY_DERIVED = {'output': ('output_dir', 'output'), 'input': ('input_dir', 'input'),
                   'models': ('models_dir', 'models'), 'loras': ('loras_dir', 'models/loras')}
@@ -237,8 +285,14 @@ def dataset_images_root() -> Path:
     return root
 
 def secret_key() -> str:
-    d = _data_dir(); d.mkdir(parents=True, exist_ok=True)
-    f = d / 'secret_key'
-    if not f.exists():
-        f.write_text(_secrets.token_hex(32), encoding='utf-8')
-    return f.read_text(encoding='utf-8').strip()
+    # A concurrent first request must not rotate the Flask signing key between
+    # two writers. The process lock prevents multiple servers, while this lock
+    # also covers parallel create_app/test initialization inside one process.
+    with _lock:
+        d = _data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / 'secret_key'
+        if not f.exists():
+            _write_private_text(f, _secrets.token_hex(32))
+        _restrict_private_file(f)
+        return f.read_text(encoding='utf-8').strip()

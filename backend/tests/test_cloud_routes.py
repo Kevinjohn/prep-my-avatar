@@ -1,5 +1,4 @@
 """Cloud training routes: gating, forwarding, progress/status/stop/sample."""
-import os
 import pytest
 
 
@@ -269,12 +268,13 @@ def test_all_runs_unifies_local_and_cloud_history(app, client, monkeypatch):
     ds = _mkds(client)
     with app.app_context():
         from app.extensions import db
-        from app.models import CloudTrainingRun, TrainingRunRecord
+        from app.models import CloudTrainingRun, LoraTestImage, TrainingRunRecord
         from app.services import cloud_training as ct
         # local launch record with a settings snapshot
-        db.session.add(TrainingRunRecord(
+        local_record = TrainingRunRecord(
             dataset_id=ds, family='krea', source='local', fingerprint='fp1', version=1,
-            steps=2000, masked=True, settings=json.dumps({'rank': 32, 'resolution': [768, 1024]})))
+            steps=2000, masked=True, settings=json.dumps({'rank': 32, 'resolution': [768, 1024]}))
+        db.session.add(local_record)
         # cloud run + its registry row
         crun = CloudTrainingRun(dataset_id=ds, status='error', run_name='r', error='boom')
         db.session.add(crun)
@@ -283,9 +283,14 @@ def test_all_runs_unifies_local_and_cloud_history(app, client, monkeypatch):
             dataset_id=ds, family='krea', source='cloud', fingerprint='fp1', version=1,
             steps=2000, masked=True, cloud_run_id=crun.id,
             settings=json.dumps({'rank': 48})))
+        db.session.add(LoraTestImage(
+            dataset_id=ds, checkpoint='krea\\lora_x_000001000_v1.safetensors',
+            strength=0.8, status='done', filename='rated.png', rating=1,
+            training_run_record_id=local_record.id))
         # legacy cloud run (predates the registry)
         db.session.add(CloudTrainingRun(dataset_id=ds, status='done', run_name='old'))
         db.session.commit()
+        local_record_id = local_record.id
         out = ct.all_runs(limit=10)
     recent = out['recent']
     assert len(recent) == 3
@@ -294,6 +299,10 @@ def test_all_runs_unifies_local_and_cloud_history(app, client, monkeypatch):
     local_row = next(r for r in recent if r['source'] == 'local')
     assert local_row['settings'] == {'rank': 32, 'resolution': [768, 1024]}
     assert local_row['steps'] == 2000
+    assert local_row['record_id'] == local_record_id
+    assert local_row['fingerprint'] == 'fp1'
+    assert local_row['evaluation']['likes'] == 1
+    assert local_row['evaluation']['best_step'] == 1000
     enriched = next(r for r in recent if r.get('error') == 'boom')
     assert enriched['status'] == 'error' and enriched['settings'] == {'rank': 48}
     legacy = next(r for r in recent if r.get('run_name') == 'old')

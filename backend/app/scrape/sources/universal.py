@@ -60,6 +60,8 @@ class UniversalSource(Source):
                   'type': 'video', 'platform': 'generic'}], None)
 
     def download(self, url, dest_base):
+        if not _host_vetted(url):
+            return False, None, 'Hôte non vetté pour un extracteur externe.'
         # 1) gallery-dl (extracteur dédié) d'abord.
         dest_dir = os.path.dirname(dest_base)
         filename = os.path.basename(dest_base)
@@ -68,8 +70,6 @@ class UniversalSource(Source):
             return True, os.path.basename(abs_path), None
         # 2) gallery-dl ne supporte pas → yt-dlp, mais seulement si l'hôte est vetté.
         if _gdl_unsupported(err):
-            if not _host_vetted(url):
-                return False, None, "Site non supporté (gallery-dl) et hôte non vetté pour yt-dlp."
             return netfetch.download_via_ytdlp(url, dest_base)
         # 3) auth/réseau (pas 'unsupported') → on remonte l'erreur gallery-dl.
         return False, None, err or "Échec du téléchargement générique."

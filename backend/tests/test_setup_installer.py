@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 
@@ -60,11 +62,59 @@ def test_start_sets_running(monkeypatch):
     assert state['state'] == 'running'
 
 
+def test_start_rejects_ml_install_on_unsupported_python(monkeypatch):
+    from app import setup_installer, capabilities
+    monkeypatch.setattr(
+        capabilities, 'python_ml_status',
+        lambda: {'version': '3.10.14', 'ml_supported': False,
+                 'ml_range': '3.11–3.12'})
+
+    with pytest.raises(setup_installer.Precondition, match='3.11–3.12'):
+        setup_installer.start('ml_extras')
+
+    assert 'ml_extras' not in setup_installer._runs
+
+
 def test_start_rejects_second_run():
     from app import setup_installer
     setup_installer._runs['ml_extras'] = {'state': 'running', 'returncode': None, 'log': []}
     with pytest.raises(setup_installer.AlreadyRunning):
         setup_installer.start('ml_extras')
+
+
+def test_start_rejects_durable_duplicate_without_launching_worker(
+        app, monkeypatch):
+    from app import setup_installer
+    from app.services import background_jobs
+    with app.app_context():
+        background_jobs.create_or_get('setup', 'masks', {'action': 'masks'})
+        monkeypatch.setattr(
+            setup_installer.threading, 'Thread',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError('duplicate must not launch a worker')))
+        with pytest.raises(setup_installer.AlreadyRunning):
+            setup_installer.start('masks')
+
+
+def test_download_progress_throttles_durable_writes(monkeypatch):
+    from app import setup_installer
+    action = 'klein_model'
+    setup_installer._runs[action] = setup_installer._new_run()
+    setup_installer._persisted_progress.clear()
+    persisted = []
+    monkeypatch.setattr(
+        setup_installer, '_persist',
+        lambda _action, **changes: persisted.append(changes.get('progress')))
+    clock = iter((1.0, 1.1, 3.2, 3.3))
+    monkeypatch.setattr(setup_installer.time, 'monotonic', lambda: next(clock))
+    total = 100 * 1024 * 1024
+
+    setup_installer._set_progress(action, 0, total)
+    setup_installer._set_progress(action, 8 * 1024 * 1024, total)
+    setup_installer._set_progress(action, 16 * 1024 * 1024, total)
+    setup_installer._set_progress(action, total, total)
+
+    assert [item['done'] for item in persisted] == [0, 16 * 1024 * 1024, total]
 
 
 def test_execute_success_clears_import_cache(monkeypatch):
@@ -188,7 +238,6 @@ def test_run_ollama_model_http_error(app, monkeypatch):
 # The four Klein assets download straight into the VALIDATED ComfyUI tree so the
 # model listers pick them up with zero manual file-moving. A fake ComfyUI dir is
 # just main.py + models/ (what capabilities._is_comfyui_dir checks).
-import os
 
 
 def _make_comfyui(root):
@@ -320,8 +369,8 @@ def test_run_klein_download_gated_401_logs_recovery_steps(app, tmp_path, monkeyp
         rc = setup_installer._run_klein_download('klein_model')
     assert rc == 1
     log = setup_installer._runs['klein_model']['log']
-    assert any('license-gated' in l for l in log)
-    assert any('HF_TOKEN' in l for l in log)
+    assert any('license-gated' in line for line in log)
+    assert any('HF_TOKEN' in line for line in log)
 
 
 def test_run_klein_download_streams_to_part_then_renames(app, tmp_path, monkeypatch):
@@ -368,7 +417,8 @@ def test_run_klein_download_skips_when_already_present(app, tmp_path, monkeypatc
         setup_installer._runs['klein_lora'] = setup_installer._new_run()
         rc = setup_installer._run_klein_download('klein_lora')
     assert rc == 0
-    assert any('already present' in l for l in setup_installer._runs['klein_lora']['log'])
+    assert any('already present' in line
+               for line in setup_installer._runs['klein_lora']['log'])
 
 
 def test_start_klein_blocks_on_low_disk(app, tmp_path, monkeypatch):
@@ -405,9 +455,9 @@ def test_execute_klein_success_clears_model_caches(monkeypatch):
     assert calls == [1]
 
 
-# --- watermark inpainting: scoped one-package install --------------------
-# Installs JUST simple-lama-inpainting (the version floor read from
-# requirements-ml.txt) into the SAME interpreter the LaMa wrapper resolves, so a
+# --- watermark inpainting: scoped runtime install -------------------------
+# Installs the pinned Torch/Pillow/OpenCV runtime into the SAME interpreter the
+# LaMa wrapper resolves, so a
 # user who already has the ML extras doesn't redo the whole step. Shown next to
 # the Curate 🧽 tools; a success drops the probe import-cache (no restart).
 
@@ -421,17 +471,18 @@ def test_install_actions_include_watermark_inpaint(app):
 
 
 def test_requirement_spec_reads_version_from_requirements_ml():
-    """The version floor is the ONE written in requirements-ml.txt — parsed, never
+    """The version pin is written in requirements-ml.txt — parsed, never
     duplicated in the installer module (edit the file, the installer follows)."""
     from app import setup_installer
     import re
-    spec = setup_installer._requirement_spec('simple-lama-inpainting')
-    assert spec.replace(' ', '').startswith('simple-lama-inpainting')
+    spec = setup_installer._requirement_spec('torch')
+    assert spec.replace(' ', '').startswith('torch')
     # Whatever the pin is, it must be the SAME text as in the requirements file.
     line = next(
-        l.split('#', 1)[0].strip()
-        for l in setup_installer._ML_REQUIREMENTS.read_text(encoding='utf-8').splitlines()
-        if re.match(r'\s*simple[-_]lama[-_]inpainting', l, re.IGNORECASE)
+        requirement_line.split('#', 1)[0].strip()
+        for requirement_line in setup_installer._ML_REQUIREMENTS.read_text(
+            encoding='utf-8').splitlines()
+        if re.match(r'\s*torch', requirement_line, re.IGNORECASE)
     )
     assert spec == line
 
@@ -441,8 +492,8 @@ def test_requirement_spec_canonicalises_name_and_falls_back(tmp_path):
     bare name (an unpinned install still works, it just isn't version-floored)."""
     from app import setup_installer
     # underscore/case variant still resolves to the file's dashed line
-    assert setup_installer._requirement_spec('Simple_Lama_Inpainting') \
-        == setup_installer._requirement_spec('simple-lama-inpainting')
+    assert setup_installer._requirement_spec('OpenCV_Python_Headless') \
+        == setup_installer._requirement_spec('opencv-python-headless')
     # missing line -> bare name fallback
     req = tmp_path / 'reqs.txt'
     req.write_text('numpy>=1.26,<2\n# a comment\n', encoding='utf-8')
@@ -459,7 +510,7 @@ def test_manual_command_watermark_inpaint_scoped_and_quoted(app):
     with app.app_context():
         config.save_config({'watermark': {'python': r'C:\ml env\python.exe'}})
         cmd = setup_installer.manual_command('watermark_inpaint')
-        spec = setup_installer._requirement_spec('simple-lama-inpainting')
+        spec = setup_installer._requirement_spec('torch')
     assert '"C:\\ml env\\python.exe"' in cmd     # resolved interpreter, quoted for spaces
     assert '-m pip install' in cmd
     assert f'"{spec}"' in cmd                     # spec quoted whole
@@ -489,12 +540,13 @@ def test_run_watermark_inpaint_targets_watermark_python(app, monkeypatch):
                             'masks': {'python': '/masks/py'}})
         setup_installer._runs['watermark_inpaint'] = setup_installer._new_run()
         rc = setup_installer._run_watermark_inpaint('watermark_inpaint')
-        spec = setup_installer._requirement_spec('simple-lama-inpainting')
+        specs = [setup_installer._requirement_spec(package)
+                 for package in setup_installer._CAPABILITY_PACKAGES['watermark_inpaint']]
     assert rc == 0
     cmd = seen['cmd']
     assert cmd[0] == '/wm/py'                      # exact interpreter, not sys.executable
     assert cmd[1:4] == ['-m', 'pip', 'install']
-    assert spec in cmd
+    assert all(spec in cmd for spec in specs)
     assert '-c' in cmd and any('requirements-ml.txt' in str(p) for p in cmd)
 
 
@@ -524,7 +576,7 @@ def test_run_watermark_inpaint_nonzero_returncode_propagates(app, monkeypatch):
         setup_installer._runs['watermark_inpaint'] = setup_installer._new_run()
         rc = setup_installer._run_watermark_inpaint('watermark_inpaint')
     assert rc == 1
-    assert any('could not build' in l for l in
+    assert any('could not build' in line for line in
                setup_installer._runs['watermark_inpaint']['log'])
 
 
@@ -557,7 +609,8 @@ def test_execute_watermark_inpaint_success_invalidates_probe_cache(app, monkeypa
     from app import setup_installer, capabilities
     with app.app_context():
         # Poison the cache with a stale 'not installed' entry, then prove it's gone.
-        capabilities._import_cache['watermark:x:import simple_lama_inpainting'] = (1e18, False)
+        capabilities._import_cache[
+            'watermark:x:import cv2, numpy, torch; from PIL import Image'] = (1e18, False)
         monkeypatch.setattr(setup_installer, '_WORKERS', {'watermark_inpaint': lambda a: 0})
         setup_installer._runs['watermark_inpaint'] = setup_installer._new_run()
         setup_installer._execute('watermark_inpaint')
@@ -568,7 +621,7 @@ def test_execute_watermark_inpaint_success_invalidates_probe_cache(app, monkeypa
 # The monolithic `-r requirements-ml.txt` is now ALSO installable one capability
 # at a time, so a user can install or REPAIR a single feature. Each scoped action
 # targets the interpreter its own probe resolves and pins requirements-ml.txt as a
-# -c constraint (numpy stays <2). The package->capability grouping lives in
+# -c constraint. The package->capability grouping lives in
 # _CAPABILITY_PACKAGES; a test proves it covers every line in requirements-ml.txt.
 
 
@@ -662,7 +715,7 @@ def test_run_ml_capability_nonzero_returncode_propagates(app, monkeypatch):
         setup_installer._runs['masks'] = setup_installer._new_run()
         rc = setup_installer._run_ml_capability('masks')
     assert rc == 1
-    assert any('no wheel' in l for l in setup_installer._runs['masks']['log'])
+    assert any('no wheel' in line for line in setup_installer._runs['masks']['log'])
 
 
 @pytest.mark.parametrize('action', ['face_scoring', 'masks'])

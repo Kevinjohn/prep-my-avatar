@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { safeJson } from '../../api/fetchClient';
 
 /* Pastille de préparation à l'entraînement — miroir du preflight serveur
    (GET /train/preflight, champs checks+verdict) : 🟢 ready / 🟡 warnings /
@@ -26,13 +27,10 @@ export default function TrainingReadiness({ datasetId, trainType, refreshKey, on
     // Débounce : les compteurs bougent en rafale pendant une passe de caption.
     clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
-      try {
-        const qs = trainType ? `?train_type=${encodeURIComponent(trainType)}` : '';
-        const r = await fetch(`/api/dataset/${datasetId}/train/preflight${qs}`, { credentials: 'include' });
-        if (!r.ok) { if (alive) setData(null); return; }   // 409 ai-toolkit absent → rien
-        const d = await r.json();
-        if (alive && d.ok) setData(d);
-      } catch { /* transient — le prochain changement de compteur retentera */ }
+      const qs = trainType ? `?train_type=${encodeURIComponent(trainType)}` : '';
+      const d = await safeJson(`/api/dataset/${datasetId}/train/preflight${qs}`);
+      if (d.ok === false) { if (alive) setData(null); return; }   // 409 ai-toolkit absent → rien
+      if (alive && d.ok) setData(d);
     }, 400);
     return () => { alive = false; clearTimeout(timer.current); };
   }, [datasetId, trainType, refreshKey]);

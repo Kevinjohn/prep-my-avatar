@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -141,8 +142,9 @@ def _prog_dataset_with_samples(app, tmp_path, monkeypatch, name='Best', trigger=
     _configure_aitoolkit(tmp_path, monkeypatch, app)
     ds = svc.create_dataset(LOCAL_USER, name, trigger)
     os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
-    open(os.path.join(svc._dataset_dir(ds.id), 'ref.webp'), 'wb').write(b'x')
-    ds.ref_filename = 'ref.webp'; svc.db.session.commit()
+    Path(svc._dataset_dir(ds.id), 'ref.webp').write_bytes(b'x')
+    ds.ref_filename = 'ref.webp'
+    svc.db.session.commit()
     run_dir = lt._output_dir() / lt._run_name(ds) / f'lora_{lt._safe_trigger(ds)}'
     (run_dir / 'samples').mkdir(parents=True)
     by_step = {}
@@ -191,8 +193,9 @@ def test_score_checkpoint_samples_degrades_cleanly(app, tmp_path, monkeypatch):
         assert r['available'] is False and 'reference' in r['reason']
         import os
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
-        open(os.path.join(svc._dataset_dir(ds.id), 'ref.webp'), 'wb').write(b'x')
-        ds.ref_filename = 'ref.webp'; svc.db.session.commit()
+        Path(svc._dataset_dir(ds.id), 'ref.webp').write_bytes(b'x')
+        ds.ref_filename = 'ref.webp'
+        svc.db.session.commit()
         from app.services import face_similarity as fsim
         monkeypatch.setattr(fsim, 'is_available', lambda: True)
         r = lt.score_checkpoint_samples(LOCAL_USER, ds.id)   # no samples dir yet
@@ -292,7 +295,7 @@ def test_style_captioned_still_checks_prose_booru_mismatch(app):
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'S3', 'zsty3', kind='style', train_type='sdxl')
         prose = 'A woman reading a book in a sunlit cafe, sitting by the window.'
-        for _ in range(12):
+        for _ in range(20):
             svc.db.session.add(FaceDatasetImage(dataset_id=ds.id, status='keep',
                                                 filename='x.webp', caption=prose))
         svc.db.session.commit()
@@ -334,9 +337,12 @@ def test_enqueue_snapshots_steps_and_not_before(app, monkeypatch):
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Q', 'q')
         monkeypatch.setattr(lt, 'assert_trainable', lambda *a, **k: None)
-        lt.enqueue_training(LOCAL_USER, ds.id, steps=2000, not_before='2999-01-01T00:00')
+        lt.enqueue_training(LOCAL_USER, ds.id, steps=2000, not_before='2999-01-01T00:00',
+                            allow_caption_mismatch=True, allow_uncaptioned=True)
         q = lt.get_train_queue()
         assert q[0]['steps'] == 2000 and q[0]['not_before'].startswith('2999')
+        assert q[0]['allow_caption_mismatch'] is True
+        assert q[0]['allow_uncaptioned'] is True
         assert lt._due_index(q) is None                   # scheduled in the future -> not due
 
 
@@ -365,15 +371,23 @@ def test_step_cap_floor_500(app, tmp_path, monkeypatch):
                                                    filename=f'x{i}.webp', caption='a caption here'))
         svc.db.session.commit()
 
-        def fake_export(user_id, dataset_id, masked=True):
-            folder = tmp_path / 'exported'
-            folder.mkdir(exist_ok=True)
-            return str(folder)
+        folder = tmp_path / 'exported'
+        folder.mkdir(exist_ok=True)
 
-        monkeypatch.setattr(lt, 'export_dataset_to_aitoolkit', fake_export)
+        def fake_materialize(*args, **kwargs):
+            captured['dataset_destination'] = kwargs['destination']
+            return str(folder), {'trigger_word': 'floortrig', 'kind': 'character'}
+
+        monkeypatch.setattr(
+            lt, '_materialize_local_training_dataset',
+            fake_materialize,
+        )
 
         result = lt.launch_training(LOCAL_USER, ds.id, steps=200, masked=False)
         assert result['steps'] == 500
+        assert Path(captured['dataset_destination']).name.startswith(
+            f'{lt._run_name(ds)}_')
+        assert Path(captured['dataset_destination']).name != lt._run_name(ds)
 
         with open(result['config_path'], encoding='utf-8') as fh:
             config = json.load(fh)
@@ -432,7 +446,7 @@ def test_masked_training_written_nonzero_keeps_masks(app, tmp_path, monkeypatch)
             os.makedirs(out_dir, exist_ok=True)
             for p in paths:
                 base = os.path.splitext(os.path.basename(p))[0]
-                open(os.path.join(out_dir, base + '.png'), 'wb').close()
+                Path(out_dir, base + '.png').touch()
             return {'ok': True, 'written': len(paths), 'results': {p: 'ok' for p in paths}}
 
         monkeypatch.setattr(lt, 'generate_person_masks', fake_masks)
@@ -600,7 +614,8 @@ def test_build_job_config_krea_raw_default_and_turbo_optin(app, tmp_path):
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
         ds = svc.create_dataset(LOCAL_USER, 'Kira', 'zchar_kira', train_type='krea')
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
 
         # Default (no train_variant persisted) -> RAW, the recommended base.
         assert lt._krea_is_raw(ds) is True
@@ -673,6 +688,189 @@ def test_archive_previous_run_renames_never_deletes(app, tmp_path):
         assert lt.archive_previous_run(ds) is None
 
 
+def test_disk_usage_includes_every_immutable_training_dataset(app, tmp_path, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    _configure_aitoolkit(tmp_path, monkeypatch, app)
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Storage', 'storagetrig')
+        prefix = lt._run_name(ds)
+        datasets_root = lt._datasets_dir()
+        for name, payload in (
+                (prefix, b'legacy'),
+                (f'{prefix}_20260718-first', b'first immutable'),
+                (f'{prefix}_20260718-first_masks', b'masks'),
+                (f'{prefix}2_20260718-sibling', b'not this dataset')):
+            folder = datasets_root / name
+            folder.mkdir(parents=True)
+            (folder / 'sample.bin').write_bytes(payload)
+
+        usage = lt.dataset_disk_usage(LOCAL_USER, ds.id)
+
+        assert usage['training_dataset_bytes'] == len(
+            b'legacyfirst immutablemasks')
+        assert usage['total_bytes'] >= usage['training_dataset_bytes']
+
+
+def test_failed_fresh_launch_restores_previous_run_and_removes_provenance(
+        app, tmp_path, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.models import TrainingRunRecord
+    from app.config import LOCAL_USER
+
+    _configure_aitoolkit(tmp_path, monkeypatch, app)
+    monkeypatch.setattr(
+        lt.subprocess, 'Popen',
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('spawn failed')))
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Fresh rollback', 'freshrollback')
+        for index in range(12):
+            svc.db.session.add(lt.FaceDatasetImage(
+                dataset_id=ds.id, status='keep', filename=f'x{index}.webp',
+                caption='a caption here'))
+        svc.db.session.commit()
+        exported = tmp_path / 'exported'
+        exported.mkdir()
+        monkeypatch.setattr(
+            lt, '_materialize_local_training_dataset',
+            lambda *args, **kwargs: (str(exported), {
+                'trigger_word': ds.trigger_word, 'kind': 'character',
+            }))
+        old_run = lt._output_dir() / lt._run_name(ds)
+        old_run.mkdir(parents=True)
+        checkpoint = old_run / 'lora_freshrollback_000001500.safetensors'
+        checkpoint.write_bytes(b'previous usable run')
+
+        with pytest.raises(ValueError, match='could not start training'):
+            lt.launch_training(
+                LOCAL_USER, ds.id, steps=1500, masked=False, fresh=True)
+
+        assert checkpoint.read_bytes() == b'previous usable run'
+        assert not list(lt._output_dir().glob(f'{lt._run_name(ds)}_archived_*'))
+        assert TrainingRunRecord.query.filter_by(dataset_id=ds.id).count() == 0
+        assert any(item['kind'] == 'failed_training_launch'
+                   for item in trash.list_entries())
+        assert lt.queue_manager._get_system_state('training_in_progress', False) is False
+
+
+def test_materialization_failure_trashes_partial_training_snapshot(
+        app, tmp_path, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.config import LOCAL_USER
+
+    _configure_aitoolkit(tmp_path, monkeypatch, app)
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Partial snapshot', 'partialsnapshot')
+        for index in range(12):
+            svc.db.session.add(lt.FaceDatasetImage(
+                dataset_id=ds.id, status='keep', filename=f'x{index}.webp',
+                caption='a caption here'))
+        svc.db.session.commit()
+        captured = {}
+
+        def fail_materialization(*_args, **kwargs):
+            destination = Path(kwargs['destination'])
+            captured['destination'] = destination
+            destination.mkdir(parents=True)
+            (destination / 'partial.png').write_bytes(b'partial snapshot')
+            raise OSError('snapshot write failed')
+
+        monkeypatch.setattr(
+            lt, '_materialize_local_training_dataset', fail_materialization)
+
+        with pytest.raises(ValueError, match='could not start training'):
+            lt.launch_training(LOCAL_USER, ds.id, steps=1500, masked=False)
+
+        assert not captured['destination'].exists()
+        assert any(item['kind'] == 'failed_training_launch'
+                   for item in trash.list_entries())
+
+
+def test_failed_resume_preserves_previous_log_and_trashes_prepared_inputs(
+        app, tmp_path, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.services import trash
+    from app.models import TrainingRunRecord
+    from app.config import LOCAL_USER
+
+    _configure_aitoolkit(tmp_path, monkeypatch, app)
+    monkeypatch.setattr(
+        lt.subprocess, 'Popen',
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError('spawn failed')))
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Resume rollback', 'resumerollback')
+        for index in range(12):
+            svc.db.session.add(lt.FaceDatasetImage(
+                dataset_id=ds.id, status='keep', filename=f'x{index}.webp',
+                caption='a caption here'))
+        svc.db.session.commit()
+
+        def fake_materialize(*args, **kwargs):
+            destination = Path(kwargs['destination'])
+            destination.mkdir(parents=True)
+            (destination / 'sample.png').write_bytes(b'immutable input')
+            (destination / lt._EXPORTED_MANIFEST).write_text(
+                json.dumps({'registry_manifest': []}), encoding='utf-8')
+            return str(destination), {
+                'trigger_word': ds.trigger_word, 'kind': 'character',
+            }
+
+        monkeypatch.setattr(lt, '_materialize_local_training_dataset', fake_materialize)
+        run_dir = lt._output_dir() / lt._run_name(ds)
+        run_dir.mkdir(parents=True)
+        checkpoint = run_dir / 'lora_resumerollback_000001500.safetensors'
+        checkpoint.write_bytes(b'previous checkpoint')
+        log = run_dir / 'training.log'
+        log.write_text('previous useful log', encoding='utf-8')
+
+        with pytest.raises(ValueError, match='could not start training'):
+            lt.launch_training(LOCAL_USER, ds.id, steps=1500, masked=False)
+
+        assert checkpoint.read_bytes() == b'previous checkpoint'
+        assert log.read_text(encoding='utf-8') == 'previous useful log'
+        assert not list(run_dir.glob('training-*-previous.log'))
+        assert TrainingRunRecord.query.filter_by(dataset_id=ds.id).count() == 0
+        failed_entries = [item for item in trash.list_entries()
+                          if item['kind'] == 'failed_training_launch']
+        assert failed_entries
+        assert any(len(trash.entry_metadata(item['id'])['files']) >= 2
+                   for item in failed_entries)
+
+
+def test_local_launch_admission_is_serialized(monkeypatch):
+    import threading
+    import time
+    from app.services import lora_training as lt
+
+    state = {'active': 0, 'max_active': 0}
+    state_lock = threading.Lock()
+
+    def fake_launch(*_args, **_kwargs):
+        with state_lock:
+            state['active'] += 1
+            state['max_active'] = max(state['max_active'], state['active'])
+        time.sleep(0.03)
+        with state_lock:
+            state['active'] -= 1
+        return {'started': True}
+
+    monkeypatch.setattr(lt, '_launch_training', fake_launch)
+    threads = [threading.Thread(target=lt.launch_training, args=('local', index))
+               for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert state['max_active'] == 1
+
+
 def test_train_settings_family_defaults(app):
     """No train_settings → researched family-aware defaults: Krea/SDXL rank 32,
     Z-Image rank 16; SDXL keeps alpha = rank/2; others alpha = rank."""
@@ -699,7 +897,8 @@ def test_default_job_config_uses_researched_defaults(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         for tt, rank in (('zimage', 16), ('krea', 32)):
             ds = svc.create_dataset(LOCAL_USER, tt, f't_{tt}', train_type=tt)
             p = lt.build_job_config(ds, str(folder), 1500)['config']['process'][0]
@@ -717,7 +916,8 @@ def test_update_train_settings_persists_validates_and_applies(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         ds = svc.create_dataset(LOCAL_USER, 'K', 'kt', train_type='krea')
         eff = lt.update_train_settings(LOCAL_USER, ds.id, {'rank': 64, 'resolution': '1024', 'save_every': 500})
         assert eff['rank'] == 64 and eff['resolution'] == '1024' and eff['save_every'] == 500
@@ -769,7 +969,8 @@ def test_sample_prompts_custom_persist_inject_and_build(app, tmp_path):
     from app import config as cfg
     with app.app_context():
         cfg.save_config({'aitoolkit': {'dir': str(tmp_path / 'aitoolkit')}})
-        folder = tmp_path / 'ds'; folder.mkdir()
+        folder = tmp_path / 'ds'
+        folder.mkdir()
         ds = svc.create_dataset(LOCAL_USER, 'Z', 'ztrig', train_type='zimage')
         eff = lt.update_train_settings(LOCAL_USER, ds.id, {
             'sample_prompts': ['on a beach at sunset', 'ztrig in the snow'],

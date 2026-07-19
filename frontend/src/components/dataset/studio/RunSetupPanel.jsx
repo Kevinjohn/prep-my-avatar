@@ -33,11 +33,14 @@ export default function RunSetupPanel({ d, studio, form, datasetId }) {
   // contredit la famille du Studio (déploiement mal classé) → bandeau distinct.
   const [archMismatch, setArchMismatch] = useState(null);
 
-  const canLaunch = form.total > 0 && !d.pending && !d.gpu_busy && !studio.launching;
   // Axe ⚖ batch (Always-on LoRA cochés batch) : chaque config tourne SANS puis
   // AVEC chaque LoRA coché → le compteur d'images/temps doit en tenir compte
   // (le backend multiplie déjà les cellules par 1 + nb cochés).
   const batchMult = 1 + ((genSettings.batch_loras || []).length);
+  const finalTotal = form.total * batchMult * form.genCount;
+  const maxImages = d.max_images || 24;
+  const canLaunch = finalTotal > 0 && finalTotal <= maxImages
+    && !d.pending && !d.gpu_busy && !studio.launching;
   const onLaunch = async () => {
     const res = await studio.launch(
       form.chosenCps, form.selSts, form.nextSeed(), form.effectivePrompt,
@@ -148,10 +151,14 @@ export default function RunSetupPanel({ d, studio, form, datasetId }) {
               onGenCount={form.setGenCount}
               total={form.total * batchMult}
               batchMult={batchMult}
-              fmt={fmt}
             />
             <LaunchBar canLaunch={canLaunch} launching={studio.launching} onLaunch={onLaunch} />
           </div>
+          {finalTotal > maxImages && (
+            <p className="m-0 text-amber-300 text-[0.6875rem]" role="alert">
+              This run has {finalTotal} images; the maximum is {maxImages}. Reduce sweep axes, batch LoRAs, or images per config.
+            </p>
+          )}
         </div>
       )}
 

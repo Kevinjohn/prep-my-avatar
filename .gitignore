@@ -23,6 +23,8 @@ config.json
 
 # Frontend and packaging outputs.
 frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/
 packaging/build/
 packaging/dist/
 packaging/*.spec

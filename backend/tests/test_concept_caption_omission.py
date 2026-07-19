@@ -16,12 +16,12 @@ LOCALLY by the caption pipeline, so we patch it at the source module
 """
 import io
 import os
+from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from app.extensions import db
-from app.models import FaceDataset, FaceDatasetImage
+from app.models import FaceDatasetImage
 from app.services import face_dataset_service as svc
 from app.config import LOCAL_USER, save_config
 
@@ -93,7 +93,7 @@ def test_export_keeps_masked_on_for_character(app, tmp_path, monkeypatch):
             called['yes'] = True
             os.makedirs(out_dir, exist_ok=True)
             for p in paths:
-                open(os.path.join(out_dir, os.path.splitext(os.path.basename(p))[0] + '.png'), 'wb').close()
+                Path(out_dir, os.path.splitext(os.path.basename(p))[0] + '.png').touch()
             return {'ok': True, 'written': len(paths), 'results': {p: 'ok' for p in paths}}
 
         monkeypatch.setattr(lt, 'generate_person_masks', fake_masks)

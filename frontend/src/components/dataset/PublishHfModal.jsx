@@ -9,8 +9,10 @@
  * outcome (clickable repo URL on success, a specific hint for the very likely
  * read-only-token failure on the first attempt).
  */
-import { useEffect, useRef, useState } from 'react';
-import { postJson } from '../../hooks/useDataset';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { safeJson, safePostJson as postJson } from '../../api/fetchClient';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 const FIELD =
   'px-3 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm ' +
@@ -35,40 +37,95 @@ export default function PublishHfModal({ datasetId, onClose }) {
   const [phase, setPhase] = useState('form');                 // form|publishing|done|error
   const [result, setResult] = useState(null);                 // {repo_url}|{error, error_code}
   const pollRef = useRef(null);
+  const pollFailuresRef = useRef(0);
+  const pollDeadlineRef = useRef(0);
+  const dialogRef = useRef(null);
+  useFocusTrap(dialogRef, true);
+  useBodyScrollLock(true);
+
+  useEffect(() => {
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape' && phase !== 'publishing') onClose();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [onClose, phase]);
 
   // Prefill <username>/<slug> from the token owner (best-effort).
   useEffect(() => {
     let alive = true;
-    fetch(`/api/dataset/${datasetId}/publish-hf/whoami`, { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
+    safeJson(`/api/dataset/${datasetId}/publish-hf/whoami`)
       .then((d) => {
-        if (!alive || !d) return;
+        if (!alive || !d || d.ok === false) return;
         setUsername(d.username || null);
         if (d.default_repo_id) setRepoId(d.default_repo_id);
-      })
-      .catch(() => { /* modal degrades to a free-text repo id */ });
+      });
     return () => { alive = false; };
   }, [datasetId]);
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) clearTimeout(pollRef.current);
+    pollRef.current = null;
+  }, []);
 
-  const poll = () => {
-    pollRef.current = setInterval(async () => {
-      try {
-        const r = await fetch(`/api/dataset/${datasetId}/publish-hf/status`, { credentials: 'include' });
-        const d = await r.json();
-        if (d.state === 'done') {
-          clearInterval(pollRef.current);
-          setResult({ repo_url: d.repo_url, count: d.count });
-          setPhase('done');
-        } else if (d.state === 'error') {
-          clearInterval(pollRef.current);
-          setResult({ error: d.error, error_code: d.error_code });
-          setPhase('error');
-        }
-      } catch { /* transient — keep polling */ }
-    }, 1500);
-  };
+  const pollOnce = useCallback(async () => {
+    const d = await safeJson(`/api/dataset/${datasetId}/publish-hf/status`);
+    if (d.state === 'done') {
+      stopPolling();
+      setResult({ repo_url: d.repo_url, count: d.count });
+      setPhase('done');
+      return;
+    }
+    if (d.state === 'error' || d.state === 'interrupted') {
+      stopPolling();
+      setResult({ error: d.error || 'Publishing was interrupted.', error_code: d.error_code });
+      setPhase('error');
+      return;
+    }
+    if (d.ok === false || d.status === 0) pollFailuresRef.current += 1;
+    else pollFailuresRef.current = 0;
+    if (pollFailuresRef.current >= 12 || Date.now() >= pollDeadlineRef.current) {
+      stopPolling();
+      setResult({
+        error: 'Status updates stopped. The server-side upload may still be running; close and reopen this dialog to check it.',
+        error_code: 'poll_stalled',
+      });
+      setPhase('error');
+      return;
+    }
+    pollRef.current = setTimeout(pollOnce, 1500);
+  }, [datasetId, stopPolling]);
+
+  const poll = useCallback(() => {
+    stopPolling();
+    pollFailuresRef.current = 0;
+    pollDeadlineRef.current = Date.now() + 30 * 60 * 1000;
+    pollOnce();
+  }, [pollOnce, stopPolling]);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  // Reopening the modal reconnects to a durable publish job instead of showing
+  // a fresh form while an upload from this or another tab is still active.
+  useEffect(() => {
+    let alive = true;
+    safeJson(`/api/dataset/${datasetId}/publish-hf/status`).then((d) => {
+      if (!alive) return;
+      if (d.state === 'running') {
+        setPhase('publishing');
+        poll();
+      } else if (d.state === 'done') {
+        setResult({ repo_url: d.repo_url, count: d.count });
+        setPhase('done');
+      } else if (d.state === 'error' || d.state === 'interrupted') {
+        setResult({ error: d.error || 'Publishing was interrupted.', error_code: d.error_code });
+        setPhase('error');
+      }
+    });
+    return () => { alive = false; };
+  }, [datasetId, poll]);
 
   const publish = async () => {
     if (!consent || !repoId.trim() || phase === 'publishing') return;
@@ -88,12 +145,20 @@ export default function PublishHfModal({ datasetId, onClose }) {
 
   const busy = phase === 'publishing';
   const readOnly = result?.error_code === 'read_only_token';
+  const pollStalled = result?.error_code === 'poll_stalled';
+  const checkStatus = () => {
+    setResult(null);
+    setPhase('publishing');
+    poll();
+  };
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Publish to Hugging Face"
+      aria-busy={busy || undefined}
       className="fixed inset-0 z-[9990] bg-black/80 flex items-center justify-center p-3"
       onClick={busy ? undefined : onClose}>
-      <div className="w-full max-w-lg rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3 max-h-[92vh] overflow-y-auto"
+      <div ref={dialogRef}
+        className="w-full max-w-lg rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3 max-h-[92vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}>
         <h2 className="text-content font-semibold flex items-center gap-1.5">
           🤗 Publish to Hugging Face
@@ -176,10 +241,11 @@ export default function PublishHfModal({ datasetId, onClose }) {
                 className="px-3 py-1.5 rounded-lg border border-border bg-surface text-content-muted hover:text-content text-sm disabled:opacity-40">
                 Cancel
               </button>
-              <button type="button" onClick={publish} disabled={!consent || !repoId.trim() || busy}
+              <button type="button" onClick={pollStalled ? checkStatus : publish}
+                disabled={pollStalled ? busy : (!consent || !repoId.trim() || busy)}
                 className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40 flex items-center gap-2">
                 {busy && <span className="inline-block w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                {busy ? 'Publishing…' : 'Publish'}
+                {busy ? 'Publishing…' : (pollStalled ? 'Check status' : 'Publish')}
               </button>
             </div>
           </>

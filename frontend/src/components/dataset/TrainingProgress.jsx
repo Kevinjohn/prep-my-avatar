@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { safeJson } from '../../api/fetchClient';
 
 /* Live view of the CURRENT run (mounted by TrainingPanel while this dataset
    trains): progress bar, loss sparkline, and the sample previews ai-toolkit
@@ -61,16 +62,11 @@ export default function TrainingProgress({ datasetId, base, trainType, cloud = f
   useEffect(() => {
     let alive = true;
     const poll = async () => {
-      try {
-        const qs = new URLSearchParams();
-        if (base != null) qs.set('base_model', base);
-        if (trainType) qs.set('train_type', trainType);
-        const r = await fetch(`/api/dataset/${datasetId}/train/${cloud ? 'cloud/' : ''}progress?${qs}`, { credentials: 'include' });
-        if (r.ok) {
-          const d = await r.json();
-          if (alive) setProg(d);
-        }
-      } catch { /* transient poll error — next tick retries */ }
+      const qs = new URLSearchParams();
+      if (base != null) qs.set('base_model', base);
+      if (trainType) qs.set('train_type', trainType);
+      const d = await safeJson(`/api/dataset/${datasetId}/train/${cloud ? 'cloud/' : ''}progress?${qs}`);
+      if (alive && d.ok !== false) setProg(d);
       if (alive) timer.current = setTimeout(poll, POLL_MS);
     };
     poll();

@@ -4,10 +4,12 @@
 Sans dépendance vers `routes`/`download_service` → importable par les deux
 (pas de cycle). Voir routes.py pour le contexte sécurité (admin-only, SSRF).
 """
-import sys
-import socket
+import glob as _glob
 import ipaddress
+import os as _os
+import socket
 import subprocess
+import sys
 import tempfile
 import shutil
 from urllib.parse import urlparse
@@ -31,7 +33,7 @@ SOCKET_TIMEOUT = 30  # secondes
 
 # Plancher de version yt-dlp (CVE-2024-38519). WARNING non bloquant — un assert
 # dur sur une version briquerait Flask au démarrage.
-YTDLP_VERSION_FLOOR = (2024, 7, 1)
+YTDLP_VERSION_FLOOR = (2026, 6, 9)
 _version_checked = False
 
 _ffmpeg_checked = None
@@ -87,8 +89,10 @@ def _ip_is_blocked(ip):
             ip = ip.ipv4_mapped
         elif ip.sixtofour is not None:
             ip = ip.sixtofour
-    return (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+    # ``is_private`` alone misses non-routable ranges such as carrier-grade NAT
+    # (100.64/10). SSRF fetches must target a globally routable address, not
+    # merely an address that Python does not classify as RFC1918 private.
+    return not ip.is_global
 
 
 def _resolve_public_ips(host, port):
@@ -149,14 +153,37 @@ def _validate_public_http_url(url):
         return False, "URL invalide."
     if parsed.scheme not in ('http', 'https'):
         return False, "Seules les URL http(s) sont autorisées."
+    if parsed.username is not None or parsed.password is not None:
+        return False, "Les identifiants intégrés dans une URL sont refusés."
     host = parsed.hostname
     if not host:
         return False, "URL sans hôte valide."
-
-    _ips, err = _resolve_public_ips(host, parsed.port or (443 if parsed.scheme == 'https' else 80))
+    try:
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except ValueError:
+        return False, "Port URL invalide."
+    _ips, err = _resolve_public_ips(host, port)
     if err:
         return False, err
     return True, None
+
+
+def _validated_public_target(url):
+    """Return the parsed URL and the exact public addresses approved for it."""
+    valid, error = _validate_public_http_url(url)
+    if not valid:
+        return None, None, error
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    ips, error = _resolve_public_ips(parsed.hostname, port)
+    if error:
+        return None, None, error
+    return parsed, tuple(sorted(ips)), None
+
+
+def _curl_resolve_entry(host, port, ip):
+    address = f'[{ip}]' if ':' in ip else ip
+    return f'{host}:{port}:{address}'
 
 
 def _download_with_ytdlp(url, dest_template):
@@ -236,13 +263,12 @@ def _looks_like_image(path):
     return False
 
 
-import os as _os
-import glob as _glob
-
-
 def download_via_ytdlp(url, dest_base):
     """Télécharge via yt-dlp dans le dossier de dest_base, garde le 1er fichier vidéo
     valide. Retourne (ok, filename|None, error|None). Ne lève jamais."""
+    valid, error = _validate_public_http_url(url)
+    if not valid:
+        return False, None, error or "URL réseau refusée."
     dest_dir = _os.path.dirname(dest_base)
     uid = _os.path.basename(dest_base)
     _os.makedirs(dest_dir, exist_ok=True)
@@ -250,8 +276,10 @@ def download_via_ytdlp(url, dest_base):
     ok, err = _download_with_ytdlp(url, dest_template)
     if not ok:
         for stray in _glob.glob(_os.path.join(dest_dir, f'{uid}.*')):
-            try: _os.remove(stray)
-            except OSError: pass
+            try:
+                _os.remove(stray)
+            except OSError:
+                pass
         return False, None, err
     from ..upload.routes import _looks_like_video
     produced = sorted(_glob.glob(_os.path.join(dest_dir, f'{uid}.*')))
@@ -260,8 +288,10 @@ def download_via_ytdlp(url, dest_base):
         if final is None and _looks_like_video(p):
             final = p
         else:
-            try: _os.remove(p)
-            except OSError: pass
+            try:
+                _os.remove(p)
+            except OSError:
+                pass
     if final is None:
         return False, None, "Le fichier téléchargé n'est pas une vidéo valide."
     return True, _os.path.basename(final), None
@@ -275,7 +305,8 @@ def fetch_hardened_bytes(url, *, allowed_types, max_bytes, require_image_magic=F
     par l'appelant pour compter/expliquer les skips.
 
     Garanties (zéro régression vs /thumb) :
-      - l'URL est supposée DÉJÀ validée anti-SSRF par l'appelant (_validate_public_http_url) ;
+      - l'URL est revalidée anti-SSRF ici, au dernier point commun avant le fetch,
+        même si l'appelant l'a déjà validée ;
       - curl_cffi impersonate='chrome' + Referer du host source ;
       - allow_redirects=False : toute 3xx → refus (sinon une redirection vers une IP
         interne contournerait la garde SSRF amont — TOCTOU/redirect bypass) ;
@@ -284,29 +315,49 @@ def fetch_hardened_bytes(url, *, allowed_types, max_bytes, require_image_magic=F
       - `require_image_magic` : en plus du content-type, le contenu doit commencer par
         une signature raster connue (anti type-spoof : un non-admin ne reçoit qu'une
         vraie image, jamais html/svg/exe déguisé)."""
+    parsed, ips, _error = _validated_public_target(url)
+    if parsed is None:
+        return False, None, None, 'ssrf'
     try:
         from curl_cffi import requests as cf_requests
     except ImportError:
         return False, None, None, 'no_curl'
-    host = urlparse(url).hostname or ''
-    try:
-        r = cf_requests.get(url, impersonate='chrome', timeout=20, stream=True,
-                            allow_redirects=False,
-                            headers={'Referer': f'https://{host}/', 'Accept': '*/*'})
-    except Exception as e:
+    host = parsed.hostname or ''
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    r = None
+    last_error = None
+    for ip in ips:
         try:
-            current_app.logger.warning(f"fetch_hardened_bytes échec {url[:120]}: {e}")
+            # curl connects to the approved address while retaining the URL's
+            # Host header and TLS SNI. DNS cannot change between validation and
+            # the socket connection.
+            r = cf_requests.get(
+                url, impersonate='chrome', timeout=20, stream=True,
+                allow_redirects=False,
+                headers={'Referer': f'{parsed.scheme}://{host}/', 'Accept': '*/*'},
+                resolve=[_curl_resolve_entry(host, port, ip)])
+            break
+        except Exception as exc:
+            last_error = exc
+    if r is None:
+        try:
+            current_app.logger.warning(
+                'fetch_hardened_bytes échec %s: %s', url[:120], last_error)
         except Exception:
             pass
         return False, None, None, 'fetch'
     if 300 <= r.status_code < 400:
-        try: r.close()
-        except Exception: pass
+        try:
+            r.close()
+        except Exception:
+            pass
         return False, None, None, 'redirect'
     ctype = (r.headers.get('content-type') or '').split(';')[0].strip().lower()
     if r.status_code != 200 or ctype not in allowed_types:
-        try: r.close()
-        except Exception: pass
+        try:
+            r.close()
+        except Exception:
+            pass
         return False, None, None, ('status' if r.status_code != 200 else 'type')
     data = bytearray()
     try:
@@ -315,12 +366,16 @@ def fetch_hardened_bytes(url, *, allowed_types, max_bytes, require_image_magic=F
                 continue
             data += chunk
             if len(data) > max_bytes:
-                try: r.close()
-                except Exception: pass
+                try:
+                    r.close()
+                except Exception:
+                    pass
                 return False, None, None, 'toolarge'
     finally:
-        try: r.close()
-        except Exception: pass
+        try:
+            r.close()
+        except Exception:
+            pass
     # Validation magic-bytes du raster : un content-type image/* peut mentir.
     if require_image_magic and not _bytes_look_like_image(bytes(data[:32])):
         return False, None, None, 'noimage'

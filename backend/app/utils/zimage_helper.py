@@ -84,12 +84,15 @@ def apply_zimage_settings(workflow, *, z_steps=None, z_cfg=None, z_model=None,
 
     if z_loras:
         allowed = (allowed_loras if allowed_loras is not None
-                   else {l['filename'] for l in get_zimage_loras()})
+                   else {item['filename'] for item in get_zimage_loras()})
         n_inj = inject_zimage_loras(workflow, z_loras, allowed)
-        applied = [l for l in z_loras if isinstance(l, dict) and l.get('filename') in allowed]
+        applied = [item for item in z_loras
+                   if isinstance(item, dict) and item.get('filename') in allowed]
         if applied:
-            info['z_loras_used'] = [{'name': os.path.basename(l['filename']),
-                                     'strength': l.get('strength', 1.0)} for l in applied]
+            info['z_loras_used'] = [
+                {'name': os.path.basename(item['filename']),
+                 'strength': item.get('strength', 1.0)}
+                for item in applied]
         info['loras_injected'] = n_inj
         if n_inj:
             logger.info(f"Z-Image: injected {n_inj} LoRA(s)")

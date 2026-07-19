@@ -27,6 +27,7 @@ téléchargées par le flux d'import durci (fetch_hardened_bytes, anti-SSRF, mag
 """
 import logging
 import os
+from pathlib import Path
 import time
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -253,7 +254,7 @@ def _client_id() -> str:
     path = resolve_cookies('reddit_client_id')   # <SCRAPE_COOKIES_DIR>/reddit_client_id.txt
     if path:
         try:
-            val = open(path, encoding='utf-8').read().strip()
+            val = Path(path).read_text(encoding='utf-8').strip()
             if val:
                 return val
         except OSError:

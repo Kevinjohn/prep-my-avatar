@@ -170,6 +170,8 @@ def test_csrf_rejection_carries_fresh_cookie_and_allows_retry(csrf_client):
     it and replay the request once and succeed, with no hard refresh."""
     r = csrf_client.put('/api/settings', json={'config': {'ollama': {'url': 'http://x'}}})
     assert r.status_code == 400                      # token missing -> Flask-WTF rejects
+    assert r.headers['X-CSRF-Error'] == '1'
+    assert r.get_json()['error_code'] == 'csrf_failed'
     planted = _csrf_cookies(r)
     assert planted, 'the CSRF-rejection response must still refresh the token cookie'
     token = planted[0].split('csrf_token=', 1)[1].split(';', 1)[0]
@@ -320,7 +322,7 @@ def test_put_settings_saves_chatgpt_auth_mode(client):
 def test_settings_payload_includes_server_defaults(client):
     cfg = client.get('/api/settings').get_json()['config']
     assert cfg['server'] == {'host': '127.0.0.1', 'port': 5050,
-                             'require_token': False, 'access_token': ''}
+                             'require_token': True, 'access_token': ''}
 
 
 def test_put_settings_saves_require_token(client):

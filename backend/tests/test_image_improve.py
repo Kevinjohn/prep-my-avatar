@@ -474,17 +474,27 @@ def test_orphaned_legacy_candidate_is_independently_cleanable(app):
         filename = 'orphan.png'
         with open(os.path.join(svc._dataset_dir(ds.id), filename), 'wb') as fh:
             fh.write(_png())
+        legacy_source = FaceDatasetImage(
+            dataset_id=ds.id, source='import', status='reject')
+        svc.db.session.add(legacy_source)
+        svc.db.session.flush()
         orphan = FaceDatasetImage(
             dataset_id=ds.id, source='generated', status='reject', filename=filename,
-            parent_image_id=999999, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
+            parent_image_id=legacy_source.id, derivation_kind=svc.KLEIN_IMAGE_IMPROVE)
         svc.db.session.add(orphan)
+        svc.db.session.commit()
+        # Current schemas turn a removed parent into a safe orphan via SET NULL;
+        # upgraded schemas install the equivalent delete trigger.
+        svc.db.session.delete(legacy_source)
         svc.db.session.commit()
         orphan_id = orphan.id
 
         assert svc.set_image_status(LOCAL_USER, orphan_id, 'pending') is True
         assert svc.set_image_status(LOCAL_USER, orphan_id, 'reject') is True
         assert svc.purge_unused(LOCAL_USER, ds.id) == 1
-        assert svc.db.session.get(FaceDatasetImage, orphan_id) is None
+        assert svc.db.session.get(FaceDatasetImage, orphan_id).status == 'trashed'
+        assert not os.path.exists(os.path.join(svc._dataset_dir(ds.id), filename))
+        assert svc.dataset_payload(LOCAL_USER, ds.id)['images'] == []
 
 
 def test_unresolved_reconstruction_pixels_are_immutable(app):

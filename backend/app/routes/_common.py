@@ -10,6 +10,11 @@ def _map_error(e: Exception):
     Unrecognized exceptions are re-raised (-> 500, a real bug)."""
     if isinstance(e, GpuBusyError):
         return jsonify({'error': 'GPU busy', 'detail': str(e)}), 503
+    if isinstance(e, PermissionError):
+        return jsonify({
+            'error': str(e),
+            'code': getattr(e, 'code', 'permission_denied'),
+        }), 403
     if isinstance(e, ValueError):
         return jsonify({'error': str(e)}), 400
     if isinstance(e, RuntimeError):

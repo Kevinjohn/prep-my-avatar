@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import ShotIllustration from './ShotIllustration';
+import { useConfirmDialog } from '../common/ConfirmDialog';
 
 // Fixed gradient palette for the dataset avatars — deterministic per name so a
 // dataset keeps its color across sessions (Tailwind needs literal class names).
@@ -121,6 +122,7 @@ function tileStats(d) {
 
 /** Photo-first tile: the reference face IS the identity — lead with it. */
 function DatasetTile({ d, onOpen, onDelete }) {
+  const confirm = useConfirmDialog();
   return (
     <div className="group relative overflow-hidden rounded-xl border border-border bg-surface transition-colors hover:border-primary/40">
       <button type="button" onClick={() => onOpen(d.id)}
@@ -168,10 +170,15 @@ function DatasetTile({ d, onOpen, onDelete }) {
       </button>
       {onDelete && (
         <button type="button"
-          onClick={() => {
-            if (window.confirm(`Permanently delete the dataset "${d.name}" and all its images? This cannot be undone.`)) onDelete(d.id);
+          onClick={async () => {
+            if (await confirm({
+              title: `Move “${d.name}” to trash?`,
+              message: 'The dataset and its images can be restored until you empty the trash in Settings.',
+              confirmLabel: 'Move to trash',
+              tone: 'warning',
+            })) onDelete(d.id);
           }}
-          title="Delete this dataset" aria-label={`Delete the dataset ${d.name}`}
+          title="Move this dataset to trash" aria-label={`Move the dataset ${d.name} to trash`}
           className="absolute right-1.5 top-1.5 rounded-lg border border-red-500/40 bg-black/50 px-2 py-1 text-xs text-red-300 opacity-70 backdrop-blur-sm transition-opacity hover:bg-red-500/25 hover:opacity-100">
           🗑
         </button>

@@ -13,6 +13,7 @@ import { isScraperImportBlocked } from './scraperState';
 import DatasetGrid from './DatasetGrid';
 import SmallImageRescueReview from './SmallImageRescueReview';
 import ImageImprovementReview from './ImageImprovementReview';
+import CurationHistory from './CurationHistory';
 import CaptionToolsBar from './CaptionToolsBar';
 import { recaptionConfirmation } from './captionCategory';
 import CropModal from './CropModal';
@@ -21,6 +22,7 @@ import DatasetSettingsModal from './DatasetSettingsModal';
 import PublishHfModal from './PublishHfModal';
 import WatermarkReviewLightbox, { buildWatermarkRecap } from './WatermarkReviewLightbox';
 import { useToast } from '../common/Toast';
+import { useConfirmDialog, usePromptDialog } from '../common/ConfirmDialog';
 import { useCapabilities } from '../../context/CapabilitiesContext';
 import InstallRunner from '../setup/InstallRunner';
 import GuidedChecklist from './GuidedChecklist';
@@ -41,87 +43,21 @@ import {
   getWorkspacePanelStatus,
   getWorkspacePanels,
   resolveWorkspaceLocation,
+  withDatasetImageSummary,
   withWorkspaceLocation,
 } from './workspaceNavigation';
+import { GridFilterBar, NavBadge, SectionHeading } from './WorkspaceChrome';
 
 const EMPTY_IMAGES = Object.freeze([]);
 
 // Style partagé des items du menu « ⋯ More » du header (actions secondaires).
 const MENU_ITEM = 'w-full flex items-center gap-2 text-left px-2.5 py-1.5 rounded-md text-sm text-content hover:bg-surface-raised disabled:opacity-40';
 
-/* En-tête de section (miroir visuel du SectionHeader de Settings, en h2 : le h1
-   de la page reste le nom du dataset) : eyebrow mono + titre + description. */
-function SectionHeading({ id, eyebrow, title, description }) {
-  return (
-    <div id={id} tabIndex={-1}>
-      <p className="m-0 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle">{eyebrow}</p>
-      <h2 className="m-0 mt-0.5 text-content text-base font-semibold">{title}</h2>
-      {description && <p className="m-0 mt-0.5 text-content-muted text-[0.75rem] leading-relaxed">{description}</p>}
-    </div>
-  );
-}
-
-/* Pastille de compte dans la sidebar — sobre : ambre = action attendue (triage,
-   watermarks, fuites), indigo pulsé = travail en cours (générations), neutre =
-   simple info. Jamais couleur seule : le sr-only épelle le sens. */
-function NavBadge({ badge }) {
-  if (!badge) return null;
-  const cls = badge.tone === 'amber' ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-    : badge.tone === 'indigo' ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200'
-    : 'border-border bg-surface-raised text-content-subtle';
-  return (
-    <span
-      className={`ml-auto shrink-0 rounded-full border px-1.5 py-px text-[0.625rem] font-semibold tabular-nums ${cls} ${badge.pulse ? 'animate-pulse' : ''}`}>
-      <span aria-hidden>{badge.n}</span>
-      <span className="sr-only"> — {badge.srLabel}</span>
-    </span>
-  );
-}
-
-/* Loud banner sitting directly above the grid whenever a tag filter is active,
-   so the user can NEVER mistake a filtered view for "images disappeared". Shows
-   every active exclusion (⊘) / inclusion (◉ only) as a removable chip, the live
-   "showing N of M" count, and a one-click "clear all". Session-only state lives
-   in the parent workspace (transient view, not persisted). */
-function GridFilterBar({ excludes, includes, shown, total, onRemoveExclude, onRemoveInclude, onClearAll }) {
-  return (
-    <div role="status"
-      className="flex items-center gap-2 flex-wrap rounded-lg border-2 border-amber-400/50 bg-amber-400/10 px-3 py-2">
-      <span className="text-amber-200 text-sm font-semibold shrink-0">🔎 Filtered view</span>
-      <span className="text-content-muted text-xs tabular-nums shrink-0">
-        showing {shown} of {total}
-      </span>
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {excludes.map((t) => (
-          <span key={`x-${t}`}
-            className="inline-flex items-center gap-1 rounded-full border border-rose-400/50 bg-rose-500/15 pl-2 pr-1 py-0.5 text-[0.6875rem] text-rose-200">
-            <span aria-hidden>⊘</span> {t}
-            <button type="button" onClick={() => onRemoveExclude(t)}
-              aria-label={`Stop hiding images tagged ${t}`}
-              className="w-4 h-4 grid place-items-center rounded-full hover:bg-rose-500/30">✕</button>
-          </span>
-        ))}
-        {includes.map((t) => (
-          <span key={`i-${t}`}
-            className="inline-flex items-center gap-1 rounded-full border border-indigo-400/50 bg-indigo-500/15 pl-2 pr-1 py-0.5 text-[0.6875rem] text-indigo-200">
-            <span aria-hidden>◉</span> only {t}
-            <button type="button" onClick={() => onRemoveInclude(t)}
-              aria-label={`Stop isolating images tagged ${t}`}
-              className="w-4 h-4 grid place-items-center rounded-full hover:bg-indigo-500/30">✕</button>
-          </span>
-        ))}
-      </div>
-      <button type="button" onClick={onClearAll}
-        className="ml-auto shrink-0 text-content-muted underline hover:text-content text-xs">
-        clear all
-      </button>
-    </div>
-  );
-}
-
 export default function DatasetWorkspace({ ds, onBack }) {
   const navigate = useNavigate();
   const toast = useToast();
+  const confirm = useConfirmDialog();
+  const promptDialog = usePromptDialog();
   const { caps, refresh: refreshCaps } = useCapabilities();
   const d = ds.data;
   const [cropImg, setCropImg] = useState(null);
@@ -146,7 +82,14 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const [includeTags, setIncludeTags] = useState([]);
   const [searchParams, setSearchParams] = useSearchParams();
   const navImages = d?.images || EMPTY_IMAGES;
-  const navContext = useMemo(() => ({
+  const images = navImages;
+  const curationHistoryKey = useMemo(() => images.map((image) => [
+    image.id, image.status, image.caption || '', image.anchor_decision || '',
+    image.framing || '', JSON.stringify(image.coverage || {}),
+    JSON.stringify(image.coverage_provenance || {}),
+    JSON.stringify(image.source_rights || {}),
+  ].join(':')).join('|'), [images]);
+  const navContext = useMemo(() => withDatasetImageSummary({
     kind: d?.kind || 'character',
     hasSelectableImages: filterImageImprovementGrid(filterSmallImageRescueGrid(navImages))
       .some((image) => Boolean(image.filename)),
@@ -164,10 +107,26 @@ export default function DatasetWorkspace({ ds, onBack }) {
     trainingStatusReady: !caps.training_visible || trainingNavigation.ready,
     trainingQueueCount: trainingNavigation.queueCount,
     studioVisible: Boolean(caps.studio_visible),
-  }), [d, navImages, caps.hf_publish, caps.training_visible, caps.studio_visible, trainingNavigation]);
+  }, d?.image_summary), [d, navImages, caps.hf_publish, caps.training_visible,
+    caps.studio_visible, trainingNavigation]);
   const workspaceLocation = resolveWorkspaceLocation(searchParams, navContext);
   const section = workspaceLocation.section;
   const panel = workspaceLocation.panel;
+
+  // The everyday image grid stays genuinely paginated. The two review surfaces
+  // that need cross-image relationships (exclusive reconstruction pairs and
+  // caption leak editing) explicitly hydrate the remaining pages on entry.
+  const {
+    hasMoreImages, loadingMoreImages, loadAllImages, imageHydrationError,
+  } = ds;
+  const reviewNeedsHydration = (section === 'curation' || section === 'captions')
+    && (hasMoreImages || loadingMoreImages);
+  useEffect(() => {
+    if ((section === 'curation' || section === 'captions')
+        && hasMoreImages && !loadingMoreImages && !imageHydrationError) {
+      loadAllImages();
+    }
+  }, [section, hasMoreImages, loadingMoreImages, imageHydrationError, loadAllImages]);
 
   const writeWorkspaceLocation = useCallback((sectionId, panelId = null, replace = false) => {
     setSearchParams(
@@ -330,7 +289,6 @@ export default function DatasetWorkspace({ ds, onBack }) {
 
   if (!d) return <p className="text-content-subtle text-sm">Loading…</p>;
 
-  const images = d.images || [];
   const rescuePairs = buildSmallImageRescuePairs(images);
   const unresolvedRescuePairs = rescuePairs.filter((pair) => !pair.resolved);
   // An unresolved pair is intentionally absent from the generic grid/bulk
@@ -371,13 +329,19 @@ export default function DatasetWorkspace({ ds, onBack }) {
   // Fidélité corps : captions bannissent aussi les marques corporelles, composition
   // cible plus de bustes/corps, import plein cadre par défaut.
   const bodyFid = d.fidelity === 'body';
-  const kept = images.filter((i) => i.status === 'keep').length;
-  const unused = images.filter((i) => (i.status === 'reject' || i.status === 'failed')
-    && !rescuePairIds.has(i.id) && !improvementPairIds.has(i.id)).length;
-  const keptUncaptioned = images.filter((i) => i.status === 'keep' && !i.caption).length;
-  const keptCaptioned = kept - keptUncaptioned;
+  const summary = d.image_summary || {};
+  const totalImages = summary.total ?? images.length;
+  const kept = summary.kept ?? images.filter((i) => i.status === 'keep').length;
+  const unused = summary.unused ?? images.filter(
+    (i) => (i.status === 'reject' || i.status === 'failed')
+      && !rescuePairIds.has(i.id) && !improvementPairIds.has(i.id),
+  ).length;
+  const keptCaptioned = summary.kept_captioned
+    ?? images.filter((i) => i.status === 'keep' && Boolean((i.caption || '').trim())).length;
+  const keptUncaptioned = kept - keptCaptioned;
   // Overlaid watermarks still awaiting removal → drives the "🧽 Clean (N)" button.
-  const watermarkDetected = images.filter((i) => i.watermark_state === 'detected').length;
+  const watermarkDetected = summary.watermark_detected
+    ?? images.filter((i) => i.watermark_state === 'detected').length;
   // Style de caption : défaut AUTO (SDXL booru-native → booru tags ; sinon prose), surchargé par le sélecteur.
   const effCaptionMode = captionMode || (d.train_type === 'sdxl' ? 'booru' : 'prose');
   // ── Grid tag-filter (session-only) ──────────────────────────────────────────
@@ -400,10 +364,14 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const gridImages = filterImages(reviewGridImages, {
     excludes: excludeTags, includes: includeTags, mode: effCaptionMode,
   });
-  const pending = images.filter((i) => i.status === 'pending' && !i.filename
-    && !unresolvedRescueIds.has(i.id) && !unresolvedImprovementIds.has(i.id)).length;
-  const triage = images.filter((i) => i.status === 'pending' && i.filename
-    && !unresolvedRescueIds.has(i.id) && !unresolvedImprovementIds.has(i.id)).length;
+  const pending = summary.pending_generation ?? images.filter(
+    (i) => i.status === 'pending' && !i.filename
+      && !unresolvedRescueIds.has(i.id) && !unresolvedImprovementIds.has(i.id),
+  ).length;
+  const triage = summary.awaiting_triage ?? images.filter(
+    (i) => i.status === 'pending' && i.filename
+      && !unresolvedRescueIds.has(i.id) && !unresolvedImprovementIds.has(i.id),
+  ).length;
 
   const toggleLeakReview = () => {
     onRevealOpenChange('leak-review', !showLeaks, setShowLeaks);
@@ -473,20 +441,33 @@ export default function DatasetWorkspace({ ds, onBack }) {
     && !isSmallImageRescueRow(viewImgLive)
     && viewImgLive.derivation_kind !== 'klein_image_improve'
     && !improvementPairIds.has(viewImgLive.id);
-
   // Export ZIP — shared by the header CTA and the Import & export row.
   // Guard-rails: untriaged images are silently EXCLUDED from the zip,
   // and uncaptioned kept ones export as trigger-only.
-  const exportZipGuarded = () => {
-    if (triage && !window.confirm(`${triage} image(s) still await triage (✓/✕) and will NOT be in the ZIP. Export anyway?`)) return;
-    if (keptUncaptioned && !window.confirm(`${keptUncaptioned} kept image(s) without a caption (trigger only). Export anyway?`)) return;
+  const exportZipGuarded = async () => {
+    if (triage && !(await confirm({
+      title: 'Export without unreviewed images?',
+      message: `${triage} images still await triage and will not be included in the ZIP.`,
+      confirmLabel: 'Export anyway',
+      tone: 'warning',
+    }))) return;
+    if (keptUncaptioned && !(await confirm({
+      title: 'Export images without captions?',
+      message: `${keptUncaptioned} kept images have no caption and will export with the trigger only.`,
+      confirmLabel: 'Export anyway',
+      tone: 'warning',
+    }))) return;
     ds.exportZip();
   };
   // The folder lives on the machine running the app, so a browser file-picker
   // can't select it — the user pastes the path instead.
-  const importFolderPrompt = () => {
-    const p = window.prompt(
-      'Path of the dataset folder on this machine (images + same-name .txt captions):');
+  const importFolderPrompt = async () => {
+    const p = await promptDialog({
+      title: 'Import a dataset folder',
+      message: 'Enter the path on the machine running the app. The folder should contain images and optional same-name .txt captions.',
+      inputLabel: 'Dataset folder path',
+      confirmLabel: 'Import folder',
+    });
     if (p && p.trim()) ds.importDatasetFolder(p.trim());
   };
 
@@ -734,13 +715,26 @@ export default function DatasetWorkspace({ ds, onBack }) {
                (une passe GPU ou un batch de générations concernent tout l'écran). ---- */}
           {!concept && (
             <NextStepCard step={nextStep} trainMode={!!caps.training_visible} busy={ds.busy}
-              totalImages={images.length} onAction={nextAction} actionLabel={nextActionLabel} />
+              totalImages={totalImages} onAction={nextAction} actionLabel={nextActionLabel} />
           )}
 
           {ds.busy && (
             <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2">
               <span className="inline-block w-4 h-4 border-2 border-amber-400/40 border-t-amber-400 rounded-full animate-spin" aria-hidden />
               <span className="text-content text-sm">{activityBanner}</span>
+            </div>
+          )}
+
+          {imageHydrationError && (section === 'curation' || section === 'captions') && (
+            <div role="alert"
+              className="flex items-center gap-3 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2">
+              <span className="text-content text-sm">
+                Couldn’t load every image for this review. Review actions stay paused until all images are loaded.
+              </span>
+              <button type="button" onClick={loadAllImages} disabled={loadingMoreImages}
+                className="ml-auto shrink-0 rounded-lg border border-red-300/40 px-3 py-1.5 text-sm font-semibold text-red-100 disabled:opacity-40">
+                Retry
+              </button>
             </div>
           )}
 
@@ -767,7 +761,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
           <div className={sectionCls('images')}>
             {heading('images')}
             <p className="m-0 text-content-subtle text-[0.75rem] tabular-nums">
-              {reviewGridImages.length} image(s) · {kept} kept
+              {totalImages} image(s) · {kept} kept
+              {images.length < totalImages ? ` · ${images.length} loaded` : ''}
               {triage > 0 ? <> · <span className="text-amber-300">{triage} awaiting ✓/✕</span></> : ''}
               {rescueReviewCount > 0
                 ? <> · <span className="text-indigo-300">{rescueReviewCount} Klein rescue pair(s) in Curation</span></>
@@ -799,7 +794,9 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   onRegenerate={(id, loraStrength, prompt) => ds.regenerate(id, loraStrength, prompt)} onView={setViewImg}
                   onBatch={ds.batchImages} busy={ds.busy}
                   nonces={ds.nonces} faceThresholds={d.face_thresholds}
-                  exclusiveImageIds={unresolvedExclusiveIds} />
+                  exclusiveImageIds={unresolvedExclusiveIds}
+                  hasMore={ds.hasMoreImages} onLoadMore={ds.loadMoreImages}
+                  loadingMore={ds.loadingMoreImages} totalImages={totalImages} />
               )}
             </div>
           </div>
@@ -819,6 +816,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
                 <div id="ds-add-import" tabIndex={-1} className="scroll-mt-20">
                   <ImportDropzone onImport={(f) => ds.importFiles(f)} busy={ds.busy} />
                 </div>
+                <CorpusWorkbench datasetId={d.id} images={images}
+                  coveragePlan={d.coverage_plan} showAnchors={false} showCoverage={false}
+                  onAnalyze={ds.analyzeCorpus} onSourceRights={ds.setSourceRights}
+                  onStatus={ds.setStatus} onBatch={ds.batchImages}
+                  reviewPairIds={unresolvedExclusiveIds} faceThresholds={d.face_thresholds}
+                  busy={ds.busy} />
+                <CoveragePlan plan={d.coverage_plan} onPolicyChange={ds.setCoveragePolicy} />
               </div>
             ) : (
               <>
@@ -833,12 +837,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   anchorPlan={d.anchor_plan} coveragePlan={d.coverage_plan}
                   onAnalyze={ds.analyzeCorpus} onClassify={ds.classify}
                   onAnchorDecision={ds.setAnchorDecision} onCoverage={ds.setCoverage}
+                  onSourceRights={ds.setSourceRights}
                   onStatus={ds.setStatus} onBatch={ds.batchImages}
                   reviewPairIds={unresolvedExclusiveIds} faceThresholds={d.face_thresholds}
                   busy={ds.busy}
                   visionAvailable={!!(caps.ollama?.reachable && caps.ollama?.vision_model_ready)} />
 
-                <CoveragePlan plan={d.coverage_plan}
+                <CoveragePlan plan={d.coverage_plan} onPolicyChange={ds.setCoveragePolicy}
                   onGoToGenerate={() => jumpTo({ targetId: 'ds-add-generate' })} />
 
                 <div id="gf-reference" className="scroll-mt-20">
@@ -859,11 +864,15 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   <div id="ds-add-generate" tabIndex={-1} className="scroll-mt-20">
                     <VariationCatalog key={`vc-${d.id}-${bodyFid}`} busy={ds.busy}
                       generating={act && act.kind === 'generate' ? act : null}
-                      onGenerate={(...args) => {
+                      onGenerate={async (...args) => {
                         // Guard-rail: a batch is already in flight — launching another one
                         // on top is usually an accidental double-click, not a plan.
-                        if (pending > 0 && !window.confirm(
-                          `A generation batch is already running (${pending} in flight).\n\nLaunch another one anyway?`)) return;
+                        if (pending > 0 && !(await confirm({
+                          title: 'Launch another generation batch?',
+                          message: `A generation batch is already running with ${pending} images in flight. Launching another may compete for the same engine.`,
+                          confirmLabel: 'Launch another',
+                          tone: 'warning',
+                        }))) return;
                         ds.generate(...args);
                       }}
                       hasRef={!!d.ref_filename || images.some((img) => img.source === 'import'
@@ -903,7 +912,14 @@ export default function DatasetWorkspace({ ds, onBack }) {
                ressemblance faciale, watermarks (find → clean → review), purge. */}
           <div className={sectionCls('curation')}>
             {heading('curation')}
-            <div id="gf-curation" className="scroll-mt-20 flex flex-col gap-2">
+            {reviewNeedsHydration ? (
+              <div role="status" className="rounded-lg border border-border bg-surface px-3 py-4 text-content-subtle text-sm">
+                {imageHydrationError ? 'Retry loading to unlock full-dataset curation.' : 'Loading every image before full-dataset curation…'}
+              </div>
+            ) : (
+              <div id="gf-curation" className="scroll-mt-20 flex flex-col gap-2">
+              <CurationHistory datasetId={d.id} refreshKey={curationHistoryKey}
+                onUndo={ds.undoCuration} />
               <SmallImageRescueReview images={images} datasetId={d.id}
                 onResolve={ds.resolveSmallImageRescue}
                 onPreview={(image) => setViewImg({ ...image, _rescueReviewPreview: true })}
@@ -955,8 +971,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
                     🔍 Review flagged ({watermarkDetected})
                   </button>
                 )}
-                {/* Watermark inpainting (LaMa) needs one extra ML package (simple-lama-
-                    inpainting). Show a scoped installer RIGHT HERE — where the lack is
+                {/* Watermark inpainting (LaMa) needs its Torch/Pillow/OpenCV runtime.
+                    Show a scoped installer RIGHT HERE — where the lack is
                     met — instead of sending the user back to Setup's whole ML-extras
                     step. Toggles a panel below (InstallRunner does the polling +
                     progress + manual-command fallback); on success caps re-fetch and
@@ -964,7 +980,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
                 {!caps.watermark_inpaint && (
                   <button type="button" onClick={() => setInstallInpaintOpen((v) => !v)}
                     aria-expanded={installInpaintOpen}
-                    title="Install the watermark-inpainting package (LaMa) so off-center marks can be repainted instead of only cropped. One-time download (~hundreds of MB)."
+                    title="Install the watermark-inpainting runtime (LaMa) so off-center marks can be repainted instead of only cropped. One-time download (~hundreds of MB)."
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-dashed border-amber-400/50 bg-amber-500/5 text-amber-200/90 text-sm hover:bg-amber-500/10">
                     ⬇ Install inpainting
                     <span className="text-content-subtle text-[0.625rem] font-normal">one-time · ~hundreds of MB</span>
@@ -986,8 +1002,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
                     <div className="flex flex-col">
                       <span className="text-amber-200 text-sm font-semibold">Install watermark inpainting (LaMa)</span>
                       <span className="text-content-subtle text-[0.6875rem]">
-                        Adds the <code className="text-amber-200/90">simple-lama-inpainting</code> package
-                        (pulls a CPU torch — one-time download, ~hundreds of MB). No restart, no GPU:
+                        Adds the verified LaMa runtime
+                        (pulls Torch — one-time download, ~hundreds of MB). No restart, no GPU required:
                         once done, ⬇ inpaints small off-center marks instead of skipping them.
                       </span>
                     </div>
@@ -1000,32 +1016,43 @@ export default function DatasetWorkspace({ ds, onBack }) {
                 </div>
               )}
 
-              {/* Nettoyage définitif des rejetées/échouées (ex-item du menu ⋯ More :
-                  c'est une action de curation, elle vit avec les autres). */}
+              {/* Recoverable cleanup of rejected/failed rows lives alongside the
+                  other curation actions. */}
               {unused > 0 && (
                 <div id="ds-curation-rejected-cleanup" tabIndex={-1}
                   className="flex items-center gap-2 flex-wrap rounded-lg border border-border bg-surface px-3 py-2 scroll-mt-20">
                   <button type="button" data-workspace-focus disabled={ds.busy}
-                    onClick={() => {
-                      if (window.confirm(`Permanently delete the ${unused} rejected/failed image(s) (files included)?`)) ds.purgeUnused();
+                    onClick={async () => {
+                      if (await confirm({
+                        title: `Move ${unused} rejected or failed image${unused === 1 ? '' : 's'} to Trash?`,
+                        message: 'The images remain recoverable in Settings until you empty the Trash.',
+                        confirmLabel: 'Move to Trash',
+                        tone: 'danger',
+                      })) ds.purgeUnused();
                     }}
-                    title="Permanently delete rejected and failed images"
+                    title="Move rejected and failed images to Trash"
                     className="px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm disabled:opacity-40">
-                    🧹 Purge rejected/failed ({unused})
+                    🧹 Trash rejected/failed ({unused})
                   </button>
                   <span className="text-content-subtle text-[0.6875rem]">
-                    frees disk space — rejected images never train either way
+                    rejected images never train; empty Trash later to reclaim disk space
                   </span>
                 </div>
               )}
-            </div>
+              </div>
+            )}
           </div>
 
           {/* ============ ✍️ Captions — générer/regénérer les captions, surveiller
                les fuites (identité/concept), outils de masse (find/replace, tags). */}
           <div className={sectionCls('captions')}>
             {heading('captions')}
-            <div id="gf-captions" className="scroll-mt-20 flex flex-col gap-2">
+            {reviewNeedsHydration ? (
+              <div role="status" className="rounded-lg border border-border bg-surface px-3 py-4 text-content-subtle text-sm">
+                {imageHydrationError ? 'Retry loading to unlock full-dataset caption review.' : 'Loading every image before full-dataset caption review…'}
+              </div>
+            ) : (
+              <div id="gf-captions" className="scroll-mt-20 flex flex-col gap-2">
               <div id="ds-captions-generate" tabIndex={-1}
                 className="flex items-center gap-2 flex-wrap rounded-lg border border-border bg-surface px-3 py-2 scroll-mt-20">
                 {!concept && (
@@ -1042,8 +1069,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   {ds.captioning ? `✨ ${keptCaptioned}/${kept} captioned…` : '✨ Caption the kept ones'}
                 </button>
                 <button type="button" disabled={ds.busy || !keptCaptioned}
-                  onClick={() => {
-                    if (window.confirm(recaptionConfirmation(d.kind || 'character', keptCaptioned))) ds.recaption(effCaptionMode);
+                  onClick={async () => {
+                    if (await confirm({
+                      title: `Replace ${keptCaptioned} existing caption${keptCaptioned === 1 ? '' : 's'}?`,
+                      message: recaptionConfirmation(d.kind || 'character', keptCaptioned),
+                      confirmLabel: 'Re-caption all',
+                      tone: 'warning',
+                    })) ds.recaption(effCaptionMode);
                   }}
                   title={isConcept
                     ? "Re-generates every caption while keeping the recurring concept unspoken"
@@ -1228,7 +1260,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   {' '}(showing {gridImages.length} of {images.length}).
                 </p>
               )}
-            </div>
+              </div>
+            )}
           </div>
 
           {/* ============ 📦 Import & export — fusionner un dataset existant ;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { INPUT_CLASS, Card, SecretField } from './primitives'
+import { safeJson } from '../../api/fetchClient'
 
 // Keep in sync with backend TRAIN_TYPES (face_dataset_service.py) — 'flux' had
 // been forgotten here when the FLUX.1 family landed (fixed alongside flux2klein).
@@ -43,7 +44,7 @@ function VastKeyGuide() {
 
 const VAST_SECRET = {
   key: 'VAST_API_KEY', label: 'vast.ai API key', testTarget: 'vast',
-  help: 'Enables cloud GPU training: the app rents a GPU for the run and shuts it down when done (typical run: $1-2). Get a key at cloud.vast.ai → Keys.',
+  help: 'Enables cloud GPU training (typical run: $1-2). The app requests shutdown when work ends and keeps retrying until vast.ai confirms it; the Cloud runs page stays billable/visible until then. Get a key at cloud.vast.ai → Keys.',
   guide: <VastKeyGuide />,
 }
 
@@ -56,10 +57,8 @@ function CloudTrainingCard({ config, setField }) {
     let alive = true
     // Raw fetch (not apiFetch): this info line is best-effort — a transient
     // 500 must not fire the global error toast over a cosmetic detail.
-    fetch('/api/dataset/train/cloud/status', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (alive && d && typeof d.month_spend === 'number') setSpend(d.month_spend) })
-      .catch(() => { /* info line is best-effort */ })
+    safeJson('/api/dataset/train/cloud/status')
+      .then((d) => { if (alive && d?.ok !== false && typeof d.month_spend === 'number') setSpend(d.month_spend) })
     return () => { alive = false }
   }, [])
   return (

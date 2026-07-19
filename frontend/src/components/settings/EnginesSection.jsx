@@ -153,6 +153,27 @@ export default function EnginesSection(props) {
 
       <ChatgptSubscriptionCard caps={caps} config={config} setField={setField} refreshCaps={refreshCaps} toast={toast} />
 
+      <Card title="Remote-generation privacy" help="API engines send the selected identity-reference images and prompts to their provider. Local Klein never leaves this computer.">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-content">Allow third-party image generation</p>
+            <p className="mt-1 text-xs text-content-muted">
+              {config.privacy?.allow_remote_generation
+                ? 'Allowed: Nano Banana and ChatGPT may receive the bounded reference pack and prompt when you select them.'
+                : 'Off (default): reference pixels and prompts stay on this computer; only local Klein can generate.'}
+            </p>
+          </div>
+          <button type="button" role="switch"
+            aria-checked={!!config.privacy?.allow_remote_generation}
+            aria-label="Allow third-party image generation"
+            onClick={() => setField('privacy', 'allow_remote_generation', !config.privacy?.allow_remote_generation)}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${config.privacy?.allow_remote_generation ? 'bg-emerald-500' : 'border border-border-strong bg-surface'}`}>
+            <span aria-hidden
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${config.privacy?.allow_remote_generation ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+      </Card>
+
       <Card title="Engines" help="Which engines appear in the generate panel, and which one is preselected.">
         <div>
           <label htmlFor="engine-default" className="block text-sm font-medium text-content">Default engine</label>

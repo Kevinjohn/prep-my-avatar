@@ -6,6 +6,7 @@ output dir is resolved via `cfg.comfyui_dir('output')` so tests can monkeypatch 
 """
 from __future__ import annotations
 from decimal import Decimal
+import hashlib
 import io
 import json
 import logging
@@ -15,8 +16,11 @@ import re
 import shutil
 import threading
 import time
+import tempfile
 import uuid
 import zipfile
+from pathlib import Path
+from datetime import datetime, timezone
 
 from PIL import Image
 
@@ -24,17 +28,20 @@ from ..extensions import db
 from ..models import FaceDataset, FaceDatasetImage
 from .. import config as cfg
 from . import dataset_activity
+from . import image_processing
+from . import trash
 from .import_analysis import analyse_image_bytes, analysis_json, parse_analysis
+from .perceptual_hash import DHashIndex as _DHashIndex, dhash as _dhash, hamming as _hamming
 
 # Garde le modèle vision chaud entre les images d'un même batch caption/classify
 # (sinon Ollama le recharge - cold start ~10s - à CHAQUE image). Déchargé en fin
 # de batch pour rendre la VRAM à ComfyUI. ComfyUI est déjà en pause pendant la passe.
 _VISION_BATCH_KEEPALIVE = '5m'
-from .face_variations import (CAPTION_PROMPT, CAPTION_PROMPT_BOORU,
+from .face_variations import (  # noqa: E402 - constant is declared before the large import
                               CAPTION_REFINE_CONCEPT_PROMPT, CAPTION_LEAK_FIX_PROMPT,
                               EXPAND_CONCEPT_TERMS_PROMPT,
-                              CLASSIFY_PROMPT, HEAD_BBOX_PROMPT, WATERMARK_BBOX_PROMPT,
-                              JOYCAPTION_PROMPT, aspect_for_label, caption_prompt_for,
+                              CLASSIFY_PROMPT, WATERMARK_BBOX_PROMPT,
+                              aspect_for_label, caption_prompt_for,
                               caption_prompt_for_style, caption_prompt_for_concept,
                               caption_has_identity_leak, caption_has_concept_leak,
                               concept_lexical_field,
@@ -81,6 +88,27 @@ def _img_path(img) -> str:
     return os.path.join(_dataset_dir(img.dataset_id), img.filename)
 
 
+def _atomic_write_bytes(path, data) -> None:
+    """Durably publish bytes without exposing a partial destination file."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f'.{destination.name}.', suffix='.tmp', dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(bytes(data))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 def _store_original_bytes(user_id, dataset_id, raw) -> str:
     """Persist the exact uploaded bytes under a generated, safe relative name."""
     format_ext = {
@@ -95,9 +123,7 @@ def _store_original_bytes(user_id, dataset_id, raw) -> str:
     filename = f"{user_id}_original_{uuid.uuid4().hex[:12]}{ext}"
     relative = os.path.join('originals', filename)
     path = os.path.join(_dataset_dir(dataset_id), relative)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'wb') as fh:
-        fh.write(bytes(raw))
+    _atomic_write_bytes(path, raw)
     return relative
 
 
@@ -219,6 +245,12 @@ def _parse_generation_anchor_metadata(value) -> list[dict]:
             'role': str(item.get('role') or 'import')[:32],
             'source_name': str(item.get('source_name') or '')[:255],
             'selection_reason': str(item.get('selection_reason') or '')[:120],
+            'sha256': (str(item.get('sha256') or '')[:64]
+                       if re.fullmatch(r'[0-9a-f]{64}', str(item.get('sha256') or ''))
+                       else ''),
+            'byte_size': (int(item.get('byte_size'))
+                          if isinstance(item.get('byte_size'), int)
+                          and item.get('byte_size') >= 0 else None),
         })
     return out
 
@@ -434,7 +466,9 @@ def select_generation_references(ds, *, preferred_ids=None,
         seen_files.add(filename)
         anchors.append({'bytes': raw, 'filename': filename, 'image_id': image_id,
                         'role': role, 'source_name': source_name,
-                        'selection_reason': selection_reason})
+                        'selection_reason': selection_reason,
+                        'sha256': hashlib.sha256(raw).hexdigest(),
+                        'byte_size': len(raw)})
         return True
 
     # The explicit reference workflow keeps its ordering semantics: the main
@@ -474,7 +508,9 @@ def _generation_anchor_metadata_json(anchors) -> str:
     return json.dumps([
         {'image_id': anchor.get('image_id'), 'filename': anchor.get('filename'),
          'role': anchor.get('role'), 'source_name': anchor.get('source_name') or '',
-         'selection_reason': anchor.get('selection_reason') or ''}
+         'selection_reason': anchor.get('selection_reason') or '',
+         'sha256': anchor.get('sha256') or hashlib.sha256(anchor['bytes']).hexdigest(),
+         'byte_size': anchor.get('byte_size', len(anchor['bytes']))}
         for anchor in anchors
     ], ensure_ascii=False)
 
@@ -490,6 +526,163 @@ def _explicit_reference_metadata_json(ds) -> str:
                   'selection_reason': 'explicit additional reference'}
                  for filename in extra_ref_filenames(ds))
     return json.dumps(items, ensure_ascii=False)
+
+
+def _write_reference_file(path: Path, data: bytes) -> None:
+    """Create one private, uniquely named reference file without overwriting."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+@trash.serialized_transaction
+def set_primary_reference(user_id, dataset_id, original_webp: bytes,
+                          cropped_webp: bytes) -> str:
+    """Atomically replace the primary reference and retain an undoable Trash entry.
+
+    Both new files are durable before the database pointer changes. Superseded
+    files move to Trash; any write, move, or commit failure restores the previous
+    filesystem/database state.
+    """
+    ds = get_dataset(user_id, dataset_id)
+    if not ds:
+        raise ValueError('dataset not found')
+    dataset_root = Path(_dataset_dir(dataset_id)).resolve()
+    original_name = f"{user_id}_datasetreforig_{uuid.uuid4().hex[:8]}.webp"
+    reference_name = f"{user_id}_datasetref_{uuid.uuid4().hex[:8]}.webp"
+    original_path = dataset_root / original_name
+    reference_path = dataset_root / reference_name
+    created = []
+    trashed = None
+    try:
+        _write_reference_file(original_path, bytes(original_webp))
+        created.append(original_path)
+        _write_reference_file(reference_path, bytes(cropped_webp))
+        created.append(reference_path)
+
+        old_names = []
+        for name in (ds.ref_filename, ds.ref_original_filename):
+            if (isinstance(name, str) and Path(name).name == name
+                    and name not in old_names):
+                old_names.append(name)
+        old_paths = [dataset_root / name for name in old_names
+                     if (dataset_root / name).is_file()
+                     and not (dataset_root / name).is_symlink()]
+        if old_paths:
+            from . import trash
+            trashed = trash.send_paths_to_trash(
+                old_paths, context=f'dataset-{dataset_id}-primary-reference', metadata={
+                    'kind': 'dataset_primary_reference',
+                    'dataset_id': dataset_id,
+                    'ref_filename': (ds.ref_filename
+                                     if ds.ref_filename in old_names else None),
+                    'ref_original_filename': (
+                        ds.ref_original_filename
+                        if ds.ref_original_filename in old_names else None),
+                    'label': f'Dataset {dataset_id} primary reference',
+                })
+
+        ds.ref_original_filename = original_name
+        ds.ref_filename = reference_name
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        for path in created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception('could not remove failed reference write %s', path)
+        if trashed is not None:
+            try:
+                from . import trash
+                trash.restore_entry(trashed['id'])
+            except Exception:
+                logger.exception('could not roll back primary-reference trash %s',
+                                 trashed['id'])
+        raise
+    return reference_name
+
+
+@trash.serialized_transaction
+def restore_trashed_primary_reference(user_id, entry_id):
+    """Swap a superseded primary reference back in without destroying the current one."""
+    from . import trash
+    metadata = trash.entry_metadata(entry_id)
+    if metadata.get('kind') != 'dataset_primary_reference':
+        raise ValueError('not a primary reference trash entry')
+    try:
+        dataset_id = int(metadata.get('dataset_id'))
+    except (TypeError, ValueError):
+        raise ValueError('trash entry has no valid dataset id')
+    ds = get_dataset(user_id, dataset_id)
+    if not ds:
+        raise ValueError('the original dataset is no longer available')
+    dataset_root = Path(_dataset_dir(dataset_id)).resolve()
+
+    restored_names = []
+    for key in ('ref_filename', 'ref_original_filename'):
+        name = metadata.get(key)
+        if name is not None and (not isinstance(name, str) or Path(name).name != name):
+            raise ValueError('primary reference trash entry is invalid')
+        if name and name not in restored_names:
+            restored_names.append(name)
+    recorded_targets = {
+        str(Path(item.get('original_path', '')).resolve(strict=False))
+        for item in (metadata.get('files') or []) if item.get('original_path')
+    }
+    expected_targets = {str(dataset_root / name) for name in restored_names}
+    if not restored_names or recorded_targets != expected_targets:
+        raise ValueError('primary reference trash entry is invalid')
+
+    current_names = []
+    for name in (ds.ref_filename, ds.ref_original_filename):
+        if (isinstance(name, str) and Path(name).name == name
+                and name not in current_names):
+            current_names.append(name)
+    current_paths = [dataset_root / name for name in current_names
+                     if (dataset_root / name).is_file()
+                     and not (dataset_root / name).is_symlink()]
+    current_trash = None
+    restored_metadata = None
+    try:
+        if current_paths:
+            current_trash = trash.send_paths_to_trash(
+                current_paths, context=f'dataset-{dataset_id}-primary-reference', metadata={
+                    'kind': 'dataset_primary_reference',
+                    'dataset_id': dataset_id,
+                    'ref_filename': (ds.ref_filename
+                                     if ds.ref_filename in current_names else None),
+                    'ref_original_filename': (
+                        ds.ref_original_filename
+                        if ds.ref_original_filename in current_names else None),
+                    'label': f'Dataset {dataset_id} primary reference',
+                })
+        restored_metadata = trash.restore_entry(entry_id, consume=False)['metadata']
+        ds.ref_filename = metadata.get('ref_filename')
+        ds.ref_original_filename = metadata.get('ref_original_filename')
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if restored_metadata is not None:
+            try:
+                trash.rollback_restored_entry(entry_id, restored_metadata)
+            except Exception:
+                logger.exception('could not roll back primary-reference restore %s', entry_id)
+        if current_trash is not None:
+            try:
+                trash.restore_entry(current_trash['id'])
+            except Exception:
+                logger.exception('could not restore current primary reference %s',
+                                 current_trash['id'])
+        raise
+    try:
+        trash.remove_entry(entry_id)
+    except OSError:
+        logger.exception('restored primary reference but could not consume trash entry %s',
+                         entry_id)
+    return ds
 
 
 def _variation_gap_ids_json(variation) -> str:
@@ -510,29 +703,107 @@ def add_extra_ref(user_id, dataset_id, image_bytes) -> str:
     extras = extra_ref_filenames(ds)
     if len(extras) >= MAX_EXTRA_REFS:
         raise ValueError(f'{MAX_EXTRA_REFS} extra references max')
+    normalized = normalize_to_webp(image_bytes)
     fn = f"{user_id}_datasetrefx_{uuid.uuid4().hex[:8]}.webp"
-    with open(os.path.join(_dataset_dir(dataset_id), fn), 'wb') as fh:
-        fh.write(normalize_to_webp(image_bytes))
+    path = Path(_dataset_dir(dataset_id)) / fn
+    with open(path, 'wb') as fh:
+        fh.write(normalized)
     ds.ref_extra_filenames = json.dumps(extras + [fn])
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        path.unlink(missing_ok=True)
+        raise
     return fn
 
 
+@trash.serialized_transaction
 def remove_extra_ref(user_id, dataset_id, filename) -> bool:
-    """Retire une référence additionnelle (entrée JSON + fichier). False si inconnue."""
+    """Move one additional reference to recoverable Trash and detach it.
+
+    The file move and database edit behave as one transaction: a failed commit
+    restores the file and keeps the old list.  A dedicated restore path below
+    reattaches the filename as well as its bytes.
+    """
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return False
     extras = extra_ref_filenames(ds)
     if filename not in extras:
         return False
-    try:
-        os.remove(os.path.join(_dataset_dir(dataset_id), filename))
-    except OSError:
-        pass
+    from . import trash
+    path = Path(_dataset_dir(dataset_id)) / filename
+    trashed = None
+    if path.is_file() and not path.is_symlink():
+        trashed = trash.send_paths_to_trash(
+            [path], context=f'dataset-{dataset_id}-extra-reference', metadata={
+                'kind': 'dataset_extra_reference',
+                'dataset_id': dataset_id,
+                'filename': filename,
+                'label': filename,
+            })
     ds.ref_extra_filenames = json.dumps([f for f in extras if f != filename])
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if trashed is not None:
+            try:
+                trash.restore_entry(trashed['id'])
+            except Exception:
+                logger.exception('could not roll back extra-reference trash %s', trashed['id'])
+        raise
     return True
+
+
+@trash.serialized_transaction
+def restore_trashed_extra_reference(user_id, entry_id):
+    """Restore an extra-reference Trash entry and reattach it to its dataset."""
+    from . import trash
+    metadata = trash.entry_metadata(entry_id)
+    if metadata.get('kind') != 'dataset_extra_reference':
+        raise ValueError('not an extra reference trash entry')
+    try:
+        dataset_id = int(metadata.get('dataset_id'))
+    except (TypeError, ValueError):
+        raise ValueError('trash entry has no valid dataset id')
+    filename = metadata.get('filename')
+    if not isinstance(filename, str) or Path(filename).name != filename:
+        raise ValueError('trash entry has no valid reference filename')
+    ds = get_dataset(user_id, dataset_id)
+    if not ds:
+        raise ValueError('the original dataset is no longer available')
+    extras = extra_ref_filenames(ds)
+    if filename in extras:
+        raise ValueError('the reference is already attached')
+    if len(extras) >= MAX_EXTRA_REFS:
+        raise ValueError(f'{MAX_EXTRA_REFS} extra references max')
+    dataset_root = Path(_dataset_dir(dataset_id)).resolve()
+    files = metadata.get('files') or []
+    if len(files) != 1:
+        raise ValueError('extra reference trash entry is invalid')
+    original = files[0].get('original_path')
+    if (not original
+            or not Path(original).resolve(strict=False).is_relative_to(dataset_root)
+            or Path(original).name != filename):
+        raise ValueError('trash restore target is outside the dataset')
+    restored_metadata = trash.restore_entry(entry_id, consume=False)['metadata']
+    ds.ref_extra_filenames = json.dumps(extras + [filename])
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        try:
+            trash.rollback_restored_entry(entry_id, restored_metadata)
+        except Exception:
+            logger.exception('could not roll back extra-reference restore %s', entry_id)
+        raise
+    try:
+        trash.remove_entry(entry_id)
+    except OSError:
+        logger.exception('restored extra reference but could not consume trash entry %s', entry_id)
+    return ds
 
 
 # --- CRUD ------------------------------------------------------------------
@@ -610,12 +881,22 @@ def is_body_fidelity(ds) -> bool:
 
 COMPOSITION_TARGET_FACE = {'face': 12, 'bust': 6, 'body': 6, 'back': 1}
 COMPOSITION_TARGET_BODY = {'face': 8, 'bust': 8, 'body': 8, 'back': 2}
+COVERAGE_PROFILES = ('strict', 'balanced', 'experimental')
+_PROFILE_SCALE = {'strict': 1.25, 'balanced': 1.0, 'experimental': 0.65}
 
 
 def coverage_targets(ds) -> dict:
     """Return the authoritative framing target for this dataset's fidelity."""
-    return dict(COMPOSITION_TARGET_BODY if is_body_fidelity(ds)
-                else COMPOSITION_TARGET_FACE)
+    base = COMPOSITION_TARGET_BODY if is_body_fidelity(ds) else COMPOSITION_TARGET_FACE
+    profile = ((getattr(ds, 'coverage_profile', None) or 'balanced').lower()
+               if ds else 'balanced')
+    scale = _PROFILE_SCALE.get(profile, 1.0)
+    targets = {key: max(1, int(math.ceil(value * scale))) for key, value in base.items()}
+    custom = _safe_json(getattr(ds, 'coverage_targets', None)) if ds else None
+    for key, value in ((custom or {}).get('framing') or {}).items():
+        if key in targets and isinstance(value, int) and not isinstance(value, bool):
+            targets[key] = max(0, min(100, value))
+    return targets
 
 
 COVERAGE_DIMENSION_TARGETS = {
@@ -629,53 +910,56 @@ COVERAGE_DIMENSION_TARGETS = {
 }
 
 
+def normalize_coverage_targets(targets) -> dict:
+    """Validate and canonicalize a user- or backup-supplied coverage override."""
+    if targets is not None and not isinstance(targets, dict):
+        raise ValueError('coverage targets must be an object')
+    clean = {'framing': {}, 'dimensions': {}}
+    for key, value in ((targets or {}).get('framing') or {}).items():
+        if key not in COMPOSITION_TARGET_FACE or isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f'invalid framing target: {key}')
+        clean['framing'][key] = max(0, min(100, value))
+    for dimension, values in ((targets or {}).get('dimensions') or {}).items():
+        if dimension not in COVERAGE_DIMENSION_TARGETS or not isinstance(values, dict):
+            raise ValueError(f'invalid coverage dimension: {dimension}')
+        clean['dimensions'][dimension] = {}
+        for value, target in values.items():
+            if (value not in COVERAGE_DIMENSION_TARGETS[dimension]
+                    or isinstance(target, bool) or not isinstance(target, int)):
+                raise ValueError(f'invalid {dimension} target: {value}')
+            clean['dimensions'][dimension][value] = max(0, min(100, target))
+    return clean
+
+
 def _variation_coverage_hint(entry) -> dict:
-    """Infer catalogue coverage tags from its stable id/label/prompt."""
-    text = ' '.join(str(entry.get(key) or '') for key in ('id', 'label', 'prompt')).lower()
-    out = {}
-    if 'profile' in text or 'profil' in text:
-        out['angle'] = 'profile'
-    elif 'three-quarter' in text or '_34' in text or '3/4' in text:
-        out['angle'] = 'three-quarter'
-    elif entry.get('framing') == 'back' or 'from behind' in text:
-        out['angle'] = 'back'
-    elif 'front' in text or 'face_' in text:
-        out['angle'] = 'front'
-    for needle, value in (('laugh', 'laugh'), ('rire', 'laugh'), ('smil', 'smile'),
-                          ('sourire', 'smile'), ('serious', 'serious'),
-                          ('surpris', 'surprised'), ('pensive', 'pensive'),
-                          ('neutral', 'neutral')):
-        if needle in text:
-            out['expression'] = value
-            break
-    for needle, value in (('golden', 'golden-hour'), ('studio light', 'studio'),
-                          ('rim light', 'low-light'), ('night', 'low-light'),
-                          ('window light', 'daylight'), ('daylight', 'daylight'),
-                          ('indoor', 'indoor')):
-        if needle in text:
-            out['lighting'] = value
-            break
-    for needle, value in (('sitting', 'sitting'), ('walking', 'moving'),
-                          ('running', 'moving'), ('full-length', 'standing'),
-                          ('full body', 'standing')):
-        if needle in text:
-            out['pose'] = value
-            break
-    if entry.get('framing') == 'face':
-        out.setdefault('pose', 'headshot')
-    for needle, value in (('outdoor', 'outdoor'), ('studio', 'studio'),
-                          ('home interior', 'indoor'), ('indoor', 'indoor'),
-                          ('plain background', 'plain'), ('neutral background', 'plain')):
-        if needle in text:
-            out['background'] = value
-            break
-    return out
+    """Read catalogue-authored structured metadata; prompt prose is not parsed."""
+    return normalize_coverage(entry.get('coverage') or {})
 
 
-def _dimension_plans(accepted) -> list[dict]:
+def coverage_dimension_targets(ds) -> dict:
+    profile = ((getattr(ds, 'coverage_profile', None) or 'balanced').lower()
+               if ds else 'balanced')
+    scale = _PROFILE_SCALE.get(profile, 1.0)
+    targets = {
+        dimension: {value: max(1, int(math.ceil(target * scale)))
+                    for value, target in values.items()}
+        for dimension, values in COVERAGE_DIMENSION_TARGETS.items()
+    }
+    custom = _safe_json(getattr(ds, 'coverage_targets', None)) if ds else None
+    for dimension, values in ((custom or {}).get('dimensions') or {}).items():
+        if dimension not in targets or not isinstance(values, dict):
+            continue
+        for value, target in values.items():
+            if (value in targets[dimension] and isinstance(target, int)
+                    and not isinstance(target, bool)):
+                targets[dimension][value] = max(0, min(100, target))
+    return targets
+
+
+def _dimension_plans(accepted, targets_by_dimension) -> list[dict]:
     parsed = [(img, parse_coverage(img.coverage_json)) for img in accepted]
     result = []
-    for dimension, targets in COVERAGE_DIMENSION_TARGETS.items():
+    for dimension, targets in targets_by_dimension.items():
         classified = sum(1 for _img, values in parsed if values.get(dimension))
         items = []
         for value, target in targets.items():
@@ -690,6 +974,46 @@ def _dimension_plans(accepted) -> list[dict]:
     return result
 
 
+def _conceptual_coverage_plan(ds, images):
+    profile = (ds.coverage_profile or 'balanced').lower()
+    target_by_profile = {'strict': 30, 'balanced': 20, 'experimental': 12}
+    accepted = [img for img in images if img.filename and img.status == 'keep']
+    # Source diversity is an admission signal, so rejected/pending corpus rows
+    # must not make the trainable set look more diverse than it really is.
+    imported = [img for img in accepted if img.source == 'import']
+    captioned = [img for img in accepted if (img.caption or '').strip()]
+    distinct_sources = len({(img.source_name or '').strip().lower() for img in imported
+                            if (img.source_name or '').strip()})
+    target = target_by_profile.get(profile, 20)
+    return {
+        'available': True,
+        'mode': 'style' if is_style(ds) else 'concept',
+        'profile': profile,
+        'targets': {'usable': target, 'source_diversity': 3},
+        'summary': {
+            'usable': len(accepted), 'imported': len(imported),
+            'captioned': len(captioned), 'uncaptioned': len(accepted) - len(captioned),
+            'source_diversity': distinct_sources,
+            'near_duplicates': sum(1 for img in imported if img.duplicate_of_id),
+            'gaps': int(len(accepted) < target) + int(distinct_sources < 3),
+        },
+        'admission': [
+            {'id': 'usable', 'label': 'Accepted examples', 'have': len(accepted),
+             'target': target, 'state': 'covered' if len(accepted) >= target else 'weak'},
+            {'id': 'sources', 'label': 'Distinct source labels', 'have': distinct_sources,
+             'target': 3, 'state': 'covered' if distinct_sources >= 3 else 'weak'},
+            {'id': 'captions', 'label': 'Captioned examples', 'have': len(captioned),
+             'target': len(accepted),
+             'state': 'covered' if len(captioned) == len(accepted) else 'weak'},
+        ],
+        'recommendations': ([{
+            'kind': 'import', 'score': 1.0,
+            'reason': f'Add {max(0, target - len(accepted))} more admitted examples',
+            'estimated_remote_cost_usd': 0,
+        }] if len(accepted) < target else []),
+    }
+
+
 def build_coverage_plan(ds, images) -> dict:
     """Describe what the corpus covers and what generation could fill.
 
@@ -700,7 +1024,8 @@ def build_coverage_plan(ds, images) -> dict:
     uncertainty that a human review or later classifier can resolve.
     """
     if is_conceptual(ds):
-        return {'available': False, 'reason': 'coverage planning is for character datasets'}
+        return _conceptual_coverage_plan(ds, images)
+    profile = (ds.coverage_profile or 'balanced').lower()
     targets = coverage_targets(ds)
     # Only accepted rows count as covered. Pending generations are candidates,
     # not members of the training set yet.
@@ -731,7 +1056,7 @@ def build_coverage_plan(ds, images) -> dict:
             'generated': sum(1 for img in generated if img.framing == framing),
         })
 
-    dimension_plans = _dimension_plans(accepted)
+    dimension_plans = _dimension_plans(accepted, coverage_dimension_targets(ds))
     labels = []
     for entry in VARIATION_CATALOG:
         framing = entry.get('framing')
@@ -768,13 +1093,56 @@ def build_coverage_plan(ds, images) -> dict:
     # Keep the default plan useful and affordable: a handful of distinct gap
     # shots is preselected in the catalogue, while the complete list remains
     # visible for manual expansion.
-    recommended = recommended[:8]
+    recommendation_limit = {'strict': 6, 'balanced': 8, 'experimental': 12}.get(profile, 8)
+    recommended = recommended[:recommendation_limit]
+    unclassified = [img for img in all_imported
+                    if img.framing in (None, 'unknown')
+                    or len(parse_coverage(img.coverage_json)) < 6]
+    low_confidence = []
+    for img in all_imported:
+        provenance = _safe_json(img.coverage_provenance) or {}
+        values = [float(value) for value in (provenance.get('confidence') or {}).values()
+                  if isinstance(value, (int, float)) and not isinstance(value, bool)]
+        if values and sum(values) / len(values) < 0.7:
+            low_confidence.append(img)
+    joint = []
+    seen_joint = set()
+    for entry in VARIATION_CATALOG:
+        hint = _variation_coverage_hint(entry)
+        signature = tuple((key, hint.get(key)) for key in ('angle', 'expression', 'lighting')
+                          if hint.get(key))
+        if len(signature) < 2 or signature in seen_joint:
+            continue
+        seen_joint.add(signature)
+        have = sum(1 for img in accepted if all(
+            parse_coverage(img.coverage_json).get(key) == value for key, value in signature))
+        joint.append({'id': '|'.join(f'{key}:{value}' for key, value in signature),
+                      'values': dict(signature), 'have': have, 'target': 1,
+                      'state': 'covered' if have else 'missing'})
+    recommendations = []
+    if unclassified or low_confidence:
+        recommendations.append({
+            'kind': 'classify', 'score': 1.0,
+            'reason': f'Review {len(set(unclassified + low_confidence))} unknown/low-confidence image(s) before spending',
+            'estimated_remote_cost_usd': 0,
+        })
+    for rank, entry in enumerate(recommended):
+        recommendations.append({
+            'kind': 'generate', 'variation_id': entry['id'],
+            'score': round(max(0.1, 1.0 - rank * 0.07), 2),
+            'reason': f"Missing {entry['framing']} coverage ({entry.get('axis') or 'composition'})",
+            'estimated_remote_cost_usd': {'nanobanana': 0.04, 'chatgpt': 0.04},
+        })
     return {
         'available': True,
+        'mode': 'character',
+        'profile': profile,
         'targets': targets,
         'framing': framing_gaps,
         'dimensions': dimension_plans,
         'combinations': labels,
+        'joint_coverage': joint,
+        'recommendations': recommendations,
         'recommended_variation_ids': [entry['id'] for entry in recommended],
         'summary': {
             'usable': len(accepted), 'imported': len(imported),
@@ -787,9 +1155,8 @@ def build_coverage_plan(ds, images) -> dict:
             'missing_combinations': sum(1 for entry in labels if entry['state'] == 'missing'),
             'unknown_combinations': sum(1 for entry in labels if entry['state'] == 'unknown'),
             'originals_preserved': sum(1 for img in all_imported if img.original_filename),
-            'unclassified': sum(1 for img in all_imported
-                                if img.framing in (None, 'unknown')
-                                or len(parse_coverage(img.coverage_json)) < 6),
+            'unclassified': len(unclassified),
+            'low_confidence': len(low_confidence),
             'near_duplicates': sum(1 for img in all_imported if img.duplicate_of_id),
             'duplicate_groups': len({img.duplicate_of_id for img in all_imported
                                      if img.duplicate_of_id}),
@@ -806,6 +1173,20 @@ def set_fidelity(user_id, dataset_id, fidelity) -> bool:
     if not ds:
         return False
     ds.fidelity = normalize_fidelity(fidelity)
+    db.session.commit()
+    return True
+
+
+def set_coverage_policy(user_id, dataset_id, profile, targets=None) -> bool:
+    ds = get_dataset(user_id, dataset_id)
+    if not ds:
+        return False
+    normalized = str(profile or 'balanced').strip().lower()
+    if normalized not in COVERAGE_PROFILES:
+        raise ValueError('coverage profile must be strict, balanced, or experimental')
+    clean = normalize_coverage_targets(targets)
+    ds.coverage_profile = normalized
+    ds.coverage_targets = json.dumps(clean, ensure_ascii=False, sort_keys=True)
     db.session.commit()
     return True
 
@@ -903,11 +1284,13 @@ def update_dataset_settings(user_id, dataset_id, *, name=None, trigger_word=None
 
 def get_dataset(user_id, dataset_id):
     ds = db.session.get(FaceDataset, dataset_id)
-    return ds if ds and str(ds.user_id) == str(user_id) else None
+    return ds if (ds and ds.trashed_at is None
+                  and str(ds.user_id) == str(user_id)) else None
 
 
 def list_datasets(user_id):
     return (FaceDataset.query.filter_by(user_id=str(user_id))
+            .filter(FaceDataset.trashed_at.is_(None))
             .order_by(FaceDataset.updated_at.desc()).all())
 
 
@@ -919,7 +1302,8 @@ def dataset_list_stats(user_id):
     from sqlalchemy import case, func
     from ..models import TrainingRunRecord
     owned = (db.session.query(FaceDataset.id)
-             .filter_by(user_id=str(user_id))).subquery()
+             .filter_by(user_id=str(user_id))
+             .filter(FaceDataset.trashed_at.is_(None))).subquery()
     stats = {}
     img_rows = (db.session.query(
         FaceDatasetImage.dataset_id,
@@ -928,6 +1312,7 @@ def dataset_list_stats(user_id):
         func.sum(case(((FaceDatasetImage.status == 'keep')
                        & (func.coalesce(FaceDatasetImage.caption, '') != ''), 1), else_=0)))
         .filter(FaceDatasetImage.dataset_id.in_(db.session.query(owned.c.id)))
+        .filter(FaceDatasetImage.status != 'trashed')
         .group_by(FaceDatasetImage.dataset_id).all())
     for ds_id, total, kept, captioned in img_rows:
         stats[ds_id] = {'images_total': int(total or 0), 'images_kept': int(kept or 0),
@@ -954,29 +1339,33 @@ def _clear_watermark_metadata(img):
 def set_image_status(user_id, image_id, status):
     if status not in _VALID_STATUS:
         raise ValueError('invalid status')
-    img = db.session.get(FaceDatasetImage, image_id)
+    img = _owned_image(user_id, image_id)
     if not img:
-        return False
-    ds = db.session.get(FaceDataset, img.dataset_id)
-    if not ds or str(ds.user_id) != str(user_id):
         return False
     if img.derivation_kind in _SMALL_IMAGE_DERIVATIONS:
         raise ValueError('resolve small-image rescue pairs with the dedicated review action')
     if _has_image_improvement_pair(img):
         raise ValueError('resolve reconstructed image pairs with the dedicated comparison action')
+    from . import curation_history
+    fields = ('status', 'watermark_state', 'watermark_bbox', 'watermark_regions')
+    before = curation_history.snapshot(img, fields)
     if status == 'reject':
         _clear_watermark_metadata(img)
     img.status = status
+    curation_history.record(
+        user_id, img, f'status:{status}', before,
+        curation_history.snapshot(img, fields))
     db.session.commit()
     return True
 
 
 def _owned_image(user_id, image_id):
     img = db.session.get(FaceDatasetImage, image_id)
-    if not img:
+    if not img or img.status == 'trashed':
         return None
     ds = db.session.get(FaceDataset, img.dataset_id)
-    return img if ds and str(ds.user_id) == str(user_id) else None
+    return img if (ds and ds.trashed_at is None
+                   and str(ds.user_id) == str(user_id)) else None
 
 
 def _has_image_improvement_pair(img) -> bool:
@@ -1197,6 +1586,14 @@ def resolve_small_image_rescue(user_id, dataset_id, candidate_id, choice):
             return result
         if source.status != 'pending' or candidate.status not in ('pending', 'failed'):
             raise RuntimeError('small-image rescue is not in a resolvable state')
+        from . import curation_history
+        fields = ('status', 'watermark_state', 'watermark_bbox', 'watermark_regions')
+        before = {row.id: curation_history.snapshot(row, fields)
+                  for row in (source, candidate)}
+        if job_id and not candidate.filename and before[candidate.id].get('status') == 'pending':
+            # Undo must not recreate a pending row whose queue job was already
+            # cancelled outside this transaction.
+            before[candidate.id]['status'] = 'failed'
         if choice == 'klein':
             if candidate.status == 'failed' or not candidate.filename:
                 raise ValueError('Klein rescue result is not ready')
@@ -1209,6 +1606,11 @@ def resolve_small_image_rescue(user_id, dataset_id, candidate_id, choice):
             source.status = candidate.status = 'reject'
             _clear_watermark_metadata(source)
             _clear_watermark_metadata(candidate)
+        batch_id = curation_history.new_batch_id()
+        for row in (source, candidate):
+            curation_history.record(
+                user_id, row, f'small_rescue:{choice}', before[row.id],
+                curation_history.snapshot(row, fields), batch_id=batch_id)
         db.session.commit()
         result = _payload(source, candidate)
     except Exception:
@@ -1291,6 +1693,15 @@ def resolve_image_improvement(user_id, dataset_id, candidate_id, choice):
             if already != choice:
                 raise RuntimeError(f'image reconstruction was already resolved as {already}')
         else:
+            from . import curation_history
+            fields = ('status', 'watermark_state', 'watermark_bbox', 'watermark_regions')
+            affected = [source, *siblings]
+            before = {row.id: curation_history.snapshot(row, fields) for row in affected}
+            cancelled = set(cancel_job_ids)
+            for row in siblings:
+                if (row.job_id in cancelled and not row.filename
+                        and before[row.id].get('status') == 'pending'):
+                    before[row.id]['status'] = 'failed'
             if choice == 'improved' and not candidate.filename:
                 raise ValueError('the reconstructed candidate is not ready')
             source.status = 'keep' if choice == 'original' else 'reject'
@@ -1301,6 +1712,11 @@ def resolve_image_improvement(user_id, dataset_id, candidate_id, choice):
                     _clear_watermark_metadata(sibling)
             if source.status == 'reject':
                 _clear_watermark_metadata(source)
+            batch_id = curation_history.new_batch_id()
+            for row in affected:
+                curation_history.record(
+                    user_id, row, f'image_improvement:{choice}', before[row.id],
+                    curation_history.snapshot(row, fields), batch_id=batch_id)
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -1316,7 +1732,12 @@ def set_image_caption(user_id, image_id, caption):
     img = _owned_image(user_id, image_id)
     if not img:
         return False
+    from . import curation_history
+    before = curation_history.snapshot(img, ('caption',))
     img.caption = (caption or '').strip()[:CAPTION_MAX_CHARS] or None
+    curation_history.record(
+        user_id, img, 'caption', before,
+        curation_history.snapshot(img, ('caption',)))
     db.session.commit()
     return True
 
@@ -1334,18 +1755,19 @@ def _crop_resize_file(path, x, y, w, h, size=1024, dst=None):
     box was smaller than `size` and got enlarged), or None on failure."""
     if not os.path.exists(path):
         return False, None
-    src = Image.open(path).convert('RGB')
-    box = (max(0, int(x)), max(0, int(y)), min(src.width, int(x + w)), min(src.height, int(y + h)))
-    if box[2] <= box[0] or box[3] <= box[1]:
-        return False, None
-    bw, bh = box[2] - box[0], box[3] - box[1]
-    if bw >= bh:
-        out_w, out_h = size, max(1, round(size * bh / bw))
-    else:
-        out_w, out_h = max(1, round(size * bw / bh)), size
-    scale = size / max(bw, bh)
-    out = io.BytesIO()
-    src.crop(box).resize((out_w, out_h), Image.LANCZOS).save(out, 'WEBP', quality=92)
+    with Image.open(path) as opened, opened.convert('RGB') as src:
+        box = (max(0, int(x)), max(0, int(y)), min(src.width, int(x + w)), min(src.height, int(y + h)))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            return False, None
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        if bw >= bh:
+            out_w, out_h = size, max(1, round(size * bh / bw))
+        else:
+            out_w, out_h = max(1, round(size * bw / bh)), size
+        scale = size / max(bw, bh)
+        out = io.BytesIO()
+        with src.crop(box) as cropped, cropped.resize((out_w, out_h), Image.LANCZOS) as resized:
+            resized.save(out, 'WEBP', quality=92)
     with open(dst or path, 'wb') as fh:
         fh.write(out.getvalue())
     return True, scale
@@ -1366,9 +1788,14 @@ def crop_image(user_id, image_id, x, y, w, h):
     return ok
 
 
+@trash.serialized_transaction
 def delete_image(user_id, image_id):
-    """Permanently delete a dataset image (DB row + file). If the image is
-    still a pending generation, its queue job is cancelled first. Returns bool."""
+    """Move a dataset image to the recoverable app trash.
+
+    The row remains as a hidden tombstone so restoring the files can also
+    restore captions, curation, analysis, and provenance without lossy JSON
+    reconstruction. Pending generation jobs are cancelled first.
+    """
     img = _owned_image(user_id, image_id)
     if not img:
         return False
@@ -1382,74 +1809,330 @@ def delete_image(user_id, image_id):
             queue_manager.cancel_job(img.job_id, str(user_id), 'image')
         except Exception:
             pass
+    from . import trash
+    paths = []
     if img.filename:
-        try:
-            os.remove(_img_path(img))
-        except OSError:
-            pass
+        path = Path(_img_path(img))
+        if path.exists():
+            paths.append(path)
     if img.original_filename:
+        path = Path(_dataset_dir(img.dataset_id)) / img.original_filename
+        if path.exists() and path not in paths:
+            paths.append(path)
+    metadata = {
+        'kind': 'dataset_image',
+        'image_id': img.id,
+        'dataset_id': img.dataset_id,
+        'previous_status': img.status,
+        'label': img.source_name or img.variation_label or img.filename or f'image {img.id}',
+    }
+    if paths:
+        trashed = trash.send_paths_to_trash(
+            paths, context=f'dataset-{img.dataset_id}-image-{img.id}', metadata=metadata)
+    else:
+        trashed = trash.store_bytes(
+            'image-record.json', json.dumps({'image_id': img.id}).encode('utf-8'),
+            context=f'dataset-{img.dataset_id}-image-{img.id}', metadata=metadata)
+    img.status = 'trashed'
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
         try:
-            os.remove(os.path.join(_dataset_dir(img.dataset_id), img.original_filename))
-        except OSError:
-            pass
-    # Keep duplicate groups valid when their representative is deleted. The
-    # strongest remaining sibling becomes the new root; historical generated
-    # provenance is intentionally untouched.
-    siblings = (FaceDatasetImage.query
-                .filter_by(dataset_id=img.dataset_id, duplicate_of_id=img.id).all())
-    if siblings:
-        replacement = sorted(siblings, key=lambda row: (-_anchor_quality_score(row), row.id))[0]
-        replacement.duplicate_of_id = None
-        for sibling in siblings:
-            if sibling.id != replacement.id:
-                sibling.duplicate_of_id = replacement.id
-    db.session.delete(img)
-    db.session.commit()
+            file_meta = trash.entry_metadata(trashed['id']).get('files') or []
+            if file_meta and all(item.get('original_path') for item in file_meta):
+                trash.restore_entry(trashed['id'])
+            else:
+                trash.remove_entry(trashed['id'])
+        except Exception:
+            logger.exception('could not roll back image trash entry %s', trashed['id'])
+        raise
     return True
 
 
+@trash.serialized_transaction
+def restore_trashed_image(user_id, entry_id):
+    """Restore one soft-deleted image and its original bytes from Trash."""
+    from . import trash
+    metadata = trash.entry_metadata(entry_id)
+    if metadata.get('kind') != 'dataset_image':
+        raise ValueError('not a dataset image trash entry')
+    try:
+        image_id = int(metadata.get('image_id'))
+    except (TypeError, ValueError):
+        raise ValueError('trash entry has no valid image id')
+    img = db.session.get(FaceDatasetImage, image_id)
+    ds = db.session.get(FaceDataset, img.dataset_id) if img else None
+    if (not img or not ds or ds.trashed_at is not None
+            or str(ds.user_id) != str(user_id) or img.status != 'trashed'):
+        raise ValueError('the original dataset image is no longer restorable')
+    dataset_root = (cfg.dataset_images_root() / str(ds.id)).resolve()
+    files = metadata.get('files') or []
+    for item in files:
+        original = item.get('original_path')
+        if original and not Path(original).resolve(strict=False).is_relative_to(dataset_root):
+            raise ValueError('trash restore target is outside the dataset')
+    restored_metadata = None
+    if files and all(item.get('original_path') for item in files):
+        restored_metadata = trash.restore_entry(entry_id, consume=False)['metadata']
+    previous = metadata.get('previous_status')
+    img.status = previous if previous in _VALID_STATUS else 'reject'
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if restored_metadata is not None:
+            try:
+                trash.rollback_restored_entry(entry_id, restored_metadata)
+            except Exception:
+                logger.exception('could not roll back image restore %s', entry_id)
+        raise
+    try:
+        trash.remove_entry(entry_id)
+    except OSError:
+        logger.exception('restored image but could not consume trash entry %s', entry_id)
+    return img
+
+
+@trash.serialized_transaction
+def restore_regenerated_image(user_id, entry_id):
+    """Swap a prior generated version back into its stable image row."""
+    metadata = trash.entry_metadata(entry_id)
+    if metadata.get('kind') != 'regenerated_image':
+        raise ValueError('not a regenerated image trash entry')
+    try:
+        image_id = int(metadata.get('image_id'))
+    except (TypeError, ValueError):
+        raise ValueError('regenerated image entry has no valid image id')
+    previous = metadata.get('previous_state')
+    if not isinstance(previous, dict) or not previous.get('filename'):
+        raise ValueError('regenerated image entry has no restorable row state')
+    img = db.session.get(FaceDatasetImage, image_id)
+    ds = db.session.get(FaceDataset, img.dataset_id) if img else None
+    if (img is None or ds is None or ds.trashed_at is not None
+            or str(ds.user_id) != str(user_id)):
+        raise ValueError('the generated image is no longer restorable')
+    dataset_root = Path(_dataset_dir(ds.id)).resolve()
+    for item in metadata.get('files') or []:
+        original = item.get('original_path')
+        if original and not Path(original).resolve(strict=False).is_relative_to(dataset_root):
+            raise ValueError('trash restore target is outside the dataset')
+
+    replacement_entry = None
+    current_path = ((dataset_root / Path(img.filename).name).resolve(strict=False)
+                    if img.filename else None)
+    if (current_path is not None and current_path.is_relative_to(dataset_root)
+            and current_path.is_file() and not current_path.is_symlink()):
+        replacement_entry = trash.send_paths_to_trash(
+            [current_path], context=f'dataset-{img.dataset_id}-regeneration', metadata={
+                'kind': 'regenerated_image',
+                'dataset_id': img.dataset_id,
+                'image_id': img.id,
+                'previous_state': _replacement_state(img),
+                'label': img.variation_label or current_path.name,
+            })
+    restored = trash.restore_entry(entry_id, consume=False)
+    try:
+        for field in _REPLACEMENT_STATE_FIELDS:
+            if field in previous:
+                setattr(img, field, previous[field])
+        img.job_id = None
+        img.fail_reason = None
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        try:
+            trash.rollback_restored_entry(entry_id, restored['metadata'])
+            if replacement_entry is not None:
+                trash.restore_entry(replacement_entry['id'])
+        except Exception:
+            logger.exception('could not roll back regenerated version restore %s', entry_id)
+        raise
+    try:
+        trash.remove_entry(entry_id)
+    except OSError:
+        logger.exception('restored generated version but could not consume %s', entry_id)
+    return img
+
+
+@trash.serialized_transaction
 def delete_dataset(user_id, dataset_id):
-    """Permanently delete a whole dataset: all image rows + files, the dataset
-    row, and its per-dataset image folder. Cancels any in-flight generations
-    first. Returns bool (False if not owned)."""
+    """Move a complete dataset backup and source folder to recoverable Trash.
+
+    Training runs, exported trainer folders, and deployed LoRAs are deliberately
+    retained.  This is a soft delete: restoring the dataset must restore the
+    complete usable project, not just its source images and database rows.
+    """
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return False
-    # Capture le trigger AVANT de supprimer la ligne : sert à purger les artefacts
-    # d'entraînement orphelins (LoRA déployés dans ComfyUI, run/export ai-toolkit,
-    # job config) qui survivaient à la suppression du dataset et restaient
-    # sélectionnables en génération. Import paresseux = pas d'import circulaire ;
-    # lora_training n'existe pas encore en phase 1 -> purge silencieusement sautée.
-    lt = None
-    purge_user, purge_trigger = ds.user_id, None
+    # Build the portable DB+file snapshot before mutating either source. The raw
+    # directory is moved into the same trash entry as a second recovery layer.
+    # Write the ZIP directly to the temporary file: a corpus may be gigabytes,
+    # so materialising the entire archive as one ``bytes`` value is unsafe.
+    from . import trash
+    dsdir = Path(_dataset_dir(dataset_id))
+    cfg._data_dir().mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f'dataset-{dataset_id}-', suffix='.zip',
+        dir=cfg._data_dir(), delete=False)
+    archive_path = Path(tmp.name)
     try:
-        from . import lora_training as lt
-        purge_trigger = lt._safe_trigger(ds)
-    except ImportError:
-        pass
+        build_backup_zip(user_id, dataset_id, destination=tmp)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+    except Exception:
+        tmp.close()
+        archive_path.unlink(missing_ok=True)
+        raise
+    finally:
+        tmp.close()
+
+    # Cancel queue-backed work before moving the dataset folder. API-backed
+    # requests cannot be recalled, so _commit_generated_replacement also checks
+    # the dataset tombstone after this serialized transaction completes.
     imgs = FaceDatasetImage.query.filter_by(dataset_id=dataset_id).all()
     for img in imgs:
-        if img.status == 'pending' and not img.filename and img.job_id:  # still generating
+        if img.status == 'pending' and not img.filename and img.job_id:
             try:
                 from ..job_queue import queue_manager
                 queue_manager.cancel_job(img.job_id, str(user_id), 'image')
             except Exception:
-                pass
-        db.session.delete(img)
-    db.session.delete(ds)
-    db.session.commit()
-    # Drop the per-dataset image folder (files + ref). rmtree, not unlink.
-    shutil.rmtree(_dataset_dir(dataset_id), ignore_errors=True)
-    # Purge les artefacts d'entraînement (LoRA ComfyUI + ai-toolkit + config). Best
-    # effort : un échec ici ne doit pas faire échouer la suppression du dataset.
-    if lt is not None:
+                logger.exception('could not cancel dataset image job %s', img.job_id)
+    targets = [archive_path]
+    if dsdir.exists():
+        targets.append(dsdir)
+    try:
+        trashed = trash.send_paths_to_trash(
+            targets, context=f'dataset-{dataset_id}-{ds.name}', metadata={
+                'kind': 'dataset_backup',
+                'dataset_id': dataset_id,
+                'dataset_name': ds.name,
+                'backup_name': archive_path.name,
+            })
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    ds.trashed_at = datetime.now(timezone.utc)
+    ds.trash_entry_id = trashed['id']
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
         try:
-            removed = lt.purge_training_artifacts(purge_user, purge_trigger)
-            if removed:
-                logger.info('delete_dataset %s : %d artefact(s) LoRA purgé(s)', dataset_id, len(removed))
-        except Exception as e:
-            logger.warning('delete_dataset %s : purge artefacts LoRA échouée : %s', dataset_id, e)
+            trash.restore_entry(trashed['id'])
+            archive_path.unlink(missing_ok=True)
+        except Exception:
+            logger.exception('could not roll back dataset trash entry %s', trashed['id'])
+        raise
     return True
+
+
+@trash.serialized_transaction
+def restore_trashed_dataset(user_id, entry_id):
+    """Restore a soft-deleted dataset, preserving its stable database graph."""
+    from . import trash
+    metadata = trash.entry_metadata(entry_id)
+    if metadata.get('kind') != 'dataset_backup':
+        raise ValueError('not a dataset backup trash entry')
+    backup_name = metadata.get('backup_name')
+    if not isinstance(backup_name, str) or Path(backup_name).name != backup_name:
+        raise ValueError('dataset backup entry is invalid')
+    try:
+        dataset_id = int(metadata.get('dataset_id'))
+    except (TypeError, ValueError):
+        raise ValueError('dataset backup entry has no valid dataset id')
+    dataset = db.session.get(FaceDataset, dataset_id)
+    if dataset is not None:
+        if str(dataset.user_id) != str(user_id) or dataset.trashed_at is None:
+            raise ValueError('the dataset is not restorable from this entry')
+        result = trash.restore_entry(entry_id, consume=False)
+        dataset.trashed_at = None
+        dataset.trash_entry_id = None
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            try:
+                trash.rollback_restored_entry(entry_id, result['metadata'])
+            except Exception:
+                logger.exception('could not roll back dataset restore %s', entry_id)
+            raise
+        for item in result['metadata'].get('files') or []:
+            if item.get('stored_name') != backup_name or not item.get('original_path'):
+                continue
+            try:
+                Path(item['original_path']).unlink(missing_ok=True)
+            except OSError:
+                logger.exception('restored dataset but could not remove backup %s',
+                                 item['original_path'])
+        try:
+            trash.remove_entry(entry_id)
+        except OSError:
+            logger.exception('restored dataset but could not consume trash entry %s',
+                             entry_id)
+        return dataset
+
+    # Disaster-recovery fallback for a trash folder copied alongside a lost DB.
+    with trash.open_entry_file(entry_id, backup_name) as backup:
+        restored = import_backup_zip(user_id, backup)
+    try:
+        trash.remove_entry(entry_id)
+    except OSError:
+        logger.exception('restored backup but could not consume trash entry %s', entry_id)
+    return restored
+
+
+def purge_trashed_record(user_id, metadata, entry_id) -> None:
+    """Hard-delete the tombstone owned by an entry before Empty Trash.
+
+    Training/cloud provenance intentionally survives dataset deletion, but the
+    live dataset graph must not retain rows that can no longer be restored.
+    """
+    kind = metadata.get('kind')
+    from ..models import CurationEvent, LoraTestImage
+    if kind == 'dataset_image':
+        try:
+            image_id = int(metadata.get('image_id'))
+        except (TypeError, ValueError):
+            raise ValueError('dataset image trash entry has no valid image id')
+        image = db.session.get(FaceDatasetImage, image_id)
+        if image is None:
+            return
+        dataset = db.session.get(FaceDataset, image.dataset_id)
+        if (dataset is None or str(dataset.user_id) != str(user_id)
+                or image.status != 'trashed'):
+            raise ValueError('dataset image tombstone is not purgeable')
+        CurationEvent.query.filter_by(image_id=image.id).delete(
+            synchronize_session=False)
+        db.session.delete(image)
+    elif kind == 'dataset_backup':
+        try:
+            dataset_id = int(metadata.get('dataset_id'))
+        except (TypeError, ValueError):
+            raise ValueError('dataset backup entry has no valid dataset id')
+        dataset = db.session.get(FaceDataset, dataset_id)
+        if dataset is None:
+            return
+        if (str(dataset.user_id) != str(user_id)
+                or dataset.trashed_at is None
+                or dataset.trash_entry_id != entry_id):
+            raise ValueError('dataset tombstone is not purgeable')
+        CurationEvent.query.filter_by(dataset_id=dataset.id).delete(
+            synchronize_session=False)
+        LoraTestImage.query.filter_by(dataset_id=dataset.id).delete(
+            synchronize_session=False)
+        FaceDatasetImage.query.filter_by(dataset_id=dataset.id).delete(
+            synchronize_session=False)
+        db.session.delete(dataset)
+    else:
+        return
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
 
 
 def cancel_pending(user_id, dataset_id):
@@ -1491,8 +2174,7 @@ def cancel_pending(user_id, dataset_id):
 
 
 def purge_unused(user_id, dataset_id):
-    """Permanently delete all REJECTED and FAILED images of a dataset (rows +
-    files). Returns the number purged."""
+    """Move all rejected and failed images to recoverable Trash."""
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return 0
@@ -1521,6 +2203,8 @@ BACKUP_VERSION = 1
 _BACKUP_MAX_FILES = 10050
 _BACKUP_MAX_ROWS = 5000
 _BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024   # 2 GB uncompressed (zip-bomb guard)
+_BACKUP_MAX_METADATA_BYTES = 64 * 1024 * 1024
+_BACKUP_MAX_TEXT_VALUE_BYTES = 1024 * 1024
 _BACKUP_NAME_RE = re.compile(
     r'^[\w.-]+\.(webp|jpg|jpeg|png|bmp|gif|tif|tiff|avif|bin)$', re.IGNORECASE)
 
@@ -1528,17 +2212,19 @@ _BACKUP_NAME_RE = re.compile(
 # à la machine source — un backup restauré ne peut pas « regénérer »).
 _BACKUP_IMG_FIELDS = ('filename', 'source', 'framing', 'variation_label', 'status',
                       'caption', 'variation_prompt', 'face_score', 'face_state',
-                      'watermark_regions', 'parent_image_id', 'derivation_kind',
+                      'watermark_state', 'watermark_bbox', 'watermark_regions',
+                      'parent_image_id', 'derivation_kind',
                       'fail_reason', 'source_name', 'original_filename',
                       'source_sha256', 'analysis_json',
                       'training_usefulness', 'coverage_value', 'upscale_ratio',
                       'perceptual_hash', 'duplicate_of_id', 'anchor_decision',
                       'coverage_json', 'generation_anchor_ids',
+                      'coverage_provenance', 'source_rights',
                       'generation_anchor_metadata', 'generation_engine',
-                      'generation_gap_ids')
+                      'generation_gap_ids', 'generation_provenance')
 
 
-def build_backup_zip(user_id, dataset_id) -> bytes:
+def build_backup_zip(user_id, dataset_id, *, destination=None):
     """Self-contained backup of one dataset: manifest.json (settings) +
     images.json (rows) + ref/ + images/ files. Ordinary rows without a file are
     skipped, but exclusive-review metadata rows are retained so their pair can
@@ -1549,6 +2235,7 @@ def build_backup_zip(user_id, dataset_id) -> bytes:
     dsdir = _dataset_dir(dataset_id)
     from sqlalchemy import or_
     rows = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
+            .filter(FaceDatasetImage.status != 'trashed')
             .filter(or_(FaceDatasetImage.filename.isnot(None),
                         FaceDatasetImage.derivation_kind.in_(_EXCLUSIVE_DERIVATIONS)))
             .all())
@@ -1556,18 +2243,50 @@ def build_backup_zip(user_id, dataset_id) -> bytes:
         'format': BACKUP_FORMAT, 'version': BACKUP_VERSION,
         'name': ds.name, 'trigger_word': ds.trigger_word,
         'kind': ds.kind, 'fidelity': ds.fidelity,
+        'coverage_profile': ds.coverage_profile,
+        'coverage_targets': ds.coverage_targets,
         'concept_desc': ds.concept_desc, 'concept_terms': ds.concept_terms,
         'train_type': ds.train_type, 'train_base_model': ds.train_base_model,
-        'train_variant': ds.train_variant, 'best_settings': ds.best_settings,
+        'train_variant': ds.train_variant, 'train_vae_path': ds.train_vae_path,
+        'train_te_path': ds.train_te_path, 'train_settings': ds.train_settings,
+        'best_settings': ds.best_settings,
         'ref_filename': ds.ref_filename, 'ref_original_filename': ds.ref_original_filename,
         'ref_extra_filenames': ds.ref_extra_filenames,
     }
     # backup_image_id is archive-local only. It lets restore remap parent_image_id
     # to the newly allocated row ids instead of retaining ids from the source DB.
-    images_meta = [dict({'backup_image_id': img.id},
-                        **{f: getattr(img, f) for f in _BACKUP_IMG_FIELDS})
-                   for img in rows]
-    buf = io.BytesIO()
+    images_meta = []
+    for img in rows:
+        values = {field: getattr(img, field) for field in _BACKUP_IMG_FIELDS}
+        if values.get('original_filename'):
+            # ZIP names are POSIX paths. Normalize this one nested DB path too,
+            # otherwise a Windows-created backup loses originals on macOS/Linux.
+            values['original_filename'] = values['original_filename'].replace('\\', '/')
+        images_meta.append({'backup_image_id': img.id, **values})
+    buf = destination if destination is not None else io.BytesIO()
+    dataset_root = Path(dsdir).resolve()
+    written_arcnames = set()
+    written_relatives = set()
+
+    def add_file(z, relative, arcname):
+        if not isinstance(relative, str) or not relative:
+            return
+        candidate = Path(dsdir) / relative
+        try:
+            candidate.resolve().relative_to(dataset_root)
+        except (OSError, ValueError):
+            logger.warning('dataset %s: unsafe backup path skipped: %s', dataset_id,
+                           relative)
+            return
+        normalized_relative = candidate.resolve()
+        if (candidate.is_symlink() or not candidate.is_file()
+                or arcname in written_arcnames
+                or normalized_relative in written_relatives):
+            return
+        z.write(candidate, arcname)
+        written_arcnames.add(arcname)
+        written_relatives.add(normalized_relative)
+
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=1))
         z.writestr('images.json', json.dumps(images_meta, ensure_ascii=False, indent=1))
@@ -1576,43 +2295,120 @@ def build_backup_zip(user_id, dataset_id) -> bytes:
             ref_names += list(json.loads(ds.ref_extra_filenames or '[]'))
         except ValueError:
             pass
-        for n in ref_names:
-            p = os.path.join(dsdir, n)
-            if os.path.isfile(p):
-                z.write(p, f'ref/{n}')
+        for n in dict.fromkeys(ref_names):
+            add_file(z, n, f'ref/{n}')
         for img in rows:
             if not img.filename:
                 continue   # metadata-only small-rescue candidate
-            p = os.path.join(dsdir, img.filename)
-            if os.path.isfile(p):
-                z.write(p, f'images/{img.filename}')
+            add_file(z, img.filename, f'images/{img.filename}')
         for img in rows:
             if not img.original_filename:
                 continue
-            p = os.path.join(dsdir, img.original_filename)
-            if os.path.isfile(p):
-                z.write(p, f'originals/{os.path.basename(img.original_filename)}')
-    return buf.getvalue()
+            add_file(z, img.original_filename,
+                     f'originals/{os.path.basename(img.original_filename)}')
+    return buf if destination is not None else buf.getvalue()
 
 
-def import_backup_zip(user_id, zip_bytes):
+def import_backup_zip(user_id, zip_source):
     """Restore a backup as a NEW dataset (never merges into an existing one).
     Hardened: manifest format/version check, per-entry filename whitelist (no
     separators/traversal), file-count and uncompressed-size caps. Returns the
     created FaceDataset."""
     try:
-        z = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile:
+        source = io.BytesIO(zip_source) if isinstance(zip_source, (bytes, bytearray)) else zip_source
+        z = zipfile.ZipFile(source)
+    except (zipfile.BadZipFile, OSError, TypeError):
         raise ValueError('not a zip file')
+    state = {}
+    try:
+        return _import_backup_archive(user_id, z, state)
+    except Exception:
+        # create_dataset commits to allocate its id. Any later extraction or DB
+        # failure must remove that partial import instead of leaving a visible,
+        # half-restored dataset and untracked files behind.
+        db.session.rollback()
+        dataset_id = state.get('dataset_id')
+        if dataset_id is not None:
+            try:
+                FaceDatasetImage.query.filter_by(dataset_id=dataset_id).delete(
+                    synchronize_session=False)
+                dataset = db.session.get(FaceDataset, dataset_id)
+                if dataset is not None:
+                    db.session.delete(dataset)
+                db.session.commit()
+                shutil.rmtree(_dataset_dir(dataset_id), ignore_errors=True)
+            except Exception:
+                db.session.rollback()
+                logger.exception('could not clean up failed backup import dataset %s',
+                                 dataset_id)
+        raise
+    finally:
+        z.close()
+
+
+def _import_backup_archive(user_id, z, state):
+    archive_infos = z.infolist()
+    names = [info.filename for info in archive_infos]
+    if len(names) != len(set(names)):
+        raise ValueError('backup contains duplicate archive paths')
+    if len(archive_infos) > _BACKUP_MAX_FILES + 2:
+        raise ValueError(f'too many files in backup (max {_BACKUP_MAX_FILES + 2})')
+    if any(info.flag_bits & 0x1 for info in archive_infos):
+        raise ValueError('encrypted backup entries are not supported')
+    if sum(info.file_size for info in archive_infos) > _BACKUP_MAX_BYTES:
+        raise ValueError('backup too large (max 2 GB uncompressed)')
+    by_name = {info.filename: info for info in archive_infos}
+    metadata_infos = [by_name.get('manifest.json'), by_name.get('images.json')]
+    if any(info is None for info in metadata_infos):
+        raise ValueError(
+            'not a dataset backup (manifest.json/images.json missing or invalid)')
+    if sum(info.file_size for info in metadata_infos) > _BACKUP_MAX_METADATA_BYTES:
+        raise ValueError('backup metadata is too large')
     try:
         manifest = json.loads(z.read('manifest.json').decode('utf-8'))
         images_meta = json.loads(z.read('images.json').decode('utf-8'))
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, UnicodeError, zipfile.BadZipFile, RuntimeError):
         raise ValueError('not a dataset backup (manifest.json/images.json missing or invalid)')
+    if not isinstance(manifest, dict):
+        raise ValueError('invalid backup manifest')
     if manifest.get('format') != BACKUP_FORMAT:
         raise ValueError('not a dataset backup')
-    if int(manifest.get('version') or 0) > BACKUP_VERSION:
+    try:
+        raw_version = manifest.get('version') or 0
+        if isinstance(raw_version, bool):
+            raise ValueError
+        version = int(raw_version)
+    except (TypeError, ValueError):
+        raise ValueError('invalid backup version')
+    if version < 1:
+        raise ValueError('invalid backup version')
+    if version > BACKUP_VERSION:
         raise ValueError('backup made by a newer version of the app - update first')
+    for field, value in manifest.items():
+        if field == 'version':
+            continue
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f'invalid backup manifest field: {field}')
+        if (isinstance(value, str)
+                and len(value.encode('utf-8')) > _BACKUP_MAX_TEXT_VALUE_BYTES):
+            raise ValueError(f'backup manifest field is too large: {field}')
+    if manifest.get('kind') not in (None, '', 'character', 'concept', 'style'):
+        raise ValueError('invalid backup dataset kind')
+    if manifest.get('fidelity') not in (None, '', 'face', 'body'):
+        raise ValueError('invalid backup dataset fidelity')
+    if manifest.get('train_type') not in (None, '', *TRAIN_TYPES):
+        raise ValueError('invalid backup training family')
+    if manifest.get('coverage_profile') not in (
+            None, '', *COVERAGE_PROFILES):
+        raise ValueError('invalid backup coverage profile')
+    if manifest.get('coverage_targets'):
+        try:
+            parsed_targets = json.loads(manifest['coverage_targets'])
+            clean_targets = normalize_coverage_targets(parsed_targets)
+        except (TypeError, ValueError):
+            raise ValueError('invalid backup coverage targets')
+        manifest['coverage_targets'] = json.dumps(
+            clean_targets, ensure_ascii=False, sort_keys=True)
     if not isinstance(images_meta, list):
         raise ValueError('invalid backup image metadata')
     if len(images_meta) > _BACKUP_MAX_ROWS:
@@ -1623,6 +2419,25 @@ def import_backup_zip(user_id, zip_bytes):
     for meta in images_meta:
         if not isinstance(meta, dict):
             raise ValueError('invalid backup image metadata')
+        # Early version-1 fixtures did not stamp source; preserve their
+        # historical generated-row default while validating all new backups.
+        if meta.get('source') is None:
+            meta['source'] = 'generated'
+        for field in _BACKUP_IMG_FIELDS:
+            value = meta.get(field)
+            if field in ('parent_image_id', 'duplicate_of_id'):
+                valid_type = (value is None or (
+                    isinstance(value, int) and not isinstance(value, bool) and value > 0))
+            elif field in ('face_score', 'upscale_ratio'):
+                valid_type = (value is None or (
+                    isinstance(value, (int, float)) and not isinstance(value, bool)))
+            else:
+                valid_type = value is None or isinstance(value, str)
+            if not valid_type:
+                raise ValueError(f'invalid backup image field: {field}')
+            if (isinstance(value, str)
+                    and len(value.encode('utf-8')) > _BACKUP_MAX_TEXT_VALUE_BYTES):
+                raise ValueError(f'backup image field is too large: {field}')
         backup_id = meta.get('backup_image_id')
         if backup_id is not None:
             if isinstance(backup_id, bool) or not isinstance(backup_id, int) or backup_id <= 0:
@@ -1647,27 +2462,60 @@ def import_backup_zip(user_id, zip_bytes):
                 raise ValueError('multiple Klein rescue candidates for one source')
         elif derivation == KLEIN_IMAGE_IMPROVE:
             parent_id = meta.get('parent_image_id')
-            if backup_id is None or isinstance(parent_id, bool) or not isinstance(parent_id, int):
+            # New schemas use ON DELETE SET NULL for a hard-removed legacy
+            # source. A surviving reconstruction with pixels is intentionally
+            # accepted below and restored as an ordinary generated image.
+            if (backup_id is None or isinstance(parent_id, bool)
+                    or (parent_id is not None and not isinstance(parent_id, int))):
                 raise ValueError('invalid reconstruction provenance')
+        if meta.get('status') not in _VALID_STATUS:
+            raise ValueError('invalid image status in backup')
+        if meta.get('source') not in ('generated', 'import', 'upload'):
+            raise ValueError('invalid image source in backup')
+        if meta.get('framing') not in (None, 'face', 'bust', 'body', 'back', 'unknown'):
+            raise ValueError('invalid image framing in backup')
+        if meta.get('training_usefulness') not in (None, 'green', 'amber', 'red'):
+            raise ValueError('invalid image usefulness in backup')
+        if meta.get('coverage_value') not in (None, 'green', 'amber', 'unknown'):
+            raise ValueError('invalid image coverage value in backup')
+        if meta.get('anchor_decision') not in (None, '', 'auto', 'pinned', 'excluded'):
+            raise ValueError('invalid image anchor decision in backup')
+        if meta.get('watermark_state') not in (
+                None, 'none', 'detected', 'dismissed', 'cleaned', 'failed'):
+            raise ValueError('invalid image watermark state in backup')
     if any(parent_id not in rescue_sources for parent_id in rescue_parent_counts):
         raise ValueError('Klein rescue candidate has no valid source')
-    infos = [i for i in z.infolist()
+    infos = [i for i in archive_infos
              if i.filename.startswith(('ref/', 'images/', 'originals/'))]
     if len(infos) > _BACKUP_MAX_FILES:
         raise ValueError(f'too many files in backup (max {_BACKUP_MAX_FILES})')
     if sum(i.file_size for i in infos) > _BACKUP_MAX_BYTES:
         raise ValueError('backup too large (max 2 GB uncompressed)')
+    destinations = []
+    for info in infos:
+        prefix, _, tail = info.filename.partition('/')
+        base = os.path.basename(info.filename)
+        if (prefix not in ('ref', 'images', 'originals') or not tail
+                or not _BACKUP_NAME_RE.match(base) or base != tail):
+            continue
+        destinations.append(base if prefix in ('ref', 'images')
+                            else os.path.join(prefix, base))
+    if len(destinations) != len(set(destinations)):
+        raise ValueError('backup file destinations collide')
     name = (manifest.get('name') or 'Restored dataset')[:100]
     trigger = (manifest.get('trigger_word') or 'restored')[:60]
     ds = create_dataset(user_id, name, trigger, kind=manifest.get('kind'),
                         concept_desc=manifest.get('concept_desc'),
                         train_type=manifest.get('train_type'))
-    for field in ('concept_terms', 'train_base_model', 'train_variant', 'best_settings',
+    state['dataset_id'] = ds.id
+    for field in ('concept_terms', 'train_base_model', 'train_variant',
+                  'train_vae_path', 'train_te_path', 'train_settings', 'best_settings',
+                  'coverage_profile', 'coverage_targets',
                   'ref_filename', 'ref_original_filename', 'ref_extra_filenames', 'fidelity'):
         setattr(ds, field, manifest.get(field))
     dsdir = _dataset_dir(ds.id)
     os.makedirs(dsdir, exist_ok=True)
-    extracted = set()
+    extracted = {'ref': set(), 'images': set(), 'originals': set()}
     for info in infos:
         prefix, _, tail = info.filename.partition('/')
         base = os.path.basename(info.filename)
@@ -1681,19 +2529,18 @@ def import_backup_zip(user_id, zip_bytes):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         with z.open(info) as src, open(destination, 'wb') as dst:
             shutil.copyfileobj(src, dst, 1024 * 1024)
-        extracted.add(base)
-        extracted.add(relative)
+        extracted[prefix].add(base)
     n_rows = 0
     restored_rows = []
     valid_source_ids = {
         meta.get('backup_image_id') for meta in images_meta
         if isinstance(meta, dict)
         and meta.get('derivation_kind') == SMALL_IMAGE_SOURCE
-        and meta.get('filename') in extracted
+        and meta.get('filename') in extracted['images']
     }
     valid_image_ids = {
         meta.get('backup_image_id') for meta in images_meta
-        if isinstance(meta, dict) and meta.get('filename') in extracted
+        if isinstance(meta, dict) and meta.get('filename') in extracted['images']
     }
     for meta in images_meta:
         if not isinstance(meta, dict):
@@ -1701,7 +2548,7 @@ def import_backup_zip(user_id, zip_bytes):
         fn = meta.get('filename')
         derivation = meta.get('derivation_kind')
         is_candidate = derivation in (KLEIN_SMALL_IMAGE, KLEIN_IMAGE_IMPROVE)
-        if fn and fn not in extracted:
+        if fn and fn not in extracted['images']:
             continue
         if not fn and not is_candidate:
             continue   # in-flight exclusive-review candidates are metadata-only
@@ -1721,7 +2568,13 @@ def import_backup_zip(user_id, zip_bytes):
             values['derivation_kind'] = None
             values['fail_reason'] = (values.get('fail_reason')
                                      or 'Recovered from orphaned reconstruction provenance.')
-        if values.get('original_filename') not in extracted:
+        original_filename = values.get('original_filename')
+        if isinstance(original_filename, str):
+            original_filename = original_filename.replace('\\', '/')
+            values['original_filename'] = original_filename
+        if (not isinstance(original_filename, str)
+                or not original_filename.startswith('originals/')
+                or Path(original_filename).name not in extracted['originals']):
             values['original_filename'] = None
         if is_candidate and not fn and values.get('status') in ('pending', 'keep'):
             values['status'] = 'failed'
@@ -1763,10 +2616,20 @@ def import_backup_zip(user_id, zip_bytes):
             remapped_metadata.append(anchor)
         img.generation_anchor_metadata = json.dumps(remapped_metadata, ensure_ascii=False)
     # Refs referenced by the manifest but absent from the zip -> clear (no dangling).
-    if ds.ref_filename and ds.ref_filename not in extracted:
+    if ds.ref_filename and ds.ref_filename not in extracted['ref']:
         ds.ref_filename = None
-    if ds.ref_original_filename and ds.ref_original_filename not in extracted:
+    if ds.ref_original_filename and ds.ref_original_filename not in extracted['ref']:
         ds.ref_original_filename = None
+    try:
+        extra_refs = json.loads(ds.ref_extra_filenames or '[]')
+    except (TypeError, ValueError):
+        extra_refs = []
+    if not isinstance(extra_refs, list):
+        extra_refs = []
+    ds.ref_extra_filenames = json.dumps([
+        name for name in extra_refs
+        if isinstance(name, str) and Path(name).name == name and name in extracted['ref']
+    ], ensure_ascii=False)
     db.session.commit()
     normalize_legacy_image_improvement_rows(ds.id)
     logger.info(f"dataset backup restored: '{name}' -> #{ds.id} ({n_rows} image rows)")
@@ -1795,6 +2658,8 @@ def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
     rows = (FaceDatasetImage.query
             .filter_by(dataset_id=dataset_id, status='keep')
             .filter(FaceDatasetImage.caption.isnot(None)).all())
+    from . import curation_history
+    batch_id = curation_history.new_batch_id()
     changed = 0
     for img in rows:
         old = img.caption or ''
@@ -1814,7 +2679,11 @@ def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
             new = ', '.join(out)
         new = new.strip()[:CAPTION_MAX_CHARS] or None
         if new != img.caption:
+            before = curation_history.snapshot(img, ('caption',))
             img.caption = new
+            curation_history.record(
+                user_id, img, f'caption_replace:{mode}', before,
+                curation_history.snapshot(img, ('caption',)), batch_id=batch_id)
             changed += 1
     if changed:
         db.session.commit()
@@ -1854,7 +2723,12 @@ def batch_image_action(user_id, dataset_id, image_ids, action):
             if delete_image(user_id, img.id):
                 n += 1
         return n
+    from . import curation_history
+    fields = ('caption',) if action == 'clear_caption' else (
+        'status', 'watermark_state', 'watermark_bbox', 'watermark_regions')
+    batch_id = curation_history.new_batch_id()
     for img in rows:
+        before = curation_history.snapshot(img, fields)
         if action == 'clear_caption':
             img.caption = None
         else:
@@ -1865,7 +2739,11 @@ def batch_image_action(user_id, dataset_id, image_ids, action):
             if action == 'reject':
                 _clear_watermark_metadata(img)
             img.status = action
-        n += 1
+        event = curation_history.record(
+            user_id, img, f'batch:{action}', before,
+            curation_history.snapshot(img, fields), batch_id=batch_id)
+        if event is not None:
+            n += 1
     db.session.commit()
     return n
 
@@ -1929,12 +2807,182 @@ def _payload_watermark_route(img):
     return route
 
 
-def dataset_payload(user_id, dataset_id):
+def _caption_leaks_for_dataset(ds, img) -> bool:
+    if img.status != 'keep' or not img.caption:
+        return False
+    if is_concept(ds):
+        return caption_has_concept_leak(img.caption, ds.concept_desc, ds.concept_terms)
+    if is_style(ds):
+        return False
+    return caption_has_identity_leak(img.caption, body=is_body_fidelity(ds))
+
+
+def _dataset_image_payload(img, *, leak=False) -> dict:
+    """Stable image representation shared by full and paginated endpoints."""
+    return {
+        'id': img.id, 'filename': img.filename, 'source': img.source,
+        'framing': img.framing, 'variation_label': img.variation_label,
+        'status': img.status, 'caption': img.caption, 'fail_reason': img.fail_reason,
+        'parent_image_id': img.parent_image_id, 'derivation_kind': img.derivation_kind,
+        'upscale_ratio': img.upscale_ratio, 'variation_prompt': img.variation_prompt,
+        'leak': bool(leak), 'face_score': img.face_score, 'face_state': img.face_state,
+        'source_name': img.source_name, 'original_filename': img.original_filename,
+        'source_sha256': img.source_sha256, 'perceptual_hash': img.perceptual_hash,
+        'duplicate_of_id': img.duplicate_of_id,
+        'anchor_decision': img.anchor_decision or 'auto',
+        'coverage': parse_coverage(img.coverage_json),
+        'coverage_provenance': _safe_json(img.coverage_provenance),
+        'source_rights': (_safe_json(img.source_rights) or
+                          ({'basis': 'generated'} if img.source == 'generated'
+                           else {'basis': 'unknown'})),
+        'generation_anchor_ids': _parse_generation_anchor_ids(img.generation_anchor_ids),
+        'generation_anchor_metadata': _parse_generation_anchor_metadata(
+            img.generation_anchor_metadata),
+        'generation_engine': img.generation_engine or (
+            img.klein_model if img.source == 'generated' else None),
+        'generation_gap_ids': _parse_generation_gap_ids(img.generation_gap_ids),
+        'generation_provenance': _safe_json(img.generation_provenance),
+        'analysis': parse_analysis(img.analysis_json),
+        'training_usefulness': img.training_usefulness,
+        'coverage_value': img.coverage_value,
+        'watermark_state': img.watermark_state,
+        'watermark_bbox': _safe_json(img.watermark_bbox),
+        **_watermark_regions_payload(img),
+        'watermark_route': _payload_watermark_route(img),
+    }
+
+
+def dataset_images_page(user_id, dataset_id, *, cursor=None, limit=100, status=None):
+    """Cursor-paginated image collection, newest first."""
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return None
-    imgs = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
-            .order_by(FaceDatasetImage.id.desc()).all())
+    try:
+        limit = max(1, min(250, int(limit)))
+    except (TypeError, ValueError):
+        limit = 100
+    query = FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
+    if status:
+        if status not in _VALID_STATUS:
+            raise ValueError(f'invalid image status: {status}')
+        query = query.filter_by(status=status)
+    else:
+        query = query.filter(FaceDatasetImage.status != 'trashed')
+    if cursor is not None:
+        try:
+            query = query.filter(FaceDatasetImage.id < int(cursor))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('cursor must be an image id') from exc
+    rows = query.order_by(FaceDatasetImage.id.desc()).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return {
+        'images': [_dataset_image_payload(
+            row, leak=_caption_leaks_for_dataset(ds, row)) for row in rows],
+        'page': {
+            'limit': limit,
+            'has_more': has_more,
+            'next_cursor': rows[-1].id if has_more and rows else None,
+        },
+    }
+
+
+def dataset_change_state(user_id, dataset_id):
+    """Small, uncached state used by the dataset event stream."""
+    row = (db.session.query(
+        FaceDataset.revision, FaceDataset.name, FaceDataset.trigger_word,
+        FaceDataset.kind, FaceDataset.concept_desc, FaceDataset.fidelity,
+        FaceDataset.train_type, FaceDataset.ref_filename,
+        FaceDataset.ref_extra_filenames, FaceDataset.coverage_profile,
+        FaceDataset.coverage_targets)
+           .filter(FaceDataset.id == dataset_id,
+                   FaceDataset.user_id == str(user_id),
+                   FaceDataset.trashed_at.is_(None)).first())
+    if row is None:
+        return None
+    metadata_payload = json.dumps(
+        list(row[1:]), ensure_ascii=False, separators=(',', ':'), default=str)
+    return {
+        'revision': int(row[0] or 0),
+        # Image triggers drive ``revision``. Dataset-level edits need their own
+        # deterministic marker so another tab receives names, trigger, policy,
+        # references and training-family changes immediately too.
+        'metadata_revision': hashlib.sha256(
+            metadata_payload.encode('utf-8')).hexdigest()[:16],
+        'activity': dataset_activity.get(dataset_id),
+    }
+
+
+_DATASET_AGGREGATE_CACHE = {}
+_DATASET_AGGREGATE_CACHE_MAX = 128
+
+
+def _dataset_aggregate_key(ds):
+    # The cache is process-global while tests and embedders may create several
+    # Flask apps, each with an independent SQLite database whose primary keys
+    # and revisions begin at the same values. Include the bound engine identity
+    # so an aggregate from database A can never be returned for database B.
+    return (
+        id(db.engine), ds.id, int(ds.revision or 0), ds.kind, ds.fidelity, ds.train_type,
+        ds.ref_filename, ds.ref_extra_filenames, ds.concept_desc, ds.concept_terms,
+        ds.coverage_profile, ds.coverage_targets,
+    )
+
+
+def _dataset_navigation_counts(imgs):
+    """Whole-dataset counts for panels whose loaded image window is paginated."""
+    by_id = {image.id: image for image in imgs}
+    visible_ids = set(by_id)
+    rescue_review = 0
+
+    # The generic grid hides every rescue provenance row unless the pair has a
+    # resolved winner. Unresolved pairs live exclusively in Curation.
+    for image in imgs:
+        if image.derivation_kind in _SMALL_IMAGE_DERIVATIONS:
+            visible_ids.discard(image.id)
+    for candidate in (image for image in imgs
+                      if image.derivation_kind == KLEIN_SMALL_IMAGE):
+        original = by_id.get(candidate.parent_image_id)
+        if not original or original.derivation_kind != SMALL_IMAGE_SOURCE:
+            continue
+        winner = None
+        if original.status == 'keep' and candidate.status == 'reject':
+            winner = original
+        elif original.status == 'reject' and candidate.status == 'keep':
+            winner = candidate
+        elif not (original.status == 'reject' and candidate.status == 'reject'):
+            rescue_review += 1
+        if winner:
+            visible_ids.add(winner.id)
+
+    # Reconstruction comparisons follow the same exclusive-review contract,
+    # but may have multiple historical candidates attached to one source.
+    improvement_groups = {}
+    for candidate in (image for image in imgs
+                      if image.derivation_kind == KLEIN_IMAGE_IMPROVE):
+        original = by_id.get(candidate.parent_image_id)
+        if original:
+            improvement_groups.setdefault(original.id, []).append(candidate)
+    for original_id, candidates in improvement_groups.items():
+        original = by_id[original_id]
+        visible_ids.discard(original_id)
+        for candidate in candidates:
+            visible_ids.discard(candidate.id)
+        terminal = all(candidate.status in {'keep', 'reject'} for candidate in candidates)
+        kept = [candidate for candidate in candidates if candidate.status == 'keep']
+        if original.status == 'keep' and terminal and not kept:
+            visible_ids.add(original.id)
+        elif original.status == 'reject' and terminal and len(kept) == 1:
+            visible_ids.add(kept[0].id)
+
+    return {
+        'selectable': sum(1 for image in imgs
+                          if image.id in visible_ids and bool(image.filename)),
+        'small_image_rescue': rescue_review,
+    }
+
+
+def _compute_dataset_aggregates(ds, imgs):
     comp = {'face': 0, 'bust': 0, 'body': 0, 'back': 0}
     # Combien, PAR bucket, sont des crops fortement agrandis (upscale_ratio >=
     # UPSCALE_WARN_THRESHOLD) plutôt que du natif : le compte `comp` seul traite un
@@ -1956,89 +3004,101 @@ def dataset_payload(user_id, dataset_id):
     #                 caption_has_concept_leak — on ne force PLUS 0 (le badge « 0 leak »
     #                 faussement rassurant de l'incident leg_behind)
     #   - style     : rien (la description des sujets EST le contenu contrôlable) → 0 honnête
-    concept = is_conceptual(ds)
-    kind_concept = is_concept(ds)
-    kind_style = is_style(ds)
-    body = is_body_fidelity(ds)
-    # Cached concept ban-list (JSON on the row) → the concept-leak detector unions it with
-    # concept_desc + the derived body/pose field, so the badge and the caption-time
-    # enforcement agree on what "leaking" means. Ignored for non-concept kinds.
-    _concept_terms = ds.concept_terms if kind_concept else None
-
     def _img_leaks(i):
-        if i.status != 'keep' or not i.caption:
-            return False
-        if kind_concept:
-            return caption_has_concept_leak(i.caption, ds.concept_desc, _concept_terms)
-        if kind_style:
-            return False
-        return caption_has_identity_leak(i.caption, body=body)
+        return _caption_leaks_for_dataset(ds, i)
 
+    exclusive_ids = set()
+    for image in imgs:
+        if image.derivation_kind in _SMALL_IMAGE_DERIVATIONS:
+            exclusive_ids.add(image.id)
+            if image.parent_image_id:
+                exclusive_ids.add(image.parent_image_id)
+        if image.derivation_kind == KLEIN_IMAGE_IMPROVE:
+            exclusive_ids.add(image.id)
+            if image.parent_image_id:
+                exclusive_ids.add(image.parent_image_id)
+    image_summary = {
+        'total': len(imgs),
+        'kept': sum(1 for i in imgs if i.status == 'keep'),
+        'kept_captioned': sum(
+            1 for i in imgs if i.status == 'keep' and bool((i.caption or '').strip())),
+        'pending_generation': sum(
+            1 for i in imgs if i.id not in exclusive_ids
+            and i.status == 'pending' and not i.filename),
+        'awaiting_triage': sum(
+            1 for i in imgs if i.id not in exclusive_ids
+            and i.status == 'pending' and bool(i.filename)),
+        'unused': sum(1 for i in imgs if i.id not in exclusive_ids
+                      and i.status in {'reject', 'failed'}),
+        'watermark_detected': sum(
+            1 for i in imgs if i.watermark_state == 'detected'),
+        **_dataset_navigation_counts(imgs),
+    }
+    return {
+        'composition': comp,
+        'composition_upscaled': comp_upscaled,
+        'coverage_plan': build_coverage_plan(ds, imgs),
+        'anchor_plan': build_anchor_plan(ds, imgs),
+        'image_summary': image_summary,
+        'caption_leak': {
+            'leaking': sum(1 for i in imgs if _img_leaks(i)),
+            'captioned': sum(1 for i in imgs if i.status == 'keep' and i.caption),
+        },
+    }
+
+
+def dataset_payload(user_id, dataset_id, *, include_images=True):
+    ds = get_dataset(user_id, dataset_id)
+    if not ds:
+        return None
+    cache_key = _dataset_aggregate_key(ds)
+    aggregates = _DATASET_AGGREGATE_CACHE.get(cache_key)
+    imgs = None
+    if include_images or aggregates is None:
+        imgs = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
+                .filter(FaceDatasetImage.status != 'trashed')
+                .order_by(FaceDatasetImage.id.desc()).all())
+    if aggregates is None:
+        aggregates = _compute_dataset_aggregates(ds, imgs)
+        _DATASET_AGGREGATE_CACHE[cache_key] = aggregates
+        while len(_DATASET_AGGREGATE_CACHE) > _DATASET_AGGREGATE_CACHE_MAX:
+            _DATASET_AGGREGATE_CACHE.pop(next(iter(_DATASET_AGGREGATE_CACHE)))
+
+    concept = is_conceptual(ds)
     return {
         'id': ds.id, 'name': ds.name, 'trigger_word': ds.trigger_word,
+        'revision': int(ds.revision or 0),
         'train_type': (ds.train_type or 'zimage'),
         'kind': (ds.kind or 'character'),
+        'coverage_profile': (ds.coverage_profile or 'balanced'),
+        'coverage_targets_custom': (_safe_json(ds.coverage_targets)
+                                    or {'framing': {}, 'dimensions': {}}),
         'fidelity': (ds.fidelity or 'face') if not concept else 'face',
         'concept_desc': (ds.concept_desc or '') if concept else '',
         'ref_filename': ds.ref_filename,
         'ref_original_filename': ds.ref_original_filename or '',
-        'ref_extra_filenames': extra_ref_filenames(ds), 'composition': comp,
-        'composition_upscaled': comp_upscaled,
-        'coverage_plan': build_coverage_plan(ds, imgs),
-        'anchor_plan': build_anchor_plan(ds, imgs),
+        'ref_extra_filenames': extra_ref_filenames(ds),
+        'composition': aggregates['composition'],
+        'composition_upscaled': aggregates['composition_upscaled'],
+        'coverage_plan': aggregates['coverage_plan'],
+        'anchor_plan': aggregates['anchor_plan'],
         # Réglages gagnants du Studio (JSON → objet). Manquait du payload : le badge
         # ★ du workspace ne s'affichait jamais, et le garde-fou « suppression d'un
         # checkpoint référencé » en a besoin.
         'best_settings': _safe_json(ds.best_settings),
         'face_thresholds': {'green': cfg.get('face_scoring.green'), 'orange': cfg.get('face_scoring.orange')},
-        'images': [{'id': i.id, 'filename': i.filename, 'source': i.source,
-                    'framing': i.framing, 'variation_label': i.variation_label,
-                    'status': i.status, 'caption': i.caption,
-                    'fail_reason': i.fail_reason,
-                    'parent_image_id': i.parent_image_id,
-                    'derivation_kind': i.derivation_kind,
-                    'upscale_ratio': i.upscale_ratio,
-                    # Core creative prompt (generated tiles) → seeds the ✏️ edit
-                    # bubble so the user edits the real prompt, not a blank box.
-                    'variation_prompt': i.variation_prompt,
-                    # Per-image leak flag (identity for character, concept for concept,
-                    # never for style): lets the UI LIST the offending captions for quick
-                    # manual treatment (the aggregate badge alone forced a grid hunt).
-                    'leak': _img_leaks(i),
-                    'face_score': i.face_score, 'face_state': i.face_state,
-                    'source_name': i.source_name,
-                    'original_filename': i.original_filename,
-                    'source_sha256': i.source_sha256,
-                    'perceptual_hash': i.perceptual_hash,
-                    'duplicate_of_id': i.duplicate_of_id,
-                    'anchor_decision': i.anchor_decision or 'auto',
-                    'coverage': parse_coverage(i.coverage_json),
-                    'generation_anchor_ids': _parse_generation_anchor_ids(
-                        i.generation_anchor_ids),
-                    'generation_anchor_metadata': _parse_generation_anchor_metadata(
-                        i.generation_anchor_metadata),
-                    'generation_engine': i.generation_engine or (
-                        i.klein_model if i.source == 'generated' else None),
-                    'generation_gap_ids': _parse_generation_gap_ids(i.generation_gap_ids),
-                    'analysis': parse_analysis(i.analysis_json),
-                    'training_usefulness': i.training_usefulness,
-                    'coverage_value': i.coverage_value,
-                    # Watermark V1: state drives the tile badge (🚩 detected / ⊘ dismissed
-                    # / ✨ cleaned / ⚠ failed) and the "Clean (N)" count; bbox lets the UI
-                    # draw the detected box (review lightbox); watermark_route names the
-                    # EXACT planned action ('crop'|'lama'|'review') for detected images.
-                    'watermark_state': i.watermark_state,
-                    'watermark_bbox': _safe_json(i.watermark_bbox),
-                    **_watermark_regions_payload(i),
-                    'watermark_route': _payload_watermark_route(i)} for i in imgs],
+        # Metadata-only clients fetch this route with include_images=0 and page
+        # through /images. The default remains backward-compatible for scripts,
+        # tests, and older frontends.
+        'images': ([_dataset_image_payload(
+            i, leak=_caption_leaks_for_dataset(ds, i)) for i in imgs]
+                   if include_images else []),
+        'image_summary': aggregates['image_summary'],
         # Kind-specific leak count (see _img_leaks): character = identity, concept = the
         # caption naming the concept (NEVER forced 0 any more), style = 0 (not applicable).
         # `captioned` bounds the badge ("N leaking / M checked") so a 0 reads as a real
         # result on M captions, not a check that never ran.
-        'caption_leak': {
-            'leaking': sum(1 for i in imgs if _img_leaks(i)),
-            'captioned': sum(1 for i in imgs if i.status == 'keep' and i.caption),
-        },
+        'caption_leak': aggregates['caption_leak'],
         # Live server-side batch on this dataset (watermark detect/clean, caption/
         # re-caption, face analysis, framing classify) as {kind, done, total,
         # started_at} — or None. The front-end RESTORES the in-progress button state
@@ -2052,14 +3112,7 @@ def dataset_payload(user_id, dataset_id):
 
 # --- Image normalization ---------------------------------------------------
 def normalize_to_webp(image_bytes: bytes, size: int = 1024) -> bytes:
-    """Resize so the longest side ≤ `size`, KEEP the aspect ratio (no square pad),
-    return WEBP. Pour les variations Nano Banana : un plan corps reste en portrait
-    (pas de bandes noires que le LoRA apprendrait). ai-toolkit gère le bucketing."""
-    im = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    im.thumbnail((size, size), Image.LANCZOS)
-    out = io.BytesIO()
-    im.save(out, 'WEBP', quality=92)
-    return out.getvalue()
+    return image_processing.normalize_to_webp(image_bytes, size=size)
 
 
 def detect_head_bbox(image_bytes):
@@ -2069,35 +3122,13 @@ def detect_head_bbox(image_bytes):
     never raises) -- the caller (face_crop_to_square_webp) already treats "no
     detection" as a normal case and falls back to a centered crop, so uploads
     keep working (degraded but functional)."""
-    try:
-        from .vision_ollama import describe_image_ollama
-    except ImportError:
-        return None
-    # fmt='json' forces Ollama's grammar mode: the model must emit a JSON object from
-    # the first token, so reasoning-prone (abliterated) checkpoints can't ramble a
-    # <think> trace past num_predict and never reach the coords (a silent-None cause).
-    raw = describe_image_ollama(image_bytes, HEAD_BBOX_PROMPT, num_predict=400,
-                                prefer_json=True, fmt='json')
-    try:
-        s = raw.index('{')
-        obj = json.loads(raw[s:raw.index('}', s) + 1])
-        y1, x1, y2, x2 = (float(obj[k]) for k in ('y1', 'x1', 'y2', 'x2'))
-    except (ValueError, KeyError, AttributeError, TypeError):
-        return None
-    # Qwen3-VL frequently SWAPS corners (returns y1>y2 or x1>x2). Normalize to
-    # min/max instead of rejecting — rejecting was a silent-None cause that fell back
-    # to a body-centered crop even when the head was correctly located.
-    x1, x2 = min(x1, x2), max(x1, x2)
-    y1, y2 = min(y1, y2), max(y1, y2)
-    if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
-        return None
-    return (x1 / 1000.0, y1 / 1000.0, x2 / 1000.0, y2 / 1000.0)
+    return image_processing.detect_head_bbox(image_bytes)
 
 
 # Marge d'elargissement de la bbox watermark (fraction du cote). Les bbox VLM sont
 # GROSSIERES et souvent trop serrees : sans marge, le crop/inpaint laisse un lisere du
 # watermark. 2.5% de chaque cote = filet de securite sans engloutir le sujet.
-_WATERMARK_BBOX_MARGIN = 0.025
+_WATERMARK_BBOX_MARGIN = image_processing.WATERMARK_BBOX_MARGIN
 
 
 def _parse_watermark_bbox(raw):
@@ -2109,24 +3140,7 @@ def _parse_watermark_bbox(raw):
     Same bbox handling as detect_head_bbox: 0-1000 grid, swapped corners normalized to
     min/max. A `present:false` (or a missing/invalid box) -> None. VLM boxes run tight,
     so we pad by _WATERMARK_BBOX_MARGIN and clamp -- the router needs the whole mark."""
-    try:
-        s = raw.index('{')
-        obj = json.loads(raw[s:raw.index('}', s) + 1])
-    except (ValueError, AttributeError, TypeError):
-        return None
-    if 'present' in obj and not obj.get('present'):
-        return None
-    try:
-        y1, x1, y2, x2 = (float(obj[k]) for k in ('y1', 'x1', 'y2', 'x2'))
-    except (KeyError, TypeError, ValueError):
-        return None
-    x1, x2 = min(x1, x2), max(x1, x2)
-    y1, y2 = min(y1, y2), max(y1, y2)
-    if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
-        return None
-    m = _WATERMARK_BBOX_MARGIN
-    return (max(0.0, x1 / 1000.0 - m), max(0.0, y1 / 1000.0 - m),
-            min(1.0, x2 / 1000.0 + m), min(1.0, y2 / 1000.0 + m))
+    return image_processing.parse_watermark_bbox(raw)
 
 
 def detect_watermark_bbox(image_bytes, *, keep_alive=0):
@@ -2138,13 +3152,7 @@ def detect_watermark_bbox(image_bytes, *, keep_alive=0):
     scene text (signs, clothing prints) -- see WATERMARK_BBOX_PROMPT. Box is margin-
     expanded (see _parse_watermark_bbox). `keep_alive` mirrors describe_image_ollama:
     0 unloads after this call; a batch passes a duration and unloads at the end."""
-    try:
-        from .vision_ollama import describe_image_ollama
-    except ImportError:
-        return None
-    raw = describe_image_ollama(image_bytes, WATERMARK_BBOX_PROMPT, num_predict=400,
-                                prefer_json=True, fmt='json', keep_alive=keep_alive)
-    return _parse_watermark_bbox(raw)
+    return image_processing.detect_watermark_bbox(image_bytes, keep_alive=keep_alive)
 
 
 def face_crop_to_square_webp(image_bytes: bytes, size: int = 1024, pad: float = 1.7,
@@ -2166,35 +3174,15 @@ def face_crop_to_square_webp(image_bytes: bytes, size: int = 1024, pad: float = 
 
     `use_vision=False` -> skip the bbox detection entirely (fast pure-PIL centered
     square, no GPU window needed) — the manual-first reference flow."""
-    im = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    W, H = im.size
-    norm = detect_head_bbox(image_bytes) if use_vision else None
-    half = 0
-    if norm:
-        x1, y1, x2, y2 = norm[0] * W, norm[1] * H, norm[2] * W, norm[3] * H
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2 - (y2 - y1) * 0.10  # shift up to keep the hair
-        half = max(x2 - x1, y2 - y1) * pad / 2
-        half = min(half, cx, W - cx, cy, H - cy)  # keep the square inside the image
-    head_detected = half >= 8
-    if head_detected:
-        box = (int(cx - half), int(cy - half), int(cx + half), int(cy + half))
-    else:  # no/failed detection → centered largest square
-        side = min(W, H)
-        left, top = (W - side) // 2, (H - side) // 2
-        box = (left, top, left + side, top + side)
-    box_side = max(1, box[2] - box[0])
-    scale = size / box_side
-    out = io.BytesIO()
-    im.crop(box).resize((size, size), Image.LANCZOS).save(out, 'WEBP', quality=92)
-    webp = out.getvalue()
-    if return_detected and return_scale:
-        return webp, head_detected, scale
-    if return_detected:
-        return webp, head_detected
-    if return_scale:
-        return webp, scale
-    return webp
+    return image_processing.face_crop_to_square_webp(
+        image_bytes,
+        size=size,
+        pad=pad,
+        return_detected=return_detected,
+        use_vision=use_vision,
+        return_scale=return_scale,
+        detector=detect_head_bbox,
+    )
 
 
 # --- Import + classify (Qwen3-VL) ------------------------------------------
@@ -2222,9 +3210,11 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
     # forçait tous les imports personnage en carré — un plan buste/corps importé
     # doit rester tel quel (ai-toolkit gère le bucketing multi-ratios).
     hash_rows = _existing_dhash_rows(dataset_id) if dedupe else []
+    hash_index = _DHashIndex(hash_rows)
     exact_hashes = {row.source_sha256 for row, _value in hash_rows if row.source_sha256}
     ids = []
     failed = 0
+    created_paths = []
     for index, item in enumerate(files_bytes):
         if isinstance(item, tuple) and len(item) == 2:
             source_name, raw = item
@@ -2271,22 +3261,37 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
                     fp = _dhash(im)
             except (OSError, ValueError):
                 fp = None   # unreadable output would have failed above; belt & braces
-            if fp is not None and hash_rows:
-                match, distance = min(hash_rows, key=lambda pair: _hamming(fp, pair[1])), None
-                distance = _hamming(fp, match[1])
-                if distance <= SCRAPE_DHASH_MAX_DISTANCE:
+            if fp is not None and hash_index:
+                match, _distance = hash_index.nearest_within(fp)
+                if match is not None:
                     duplicate_of_id = match[0].duplicate_of_id or match[0].id
                     if stats is not None:
                         stats['near_duplicates'] = stats.get('near_duplicates', 0) + 1
         try:
             original_filename = _store_original_bytes(user_id, dataset_id, raw)
+            created_paths.append(os.path.join(_dataset_dir(dataset_id), original_filename))
         except OSError as e:
             failed += 1
             logger.warning(f"dataset import: original preservation failed ({source_name or index}): {e}")
             continue
         fn = f"{user_id}_dataset_{uuid.uuid4().hex[:8]}.webp"
-        with open(os.path.join(_dataset_dir(dataset_id), fn), 'wb') as fh:
-            fh.write(webp)
+        normalized_path = os.path.join(_dataset_dir(dataset_id), fn)
+        try:
+            _atomic_write_bytes(normalized_path, webp)
+            created_paths.append(normalized_path)
+        except OSError as e:
+            failed += 1
+            original_path = os.path.join(_dataset_dir(dataset_id), original_filename)
+            try:
+                os.remove(original_path)
+            except OSError:
+                pass
+            if original_path in created_paths:
+                created_paths.remove(original_path)
+            logger.warning(
+                'dataset import: normalized write failed (%s): %s',
+                source_name or index, e)
+            continue
         img = FaceDatasetImage(
             dataset_id=dataset_id,
             source='import',
@@ -2304,11 +3309,31 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
             upscale_ratio=scale,
         )
         db.session.add(img)
-        db.session.commit()
+        try:
+            db.session.flush()
+        except Exception:
+            db.session.rollback()
+            for path in created_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise
         ids.append(img.id)
         exact_hashes.add(analysis.get('source_sha256'))
         if fp is not None:
             hash_rows.append((img, fp))
+            hash_index.add(img, fp)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        for path in created_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
     return ids, failed
 
 
@@ -2335,8 +3360,10 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
     grouped for review.
     Returns (ids, failed)."""
     hash_rows = _existing_dhash_rows(dataset_id)
+    hash_index = _DHashIndex(hash_rows)
     exact_hashes = {row.source_sha256 for row, _value in hash_rows if row.source_sha256}
     ids, failed = [], 0
+    created_paths = []
     for stem, display, getter in entries:
         try:
             raw = getter()
@@ -2372,21 +3399,36 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
         except (OSError, ValueError):
             fp = None
         duplicate_of_id = None
-        if fp is not None and hash_rows:
-            match = min(hash_rows, key=lambda pair: _hamming(fp, pair[1]))
-            if _hamming(fp, match[1]) <= SCRAPE_DHASH_MAX_DISTANCE:
+        if fp is not None and hash_index:
+            match, _distance = hash_index.nearest_within(fp)
+            if match is not None:
                 duplicate_of_id = match[0].duplicate_of_id or match[0].id
                 if stats is not None:
                     stats['near_duplicates'] = stats.get('near_duplicates', 0) + 1
         try:
             original_filename = _store_original_bytes(user_id, dataset_id, raw)
+            created_paths.append(os.path.join(_dataset_dir(dataset_id), original_filename))
         except OSError as e:
             failed += 1
             logger.warning(f"dataset import: original preservation failed ({display}): {e}")
             continue
         fn = f"{user_id}_dsimport_{uuid.uuid4().hex[:8]}.webp"
-        with open(os.path.join(_dataset_dir(dataset_id), fn), 'wb') as fh:
-            fh.write(webp)
+        normalized_path = os.path.join(_dataset_dir(dataset_id), fn)
+        try:
+            _atomic_write_bytes(normalized_path, webp)
+            created_paths.append(normalized_path)
+        except OSError as e:
+            failed += 1
+            original_path = os.path.join(_dataset_dir(dataset_id), original_filename)
+            try:
+                os.remove(original_path)
+            except OSError:
+                pass
+            if original_path in created_paths:
+                created_paths.remove(original_path)
+            logger.warning(
+                'dataset import: normalized write failed (%s): %s', display, e)
+            continue
         cap = (captions.get(stem) or '').strip() or None
         if cap:
             cap = cap[:CAPTION_MAX_CHARS]
@@ -2408,15 +3450,35 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
             caption=cap,
         )
         db.session.add(img)
-        db.session.commit()
+        try:
+            db.session.flush()
+        except Exception:
+            db.session.rollback()
+            for path in created_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise
         ids.append(img.id)
         exact_hashes.add(analysis.get('source_sha256'))
         if fp is not None:
             hash_rows.append((img, fp))
+            hash_index.add(img, fp)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        for path in created_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
     return ids, failed
 
 
-def import_dataset_zip(user_id, dataset_id, zip_bytes, stats=None):
+def import_dataset_zip(user_id, dataset_id, zip_source, stats=None):
     """Import an existing training dataset into THIS dataset (merge, not create):
     every image in the zip becomes an 'import' row (status=keep), a same-stem
     .txt sidecar becomes its caption (truncated to CAPTION_MAX_CHARS). Returns
@@ -2425,8 +3487,9 @@ def import_dataset_zip(user_id, dataset_id, zip_bytes, stats=None):
     if not ds:
         raise ValueError('dataset not found')
     try:
-        z = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile:
+        source = io.BytesIO(zip_source) if isinstance(zip_source, (bytes, bytearray)) else zip_source
+        z = zipfile.ZipFile(source)
+    except (zipfile.BadZipFile, OSError, TypeError):
         raise ValueError('not a zip file')
     infos = [i for i in z.infolist() if not i.is_dir()]
     if len(infos) > DATASET_ZIP_MAX_FILES:
@@ -2443,7 +3506,10 @@ def import_dataset_zip(user_id, dataset_id, zip_bytes, stats=None):
                 pass
     entries = [(os.path.splitext(i.filename)[0], i.filename, lambda i=i: z.read(i))
                for i in infos if i.filename.lower().endswith(_DATASET_ZIP_IMG_EXTS)]
-    return _merge_training_images(user_id, dataset_id, entries, captions, stats=stats)
+    try:
+        return _merge_training_images(user_id, dataset_id, entries, captions, stats=stats)
+    finally:
+        z.close()
 
 
 def import_dataset_folder(user_id, dataset_id, folder, stats=None):
@@ -2508,28 +3574,9 @@ _SCRAPE_DL_MAX_BYTES = 25 * 1024 * 1024
 _SCRAPE_DL_WORKERS = 6
 
 
-def _dhash(im: Image.Image) -> int:
-    """dHash 64 bits (gradient horizontal sur grayscale 9×8) — PIL pur, insensible
-    au resize/re-encodage, donc stable entre un scrape original et sa version
-    normalisée webp déjà importée."""
-    g = im.convert('L').resize((9, 8), Image.LANCZOS)
-    px = list(g.getdata())
-    bits = 0
-    for row in range(8):
-        for col in range(8):
-            bits = (bits << 1) | (px[row * 9 + col] > px[row * 9 + col + 1])
-    return bits
-
-
-def _hamming(a: int, b: int) -> int:
-    return bin(a ^ b).count('1')
-
-
-def _existing_dhashes(dataset_id) -> list:
-    """dHashes des images déjà dans le dataset (keep/pending), recalculés à la
-    volée : resize 9×8 ≈ qq ms/image et un dataset plafonne à ~200 images —
-    pas de colonne/migration pour si peu."""
-    out = []
+def _existing_dhashes(dataset_id) -> _DHashIndex:
+    """Indexed dHashes of existing keep/pending images, with legacy backfill."""
+    out = _DHashIndex()
     rows = FaceDatasetImage.query.filter(
         FaceDatasetImage.dataset_id == dataset_id,
         FaceDatasetImage.status.in_(('keep', 'pending'))).all()
@@ -2538,9 +3585,10 @@ def _existing_dhashes(dataset_id) -> list:
             continue
         try:
             with Image.open(os.path.join(_dataset_dir(dataset_id), r.filename)) as im:
-                out.append(_dhash(im))
+                value = _dhash(im)
         except (OSError, ValueError):
             continue
+        out.add(None, value)
     return out
 
 
@@ -2611,19 +3659,17 @@ def analyze_corpus(user_id, dataset_id) -> dict:
     # the sharp/high-resolution representative instead of whichever imported first.
     ordered = sorted((row for row in rows if _stored_hash_int(row.perceptual_hash) is not None),
                      key=lambda row: (-_anchor_quality_score(row), row.id))
-    representatives = []
+    representatives = _DHashIndex()
     for row in rows:
         row.duplicate_of_id = None
     duplicate_pairs = 0
     for row in ordered:
         value = _stored_hash_int(row.perceptual_hash)
-        representative = next((candidate for candidate in representatives
-                               if _hamming(value, _stored_hash_int(candidate.perceptual_hash))
-                               <= SCRAPE_DHASH_MAX_DISTANCE), None)
-        if representative is None:
-            representatives.append(row)
+        match, _distance = representatives.nearest_within(value)
+        if match is None:
+            representatives.add(row, value)
         else:
-            row.duplicate_of_id = representative.id
+            row.duplicate_of_id = match[0].id
             duplicate_pairs += 1
     db.session.commit()
     return {'analyzed': analyzed, 'failed': failed,
@@ -2638,7 +3684,12 @@ def set_anchor_decision(user_id, image_id, decision) -> bool:
     normalized = str(decision or 'auto').strip().lower()
     if normalized not in ANCHOR_DECISIONS:
         raise ValueError('anchor decision must be auto, pinned, or excluded')
+    from . import curation_history
+    before = curation_history.snapshot(img, ('anchor_decision',))
     img.anchor_decision = None if normalized == 'auto' else normalized
+    curation_history.record(
+        user_id, img, f'anchor:{normalized}', before,
+        curation_history.snapshot(img, ('anchor_decision',)))
     db.session.commit()
     return True
 
@@ -2649,6 +3700,10 @@ def set_image_coverage(user_id, image_id, values) -> bool:
         return False
     if not isinstance(values, dict):
         raise ValueError('coverage must be an object')
+    from . import curation_history
+    coverage_fields = ('framing', 'coverage_json', 'coverage_value',
+                       'coverage_provenance', 'variation_label')
+    before = curation_history.snapshot(img, coverage_fields)
     framing = str(values.get('framing') or '').strip().lower()
     if framing:
         if framing not in ('face', 'bust', 'body', 'back', 'unknown'):
@@ -2657,10 +3712,45 @@ def set_image_coverage(user_id, image_id, values) -> bool:
     coverage = normalize_coverage(values)
     img.coverage_json = json.dumps(coverage, ensure_ascii=False, sort_keys=True)
     img.coverage_value = 'green' if coverage else 'unknown'
+    now = datetime.now(timezone.utc).isoformat()
+    img.coverage_provenance = json.dumps({
+        'source': 'manual', 'recorded_at': now,
+        'confidence': {key: 1.0 for key in coverage},
+    }, ensure_ascii=False, sort_keys=True)
     label = ', '.join(coverage.get(key) for key in ('angle', 'expression')
                       if coverage.get(key))
     if label:
         img.variation_label = label[:120]
+    curation_history.record(
+        user_id, img, 'coverage', before,
+        curation_history.snapshot(img, coverage_fields))
+    db.session.commit()
+    return True
+
+
+SOURCE_RIGHTS_BASES = ('owned', 'licensed', 'consented', 'public-domain', 'unknown')
+
+
+def set_image_rights(user_id, image_id, values) -> bool:
+    img = _owned_image(user_id, image_id)
+    if not img or not isinstance(values, dict):
+        return False
+    basis = str(values.get('basis') or 'unknown').strip().lower()
+    if basis not in SOURCE_RIGHTS_BASES:
+        raise ValueError('rights basis must be owned, licensed, consented, public-domain, or unknown')
+    payload = {
+        'basis': basis,
+        'license': str(values.get('license') or '').strip()[:160],
+        'consent_confirmed': bool(values.get('consent_confirmed')),
+        'notes': str(values.get('notes') or '').strip()[:500],
+        'recorded_at': datetime.now(timezone.utc).isoformat(),
+    }
+    from . import curation_history
+    before = curation_history.snapshot(img, ('source_rights',))
+    img.source_rights = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    curation_history.record(
+        user_id, img, f'rights:{basis}', before,
+        curation_history.snapshot(img, ('source_rights',)))
     db.session.commit()
     return True
 
@@ -2685,10 +3775,17 @@ def _accept_scrape_bytes(raw, seen_hashes, skipped, rescue_small=False):
     except (OSError, ValueError):
         skipped['errors'] += 1
         return None
-    if any(_hamming(fp, s) <= SCRAPE_DHASH_MAX_DISTANCE for s in seen_hashes):
+    if isinstance(seen_hashes, _DHashIndex):
+        duplicate = seen_hashes.nearest_within(fp)[0] is not None
+    else:
+        duplicate = any(_hamming(fp, s) <= SCRAPE_DHASH_MAX_DISTANCE for s in seen_hashes)
+    if duplicate:
         skipped['duplicates'] += 1
         return None
-    seen_hashes.append(fp)
+    if isinstance(seen_hashes, _DHashIndex):
+        seen_hashes.add(None, fp)
+    else:
+        seen_hashes.append(fp)
     return raw
 
 
@@ -2863,7 +3960,7 @@ def _parse_classify(raw):
         start = raw.index('{')
         obj = json.loads(raw[start:raw.index('}', start) + 1])
     except (ValueError, AttributeError):
-        return 'unknown', None, {}
+        return 'unknown', None, {}, {}
     fr = obj.get('framing')
     fr = fr if fr in ('face', 'bust', 'body', 'back') else 'unknown'
     coverage = {}
@@ -2879,7 +3976,13 @@ def _parse_classify(raw):
     # Preserve the historical human-facing label verbatim (e.g. "3/4, smile")
     # while storing normalized machine values ("three-quarter") in coverage_json.
     label = ', '.join(str(obj.get(k)).strip() for k in ('angle', 'expression') if obj.get(k))
-    return fr, (label or None), coverage
+    confidence = {}
+    raw_confidence = obj.get('confidence') if isinstance(obj.get('confidence'), dict) else {}
+    for key in ('framing', *COVERAGE_VALUES):
+        value = raw_confidence.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            confidence[key] = round(max(0.0, min(1.0, float(value))), 3)
+    return fr, (label or None), coverage, confidence
 
 
 def classify_images(user_id, dataset_id):
@@ -2913,11 +4016,17 @@ def classify_images(user_id, dataset_id):
                 # on laisse framing=None (retry possible) au lieu d'écrire 'unknown'
                 # définitivement, qui bloquerait toute reclassification.
                 continue
-            framing, label, coverage = _parse_classify(raw)
+            framing, label, coverage, confidence = _parse_classify(raw)
             img.framing = framing
             img.variation_label = label
             img.coverage_json = json.dumps(coverage, ensure_ascii=False, sort_keys=True)
             img.coverage_value = 'green' if coverage else 'unknown'
+            img.coverage_provenance = json.dumps({
+                'source': 'vision',
+                'model': cfg.get('ollama.vision_model'),
+                'recorded_at': datetime.now(timezone.utc).isoformat(),
+                'confidence': confidence,
+            }, ensure_ascii=False, sort_keys=True)
             db.session.commit()
             n += 1
     finally:
@@ -3631,6 +4740,8 @@ def set_watermark_regions(user_id, dataset_id, image_id, regions) -> dict | None
         raise RuntimeError('image is no longer detected')
     normalized = normalize_watermark_regions(regions)
     stored = json.dumps(normalized) if normalized is not None else None
+    from . import curation_history
+    before = curation_history.snapshot(img, ('watermark_regions',))
     updated = (FaceDatasetImage.query
                .filter_by(id=img.id, watermark_state='detected')
                .update({'watermark_regions': stored}, synchronize_session=False))
@@ -3639,6 +4750,9 @@ def set_watermark_regions(user_id, dataset_id, image_id, regions) -> dict | None
         if owned_query.one_or_none() is None:
             return None
         raise RuntimeError('image is no longer detected')
+    curation_history.record(
+        user_id, img, 'watermark_regions', before,
+        {'watermark_regions': stored})
     db.session.commit()
     return _watermark_regions_payload(img)
 
@@ -3695,15 +4809,16 @@ def _apply_watermark_crop(path, box) -> bool:
     resizing -- the whole point of the crop route is that it invents no pixel (the
     aspect-ratio change is absorbed by ai-toolkit's bucketing). Returns bool."""
     try:
-        im = Image.open(path).convert('RGB')
+        with Image.open(path) as opened, opened.convert('RGB') as im:
+            box = (max(0, int(box[0])), max(0, int(box[1])),
+                   min(im.width, int(box[2])), min(im.height, int(box[3])))
+            if box[2] - box[0] < 1 or box[3] - box[1] < 1:
+                return False
+            out = io.BytesIO()
+            with im.crop(box) as cropped:
+                cropped.save(out, 'WEBP', quality=92)
     except (OSError, ValueError):
         return False
-    box = (max(0, int(box[0])), max(0, int(box[1])),
-           min(im.width, int(box[2])), min(im.height, int(box[3])))
-    if box[2] - box[0] < 1 or box[3] - box[1] < 1:
-        return False
-    out = io.BytesIO()
-    im.crop(box).save(out, 'WEBP', quality=92)
     with open(path, 'wb') as fh:
         fh.write(out.getvalue())
     return True
@@ -3787,9 +4902,18 @@ def dismiss_watermarks(user_id, dataset_id, image_ids):
     rows = (FaceDatasetImage.query
             .filter_by(dataset_id=dataset_id, watermark_state='detected')
             .filter(FaceDatasetImage.id.in_(ids)).all())
+    from . import curation_history
+    batch_id = curation_history.new_batch_id()
     for img in rows:
+        before = curation_history.snapshot(
+            img, ('watermark_state', 'watermark_regions'))
         img.watermark_state = 'dismissed'
         img.watermark_regions = None
+        curation_history.record(
+            user_id, img, 'watermark_dismiss', before,
+            curation_history.snapshot(
+                img, ('watermark_state', 'watermark_regions')),
+            batch_id=batch_id)
     if rows:
         db.session.commit()
     return len(rows)
@@ -4178,6 +5302,129 @@ def _improve_existing_image_locked(user_id, image_id):
     return {'candidate_id': candidate.id, 'job_id': job_id}
 
 
+_REPLACEMENT_STATE_FIELDS = (
+    'filename', 'caption', 'status', 'klein_model', 'generation_anchor_ids',
+    'generation_anchor_metadata', 'generation_engine', 'generation_gap_ids',
+    'generation_provenance', 'analysis_json', 'training_usefulness',
+    'coverage_value', 'coverage_json', 'coverage_provenance', 'source_rights',
+    'source_sha256', 'perceptual_hash', 'duplicate_of_id', 'face_score',
+    'face_state', 'upscale_ratio', 'watermark_state', 'watermark_bbox',
+    'watermark_regions',
+)
+
+
+def _replacement_state(img) -> dict:
+    return {field: getattr(img, field) for field in _REPLACEMENT_STATE_FIELDS}
+
+
+def _replacement_provenance(img, provenance, previous_state=None) -> str:
+    try:
+        payload = json.loads(provenance or '{}')
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if img.filename:
+        payload['_replacement_previous'] = previous_state or _replacement_state(img)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _replacement_previous(img):
+    provenance = _safe_json(img.generation_provenance) or {}
+    previous = provenance.get('_replacement_previous')
+    return previous if isinstance(previous, dict) else None
+
+
+def _final_generation_provenance(img, updates=None):
+    provenance = _safe_json(img.generation_provenance) or {}
+    provenance.pop('_replacement_previous', None)
+    if updates:
+        provenance.update(updates)
+    return json.dumps(provenance, ensure_ascii=False, sort_keys=True)
+
+
+def _restore_replacement_after_failure(img, reason):
+    previous = _replacement_previous(img)
+    if previous:
+        for field in _REPLACEMENT_STATE_FIELDS:
+            if field in previous:
+                setattr(img, field, previous[field])
+        img.job_id = None
+        img.fail_reason = reason
+    else:
+        img.status = 'failed'
+        img.fail_reason = reason
+
+
+@trash.serialized_transaction
+def _commit_generated_replacement(img, filename, data, *, provenance_updates=None):
+    """Atomically swap a completed generation into a dataset image row."""
+    dataset = db.session.get(FaceDataset, img.dataset_id)
+    if dataset is None or dataset.trashed_at is not None:
+        raise ValueError('cannot commit a generation to a deleted dataset')
+    safe_name = Path(str(filename or '')).name
+    if not safe_name or safe_name != filename:
+        raise ValueError('invalid generated image filename')
+    dataset_root = Path(_dataset_dir(img.dataset_id)).resolve()
+    destination = (dataset_root / safe_name).resolve(strict=False)
+    if not destination.is_relative_to(dataset_root) or destination.is_symlink():
+        raise ValueError('generated image path escapes the dataset')
+    previous = _replacement_previous(img)
+    old_path = None
+    if previous and previous.get('filename'):
+        candidate = (dataset_root / Path(previous['filename']).name).resolve(strict=False)
+        if candidate.is_relative_to(dataset_root) and candidate.is_file() \
+                and not candidate.is_symlink():
+            old_path = candidate
+    if old_path == destination or destination.exists():
+        stem, suffix = destination.stem, destination.suffix
+        safe_name = f'{stem}_{uuid.uuid4().hex[:6]}{suffix}'
+        destination = dataset_root / safe_name
+    _atomic_write_bytes(destination, data)
+    trashed = None
+    try:
+        if old_path is not None:
+            trashed = trash.send_paths_to_trash(
+                [old_path], context=f'dataset-{img.dataset_id}-regeneration', metadata={
+                    'kind': 'regenerated_image',
+                    'dataset_id': img.dataset_id,
+                    'image_id': img.id,
+                    'previous_state': previous,
+                    'label': img.variation_label or old_path.name,
+                })
+        img.filename = safe_name
+        img.caption = None
+        img.status = 'pending'
+        img.job_id = None
+        img.fail_reason = None
+        img.analysis_json = None
+        img.training_usefulness = None
+        img.coverage_value = None
+        img.coverage_json = None
+        img.coverage_provenance = None
+        img.source_rights = json.dumps({'basis': 'generated'})
+        img.source_sha256 = hashlib.sha256(data).hexdigest()
+        img.perceptual_hash = None
+        img.duplicate_of_id = None
+        img.face_score = None
+        img.face_state = None
+        img.upscale_ratio = None
+        _clear_watermark_metadata(img)
+        img.generation_provenance = _final_generation_provenance(
+            img, provenance_updates)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        destination.unlink(missing_ok=True)
+        if trashed is not None:
+            try:
+                trash.restore_entry(trashed['id'])
+            except Exception:
+                logger.exception('could not roll back regenerated image swap %s', img.id)
+        raise
+    return safe_name
+
+
 def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=None,
                      engine=None, klein_model=None):
     """Re-enqueue a single generated variation IN PLACE (same row id): cancel any
@@ -4235,19 +5482,14 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
         if enabled and target not in enabled:
             default = cfg.get('engines.default')
             target = default if default in enabled else enabled[0]
-    _clear_watermark_metadata(img)
+    if target in API_ENGINES and not cfg.get('privacy.allow_remote_generation'):
+        raise RemoteGenerationConsentRequired()
     if img.status == 'pending' and not img.filename and img.job_id:  # still generating
         try:
             from ..job_queue import queue_manager
             queue_manager.cancel_job(img.job_id, str(user_id), 'image')
         except Exception:
             pass
-    if img.filename:
-        try:
-            os.remove(_img_path(img))
-        except OSError:
-            pass
-
     # API target ('nanobanana'/'chatgpt' — requested, or the row's origin when
     # no engine was given): the row's klein_model column carries the engine tag.
     # With an `app` handle the call runs in a background thread (the row flips
@@ -4256,6 +5498,7 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
     # callers).
     if target in API_ENGINES:
         engine = target
+        previous_state = _replacement_state(img) if img.filename else None
         img.klein_model = engine      # the row's engine tag follows the switch
         api_generate = _api_generate_fn(engine)
         anchors = select_generation_references(
@@ -4266,10 +5509,10 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
         img.generation_anchor_ids = _generation_anchor_ids_json(anchors)
         img.generation_anchor_metadata = _generation_anchor_metadata_json(anchors)
         img.generation_engine = engine
-        img.filename = None
-        img.caption = None
         img.status = 'pending'
         img.fail_reason = None   # fresh attempt: drop the previous failure message
+        img.generation_provenance = _replacement_provenance(
+            img, _remote_generation_provenance(engine, anchors), previous_state)
         db.session.commit()
         aspect = aspect_for_label(img.variation_label, img.framing)
         if app is not None:
@@ -4295,26 +5538,36 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
                                    **gen_kwargs)
             except SubscriptionQuotaExceeded:
                 out = None
-                img.status = 'failed'
-                img.fail_reason = _QUOTA_MSG
+                _restore_replacement_after_failure(img, _QUOTA_MSG)
                 db.session.commit()
                 return engine
             except SubscriptionUnavailable as e:
                 out = None
-                img.status = 'failed'
-                img.fail_reason = f'chatgpt: {e}'
+                _restore_replacement_after_failure(img, f'chatgpt: {e}')
                 db.session.commit()
                 return engine
             if out:
                 fn = f"{user_id}_{_ENGINE_FILE_TAG[engine]}_{uuid.uuid4().hex[:8]}.webp"
-                with open(os.path.join(_dataset_dir(img.dataset_id), fn), 'wb') as fh:
-                    fh.write(normalize_to_webp(out))
-                img.filename = fn
+                normalized = normalize_to_webp(out)
+                _commit_generated_replacement(
+                    img, fn, normalized, provenance_updates={
+                        'response_received_at': datetime.now(timezone.utc).isoformat(),
+                        'response_sha256': hashlib.sha256(out).hexdigest(),
+                        'stored_sha256': hashlib.sha256(normalized).hexdigest(),
+                    })
             else:
-                img.status = 'failed'
-                img.fail_reason = f'{engine}: empty response (often a content-policy refusal or a transient API error - retry usually works)'
-            db.session.commit()
+                _restore_replacement_after_failure(
+                    img, f'{engine}: empty response (often a content-policy refusal '
+                         'or a transient API error - retry usually works)')
+                db.session.commit()
             return engine
+        except Exception as exc:
+            db.session.rollback()
+            img = db.session.get(FaceDatasetImage, image_id)
+            if img is not None:
+                _restore_replacement_after_failure(img, f'{engine}: {str(exc)[:400]}')
+                db.session.commit()
+            raise
         finally:
             dataset_activity.end(token)
 
@@ -4329,10 +5582,7 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
     # workspace's Klein pick instead (None = enqueue's default model).
     model = (img.klein_model if img.klein_model not in API_ENGINES
              else ((klein_model or '').strip() or None))
-    img.klein_model = model           # the row's engine/model tag follows the switch
-    img.generation_engine = 'klein'
-    img.generation_anchor_ids = '[]'
-    img.generation_anchor_metadata = _explicit_reference_metadata_json(ds)
+    previous_state = _replacement_state(img) if img.filename else None
     extra_paths = [os.path.join(_dataset_dir(ds.id), fn) for fn in extra_ref_filenames(ds)]
     job_id = enqueue_klein_edit(
         user_id=str(user_id), source_filename=ds.ref_filename,
@@ -4343,9 +5593,24 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
         lora_strength=lora_strength, extra_ref_paths=extra_paths,
         extra_metadata={'is_dataset': True, 'dataset_id': img.dataset_id,
                         'variation_label': img.variation_label})
+    local_provenance = json.dumps({
+        'schema_version': 1,
+        'provider': 'local',
+        'engine': 'klein',
+        'model': model or 'configured-default',
+        'client_request_id': str(uuid.uuid4()),
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'remote_generation_consent': False,
+        'data_sent': [],
+        'prompt_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+    }, ensure_ascii=False, sort_keys=True)
+    img.generation_provenance = _replacement_provenance(
+        img, local_provenance, previous_state)
+    img.klein_model = model           # the row's engine/model tag follows the switch
+    img.generation_engine = 'klein'
+    img.generation_anchor_ids = '[]'
+    img.generation_anchor_metadata = _explicit_reference_metadata_json(ds)
     img.status = 'pending'
-    img.filename = None
-    img.caption = None
     img.job_id = job_id
     img.fail_reason = None   # fresh attempt: drop the previous failure message
     db.session.commit()
@@ -4362,7 +5627,17 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
 API_ENGINES = ('nanobanana', 'chatgpt')
 _ENGINE_FILE_TAG = {'nanobanana': 'NBFace', 'chatgpt': 'GPTFace'}
 
-from .chatgpt_image import SubscriptionQuotaExceeded, SubscriptionUnavailable
+
+class RemoteGenerationConsentRequired(PermissionError):
+    code = 'remote_generation_consent_required'
+
+    def __init__(self):
+        super().__init__(
+            'Remote generation is off: reference images and prompts stay on '
+            'this computer. Enable third-party generation in Settings ▸ Image engines.')
+
+from .chatgpt_image import (  # noqa: E402 - keep optional image provider lazy at module tail
+    SubscriptionQuotaExceeded, SubscriptionUnavailable)
 
 _QUOTA_MSG = ('chatgpt: subscription image quota reached — remaining rows were '
               'stopped; rerun in API-key mode or wait for your plan quota to reset')
@@ -4376,6 +5651,27 @@ def _api_generate_fn(engine):
     else:
         from .nanobanana import generate_variation
     return generate_variation
+
+
+def _remote_generation_provenance(engine, anchors) -> str:
+    if engine == 'chatgpt':
+        from .chatgpt_image import CHATGPT_IMAGE_MODEL
+        provider, model = 'openai', CHATGPT_IMAGE_MODEL
+    else:
+        from .nanobanana import NANOBANANA_MODEL
+        provider, model = 'google', NANOBANANA_MODEL
+    return json.dumps({
+        'schema_version': 1,
+        'provider': provider,
+        'engine': engine,
+        'model': model,
+        'client_request_id': str(uuid.uuid4()),
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'remote_generation_consent': bool(cfg.get('privacy.allow_remote_generation')),
+        'data_sent': ['reference_images', 'variation_prompt'],
+        'anchor_sha256': [anchor.get('sha256') or hashlib.sha256(anchor['bytes']).hexdigest()
+                          for anchor in anchors],
+    }, ensure_ascii=False, sort_keys=True)
 
 
 def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id=None):
@@ -4434,8 +5730,7 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
             with app.app_context():
                 img = db.session.get(FaceDatasetImage, image_id)
                 if img is not None:
-                    img.status = 'failed'
-                    img.fail_reason = stop_msg['text']
+                    _restore_replacement_after_failure(img, stop_msg['text'])
                     db.session.commit()
             return
         out = None
@@ -4444,18 +5739,35 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
         if engine == 'chatgpt':
             gen_kwargs['force_lane'] = force_lane
         try:
-            out = api_generate(ref_bytes, wrap_variation(prompt, ref_count=n_refs),
+            wrapped_prompt = wrap_variation(prompt, ref_count=n_refs)
+            with app.app_context():
+                tracked = db.session.get(FaceDatasetImage, image_id)
+                if tracked is not None:
+                    provenance = _safe_json(tracked.generation_provenance) or {}
+                    provenance.update({
+                        'request_started_at': datetime.now(timezone.utc).isoformat(),
+                        'actual_auth_lane': force_lane or 'api',
+                        'aspect_ratio': aspect,
+                        'wrapped_prompt_sha256': hashlib.sha256(
+                            wrapped_prompt.encode('utf-8')).hexdigest(),
+                    })
+                    tracked.generation_provenance = json.dumps(
+                        provenance, ensure_ascii=False, sort_keys=True)
+                    db.session.commit()
+            out = api_generate(ref_bytes, wrapped_prompt,
                                **gen_kwargs)
             if not out:
                 # api_generate signale certains refus/vides par un retour falsy
                 # sans lever — sans raison, la tuile "failed" resterait muette.
                 fail_reason = f'{engine}: empty response (often a content-policy refusal or a transient API error - retry usually works)'
         except SubscriptionQuotaExceeded as e:
-            quota_exhausted.set(); stop_msg['text'] = _QUOTA_MSG
+            quota_exhausted.set()
+            stop_msg['text'] = _QUOTA_MSG
             logger.warning(f"{engine} batch: quota exhausted at row {image_id}: {e}")
             fail_reason = _QUOTA_MSG
         except SubscriptionUnavailable as e:
-            quota_exhausted.set(); stop_msg['text'] = _LOST_MSG
+            quota_exhausted.set()
+            stop_msg['text'] = _LOST_MSG
             logger.warning(f"{engine} batch: subscription lost at row {image_id}: {e}")
             fail_reason = _LOST_MSG
         except Exception as e:
@@ -4470,17 +5782,24 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
                 fn = f"{ds.user_id}_{tag}_{uuid.uuid4().hex[:8]}.webp"
                 try:
                     # Conserve le ratio demandé (pas de letterbox carré sur les corps).
-                    with open(os.path.join(_dataset_dir(img.dataset_id), fn), 'wb') as fh:
-                        fh.write(normalize_to_webp(out))
-                    img.filename = fn
+                    normalized = normalize_to_webp(out)
+                    _commit_generated_replacement(
+                        img, fn, normalized, provenance_updates={
+                            'response_received_at': datetime.now(timezone.utc).isoformat(),
+                            'response_sha256': hashlib.sha256(out).hexdigest(),
+                            'stored_sha256': hashlib.sha256(normalized).hexdigest(),
+                        })
                 except Exception as e:
                     logger.warning(f"{engine} batch: save failed for row {image_id}: {e}")
-                    img.status = 'failed'
-                    img.fail_reason = f'saving the image failed: {str(e)[:400]}'
+                    db.session.rollback()
+                    img = db.session.get(FaceDatasetImage, image_id)
+                    if img is not None:
+                        _restore_replacement_after_failure(
+                            img, f'saving the image failed: {str(e)[:400]}')
+                        db.session.commit()
             else:
-                img.status = 'failed'
-                img.fail_reason = fail_reason
-            db.session.commit()
+                _restore_replacement_after_failure(img, fail_reason)
+                db.session.commit()
 
     def _one(item):
         # Progress-tracking wrapper: bump the indicator once per item handled,
@@ -4512,6 +5831,8 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
     # (comptes/API tiers) — elles n'existent que sur le chemin Klein local.
     if any(v.get('nsfw') or is_nsfw_label(v.get('label')) for v in variations):
         raise ValueError('NSFW variations run on the local Klein engine only')
+    if not cfg.get('privacy.allow_remote_generation'):
+        raise RemoteGenerationConsentRequired()
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
@@ -4540,7 +5861,9 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
                                    generation_anchor_ids=anchor_ids,
                                    generation_anchor_metadata=_generation_anchor_metadata_json(anchors),
                                    generation_engine=engine,
-                                   generation_gap_ids=_variation_gap_ids_json(v))
+                                   generation_gap_ids=_variation_gap_ids_json(v),
+                                   generation_provenance=_remote_generation_provenance(
+                                       engine, anchors))
             db.session.add(img)
             db.session.commit()
             ids.append(img.id)
@@ -4550,6 +5873,37 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
                      args=(app, items, ref_bytes, engine, dataset_id),
                      daemon=True).start()
     return ids
+
+
+def recover_interrupted_api_generations() -> int:
+    """Close API rows whose daemon disappeared during a process restart.
+
+    Provider APIs do not offer a shared idempotency/result handle here. Blindly
+    replaying a pending row could therefore charge twice after the remote call
+    succeeded but before its bytes were committed. Marking the row failed makes
+    the interruption explicit and keeps the existing Regenerate action as the
+    safe, user-authorized retry path.
+    """
+    # A handful of very early databases can reach this startup hook while an
+    # additive migration test is intentionally exercising only a partial legacy
+    # table. Do not issue an ORM SELECT for columns that schema does not yet have.
+    from sqlalchemy import inspect
+    required = {'status', 'filename', 'job_id', 'generation_engine', 'fail_reason'}
+    existing = {column['name'] for column in inspect(db.engine).get_columns(
+        FaceDatasetImage.__tablename__)}
+    if not required.issubset(existing):
+        return 0
+    rows = (FaceDatasetImage.query
+            .filter_by(status='pending', filename=None, job_id=None)
+            .filter(FaceDatasetImage.generation_engine.in_(tuple(API_ENGINES)))
+            .all())
+    for row in rows:
+        row.status = 'failed'
+        row.fail_reason = ('The app restarted before this provider generation was '
+                           'saved. Check the provider history, then regenerate if needed.')
+    if rows:
+        db.session.commit()
+    return len(rows)
 
 
 # --- Completion linking (called from the job queue) -------------------------
@@ -4751,6 +6105,12 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
     before concluding the row really doesn't exist.
     `reason` (the job row's error_message, e.g. a ComfyUI execution error) shows
     on the failed tile so the user sees WHY, not a generic 'see the log'."""
+    if filename and (not isinstance(filename, str)
+                     or Path(filename).name != filename
+                     or filename in ('.', '..')):
+        failed = True
+        reason = 'ComfyUI returned an unsafe output filename'
+        filename = None
     qa_candidate_id = None
     img = FaceDatasetImage.query.filter_by(job_id=job_id).first()
     if img is None:
@@ -4763,15 +6123,21 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
             and img.status in ('keep', 'reject')):
         # The user already resolved the pair while this job/callback was racing.
         # The terminal review decision wins: do not attach
-        # a late file and do not turn reject into failed. Remove a local Comfy output
-        # when possible so ignored results do not accumulate outside the dataset.
+        # a late file and do not turn reject into failed. Retain a local Comfy output
+        # in app Trash so an expensive late generation is still recoverable.
         output_dir = _comfy_output_dir()
         late_output = os.path.join(output_dir, filename) if output_dir and filename else None
         if late_output and os.path.isfile(late_output):
             try:
-                os.remove(late_output)
-            except OSError:
-                pass
+                from . import trash
+                trash.send_paths_to_trash(
+                    [late_output], context='late-dataset-output', metadata={
+                        'kind': 'orphaned_generation',
+                        'dataset_id': img.dataset_id,
+                        'label': f'Late dataset output: {os.path.basename(filename)}',
+                    })
+            except (OSError, ValueError):
+                logger.exception('could not retain late dataset output %s', filename)
         try:
             _sync_generate_activity(img.dataset_id)
         except Exception:
@@ -4783,43 +6149,44 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
         # that callback overwrite an already-resolved rescue choice (keep/reject).
         if not (img.derivation_kind in (KLEIN_SMALL_IMAGE, KLEIN_IMAGE_IMPROVE)
                 and img.status in ('keep', 'reject')):
-            img.status = 'failed'
-            img.fail_reason = (img.fail_reason or reason
-                               or 'Klein generation failed (see 🪵 Server log in Settings for the ComfyUI error)')
+            _restore_replacement_after_failure(
+                img, img.fail_reason or reason
+                or 'Klein generation failed (see 🪵 Server log in Settings for the ComfyUI error)')
+            db.session.commit()
     else:
         output_dir = _comfy_output_dir()
         src = os.path.join(output_dir, filename) if output_dir else None
-        dst = os.path.join(_dataset_dir(img.dataset_id), filename)
-        if src and os.path.exists(src) and os.path.exists(dst):
-            # Collision guard: NEVER overwrite another tile's file. ComfyUI's
-            # SaveImage counter re-issued the same name when earlier results
-            # were moved out of its output folder — every tile then displayed
-            # the same (last) image. The prefix is unique per job now, but a
-            # residual collision must degrade to a rename, not a silent loss.
-            base, ext = os.path.splitext(filename)
-            filename = f"{base}_{uuid.uuid4().hex[:6]}{ext}"
-            dst = os.path.join(_dataset_dir(img.dataset_id), filename)
-            logger.warning(f"dataset link: name collision, storing as {filename}")
-        img.filename = filename
+        data = None
         if src and os.path.exists(src):
-            shutil.move(src, dst)          # file where we expected it on disk
-        elif os.path.exists(dst):
-            pass                           # already brought in (retry / dup completion)
+            with open(src, 'rb') as handle:
+                data = handle.read()
         else:
             # The file isn't on disk where we look — ComfyUI was pointed at a
             # custom output path, or none is configured. Fetch it over the /view
             # API instead (path-independent, like other ComfyUI front-ends). #2
             from ..utils.comfyui import fetch_output_image_bytes
             data = fetch_output_image_bytes(filename)
-            if data:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                with open(dst, 'wb') as f:
-                    f.write(data)
-            else:
-                img.status = 'failed'
-                img.fail_reason = ('The finished image could not be retrieved from ComfyUI '
-                                   '(not on disk, and the /view API fetch failed).')
-                logger.warning(f"dataset link: file not on disk and /view API fetch failed (job {job_id})")
+        if data:
+            _commit_generated_replacement(
+                img, filename, data, provenance_updates={
+                    'response_received_at': datetime.now(timezone.utc).isoformat(),
+                    'response_sha256': hashlib.sha256(data).hexdigest(),
+                })
+            if src:
+                try:
+                    os.remove(src)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.warning('could not remove imported ComfyUI output %s', src)
+        else:
+            _restore_replacement_after_failure(
+                img, 'The finished image could not be retrieved from ComfyUI '
+                     '(not on disk, and the /view API fetch failed).')
+            db.session.commit()
+            logger.warning(
+                'dataset link: file not on disk and /view API fetch failed (job %s)',
+                job_id)
         if (img.derivation_kind == KLEIN_IMAGE_IMPROVE
                 and img.status == 'pending' and img.filename
                 and os.path.isfile(_img_path(img))):
@@ -4887,7 +6254,7 @@ def _export_caption(ds, caption) -> str:
     return f"{ds.trigger_word}, {cap}" if cap else ds.trigger_word
 
 
-def build_export_zip(user_id, dataset_id) -> bytes:
+def build_export_zip(user_id, dataset_id, *, destination=None):
     """Training-ready ZIP in the PUBLIC-TOOL layout, not an app-internal format:
     one `10_<trigger>/` folder of `image.png` + same-stem `image.txt` caption
     pairs (captions carry the resolved trigger inline). That single shape feeds
@@ -4902,78 +6269,81 @@ def build_export_zip(user_id, dataset_id) -> bytes:
             .order_by(FaceDatasetImage.id.asc()).all())
     if not kept:
         raise ValueError('no kept images to export')
+    available = [img for img in kept
+                 if img.filename and os.path.exists(_img_path(img))]
+    if not available:
+        raise ValueError('kept image files are missing; run the integrity check')
     safe = ''.join(c for c in ds.name if c.isalnum() or c in ('-', '_')) or 'dataset'
     safe_trigger = ''.join(c for c in ds.trigger_word if c.isalnum() or c in ('-', '_')) or 'lora'
     folder = f"10_{safe_trigger}"
     comp = {'face': 0, 'bust': 0, 'body': 0, 'back': 0}
     exported_meta = []
-    buf = io.BytesIO()
+    buf = destination if destination is not None else io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # Garder la PHOTO RÉELLE de référence dans le set : les datasets 100 %
-        # synthétiques dérivent de la distribution réelle (deep-research 2026-06-14).
-        # On l'inclut comme ancre réelle (_000), caption = trigger seul.
-        ref_path = _ref_path(ds) if ds.ref_filename else ''
-        if ref_path and os.path.exists(ref_path):
-            try:
-                rpng = io.BytesIO()
-                Image.open(ref_path).convert('RGB').save(rpng, 'PNG')
-                zf.writestr(f"{folder}/{safe}_000_ref.png", rpng.getvalue())
-                zf.writestr(f"{folder}/{safe}_000_ref.txt", ds.trigger_word)
-                exported_meta.append({
-                    'file': f'{safe}_000_ref.png', 'source': 'reference',
-                    'caption_file': f'{safe}_000_ref.txt', 'framing': 'face',
-                })
-            except OSError:
-                pass
-        for n, img in enumerate(kept, 1):
-            path = _img_path(img) if img.filename else ''
-            if not img.filename or not os.path.exists(path):
-                continue
+        # The primary reference is an identity/generation anchor, not an admitted
+        # training row. Every training/export surface consumes the same explicit
+        # status='keep' projection; users can import the reference if they want it
+        # represented in the training set.
+        for n, img in enumerate(available, 1):
+            path = _img_path(img)
             png = io.BytesIO()
-            Image.open(path).convert('RGB').save(png, 'PNG')
+            with Image.open(path) as opened, opened.convert('RGB') as converted:
+                converted.save(png, 'PNG')
+            png_bytes = png.getvalue()
+            exported_caption = _export_caption(ds, img.caption)
             base = f"{folder}/{safe}_{n:03d}"
-            zf.writestr(f"{base}.png", png.getvalue())
-            zf.writestr(f"{base}.txt", _export_caption(ds, img.caption))
+            zf.writestr(f"{base}.png", png_bytes)
+            zf.writestr(f"{base}.txt", exported_caption)
             exported_meta.append({
                 'file': f'{safe}_{n:03d}.png',
                 'caption_file': f'{safe}_{n:03d}.txt',
                 'source': img.source,
                 'source_name': img.source_name or '',
                 'source_sha256': img.source_sha256,
+                'content_sha256': hashlib.sha256(png_bytes).hexdigest(),
+                'caption_sha256': hashlib.sha256(
+                    exported_caption.encode('utf-8')).hexdigest(),
                 'framing': img.framing,
                 'technical': img.training_usefulness,
                 'coverage': parse_coverage(img.coverage_json),
+                'coverage_provenance': _safe_json(img.coverage_provenance),
+                'source_rights': (_safe_json(img.source_rights) or
+                                  {'basis': 'generated' if img.source == 'generated'
+                                   else 'unknown'}),
                 'duplicate_of_id': img.duplicate_of_id,
                 'generation_engine': img.generation_engine or (
                     img.klein_model if img.source == 'generated' else None),
                 'generation_gap_ids': _parse_generation_gap_ids(img.generation_gap_ids),
                 'generation_anchors': _parse_generation_anchor_metadata(
                     img.generation_anchor_metadata),
+                'generation_provenance': _safe_json(img.generation_provenance),
             })
             if img.framing in comp:
                 comp[img.framing] += 1
         zf.writestr(f"{folder}/_dataset_info.md",
-                    _INFO.format(trigger=ds.trigger_word, n=len(kept), comp=comp))
+                    _INFO.format(trigger=ds.trigger_word, n=len(exported_meta), comp=comp))
         zf.writestr(f"{folder}/_prep_my_avatar_manifest.json", json.dumps({
             'format': 'prep-my-avatar-training-export',
-            'version': 1,
+            'version': 2,
             'dataset': {'name': ds.name, 'trigger_word': ds.trigger_word,
                         'kind': ds.kind or 'character',
-                        'fidelity': ds.fidelity or 'face'},
+                        'fidelity': ds.fidelity or 'face',
+                        'coverage_profile': ds.coverage_profile or 'balanced',
+                        'coverage_targets': _safe_json(ds.coverage_targets)},
             'images': exported_meta,
             'source_mix': {
                 'reference': sum(1 for item in exported_meta if item['source'] == 'reference'),
                 'imported': sum(1 for item in exported_meta if item['source'] == 'import'),
                 'generated': sum(1 for item in exported_meta if item['source'] == 'generated'),
             },
-            'coverage_plan': build_coverage_plan(ds, kept),
+            'coverage_plan': build_coverage_plan(ds, available),
             'attribution': {
                 'fork': 'Prep My Avatar',
                 'upstream': 'perfectgf/lora-dataset-studio',
                 'license': 'PolyForm Noncommercial 1.0.0',
             },
         }, ensure_ascii=False, indent=2))
-    return buf.getvalue()
+    return buf if destination is not None else buf.getvalue()
 
 
 def write_caption_files(user_id, dataset_id) -> dict:

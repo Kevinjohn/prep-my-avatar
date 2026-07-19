@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiFetch, putJson, postJson } from '../api/fetchClient'
 import { useToast } from '../components/common/Toast'
+import { useConfirmDialog } from '../components/common/ConfirmDialog'
 import { useCapabilities } from '../context/CapabilitiesContext'
 import { deriveSetupSteps, deriveCapabilitySummary, SETUP_STEP_IDS } from '../hooks/useSetupSteps'
 import GuidedSteps from '../components/setup/GuidedSteps'
@@ -60,6 +61,7 @@ const CAPABILITY_STEP_ID = {
 
 export default function SetupPage() {
   const toast = useToast()
+  const confirm = useConfirmDialog()
   const { caps, refresh } = useCapabilities()
   const [config, setConfig] = useState(null)
   const [secretsPresence, setSecretsPresence] = useState({})
@@ -487,9 +489,8 @@ export default function SetupPage() {
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-content space-y-1">
               <p>
                 <span className="font-semibold text-amber-300">⚠ Python {caps.python.version} —</span>{' '}
-                these extras need Python {caps.python.ml_range}. insightface / numpy&lt;2 / onnxruntime publish
-                no prebuilt packages for {caps.python.version}, so the installs below will try to compile them
-                and most likely fail.
+                these extras need Python {caps.python.ml_range}. The reviewed InsightFace, rembg, ONNX and
+                Torch dependency graph is not supported on {caps.python.version}, so the installs below will fail.
               </p>
               <p className="text-content-muted">
                 They're optional — you can skip this step, or install them into a separate Python 3.11/3.12
@@ -542,7 +543,7 @@ export default function SetupPage() {
         <p className="mt-2 text-content-muted text-xs">
           No GPU? You can skip this step: add a <strong>vast.ai API key</strong> in
           Settings instead and train in the cloud (the app rents a GPU per run,
-          ~$1-2, and shuts it down automatically).
+          typically ~$1-2). It requests shutdown when work ends and keeps the run visibly billable until vast.ai confirms it.
         </p>
       </>
     )
@@ -648,9 +649,13 @@ export default function SetupPage() {
     (savedConfigRef.current != null && JSON.stringify(config) !== savedConfigRef.current)
     || Object.values(secretInputs).some((v) => (v || '').trim())
   )
-  const goBack = () => {
-    if (hasUnsaved() && !window.confirm(
-      'You have unsaved changes on this step - they will be lost.\n\nGo back without saving?')) return
+  const goBack = async () => {
+    if (hasUnsaved() && !(await confirm({
+      title: 'Discard unsaved setup changes?',
+      message: 'The values typed on this step have not been saved and will be lost if you go back.',
+      confirmLabel: 'Discard and go back',
+      tone: 'danger',
+    }))) return
     if (kind === 'done') {
       const last = [...SETUP_STEP_IDS].reverse().find((id) => !isReady(id))
       return setScreen(last ? screenOf(last) : 0)
@@ -679,7 +684,7 @@ export default function SetupPage() {
   // Progress dots: one per tool step, filled when that tool is ready.
   const ProgressDots = () => (
     <div className="flex items-center gap-1.5" aria-hidden="true">
-      {SETUP_STEP_IDS.map((id, i) => {
+      {SETUP_STEP_IDS.map((id) => {
         const active = kind === id
         const ready = stepById[id].status === 'ready'
         return (

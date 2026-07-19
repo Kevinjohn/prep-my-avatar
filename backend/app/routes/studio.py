@@ -41,7 +41,8 @@ def studio_base_models():
 
 @bp.get('/checkpoints')
 def studio_checkpoints():
-    return jsonify({'loras': lts.list_all_testable_checkpoints(LOCAL_USER)})
+    return jsonify({'loras': lts.list_all_testable_checkpoints(LOCAL_USER),
+                    'max_images': lts.MAX_TEST_IMAGES})
 
 
 @bp.get('/recent-prompts')

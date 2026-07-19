@@ -2,6 +2,7 @@
 manifest diffs, and the version suffix on deployed checkpoint names."""
 import json
 import os
+import threading
 
 import pytest
 
@@ -41,15 +42,79 @@ def test_register_allocates_versions_by_fingerprint(app, ds_with_images):
         assert r2.version == 1
         # edit a caption -> new fingerprint -> v2
         from app.models import FaceDatasetImage
-        img = FaceDatasetImage.query.get(ids[0])
-        img.caption = 'edited caption'
         from app.extensions import db
+        img = db.session.get(FaceDatasetImage, ids[0])
+        img.caption = 'edited caption'
         db.session.commit()
         r3 = reg.register_launch(LOCAL_USER, ds_id, 'zimage', 'local', steps=1000)
         assert r3.version == 2
         # families version independently
         rk = reg.register_launch(LOCAL_USER, ds_id, 'krea', 'cloud', cloud_run_id=7)
         assert rk.version == 1 and rk.source == 'cloud' and rk.cloud_run_id == 7
+
+
+def test_register_persists_admission_snapshot_and_explicit_overrides(app, ds_with_images):
+    from app.services import checkpoint_registry as reg
+    ds_id, _ = ds_with_images
+    preflight = {'verdict': 'warning', 'kept': 12, 'blockers': [],
+                 'warnings': ['limited pose coverage']}
+    overrides = {'allow_caption_mismatch': True, 'masked': False}
+    with app.app_context():
+        row = reg.register_launch(
+            LOCAL_USER, ds_id, 'zimage', 'local',
+            preflight=preflight, overrides=overrides)
+        assert json.loads(row.preflight) == preflight
+        assert json.loads(row.overrides) == overrides
+
+
+def test_required_registration_fails_closed(app, ds_with_images, monkeypatch):
+    from app.services import checkpoint_registry as registry
+    dataset_id, _ = ds_with_images
+    with app.app_context():
+        monkeypatch.setattr(registry, 'dataset_manifest', lambda *_args: object())
+        with pytest.raises(RuntimeError, match='immutable training launch provenance'):
+            registry.register_launch(
+                LOCAL_USER, dataset_id, 'zimage', 'local', required=True)
+
+
+def test_required_registration_fails_when_dataset_disappeared(app):
+    from app.services import checkpoint_registry as registry
+    with app.app_context():
+        assert registry.register_launch(
+            LOCAL_USER, 999999, 'zimage', 'local') is None
+        with pytest.raises(RuntimeError, match='immutable training launch provenance'):
+            registry.register_launch(
+                LOCAL_USER, 999999, 'zimage', 'local', required=True)
+
+
+def test_concurrent_distinct_launches_allocate_distinct_versions(app, ds_with_images):
+    from app.services import checkpoint_registry as registry
+    dataset_id, _ = ds_with_images
+    barrier = threading.Barrier(3)
+    versions = []
+    errors = []
+
+    def register(index):
+        try:
+            with app.app_context():
+                barrier.wait(timeout=3)
+                record = registry.register_launch(
+                    LOCAL_USER, dataset_id, 'zimage', 'local',
+                    manifest=[[index, f'caption-{index}', f'file-{index}']],
+                    trigger='prov', kind='character', required=True)
+                versions.append(record.version)
+        except Exception as exc:  # surfaced below with the original exception
+            errors.append(exc)
+
+    threads = [threading.Thread(target=register, args=(index,)) for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait(timeout=3)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not errors
+    assert sorted(versions) == [1, 2]
 
 
 def test_manifest_diff_counts_changes():
@@ -59,6 +124,65 @@ def test_manifest_diff_counts_changes():
     d = reg.manifest_diff(old, new)
     assert d == {'images_added': 1, 'images_removed': 1,
                  'captions_changed': 1, 'images_edited': 1}
+
+
+def test_manifest_hashes_exact_bytes_not_size_or_mtime(app, ds_with_images):
+    import os
+    from pathlib import Path
+    from app.services import checkpoint_registry as reg
+    from app.services import face_dataset_service as fds
+    from app.models import FaceDatasetImage
+    ds_id, ids = ds_with_images
+    with app.app_context():
+        row = fds.db.session.get(FaceDatasetImage, ids[0])
+        path = Path(fds._img_path(row))
+        before_stat = os.stat(path)
+        before = reg.dataset_manifest(ds_id)
+        original = path.read_bytes()
+        replacement = bytes([original[0] ^ 0xFF]) + original[1:]
+        path.write_bytes(replacement)
+        os.utime(path, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
+        after = reg.dataset_manifest(ds_id)
+        assert os.stat(path).st_size == before_stat.st_size
+        assert before != after
+        assert len(after[0][2]) == 64
+
+
+def test_manifest_uses_sha256_for_captions_and_dataset_fingerprint(app, ds_with_images):
+    from app.services import checkpoint_registry as registry
+    from app.services import face_dataset_service as datasets
+    with app.app_context():
+        dataset_id, _images = ds_with_images
+        dataset = datasets.get_dataset(LOCAL_USER, dataset_id)
+        manifest = registry.dataset_manifest(dataset_id)
+        assert len(manifest[0][1]) == 64
+        assert len(manifest[0][2]) == 64
+        assert len(registry.fingerprint_of(
+            manifest, dataset.trigger_word, dataset.kind or '')) == 64
+
+
+def test_full_fingerprint_keeps_legacy_prefix_version(app, ds_with_images):
+    from app.extensions import db
+    from app.models import TrainingRunRecord
+    from app.services import checkpoint_registry as registry
+    dataset_id, _images = ds_with_images
+    with app.app_context():
+        manifest = registry.dataset_manifest(dataset_id)
+        legacy_full = registry.fingerprint_of(manifest, 'prov', '')
+        full = registry.fingerprint_of(manifest, 'prov', 'character')
+        db.session.add(TrainingRunRecord(
+            dataset_id=dataset_id, family='zimage', source='legacy',
+            fingerprint=legacy_full[:16], manifest=json.dumps(manifest), version=3,
+        ))
+        db.session.commit()
+
+        state = registry.dataset_state(LOCAL_USER, dataset_id, 'zimage')
+        record = registry.register_launch(
+            LOCAL_USER, dataset_id, 'zimage', 'local', required=True)
+
+        assert state['changed'] is False
+        assert record.version == 3
+        assert record.fingerprint == full
 
 
 def test_dataset_state_flags_drift(app, ds_with_images):
@@ -73,7 +197,7 @@ def test_dataset_state_flags_drift(app, ds_with_images):
         assert st['registered'] is True and st['version'] == 1
         assert st['changed'] is False and st['diff'] is None
         # remove an image -> drift with a readable diff
-        FaceDatasetImage.query.get(ids[1]).status = 'reject'
+        db.session.get(FaceDatasetImage, ids[1]).status = 'reject'
         db.session.commit()
         st = reg.dataset_state(LOCAL_USER, ds_id, 'zimage')
         assert st['changed'] is True
@@ -146,6 +270,22 @@ def test_ensure_baseline_retrofits_pretrained_datasets(app, ds_with_images):
         assert reg.latest_record(ds_id, 'zimage').id == rec.id   # no duplicate
 
 
+def test_legacy_backfill_runs_outside_checkpoint_get(app, ds_with_images, monkeypatch):
+    """Startup migration preserves legacy provenance without a mutating GET."""
+    from app.services import checkpoint_registry as reg
+    ds_id, _ = ds_with_images
+    monkeypatch.setattr(
+        'app.services.lora_training.list_checkpoints',
+        lambda _user, dataset_id, family=None, **_kwargs:
+            [{'filename': 'legacy.safetensors'}]
+            if dataset_id == ds_id and family == 'zimage' else [])
+    with app.app_context():
+        assert reg.backfill_legacy_baselines(LOCAL_USER) == 1
+        rec = reg.latest_record(ds_id, 'zimage')
+        assert rec is not None and rec.source == 'legacy'
+        assert reg.backfill_legacy_baselines(LOCAL_USER) == 0
+
+
 def test_cloud_checkpoints_lists_synced_saves_and_checks_files(app, ds_with_images, tmp_path):
     """The panel list must show cloud saves synced locally — including an
     ACTIVE run's latest (user-observed: step 1000, save synced, list empty) —
@@ -206,9 +346,11 @@ def test_checkpoint_download_targets_run_id(app, client, monkeypatch, ds_with_im
             runs.append(r.id)
     old_id, new_id = runs
     # family resolution -> newest run's file (unchanged default)
-    assert client.get(f'/api/dataset/{ds_id}/train/cloud/checkpoint?train_type=krea').data == b'NEW'
+    with client.get(f'/api/dataset/{ds_id}/train/cloud/checkpoint?train_type=krea') as response:
+        assert response.data == b'NEW'
     # run_id targets the OLD row's own file
-    assert client.get(f'/api/dataset/{ds_id}/train/cloud/checkpoint?run_id={old_id}').data == b'OLD'
+    with client.get(f'/api/dataset/{ds_id}/train/cloud/checkpoint?run_id={old_id}') as response:
+        assert response.data == b'OLD'
     # a run_id of another dataset -> 404, no cross-dataset leak
     assert client.get(f'/api/dataset/{ds_id + 999}/train/cloud/checkpoint?run_id={old_id}').status_code == 404
 
@@ -236,6 +378,10 @@ def test_baseline_evidence_is_family_scoped(app, client, monkeypatch, ds_with_im
     client.get(f'/api/dataset/{ds_id}/train/checkpoints?train_type=krea')
     client.get(f'/api/dataset/{ds_id}/train/checkpoints?train_type=zimage')
     with app.app_context():
+        # Listing is read-only; startup maintenance performs the backfill.
+        assert reg.latest_record(ds_id, 'krea') is None
+        assert reg.latest_record(ds_id, 'zimage') is None
+        assert reg.backfill_legacy_baselines(LOCAL_USER) == 1
         assert reg.latest_record(ds_id, 'krea') is None       # not trained -> no baseline
         z = reg.latest_record(ds_id, 'zimage')
         assert z is not None and z.version == 1               # trained -> baseline
@@ -305,7 +451,7 @@ def test_imported_list_shows_cloud_epoch_deployments(app, ds_with_images, tmp_pa
     ds_id, _ = ds_with_images
     with app.app_context():
         cfg.save_config({'comfyui': {'base_dir': str(tmp_path / 'comfy')}})
-        run = CloudTrainingRun(dataset_id=ds_id, status='completed')
+        run = CloudTrainingRun(dataset_id=ds_id, status='done')
         db.session.add(run)
         db.session.commit()
         dest = tmp_path / 'comfy' / 'models' / 'loras' / 'krea'

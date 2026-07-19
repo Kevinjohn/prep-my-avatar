@@ -12,11 +12,9 @@ user-supplied URLs.
 Actually pulling the chosen images INTO a dataset is a separate, autonomous path
 (`POST /api/dataset/<id>/scrape-import` in routes/datasets.py → svc.scrape_import_urls).
 """
-from urllib.parse import urlparse
-
 from flask import Blueprint, request, jsonify, Response
 
-from ..scrape.netfetch import _validate_public_http_url
+from ..scrape.netfetch import _validate_public_http_url, fetch_hardened_bytes
 
 bp = Blueprint('scrape', __name__, url_prefix='/api')
 
@@ -84,45 +82,29 @@ def scrape_thumb():
     browser <img> fails; fetch server-side (curl_cffi impersonate=chrome + Referer)
     and restream from our origin. SSRF-guarded (public http(s) only, no redirects),
     content-type restricted to raster, size-capped."""
+    if request.headers.get('Sec-Fetch-Site', '').lower() in ('cross-site', 'none'):
+        return jsonify({'error': 'cross-site thumbnail requests are refused'}), 403
     url = (request.args.get('url') or '').strip()
     ok, err = _validate_public_http_url(url)
     if not ok:
         return jsonify({'error': err or 'invalid URL'}), 400
-    try:
-        from curl_cffi import requests as cf_requests
-    except ImportError:
-        return jsonify({'error': 'curl_cffi unavailable'}), 503
-    host = urlparse(url).hostname or ''
-    try:
-        # allow_redirects=False: only the ALREADY-validated host is fetched. A 3xx
-        # toward an internal IP would bypass the upstream SSRF guard (TOCTOU/redirect).
-        r = cf_requests.get(url, impersonate='chrome', timeout=20, stream=True,
-                            allow_redirects=False,
-                            headers={'Referer': f'https://{host}/', 'Accept': 'image/*,*/*'})
-    except Exception:
-        return jsonify({'error': 'fetch failed'}), 502
-    if 300 <= r.status_code < 400:
-        try: r.close()
-        except Exception: pass
-        return jsonify({'error': 'redirect refused'}), 502
-    ctype = (r.headers.get('content-type') or '').split(';')[0].strip().lower()
-    if r.status_code != 200 or ctype not in _ALLOWED_THUMB_TYPES:
-        try: r.close()
-        except Exception: pass
-        return jsonify({'error': 'unsupported type'}), 415
-    data = bytearray()
-    try:
-        for chunk in r.iter_content(8192):
-            if not chunk:
-                continue
-            data += chunk
-            if len(data) > MAX_THUMB_BYTES:
-                return jsonify({'error': 'thumbnail too large'}), 413
-    finally:
-        try: r.close()
-        except Exception: pass
+    ok, data, ctype, reason = fetch_hardened_bytes(
+        url, allowed_types=_ALLOWED_THUMB_TYPES, max_bytes=MAX_THUMB_BYTES,
+        require_image_magic=True)
+    if not ok:
+        status = {
+            'ssrf': 400, 'no_curl': 503, 'toolarge': 413,
+            'type': 415, 'noimage': 415,
+        }.get(reason, 502)
+        message = {
+            'ssrf': 'invalid URL', 'no_curl': 'curl_cffi unavailable',
+            'toolarge': 'thumbnail too large', 'type': 'unsupported type',
+            'noimage': 'response is not a supported raster image',
+            'redirect': 'redirect refused',
+        }.get(reason, 'fetch failed')
+        return jsonify({'error': message}), status
     # Hardened: no MIME sniffing, inline, locked-down CSP (defense in depth).
-    return Response(bytes(data), content_type=ctype, headers={
+    return Response(data, content_type=ctype, headers={
         'Cache-Control': 'public, max-age=86400',
         'X-Content-Type-Options': 'nosniff',
         'Content-Disposition': 'inline; filename="thumb"',
