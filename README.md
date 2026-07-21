@@ -12,6 +12,50 @@ front of the journey:
 large photo corpus → analyse → plan coverage → generate missing combinations → review → train/export
 ```
 
+## Workflow at a glance
+
+### 1. Import and review the source corpus
+
+Import preserves every original while the Corpus Workbench surfaces technical
+quality, duplicates, training admission, anchor choices, rights, and coverage.
+
+![Import and review the source corpus](docs/screenshots/readme/01-import-corpus.jpg)
+
+### 2. Plan coverage
+
+See which framing and visual combinations are covered, weak, unknown, or missing
+before spending anything on generation.
+
+![Plan corpus coverage](docs/screenshots/readme/02-coverage-plan.jpg)
+
+### 3. Generate only proven gaps
+
+Choose a local or API engine, then review the preselected shots that fill genuine
+coverage gaps.
+
+![Select gap-filling generation shots](docs/screenshots/readme/03-generate-gaps.jpg)
+
+### 4. Curate the combined dataset
+
+Keep or reject imported and generated candidates together, with quality and
+provenance visible during review.
+
+![Curate imported and generated images](docs/screenshots/readme/04-curate-images.jpg)
+
+### 5. Check training readiness
+
+The training workspace keeps the next blocker visible and shows whether a local
+or cloud trainer is configured before launch.
+
+![Check training readiness](docs/screenshots/readme/05-training-readiness.jpg)
+
+### 6. Export or back up
+
+Export ordinary training pairs, or create a portable backup that retains the
+full preparation history.
+
+![Export the training dataset or create a portable backup](docs/screenshots/readme/06-export-backup.jpg)
+
 ## Fork-specific workflow
 
 - Import a large real-photo corpus while preserving every uploaded original byte,
