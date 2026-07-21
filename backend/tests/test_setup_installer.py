@@ -57,6 +57,10 @@ def test_start_unknown_action_raises():
 
 def test_start_sets_running(monkeypatch):
     from app import setup_installer
+    monkeypatch.setattr(
+        setup_installer.capabilities, 'python_ml_status',
+        lambda: {'version': '3.12.0', 'ml_supported': True,
+                 'ml_range': '3.11–3.12'})
     monkeypatch.setattr(setup_installer, '_execute', lambda action: None)  # thread no-ops
     state = setup_installer.start('ml_extras')
     assert state['state'] == 'running'
@@ -86,6 +90,10 @@ def test_start_rejects_durable_duplicate_without_launching_worker(
         app, monkeypatch):
     from app import setup_installer
     from app.services import background_jobs
+    monkeypatch.setattr(
+        setup_installer.capabilities, 'python_ml_status',
+        lambda: {'version': '3.12.0', 'ml_supported': True,
+                 'ml_range': '3.11–3.12'})
     with app.app_context():
         background_jobs.create_or_get('setup', 'masks', {'action': 'masks'})
         monkeypatch.setattr(

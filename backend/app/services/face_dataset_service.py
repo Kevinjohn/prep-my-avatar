@@ -121,7 +121,9 @@ def _store_original_bytes(user_id, dataset_id, raw) -> str:
     except (OSError, ValueError):
         ext = '.bin'
     filename = f"{user_id}_original_{uuid.uuid4().hex[:12]}{ext}"
-    relative = os.path.join('originals', filename)
+    # Database paths are portable identifiers, not host-native filesystem paths.
+    # Keeping them POSIX-style lets backups created on Windows restore elsewhere.
+    relative = f'originals/{filename}'
     path = os.path.join(_dataset_dir(dataset_id), relative)
     _atomic_write_bytes(path, raw)
     return relative
@@ -3478,6 +3480,19 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
     return ids, failed
 
 
+class _SeekableZipStream:
+    """Supply the ``seekable`` method missing from Python 3.10 spooled uploads."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    def seekable(self):
+        return True
+
+
 def import_dataset_zip(user_id, dataset_id, zip_source, stats=None):
     """Import an existing training dataset into THIS dataset (merge, not create):
     every image in the zip becomes an 'import' row (status=keep), a same-stem
@@ -3488,8 +3503,15 @@ def import_dataset_zip(user_id, dataset_id, zip_source, stats=None):
         raise ValueError('dataset not found')
     try:
         source = io.BytesIO(zip_source) if isinstance(zip_source, (bytes, bytearray)) else zip_source
+        if not hasattr(source, 'seekable'):
+            # ``tempfile.SpooledTemporaryFile`` gained ``seekable`` after Python
+            # 3.10. Werkzeug uses it for multipart uploads, while ZipFile 3.10
+            # requires the attribute even though the stream already supports
+            # read/seek/tell. A delegating proxy avoids buffering large archives.
+            source.seek(source.tell())
+            source = _SeekableZipStream(source)
         z = zipfile.ZipFile(source)
-    except (zipfile.BadZipFile, OSError, TypeError):
+    except (AttributeError, zipfile.BadZipFile, OSError, TypeError):
         raise ValueError('not a zip file')
     infos = [i for i in z.infolist() if not i.is_dir()]
     if len(infos) > DATASET_ZIP_MAX_FILES:

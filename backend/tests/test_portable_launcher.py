@@ -65,7 +65,7 @@ def test_start_server_passes_supervision_contract_and_closes_parent_log(
     assert captured['env']['LDS_PORT'] == '5050'
     assert captured['stdout'] is captured['stderr']
     assert captured['stdout'].closed is True
-    assert captured['command'][-1].endswith('backend/run.py')
+    assert Path(captured['command'][-1]) == tmp_path / 'backend' / 'run.py'
 
 
 def test_readiness_timeout_is_reported_while_process_is_still_running(launcher):

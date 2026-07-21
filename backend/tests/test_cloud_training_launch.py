@@ -254,8 +254,21 @@ def test_launch_refuses_second_active_run(ct, app, seeded_dataset, monkeypatch):
 
 def test_simultaneous_launches_reserve_only_one_active_slot(
         ct, app, seeded_dataset, monkeypatch):
+    from types import SimpleNamespace
+
     import threading
     _fake_export(monkeypatch, ct)
+    # The default test database is one in-memory SQLite connection. Concurrent
+    # reads through that shared connection are unsupported on Windows and are
+    # outside this test's purpose; freeze the already-seeded row so only the
+    # admission critical section performs database work concurrently.
+    with app.app_context():
+        ds = ct.fds.get_dataset('local', seeded_dataset)
+        frozen_ds = SimpleNamespace(**{
+            column.name: getattr(ds, column.name)
+            for column in ds.__table__.columns
+        })
+    monkeypatch.setattr(ct.fds, 'get_dataset', lambda *_args, **_kwargs: frozen_ds)
     barrier = threading.Barrier(2)
     results = []
     results_lock = threading.Lock()
@@ -1385,10 +1398,10 @@ def test_continue_seeds_checkpoint_in_monitor_flow(ct, app, seeded_dataset,
         new_run = ct.db.session.get(ct.CloudTrainingRun, new_id)
         job_name = new_run.job_name
         ct._monitor(app, new_id)
-        copied_resume = new_run.staging_dir + '/resume/' + ckpt.name
+        copied_resume = ct.Path(new_run.staging_dir) / 'resume' / ckpt.name
     assert fake.seeded is not None
-    assert fake.seeded['local_path'] == copied_resume
-    assert ct.Path(copied_resume).read_bytes() == b'weights'
+    assert ct.Path(fake.seeded['local_path']) == copied_resume
+    assert copied_resume.read_bytes() == b'weights'
     assert fake.seeded['remote_name'] == f'{job_name}_000000750.safetensors'
     assert fake.seeded['dest_dir'] == f'/root/ai-toolkit/output/{job_name}'
     # ordering: create_job -> seed -> start_job

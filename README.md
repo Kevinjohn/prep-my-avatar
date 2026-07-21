@@ -156,9 +156,9 @@ consent toggle.
 
 ## Versioning
 
-The current application release is **2026.07.17.1**. Application releases use
+The current application release is **2026.07.21.1**. Application releases use
 calendar versions in the form `YYYY.MM.DD.N`, with matching Git tags such as
-`v2026.07.17.1`; `N` increments when more than one release is cut on the same day.
+`v2026.07.21.1`; `N` increments when more than one release is cut on the same day.
 
 `backend/app/version.py` is the application version source of truth. The prototype
 `avatar_prep` Python package keeps its independent SemVer, and the frontend package

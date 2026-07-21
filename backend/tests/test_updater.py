@@ -207,6 +207,7 @@ def test_apply_updates_installed_optional_group_only(monkeypatch, tmp_path):
         return _R()
 
     _patch_git(monkeypatch, resp)
+    monkeypatch.setattr(updater, '_ml_python_supported', lambda: True)
     monkeypatch.setattr(
         updater, '_pip_environment_snapshot',
         lambda: ({'freeze': ['insightface==0.7.3'],
@@ -225,7 +226,7 @@ def test_apply_updates_installed_optional_group_only(monkeypatch, tmp_path):
     assert 'rembg' not in rendered and 'torch' not in rendered
 
 
-def test_optional_ml_update_removes_legacy_lama_wrapper(tmp_path):
+def test_optional_ml_update_removes_legacy_lama_wrapper(monkeypatch, tmp_path):
     backend = tmp_path / 'backend'
     backend.mkdir()
     (backend / 'requirements-ml.txt').write_text(
@@ -237,6 +238,7 @@ def test_optional_ml_update_removes_legacy_lama_wrapper(tmp_path):
             'torch': '2.1.2',
         },
     }
+    monkeypatch.setattr(updater, '_ml_python_supported', lambda: True)
 
     commands = updater._optional_python_install_commands(
         tmp_path, ['backend/requirements-ml.txt'], snapshot)

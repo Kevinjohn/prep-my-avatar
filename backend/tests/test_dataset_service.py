@@ -127,6 +127,36 @@ def test_import_records_source_provenance_and_technical_analysis(app):
         assert image['analysis']['metrics']['resolution'] > 0
 
 
+def test_import_zip_accepts_legacy_spooled_upload_without_seekable(app):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    class LegacySpooledUpload:
+        def __init__(self, payload):
+            self._stream = io.BytesIO(payload)
+
+        def read(self, *args):
+            return self._stream.read(*args)
+
+        def seek(self, *args):
+            return self._stream.seek(*args)
+
+        def tell(self):
+            return self._stream.tell()
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Legacy zip', 'legacyzip')
+        archive = _training_zip([
+            ('img.png', _png((9, 90, 200))),
+            ('img.txt', b'caption here'),
+        ])
+        ids, failed = svc.import_dataset_zip(
+            LOCAL_USER, ds.id, LegacySpooledUpload(archive))
+
+        assert len(ids) == 1 and failed == 0
+        assert svc.db.session.get(svc.FaceDatasetImage, ids[0]).caption == 'caption here'
+
+
 def test_backup_roundtrip_preserves_uploaded_original(app):
     import os
     from app.services import face_dataset_service as svc

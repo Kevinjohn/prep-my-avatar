@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date
 
 
-APP_VERSION = '2026.07.17.1'
+APP_VERSION = '2026.07.21.1'
 
 
 def calver_key(value: str) -> tuple[int, int, int, int]:

@@ -7,6 +7,33 @@ under **Unreleased** until a release is tagged.
 
 ## Unreleased
 
+## 2026.07.21.1
+
+### Cross-platform reliability and CI
+
+- Fixed Python 3.10 ZIP imports from Flask/Werkzeug multipart uploads. Legacy
+  spooled streams that implement `read`, `seek`, and `tell` but lack the newer
+  `seekable` method are now adapted without buffering large archives in memory.
+- Standardized persisted uploaded-original paths to portable POSIX-style
+  identifiers so backups created on Windows restore correctly on Linux or
+  macOS, while host-native paths continue to be used for filesystem access.
+- Restored the missing run-comparison component to source control after a broad
+  runtime-data ignore rule accidentally excluded its directory. Frontend builds
+  and Playwright checks now reach and exercise the complete application again.
+- Made cloud-resume, portable-launcher, and process-lock tests respect native
+  Windows path and mandatory byte-lock semantics instead of assuming POSIX path
+  separators or reopening an actively locked file.
+- Isolated the cloud admission race test from the shared in-memory SQLite
+  connection used by the test harness. The test still exercises the real
+  admission critical section without introducing unsupported concurrent reads
+  on one Windows SQLite connection.
+- Made successful optional-ML installer and updater tests explicitly model a
+  supported feature interpreter. Python 3.10 continues to support the core app
+  while correctly refusing the reviewed Python 3.11–3.12 ML dependency graph.
+- Added regression coverage for Python 3.10 upload streams, portable provenance
+  paths, native checkpoint paths, Windows launcher commands, lock ownership,
+  optional dependency updates, and concurrent cloud admission.
+
 ### Dataset workflow and recovery
 
 - Added app-wide, recoverable Trash handling for datasets, individual images,
@@ -127,9 +154,11 @@ under **Unreleased** until a release is tagged.
 
 ### Verification
 
-- Backend: 1,353 tests passed and 1 skipped in the complete suite; the final
-  dataset-service regression suite passed 78 tests and the training-service
-  suite passed 42 tests.
+- Backend: 1,355 tests passed and 1 skipped on each of Python 3.10, 3.11, and
+  3.12; all 4 independent package tests passed on every interpreter.
+- Cross-platform regressions: all 11 focused tests passed on Python 3.10, 3.11,
+  and 3.12, and the concurrent cloud-admission test passed 20 additional stress
+  runs.
 - Frontend: ESLint, typecheck, 78 contract tests, and production build passed.
 - End to end: all 4 Playwright scenarios passed across desktop and mobile.
 - Static checks: Ruff and `git diff --check` passed.
