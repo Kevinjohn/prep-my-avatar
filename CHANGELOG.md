@@ -9,6 +9,14 @@ under **Unreleased** until a release is tagged.
 
 No unreleased changes.
 
+## 2026.07.28.2
+
+### Release highlights
+
+- Published a patch release of the repository-wide reliability and recovery
+  hardening delivered in `2026.07.28.1`; there are no additional functional
+  changes in this patch.
+
 ## 2026.07.28.1
 
 ### Release highlights

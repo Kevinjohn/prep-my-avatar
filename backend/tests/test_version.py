@@ -4,8 +4,8 @@ from app.version import APP_VERSION, calver_key, is_newer_version
 
 
 def test_current_app_version_uses_release_calver():
-    assert APP_VERSION == '2026.07.28.1'
-    assert calver_key(APP_VERSION) == (2026, 7, 28, 1)
+    assert APP_VERSION == '2026.07.28.2'
+    assert calver_key(APP_VERSION) == (2026, 7, 28, 2)
 
 
 def test_calver_comparison_is_numeric_not_lexical():
