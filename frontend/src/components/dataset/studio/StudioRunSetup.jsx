@@ -15,18 +15,21 @@ import { fmt } from '../../../utils/studioFormat';
 import { postJson, safeJson } from '../../../api/fetchClient';
 import StrengthPicker from './StrengthPicker';
 import RecentPrompts from './RecentPrompts';
+import { useToast } from '../../common/Toast';
 
 export default function StudioRunSetup({
   selectionCount, strengths, onToggleStrength,
   prompt, onPrompt, seed, onReroll, count, onCount,
-  onLaunch, launching, gpuBusy, batchMult = 1,
+  onLaunch, launching, gpuBusy, batchMult = 1, maxImages = MAX_TEST_IMAGES,
+  metadataReady = true,
 }) {
+  const toast = useToast();
   // batchMult = 1 + nb de LoRA cochés « ⚖ batch » (axe sans/avec) — le backend
   // multiplie les cellules d'autant, le compteur de coût doit suivre.
   const cells = selectionCount * strengths.length * count * batchMult;
-  const overLimit = cells > MAX_TEST_IMAGES;
+  const overLimit = cells > maxImages;
   const canLaunch = selectionCount > 0 && strengths.length > 0 && cells > 0
-    && !overLimit && !launching && !gpuBusy;
+    && !overLimit && !launching && !gpuBusy && metadataReady;
 
   // Prompts de test récents GLOBAUX (tous datasets — la comparaison n'en avait
   // aucun avant). Rechargé après un lancement (nouveau prompt mémorisé) et après
@@ -38,9 +41,16 @@ export default function StudioRunSetup({
   }, []);
   useEffect(() => { loadRecent(); }, [loadRecent, launching]);
   const deleteRecent = useCallback(async (p) => {
-    await postJson('/api/studio/recent-prompts/delete', { prompt: p }).catch(() => {});
-    loadRecent();
-  }, [loadRecent]);
+    try {
+      const result = await postJson('/api/studio/recent-prompts/delete', { prompt: p });
+      toast.success(`Prompt deleted (${result.deleted || 0} image(s))`);
+      loadRecent();
+      return true;
+    } catch (error) {
+      toast.error(error?.message || 'Could not delete this prompt');
+      return false;
+    }
+  }, [loadRecent, toast]);
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-3">
@@ -102,7 +112,7 @@ export default function StudioRunSetup({
       )}
       {overLimit && (
         <p className="m-0 text-amber-300 text-[0.6875rem]" role="alert">
-          This run has {cells} images; the maximum is {MAX_TEST_IMAGES}. Reduce LoRAs, strengths, batch axes, or images per config.
+          This run has {cells} images; the maximum is {maxImages}. Reduce LoRAs, strengths, batch axes, or images per config.
         </p>
       )}
     </div>

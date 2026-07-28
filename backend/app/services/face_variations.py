@@ -859,11 +859,15 @@ def _concept_leak_re(terms):
         t = (t or '').strip().lower()
         if len(t) < 3:
             continue
-        p = re.escape(t).replace(r'\ ', r'[\s-]+').replace(r'\-', r'[\s-]+')
-        pats.append(p)
+        variants = {t, f'{t}s', f'{t}es', f'{t}ing', f'{t}ed'}
+        if t.endswith('e'):
+            variants.update({f'{t[:-1]}ing', f'{t}d'})
+        pats.extend(
+            re.escape(variant).replace(r'\ ', r'[\s-]+').replace(r'\-', r'[\s-]+')
+            for variant in variants)
     if not pats:
         return None
-    return re.compile(r'\b(?:' + '|'.join(pats) + r')(?:e?s|ing|ed)?\b', re.I)
+    return re.compile(r'\b(?:' + '|'.join(pats) + r')\b', re.I)
 
 
 def caption_concept_leaks(caption, concept_desc, concept_terms=None) -> list:
@@ -986,11 +990,14 @@ def _is_identity_tag(tag, body=False) -> bool:
         return False
     if t in _IDENTITY_TAG_EXACT:
         return True
-    if 'eyes' in t:  # garde l'EXPRESSION (closed_eyes, wink), drop la couleur (blue_eyes)
-        return not any(k in t for k in ('closed', 'wink', 'half'))
-    if body and any(sub in t for sub in _BODY_TAG_CONTAINS):
+    tokens = tuple(part for part in t.replace('-', '_').split('_') if part)
+    if 'eyes' in tokens:  # garde l'EXPRESSION (closed_eyes, wink), drop la couleur
+        return not any(k in tokens for k in ('closed', 'wink', 'half'))
+    if body and any(token.startswith(sub) for token in tokens
+                    for sub in _BODY_TAG_CONTAINS):
         return True
-    return any(sub in t for sub in _IDENTITY_TAG_CONTAINS)
+    return any(token.startswith(sub) for token in tokens
+               for sub in _IDENTITY_TAG_CONTAINS)
 
 
 def drop_identity_tags(caption, body=False) -> str:

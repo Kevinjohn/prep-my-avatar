@@ -1,4 +1,7 @@
 """Settings API: config/secrets CRUD + capability probes."""
+import ipaddress
+import math
+
 from flask import Blueprint, current_app, jsonify, request
 
 from .. import capabilities
@@ -9,6 +12,78 @@ from .. import config as cfg
 from ..utils.redact import redact_user_paths as _redact_user_paths
 
 bp = Blueprint('settings', __name__, url_prefix='/api')
+
+
+_CLOUD_BOUNDS = {
+    'max_concurrent_runs': (1, 10, int),
+    'max_price_per_hour': (0.1, 5, float),
+    'monthly_budget_usd': (0, None, float),
+    'stall_timeout_minutes': (5, 240, int),
+}
+
+
+def _validate_cloud_settings(cloud: dict) -> str | None:
+    """Return a field-specific error for paid-cloud operational guardrails."""
+    for field, (minimum, maximum, kind) in _CLOUD_BOUNDS.items():
+        if field not in cloud:
+            continue
+        value = cloud[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"cloud.{field} must be a number"
+        if not math.isfinite(value):
+            return f"cloud.{field} must be finite"
+        if kind is int and int(value) != value:
+            return f"cloud.{field} must be an integer"
+        if value < minimum or (maximum is not None and value > maximum):
+            upper = f' and at most {maximum}' if maximum is not None else ''
+            return f"cloud.{field} must be at least {minimum}{upper}"
+    return None
+
+
+_ENUM_VALUES = {
+    'server.host': {'127.0.0.1', '0.0.0.0'},
+    'engines.chatgpt_auth': {'auto', 'api', 'subscription'},
+    'captioning.backend': {'auto', 'joycaption', 'ollama', 'none'},
+    'training.default_family': {'zimage', 'sdxl', 'krea', 'flux2klein'},
+    'watermark.device': {'auto', 'cuda', 'cpu'},
+}
+
+
+def _validate_config_values(partial: dict, defaults: dict, prefix: str = '') -> str | None:
+    """Validate nested keys and JSON value types against the config contract."""
+    for key, value in partial.items():
+        dotted = f'{prefix}.{key}' if prefix else key
+        if key not in defaults:
+            return f"unknown config field '{dotted}'"
+        expected = defaults[key]
+        if isinstance(expected, dict):
+            if not isinstance(value, dict):
+                return f'{dotted} must be an object'
+            error = _validate_config_values(value, expected, dotted)
+            if error:
+                return error
+        elif isinstance(expected, bool):
+            if not isinstance(value, bool):
+                return f'{dotted} must be a boolean'
+        elif isinstance(expected, int):
+            if isinstance(value, bool) or not isinstance(value, int):
+                return f'{dotted} must be an integer'
+        elif isinstance(expected, float):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or not math.isfinite(value):
+                return f'{dotted} must be a finite number'
+        elif isinstance(expected, str):
+            if not isinstance(value, str):
+                return f'{dotted} must be a string'
+        elif isinstance(expected, list):
+            if not isinstance(value, list):
+                return f'{dotted} must be an array'
+            if expected and any(not isinstance(item, type(expected[0])) for item in value):
+                return f'{dotted} contains an invalid value type'
+        allowed = _ENUM_VALUES.get(dotted)
+        if allowed is not None and value not in allowed:
+            return f'{dotted} must be one of {sorted(allowed)}'
+    return None
 
 
 _TEST_TARGETS = {
@@ -49,10 +124,14 @@ def _is_cgnat(ip) -> bool:
     """True for the 100.64.0.0/10 carrier-grade-NAT block that Tailscale draws
     every node's address from — the reliable signature of a tailnet IP."""
     try:
-        a, b = (int(x) for x in ip.split('.')[:2])
-    except (ValueError, AttributeError):
+        address = ipaddress.ip_address(ip)
+    except (ValueError, TypeError):
         return False
-    return a == 100 and 64 <= b <= 127
+    return address.version == 4 and address in ipaddress.ip_network('100.64.0.0/10')
+
+
+def _query_flag(name: str) -> bool:
+    return request.args.get(name, '').strip().lower() not in ('', '0', 'false', 'no')
 
 
 def _tailscale_ip():
@@ -104,11 +183,21 @@ def get_settings():
 
 @bp.put('/settings')
 def put_settings():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(force=True, silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': 'request body must be an object'}), 400
     if 'config' in body and not isinstance(body['config'], dict):
         return jsonify({'error': "'config' must be an object"}), 400
     if 'secrets' in body and not isinstance(body['secrets'], dict):
         return jsonify({'error': "'secrets' must be an object"}), 400
+    secrets_partial = body.get('secrets') or {}
+    for name, value in secrets_partial.items():
+        if name not in cfg.SECRET_KEYS:
+            return jsonify({'error': f"unknown secret key '{name}'"}), 400
+        if not isinstance(value, str):
+            return jsonify({'error': f'secret {name} must be a string'}), 400
+        if '\r' in value or '\n' in value or '\x00' in value:
+            return jsonify({'error': f'secret {name} contains invalid characters'}), 400
     config_partial = body.get('config') or {}
     unknown = set(config_partial) - set(cfg.DEFAULTS)
     if unknown:
@@ -119,6 +208,36 @@ def put_settings():
     for k, v in config_partial.items():
         if not isinstance(v, dict):
             return jsonify({'error': f"config section '{k}' must be an object"}), 400
+    value_error = _validate_config_values(config_partial, cfg.DEFAULTS)
+    if value_error:
+        return jsonify({'error': value_error}), 400
+    server = config_partial.get('server') or {}
+    port = server.get('port')
+    if port is not None and not 1 <= port <= 65535:
+        return jsonify({'error': 'server.port must be between 1 and 65535'}), 400
+    cloud_error = _validate_cloud_settings(config_partial.get('cloud') or {})
+    if cloud_error:
+        return jsonify({'error': cloud_error}), 400
+    effective = cfg._deep_merge(cfg.load_config(), config_partial)
+    face = effective.get('face_scoring') or {}
+    green, orange = face.get('green'), face.get('orange')
+    if (not isinstance(green, (int, float)) or isinstance(green, bool)
+            or not isinstance(orange, (int, float)) or isinstance(orange, bool)
+            or not 0 <= orange < green <= 1):
+        return jsonify({
+            'error': 'face_scoring thresholds must satisfy 0 <= orange < green <= 1',
+        }), 400
+    engines = effective.get('engines') or {}
+    allowed_engines = {'klein', 'nanobanana', 'chatgpt'}
+    enabled = engines.get('enabled')
+    default_engine = engines.get('default')
+    if (not isinstance(enabled, list) or not enabled
+            or any(not isinstance(item, str) or item not in allowed_engines
+                   for item in enabled)
+            or len(set(enabled)) != len(enabled)):
+        return jsonify({'error': 'engines.enabled must contain at least one valid engine'}), 400
+    if default_engine not in enabled:
+        return jsonify({'error': 'engines.default must be enabled'}), 400
     # Auto-correct the classic portable-bundle mistake: a base_dir pointing at
     # ...\ComfyUI_windows_portable gets rewritten to the nested ...\ComfyUI that
     # actually holds main.py + models/, so the base/model listers find checkpoints
@@ -128,8 +247,7 @@ def put_settings():
         r = capabilities.resolve_comfyui_base(bd)
         if r['valid'] and r['nested']:
             config_partial['comfyui']['base_dir'] = r['resolved']
-    cfg.save_config(config_partial)
-    cfg.set_secrets(body.get('secrets') or {})
+    cfg.save_settings(config_partial, secrets_partial)
     # A changed ComfyUI location must take effect NOW: the base/model listers cache
     # their scans for 5 min, so without this the training-base dropdowns keep showing
     # the pre-save (often empty) list right after the user points the app at ComfyUI.
@@ -153,7 +271,7 @@ def delete_secret(name):
 
 @bp.get('/capabilities')
 def get_capabilities():
-    force = bool(request.args.get('force'))
+    force = _query_flag('force')
     return jsonify(capabilities.probe(force=force))
 
 
@@ -183,8 +301,8 @@ def update_check():
     import requests
     from ..version import APP_VERSION, is_newer_version
     from ..services import updater
-    force = bool(request.args.get('force'))
-    auto = bool(request.args.get('auto'))
+    force = _query_flag('force')
+    auto = _query_flag('auto')
     # A git checkout: the meaningful signal is commits-behind-origin (the user pushes
     # commits to a branch, not tagged releases — a release-only check reads "up to date"
     # while the tree is many commits behind). The fetch runs on an explicit check
@@ -197,13 +315,14 @@ def update_check():
             return jsonify(_git_check_cache['data'])
         gs = updater.git_update_status()
         if gs is not None:
-            _git_check_cache.update(ts=now, data=gs)
+            if gs.get('ok'):
+                _git_check_cache.update(ts=now, data=gs)
             return jsonify(gs)
     now = time.time()
     if (_update_cache['data'] is not None and (now - _update_cache['ts']) < _UPDATE_TTL
             and not force):
         return jsonify(_update_cache['data'])
-    repo = cfg.get('updates.repo') or 'perfectgf/lora-dataset-studio'
+    repo = cfg.get('updates.repo') or cfg.DEFAULT_UPDATE_REPO
     out = {'ok': True, 'current': APP_VERSION, 'latest': None,
            'update_available': False, 'url': f'https://github.com/{repo}/releases'}
     sha = updater.current_sha()
@@ -235,13 +354,20 @@ def update_apply():
     actual re-launch happens ~1 s after this response flushes, so the client can start
     polling /api/health. A packaged build (no git) gets {manual:true, url} instead."""
     from ..services import updater
+    from .. import setup_installer
+    active_installs = setup_installer.active_pip_mutations()
+    if active_installs:
+        return jsonify({
+            'error': 'wait for or cancel the active package install before updating',
+            'active_installs': active_installs,
+        }), 409
     res = updater.apply_update()
     res['restarting'] = bool(res.get('ok') and res.get('changed'))
     if res['restarting']:
         # invalidate the cached checks so the banner/badge re-evaluate post-update
         _update_cache.update(ts=0.0, data=None)
         _git_check_cache.update(ts=0.0, data=None)
-        updater.schedule_restart()
+        updater.schedule_restart(restart_nonce=res.get('restart_nonce'))
     return jsonify(res)
 
 
@@ -259,11 +385,21 @@ def settings_restart():
     passes os.environ down to the relaunch, so setting it here is what makes the
     saved port actually take effect."""
     import os
+    import uuid
     from ..services import updater
     os.environ['LDS_HOST'] = str(cfg.get('server.host') or '127.0.0.1')
     os.environ['LDS_PORT'] = str(cfg.get('server.port') or 5050)
-    updater.schedule_restart()
-    return jsonify({'ok': True, 'restarting': True})
+    from .. import setup_installer
+    active_installs = setup_installer.active_pip_mutations()
+    if active_installs:
+        return jsonify({
+            'error': 'wait for or cancel the active package install before restarting',
+            'active_installs': active_installs,
+        }), 409
+    restart_nonce = uuid.uuid4().hex
+    updater.schedule_restart(restart_nonce=restart_nonce)
+    return jsonify({'ok': True, 'restarting': True,
+                    'restart_nonce': restart_nonce})
 
 
 @bp.get('/trash')
@@ -271,7 +407,8 @@ def trash_info():
     """Trash size for the Settings card — everything the app 'deletes' lands
     there; only 'Empty trash' below actually destroys bytes."""
     from ..services import trash
-    return jsonify({'size_bytes': trash.trash_size(), 'entries': trash.list_entries()})
+    size_bytes, entries = trash.inventory()
+    return jsonify({'size_bytes': size_bytes, 'entries': entries})
 
 
 @bp.post('/trash/<entry_id>/restore')

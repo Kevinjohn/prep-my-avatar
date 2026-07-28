@@ -127,6 +127,43 @@ def test_vision_ollama_never_raises_when_config_returns_none(app, monkeypatch):
         assert vision_ollama.unload_vision_model() is False
 
 
+def test_unload_vision_model_retries_http_errors(app, monkeypatch):
+    from app.services import vision_ollama
+
+    class Response:
+        def __init__(self, status):
+            self.status_code = status
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise vision_ollama.requests.HTTPError(str(self.status_code))
+
+    responses = iter([Response(500), Response(200)])
+    calls = []
+    monkeypatch.setattr(
+        vision_ollama.requests, 'post',
+        lambda *args, **kwargs: calls.append(args) or next(responses))
+    with app.app_context():
+        assert vision_ollama.unload_vision_model(
+            ollama_url='http://ollama', model='vision') is True
+    assert len(calls) == 2
+
+
+def test_unload_vision_model_returns_false_for_repeated_http_errors(
+        app, monkeypatch):
+    from app.services import vision_ollama
+
+    class Response:
+        def raise_for_status(self):
+            raise vision_ollama.requests.HTTPError('500')
+
+    monkeypatch.setattr(
+        vision_ollama.requests, 'post', lambda *args, **kwargs: Response())
+    with app.app_context():
+        assert vision_ollama.unload_vision_model(
+            ollama_url='http://ollama', model='vision') is False
+
+
 # --- caption_images backend selection ---------------------------------------
 
 def test_caption_images_backend_none_raises(app):

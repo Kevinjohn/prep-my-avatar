@@ -5,7 +5,7 @@
  * prompt_by_label()) and must never change; this map is display-only, used
  * where a label is rendered/announced in the UI.
  */
-const LABELS = {
+export const LABELS = {
   'Visage face, neutre': 'Face front, neutral',
   'Visage face, sourire': 'Face front, smile',
   'Visage 3/4 gauche, sourire': 'Face three-quarter left, smile',
@@ -34,12 +34,21 @@ const LABELS = {
   'Buste studio': 'Bust, studio',
   'Buste, veste': 'Bust, jacket',
   'Buste, tenue soiree': 'Bust, evening outfit',
+  'Buste, haut ajusté': 'Bust, fitted top',
+  'Buste, maillot (plage)': 'Bust, swimsuit (beach)',
+  'Buste, robe d\'été': 'Bust, summer dress',
   'Corps debout face': 'Body standing, front',
   'Corps debout 3/4': 'Body standing, three-quarter',
   'Corps assis': 'Body sitting',
   'Corps en marche': 'Body walking',
   'Corps, cafe': 'Body, café',
   'Corps, plage (habille)': 'Body, beach (clothed)',
+  'Corps, bikini plage': 'Body, beach bikini',
+  'Corps, jean ajusté': 'Body, fitted jeans',
+  'Corps, maillot piscine': 'Body, pool swimsuit',
+  'Corps, robe moulante': 'Body, fitted dress',
+  'Corps, silhouette contre-jour': 'Body, backlit silhouette',
+  'Corps, tenue de sport': 'Body, sportswear',
   'Dos 3/4': 'Back, three-quarter',
   'Corps, plan large urbain': 'Body, wide urban shot',
   'Corps en marche, large': 'Body walking, wide shot',

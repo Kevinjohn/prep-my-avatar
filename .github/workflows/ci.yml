@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     strategy:
@@ -24,6 +28,7 @@ jobs:
           # path, permission and process-lock behavior the Linux jobs cannot.
           - { os: macos-latest, python: '3.12' }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -37,6 +42,11 @@ jobs:
         run: python -m pip install --disable-pip-version-check -e . -r backend/requirements-dev.txt
       - name: Run backend tests
         run: python -m pytest backend/tests -q
+      - name: Run subprocess and ComfyUI protocol contracts
+        run: >-
+          python -m pytest
+          backend/tests/test_infer_workers.py
+          backend/tests/test_comfyui_object_info_contract.py -q
       - name: Run package tests
         run: python -m pytest tests -q
       - name: Lint backend
@@ -44,6 +54,7 @@ jobs:
 
   python-dependency-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -64,16 +75,18 @@ jobs:
         run: python -m pip_audit -r "${{ matrix.requirements }}" --progress-spinner off
 
   optional-python-installability:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { python: '3.10', requirements: backend/requirements-scrape.txt }
-          - { python: '3.11', requirements: backend/requirements-scrape.txt }
-          - { python: '3.12', requirements: backend/requirements-scrape.txt }
-          - { python: '3.11', requirements: backend/requirements-ml.txt }
-          - { python: '3.12', requirements: backend/requirements-ml.txt }
+          - { os: ubuntu-latest, python: '3.10', requirements: backend/requirements-scrape.txt, imports: 'gallery_dl,yt_dlp,curl_cffi,brotli,bs4,cloudscraper,lxml' }
+          - { os: ubuntu-latest, python: '3.11', requirements: backend/requirements-scrape.txt, imports: 'gallery_dl,yt_dlp,curl_cffi,brotli,bs4,cloudscraper,lxml' }
+          - { os: ubuntu-latest, python: '3.12', requirements: backend/requirements-scrape.txt, imports: 'gallery_dl,yt_dlp,curl_cffi,brotli,bs4,cloudscraper,lxml' }
+          - { os: ubuntu-latest, python: '3.11', requirements: backend/requirements-ml.txt, imports: 'insightface,onnxruntime,rembg,cv2,torch,PIL,numpy' }
+          - { os: ubuntu-latest, python: '3.12', requirements: backend/requirements-ml.txt, imports: 'insightface,onnxruntime,rembg,cv2,torch,PIL,numpy' }
+          - { os: windows-latest, python: '3.12', requirements: backend/requirements-ml.txt, imports: 'insightface,onnxruntime,rembg,cv2,torch,PIL,numpy' }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -81,13 +94,31 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: ${{ matrix.requirements }}
-      - name: Resolve optional dependency graph
-        run: >-
-          python -m pip install --disable-pip-version-check --dry-run
-          -r "${{ matrix.requirements }}"
+      - name: Install optional dependency graph
+        run: python -m pip install --disable-pip-version-check -r "${{ matrix.requirements }}"
+      - name: Import optional dependency graph
+        env:
+          OPTIONAL_IMPORTS: ${{ matrix.imports }}
+        run: python -c "import importlib, os; [importlib.import_module(name) for name in os.environ['OPTIONAL_IMPORTS'].split(',')]"
+
+  governance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install governance validator
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Validate repository contracts
+        run: python scripts/validate_repository_contracts.py
+      - name: Validate GitHub Actions workflows
+        uses: raven-actions/actionlint@01fce4f43a270a612932cb1c64d40505fc1e4e9d # v2
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -112,6 +143,7 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build image
@@ -136,6 +168,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5

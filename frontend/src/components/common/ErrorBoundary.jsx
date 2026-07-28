@@ -25,6 +25,18 @@ class ErrorBoundary extends Component {
     } catch { /* never let logging itself break the fallback UI */ }
   }
 
+  componentDidUpdate(previousProps) {
+    if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+      this.props.onReset?.();
+    }
+  }
+
+  reset = () => {
+    this.setState({ hasError: false });
+    this.props.onReset?.();
+  };
+
   render() {
     if (this.state.hasError) {
       // Root-level boundary: full-screen recovery UI with a reload action so a
@@ -51,6 +63,10 @@ class ErrorBoundary extends Component {
       return (
         <div className="text-center py-8 text-content-muted" role="alert">
           <p>{this.props.fallbackMessage || 'Something went wrong. Please refresh the page.'}</p>
+          <button type="button" onClick={this.reset}
+            className="mt-3 rounded-md border border-border px-3 py-1.5 text-sm text-content">
+            Try again
+          </button>
         </div>
       );
     }

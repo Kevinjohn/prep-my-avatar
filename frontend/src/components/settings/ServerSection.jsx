@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-import { fetchWithCsrfRetry, postJson } from '../../api/fetchClient'
+import { postJson } from '../../api/fetchClient'
+import { restartTarget, waitForRestart } from '../../utils/restartReadiness'
 import { useToast } from '../common/Toast'
 import { INPUT_CLASS, Card } from './primitives'
 
@@ -38,14 +39,13 @@ export default function ServerSection({ config, setField, runtime, handleSave })
   ].filter(Boolean) : []
   const qrUrl = reachUrls[0]?.url || null
 
-  const waitForHealthAndReload = async () => {
-    for (let i = 0; i < 120; i += 1) {
-      await new Promise((r) => setTimeout(r, 1000))
-      try {
-        const res = await fetchWithCsrfRetry('/api/health', { cache: 'no-store' })
-        if (res.ok) { window.location.reload(); return }
-      } catch { /* still restarting — keep waiting */ }
+  const waitForHealthAndReload = async (restartNonce) => {
+    const target = restartTarget(window.location, config.server.port)
+    if (await waitForRestart({ restartNonce, target })) {
+      window.location.assign(new URL(window.location.hash || '#/', target.origin).toString())
+      return
     }
+    toast.error('The restarted server did not become reachable within two minutes. Open the configured port or restart the app manually.')
     setRestarting(false)   // gave up after ~2 min
   }
 
@@ -56,8 +56,8 @@ export default function ServerSection({ config, setField, runtime, handleSave })
     // would silently come back on the OLD port with no visible change.
     if (!(await handleSave())) { setRestarting(false); return }
     try {
-      await postJson('/api/settings/restart', {})
-      waitForHealthAndReload()
+      const response = await postJson('/api/settings/restart', {})
+      waitForHealthAndReload(response.restart_nonce)
     } catch (e) {
       toast.error(e.message || 'Restart failed')
       setRestarting(false)
@@ -165,7 +165,9 @@ export default function ServerSection({ config, setField, runtime, handleSave })
           {/* Open it on your phone: scannable QR + copyable URLs, detected from
               the machine's real addresses — no more guessing which IP/port. */}
           <div className="rounded-lg border border-border bg-surface-raised px-3 py-3">
-            <p className="text-sm font-medium text-content">Open it on your phone</p>
+            <p className="text-sm font-medium text-content">
+              {dirty ? 'After restart: phone access preview' : 'Open the running server on your phone'}
+            </p>
             {reachUrls.length > 0 ? (
               <div className="mt-2 flex items-start gap-4">
                 {qrUrl && (
@@ -175,8 +177,9 @@ export default function ServerSection({ config, setField, runtime, handleSave })
                 )}
                 <div className="min-w-0 flex-1 space-y-2">
                   <p className="text-xs text-content-muted">
-                    Point your phone camera at the code — or open a link below. Enter the access
-                    token on the login page. The LAN link needs the same Wi-Fi; Tailscale works anywhere.
+                    {dirty
+                      ? 'These saved URLs become reachable only after Save & restart to apply.'
+                      : 'Point your phone camera at the code — or open a link below. Enter the access token on the login page. The LAN link needs the same Wi-Fi; Tailscale works anywhere.'}
                   </p>
                   {reachUrls.map((u) => (
                     <div key={u.key} className="flex items-center gap-2">

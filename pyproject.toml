@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "avatar-prep"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local-first photo triage, crop, caption and coverage planning for reusable avatar model training"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,9 @@ avatar-prep = "avatar_prep.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "avatar_prep.__version__"}
 
 [tool.pytest.ini_options]
 filterwarnings = ["error"]

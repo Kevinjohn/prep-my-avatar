@@ -25,7 +25,7 @@ export default function RunSetupPanel({ d, studio, form, datasetId }) {
   // StudioGenerationSettings : objet snake_case déjà prêt à fusionner dans le POST /run
   // (source unique de vérité pour rebalance/enhancer/precision/format/detail/negative +
   // pile LoRA « always-on »). Le composant est gaté PAR FAMILLE et se persiste seul.
-  const [genSettings, setGenSettings] = useState({});
+  const [genSettings, setGenSettings] = useState(/** @type {any} */ ({}));
   // Manques de modèles/nodes remontés par un 409 `studio_missing` au lancement
   // (P0-a) → bandeau actionnable listant les fichiers/nodes absents.
   const [preflight, setPreflight] = useState(null);
@@ -82,7 +82,7 @@ export default function RunSetupPanel({ d, studio, form, datasetId }) {
       {!d.pending && d.resumable > 0 && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2" role="status">
           <span aria-hidden>⏸</span>
-          <span className="text-content text-sm">{d.resumable} stopped cell(s) — resumable with their settings</span>
+          <span className="text-content text-sm">{d.resumable} stopped cell(s) in this family — resumable with their settings (up to {maxImages})</span>
           <button type="button" disabled={!!d.gpu_busy || studio.launching}
             onClick={() => studio.resume()}
             className="ml-auto px-2.5 py-1 rounded-lg bg-gradient-primary text-white text-xs font-semibold disabled:opacity-40">

@@ -120,7 +120,8 @@ def test_analyze_faces_ref_not_ok_returns_empty_and_no_row_change(app, monkeypat
         assert refreshed.face_score is None
 
 
-def test_score_dataset_faces_unavailable_returns_empty_without_subprocess(app, monkeypatch):
+def test_score_dataset_faces_unavailable_returns_error_without_subprocess(
+        app, monkeypatch, tmp_path):
     """is_available() False (capability probe) -> score_dataset_faces returns {}
     WITHOUT ever invoking subprocess.run (the never-raise/never-shell-out contract)."""
     from app.services import face_similarity as fsim
@@ -131,9 +132,14 @@ def test_score_dataset_faces_unavailable_returns_empty_without_subprocess(app, m
         raise AssertionError('subprocess.run must not be called when unavailable')
 
     monkeypatch.setattr('app.services.face_similarity.subprocess.run', _boom)
+    ref = tmp_path / 'ref.jpg'
+    image = tmp_path / 'image.jpg'
+    ref.write_bytes(b'input')
+    image.write_bytes(b'input')
     with app.app_context():
-        # inputs missing on disk -> ({}, None) before the availability check
-        assert fsim.score_dataset_faces('/does/not/matter', ['/also/not']) == ({}, None)
+        result, error = fsim.score_dataset_faces(str(ref), [str(image)])
+        assert result == {}
+        assert error['kind'] == 'unavailable'
 
 
 def test_is_available_delegates_to_capability_probe(app, monkeypatch):
@@ -308,11 +314,18 @@ def test_score_faces_payload_carries_scoring_error(app, monkeypatch):
         cell_path = os.path.join(svc._dataset_dir(ds.id), 'cell.webp')
         with open(cell_path, 'wb') as fh:
             fh.write(_png())
-        svc.db.session.add(LoraTestImage(dataset_id=ds.id, status='done',
-                                         filename='cell.webp',
-                                         checkpoint='lora_x_000000250.safetensors',
-                                         prompt='p', seed=1, strength=1.0))
+        second_path = os.path.join(svc._dataset_dir(ds.id), 'cell-2.webp')
+        with open(second_path, 'wb') as fh:
+            fh.write(_png())
+        for filename, checkpoint in (
+            ('cell.webp', 'lora_x_000000250.safetensors'),
+            ('cell-2.webp', 'lora_x_000000500.safetensors'),
+        ):
+            svc.db.session.add(LoraTestImage(dataset_id=ds.id, status='done',
+                                             filename=filename, run_id='matched-run',
+                                             checkpoint=checkpoint,
+                                             prompt='p', seed=1, strength=1.0))
         svc.db.session.commit()
         out = studio.score_faces(LOCAL_USER, ds.id)
-    assert out['scored'] == 0 and out['total'] == 1
+    assert out['scored'] == 0 and out['total'] == 2
     assert out['scoring_error'] == {'kind': 'failed', 'detail': 'AssertionError'}

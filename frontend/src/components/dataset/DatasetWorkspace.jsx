@@ -182,11 +182,14 @@ export default function DatasetWorkspace({ ds, onBack }) {
   // never leak from one dataset to the next.
   useEffect(() => { setExcludeTags([]); setIncludeTags([]); }, [d?.id]);
 
+  const landingDatasetId = d?.id;
+  const landingDatasetKind = d?.kind;
+
   useEffect(() => {
-    if (!d || !panel || workspaceLocation.pending) return undefined;
+    if (!landingDatasetId || !panel || workspaceLocation.pending) return undefined;
     const destination = getWorkspacePanel(section, panel);
     if (!destination) return undefined;
-    const revealReady = destination.reveal === 'scraper' && d.kind === 'character'
+    const revealReady = destination.reveal === 'scraper' && landingDatasetKind === 'character'
       ? scraperOpen
       : destination.reveal === 'caption-leak'
         ? showLeaks
@@ -204,7 +207,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
       const target = document.getElementById(destination.targetId);
       if (!target || target.getClientRects().length === 0) return false;
       if ((destination.reveal === 'training-advanced'
-          || destination.reveal === 'training-checkpoints') && !target.open) return false;
+          || destination.reveal === 'training-checkpoints')
+          && (!(target instanceof HTMLDetailsElement) || !target.open)) return false;
       target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       target.classList.remove('gf-highlight');
       void target.offsetWidth;
@@ -269,7 +273,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
       if (frame !== undefined) cancelAnimationFrame(frame);
       if (timer) window.clearTimeout(timer);
     };
-  }, [d, section, panel, workspaceLocation.pending, landingRequest,
+  }, [landingDatasetId, landingDatasetKind, section, panel, workspaceLocation.pending, landingRequest,
       scraperOpen, showLeaks, captionToolsOpen, writeWorkspaceLocation]);
 
   useEffect(() => {
@@ -391,7 +395,8 @@ export default function DatasetWorkspace({ ds, onBack }) {
         return;
       }
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      const b = el.querySelector('button:not([disabled])'); if (b) b.focus({ preventScroll: true });
+      const b = el.querySelector('button:not([disabled])');
+      if (b instanceof HTMLElement) b.focus({ preventScroll: true });
       // Flash the landed-on block (gf-highlight, index.css) so the eye finds it.
       // remove + reflow restarts the animation when the same step is clicked twice.
       el.classList.remove('gf-highlight');
@@ -610,14 +615,23 @@ export default function DatasetWorkspace({ ds, onBack }) {
           ← Datasets
         </button>
         <h1 className="text-content font-bold">{d.name}</h1>
-        <button type="button"
-          onClick={() => { try { navigator.clipboard.writeText(d.trigger_word || ''); } catch { /* ignore */ } }}
+        {d.kind !== 'style' ? <button type="button"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(d.trigger_word || '');
+              toast.success('Trigger word copied');
+            } catch {
+              toast.error('Could not copy the trigger word — select it and copy manually');
+            }
+          }}
           title="Copy the trigger word (to put in your prompts)"
           className="flex items-center gap-1 px-2 py-0.5 rounded-lg border border-indigo-400/40 bg-indigo-500/10 text-[0.6875rem]">
           <span className="text-content-subtle">trigger:</span>
           <code className="text-indigo-300 font-semibold">{d.trigger_word || '—'}</code>
           <span aria-hidden className="text-content-subtle">⧉</span>
-        </button>
+        </button> : <span className="rounded-lg border border-border bg-surface px-2 py-0.5 text-content-subtle text-[0.6875rem]">
+          Style LoRA · no prompt trigger
+        </span>}
         <div className="ml-auto flex items-center gap-2">
           <button type="button" disabled={!kept} onClick={exportZipGuarded}
             className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
@@ -878,8 +892,10 @@ export default function DatasetWorkspace({ ds, onBack }) {
                       hasRef={!!d.ref_filename || images.some((img) => img.source === 'import'
                         && img.filename && img.status === 'keep')}
                       hasPrimaryRef={!!d.ref_filename} composition={d.composition} images={images}
+                      variationLabelCounts={d.image_summary?.variation_label_counts}
                       bodyFidelity={bodyFid}
                       recommendedIds={d.coverage_plan?.recommended_variation_ids}
+                      coverageTargets={d.coverage_plan?.targets}
                       anchorPlan={d.anchor_plan} />
                   </div>
                   {/* Scraper (character datasets too): scan a gallery URL → pick → import
@@ -1403,7 +1419,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
       {cropImg && cropImg.filename && (
         <CropModal imageUrl={`/api/dataset/${d.id}/img/${encodeURIComponent(cropImg.filename)}`}
           onCancel={() => setCropImg(null)}
-          onConfirm={async (box) => { await ds.crop(cropImg.id, box); setCropImg(null); }} />
+          onConfirm={async (box) => { if (await ds.crop(cropImg.id, box)) setCropImg(null); }} />
       )}
       {refCrop && d.ref_filename && (
         // Feed the crop editor the full-frame ORIGINAL (when kept) so the box can widen
@@ -1412,9 +1428,9 @@ export default function DatasetWorkspace({ ds, onBack }) {
         <CropModal imageUrl={`/api/dataset/${d.id}/img/${encodeURIComponent(d.ref_original_filename || d.ref_filename)}`}
           defaultAspect={1}
           onCancel={() => setRefCrop(false)}
-          onConfirm={async (box) => { await ds.cropRef(box); setRefCrop(false); }}
+          onConfirm={async (box) => { if (await ds.cropRef(box)) setRefCrop(false); }}
           onReset={d.ref_original_filename
-            ? async () => { await ds.recropRefAuto(); setRefCrop(false); }
+            ? async () => { if (await ds.recropRefAuto()) setRefCrop(false); }
             : undefined} />
       )}
       {viewImgLive && (

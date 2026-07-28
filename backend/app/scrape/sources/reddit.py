@@ -28,6 +28,8 @@ téléchargées par le flux d'import durci (fetch_hardened_bytes, anti-SSRF, mag
 import logging
 import os
 from pathlib import Path
+from collections import OrderedDict
+from threading import Lock
 import time
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -63,6 +65,10 @@ _IMG_EXT = ('.jpg', '.jpeg', '.png', '.webp', '.gif')
 # (Settings → Scraping, effectif via os.environ sans restart), le jeton en cache
 # appartient encore à l'ANCIEN id — donc à son quota — et doit être re-frappé.
 _token_cache = {'value': None, 'exp': 0.0, 'cid': None}
+_cursor_cache = OrderedDict()
+_cursor_cache_lock = Lock()
+_CURSOR_CACHE_MAX = 128
+_CURSOR_CACHE_TTL = 10 * 60
 
 _REDDIT_CAPS = Capabilities(
     can_enumerate_profile=True,
@@ -359,9 +365,20 @@ class RedditSource(Source):
         1re fournée ; page N = N appels séquentiels. Retourne [] si on épuise le
         listing AVANT d'atteindre la page (sinon « Charger plus » re-remonterait la
         dernière fournée déjà vue → doublons)."""
-        after = None
+        cache_key = (ep['api_path'], tuple(sorted(ep['params'].items())))
+        now = time.monotonic()
+        with _cursor_cache_lock:
+            expired = [key for key, (created, _) in _cursor_cache.items()
+                       if now - created > _CURSOR_CACHE_TTL]
+            for key in expired:
+                _cursor_cache.pop(key, None)
+            cached = _cursor_cache.get((cache_key, page))
+            if cached:
+                _cursor_cache.move_to_end((cache_key, page))
+        after = cached[1] if cached else None
+        first_page = page if cached else 0
         children = []
-        for i in range(page + 1):
+        for i in range(first_page, page + 1):
             params = dict(ep['params'])
             params['limit'] = _BATCH_POSTS
             if after:
@@ -369,6 +386,12 @@ class RedditSource(Source):
             listing = (_api_get(ep['api_path'], params, token) or {}).get('data', {})
             children = listing.get('children', []) or []
             after = listing.get('after')
+            if after:
+                with _cursor_cache_lock:
+                    _cursor_cache[(cache_key, i + 1)] = (time.monotonic(), after)
+                    _cursor_cache.move_to_end((cache_key, i + 1))
+                    while len(_cursor_cache) > _CURSOR_CACHE_MAX:
+                        _cursor_cache.popitem(last=False)
             if i < page and not after:
                 return []      # plus de pages avant d'atteindre la page voulue
         return children
@@ -441,9 +464,8 @@ class RedditSource(Source):
         dest_dir = os.path.dirname(dest_base)
         filename = os.path.basename(dest_base) + ext
         try:
-            os.makedirs(dest_dir, exist_ok=True)
-            with open(os.path.join(dest_dir, filename), 'wb') as f:
-                f.write(data)
+            from .base import atomic_write_bytes
+            atomic_write_bytes(os.path.join(dest_dir, filename), data)
         except OSError as e:
             return False, None, f"Reddit : erreur d'écriture ({e})."
         return True, filename, None

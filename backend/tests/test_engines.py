@@ -54,6 +54,29 @@ def test_nanobanana_returns_none_without_key(app, monkeypatch):
     post.assert_not_called()
 
 
+def test_remote_image_adapters_contain_malformed_success_json(app, monkeypatch):
+    monkeypatch.setenv('GEMINI_API_KEY', 'g-x')
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-x')
+    from app.services import chatgpt_image, nanobanana
+    response = MagicMock(status_code=200)
+    response.json.side_effect = ValueError('not json')
+    with patch('app.services.nanobanana.requests.post', return_value=response):
+        assert nanobanana.generate_variation(b'r', 'p') is None
+    with patch('app.services.chatgpt_image.requests.post', return_value=response):
+        assert chatgpt_image.generate_variation(b'r', 'p', force_lane='api') is None
+
+
+def test_nanobanana_caps_references_at_provider_limit(app, monkeypatch):
+    monkeypatch.setenv('GEMINI_API_KEY', 'g-x')
+    from app.services import nanobanana
+    response = MagicMock(status_code=200)
+    response.json.return_value = {'candidates': []}
+    with patch('app.services.nanobanana.requests.post', return_value=response) as post:
+        nanobanana.generate_variation([bytes([i]) for i in range(15)], 'p')
+    parts = post.call_args.kwargs['json']['contents'][0]['parts']
+    assert len([part for part in parts if 'inlineData' in part]) == 14
+
+
 def _sub_connected(monkeypatch):
     """Wire a fake connected subscription into chatgpt_image's oauth module."""
     from app.services import chatgpt_oauth
@@ -151,6 +174,27 @@ def test_subscription_401_refreshes_and_retries_once(app, monkeypatch):
         assert chatgpt_image.generate_variation(b'r', 'p') == b'img'
     assert post.call_count == 2
     assert calls == [False, True]                 # second attempt forces a refresh
+
+
+def test_subscription_persistent_401_requires_reconnect(app, monkeypatch):
+    import pytest
+    from app.services import chatgpt_oauth
+    calls = []
+    monkeypatch.setattr(chatgpt_oauth, 'access_token',
+                        lambda force_refresh=False: calls.append(force_refresh) or 'at-x')
+    monkeypatch.setattr(chatgpt_oauth, 'account_id', lambda: 'acc-x')
+    monkeypatch.setattr(chatgpt_oauth, 'status',
+                        lambda: {'connected': True, 'email': None, 'plan': None})
+    from app.services import chatgpt_image
+    unauthorized = MagicMock(status_code=401, text='expired',
+                             headers={'content-type': ''})
+    with patch('app.services.chatgpt_image.requests.post',
+               side_effect=[unauthorized, unauthorized]) as post:
+        with pytest.raises(chatgpt_image.SubscriptionUnavailable,
+                           match='reconnect in Settings'):
+            chatgpt_image.generate_variation(b'r', 'p')
+    assert post.call_count == 2
+    assert calls == [False, True]
 
 
 def test_subscription_parses_sse_without_content_type(app, monkeypatch):

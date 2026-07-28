@@ -162,7 +162,7 @@ def test_small_rescue_preserves_original_and_queues_empty_prompt(app):
 
         def enqueue(**kwargs):
             calls.append(kwargs)
-            return 'small-rescue-job'
+            return kwargs['job_id']
 
         real_get = svc.cfg.get
 
@@ -187,7 +187,7 @@ def test_small_rescue_preserves_original_and_queues_empty_prompt(app):
         assert source.status == candidate.status == 'pending'
         assert source.filename and candidate.filename is None
         assert candidate.parent_image_id == source.id
-        assert candidate.job_id == 'small-rescue-job'
+        assert candidate.job_id == calls[0]['job_id']
         assert candidate.variation_prompt == ''
         assert calls[0]['edit_prompt'] == ''
         assert calls[0]['source_path'] == svc._img_path(source)

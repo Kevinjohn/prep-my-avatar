@@ -10,41 +10,17 @@ import { useMemo, useState } from 'react';
 import { fmt } from '../../../utils/studioFormat';
 import RunSelector from './RunSelector';
 import ResultsGrid from './ResultsGrid';
+import { groupStudioRuns } from '../../../utils/studioState';
 
 export default function ResultsArea({ datasetId, d, studio, vote, onOpen }) {
   // Repli des grilles de résultats (pour ne pas encombrer la page).
   const [showResults, setShowResults] = useState(true);
   // Run sélectionné (null = run le plus récent par défaut).
-  const [selRun, setSelRun] = useState(null);
-
-  // --- Regroupement par RUN (un lancement = même seed + prompt + modèle). On
-  // n'affiche que le run sélectionné (le plus récent par défaut) pour ne pas
-  // mélanger d'anciens tests déjà votés avec un nouveau run.
-  const runs = useMemo(() => {
-    const groups = new Map();
-    for (const c of d?.cells || []) {
-      // Un lancement = un run_seed (regroupe les N seeds d'un batch). Fallback sur
-      // `seed` pour les anciens runs (avant la colonne run_seed).
-      const runSeed = c.run_seed ?? c.seed;
-      // Un lancement = un run_seed (N seeds d'un batch + TOUS les modèles de base
-      // balayés). Le modèle est un axe de VARIANTE, pas un run distinct.
-      const key = `${runSeed}|${c.prompt || ''}`;
-      let g = groups.get(key);
-      if (!g) {
-        g = { key, seed: runSeed, prompt: c.prompt || '', models: new Set(),
-              cells: [], latestId: 0, likes: 0, dislikes: 0 };
-        groups.set(key, g);
-      }
-      g.cells.push(c);
-      if (c.z_model_label) g.models.add(c.z_model_label);
-      if (c.id > g.latestId) g.latestId = c.id;
-      if (c.rating === 1) g.likes += 1; else if (c.rating === -1) g.dislikes += 1;
-    }
-    return [...groups.values()].map((g) => ({
-      ...g, modelLabel: g.models.size > 1 ? `${g.models.size} models` : ([...g.models][0] || ''),
-    })).sort((a, b) => b.latestId - a.latestId);
-  }, [d]);
-  const activeRunKey = (runs.find((r) => r.key === selRun) ? selRun : runs[0]?.key) || null;
+  // The hot status payload contains exactly one run. Older runs are selected
+  // through the bounded, paginated history endpoint instead of being shipped
+  // and regrouped on every poll.
+  const runs = useMemo(() => groupStudioRuns(d?.cells), [d]);
+  const activeRunKey = d?.selected_run_id || runs[0]?.key || null;
   const displayedCells = useMemo(() => {
     const r = runs.find((x) => x.key === activeRunKey);
     return r ? r.cells : [];
@@ -112,9 +88,11 @@ export default function ResultsArea({ datasetId, d, studio, vote, onOpen }) {
   return (
     <div className="flex flex-col gap-1">
       <RunSelector
-        runs={runs}
+        runs={studio.runHistory?.length ? studio.runHistory.map((run) => ({
+          ...run, key: run.run_id, likes: run.likes || 0, dislikes: run.dislikes || 0,
+        })) : runs}
         activeRunKey={activeRunKey}
-        onSelect={(key) => setSelRun(key)}
+        onSelect={studio.selectRun}
         unvotedCount={unvoted.length}
         onStartVote={() => vote.startVoting(unvoted)}
         greenCount={greens.length}
@@ -122,6 +100,9 @@ export default function ResultsArea({ datasetId, d, studio, vote, onOpen }) {
         displayedCount={displayedCells.length}
         showResults={showResults}
         onToggleResults={() => setShowResults((v) => !v)}
+        hasMore={!!studio.historyCursor}
+        loadingMore={studio.historyLoading}
+        onLoadMore={() => studio.loadRunHistory({ append: true })}
       />
       {showResults && (
         <ResultsGrid

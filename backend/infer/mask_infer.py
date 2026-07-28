@@ -11,6 +11,7 @@ mask_min_value cote training, pas ici).
 import json
 import os
 import sys
+import tempfile
 
 
 def _log(msg):
@@ -21,7 +22,14 @@ def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
         images = payload.get('images') or []
+        if not isinstance(images, list) or not images or not all(isinstance(p, str) and p for p in images):
+            raise ValueError('images must be a non-empty list of paths')
         out_dir = payload['out_dir']
+        if not isinstance(out_dir, str) or not out_dir:
+            raise ValueError('out_dir must be a path')
+        names = [os.path.splitext(os.path.basename(p))[0] + '.png' for p in images]
+        if len(names) != len(set(names)):
+            raise ValueError('image paths must have unique output stems')
     except Exception as e:
         print(json.dumps({"ok": False, "error": f"payload: {e}"}))
         return 1
@@ -39,14 +47,25 @@ def main() -> int:
             with Image.open(p) as im:
                 mask = remove(im.convert('RGB'), session=session, only_mask=True)
             name = os.path.splitext(os.path.basename(p))[0] + '.png'
-            mask.convert('L').save(os.path.join(out_dir, name), 'PNG')
+            final_path = os.path.join(out_dir, name)
+            fd, temporary_path = tempfile.mkstemp(prefix=f'.{name}.', suffix='.tmp', dir=out_dir)
+            os.close(fd)
+            try:
+                mask.convert('L').save(temporary_path, 'PNG')
+                os.replace(temporary_path, final_path)
+            finally:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
             results[p] = 'ok'
             written += 1
         except Exception as e:
             results[p] = f'error: {e}'
         _log(f'[mask] {i}/{len(images)} {results[p]}')
-    print(json.dumps({"ok": True, "written": written, "results": results}))
-    return 0
+    ok = written == len(images)
+    print(json.dumps({"ok": ok, "written": written, "results": results}))
+    return 0 if ok else 1
 
 
 if __name__ == '__main__':

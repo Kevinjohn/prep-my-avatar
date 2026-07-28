@@ -10,6 +10,17 @@ import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 export default function PreflightModal({ report, datasetId, ds, onResolve }) {
   const { warnings = [], leak_images: leaks = [], dup_pairs: dups = [] } = report || {};
+  const leakGuidance = report?.leak_kind === 'concept'
+    ? 'Captions naming the trained concept — remove the concept terms'
+    : report?.leak_kind === 'identity'
+      ? 'Captions describing the identity — remove identifying face / hair terms'
+      : 'Captions leaking the training target — remove the terms identified in the warning above';
+  const duplicateLabel = (image) => [
+    image.filename ? `file ${image.filename}` : `image ${image.id}`,
+    image.framing && `${image.framing} framing`,
+    image.training_usefulness && `${image.training_usefulness} technical quality`,
+    image.caption && `caption: ${image.caption}`,
+  ].filter(Boolean).join(', ');
   const [rejected, setRejected] = useState({});   // imageId -> pending|done
   const [pendingActions, setPendingActions] = useState(0);
   const [actionError, setActionError] = useState('');
@@ -82,7 +93,7 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
         {leaks.length > 0 && (
           <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-2.5 flex flex-col gap-2">
             <span className="text-amber-300 text-[0.8125rem] font-semibold">
-              Captions describing the identity ({leaks.length}) — remove the face / hair words
+              {leakGuidance} ({leaks.length})
             </span>
             {leaks.map((li) => (
               <div key={li.id} className="flex gap-2 items-start">
@@ -110,9 +121,10 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
                 <div key={`${p.a.id}-${p.b.id}-${i}`} className={`flex items-center gap-3 ${resolved ? 'opacity-60' : ''}`}>
                   {[p.a, p.b].map((im) => (
                     <div key={im.id} className="flex flex-col items-center gap-1">
-                      <img src={imgUrl(im.filename)} alt={`image ${im.id}`} loading="lazy"
+                      <img src={imgUrl(im.filename)} alt={duplicateLabel(im)} loading="lazy"
                         className={`w-20 h-20 rounded object-cover bg-black ${rejected[im.id] === 'done' ? 'ring-2 ring-red-500 grayscale' : ''}`} />
                       <button type="button" disabled={resolved || saving} onClick={() => reject(im.id)}
+                        aria-label={`Reject ${duplicateLabel(im)} from this near-duplicate pair`}
                         className="px-2 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300 text-[0.625rem] disabled:opacity-40">
                         {rejected[im.id] === 'pending' ? 'Saving…'
                           : rejected[im.id] === 'done' ? '✕ rejected' : 'Reject this'}

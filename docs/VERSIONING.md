@@ -35,3 +35,7 @@ date tags remain readable as release zero for that date.
 
 The GitHub release workflow checks that the tag exactly matches `APP_VERSION`
 before it tests and builds the portable Windows bundle.
+
+Release feeds, manual downloads, and source comparison links use the fork-owned
+`Kevinjohn/prep-my-avatar` repository. The updater never substitutes upstream
+LoRA Dataset Studio releases for this fork.

@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 
 def _log(msg):
     print(msg, file=sys.stderr, flush=True)
@@ -73,6 +74,32 @@ def _payload_bboxes(req):
     return bboxes
 
 
+def _save_atomic(image, image_path):
+    """Encode beside the source, then atomically publish a complete image.
+
+    JPEG output is intentionally unsupported here: a second JPEG encode would
+    alter pixels outside the mask. The service migrates JPEG inputs to a PNG
+    destination before invoking this worker.
+    """
+    extension = os.path.splitext(image_path)[1].lower()
+    formats = {'.png': ('PNG', {}), '.webp': ('WEBP', {'lossless': True})}
+    if extension in ('.jpg', '.jpeg'):
+        raise ValueError('JPEG inpaint output must be migrated to PNG')
+    image_format, options = formats.get(extension, ('PNG', {}))
+    directory = os.path.dirname(os.path.abspath(image_path))
+    fd, temporary_path = tempfile.mkstemp(prefix='.lama-', suffix=extension or '.tmp',
+                                           dir=directory)
+    os.close(fd)
+    try:
+        image.convert('RGB').save(temporary_path, image_format, **options)
+        os.replace(temporary_path, image_path)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+
+
 def main() -> int:
     raw = sys.stdin.read()
     try:
@@ -119,11 +146,17 @@ def main() -> int:
                 mask = build_mask((W, H), job['bboxes'])
                 _log(f"[lama] inpaint {W}x{H} boxes={len(job['bboxes'])} device={actual_device}")
                 result = lama(img, mask)
-                result.convert('RGB').save(image_path, 'WEBP', quality=92)
-                results.append({'image_path': image_path, 'ok': True})
+                _save_atomic(result, image_path)
+                item = {'image_path': image_path, 'ok': True}
             except Exception as e:
-                results.append({'image_path': image_path, 'ok': False,
-                                'error': f'{type(e).__name__}: {e}'})
+                item = {'image_path': image_path, 'ok': False,
+                        'error': f'{type(e).__name__}: {e}'}
+            results.append(item)
+            if batch:
+                # A durable mutation must have an acknowledgement before the
+                # worker starts the next item. The parent can reconcile these
+                # lines even when a later job times out or the worker exits.
+                print(json.dumps({'type': 'result', **item}), flush=True)
         if batch:
             print(json.dumps({'ok': True, 'device': actual_device, 'results': results}))
         elif results[0]['ok']:

@@ -27,7 +27,10 @@ REM    PowerShell (ships with Windows) + an internet connection.
 if not defined PY (
   echo [i] No CPython 3.11-3.12 found -- downloading a self-contained one ^(~44 MB, one time^)...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\bootstrap_python.ps1" -Dest "%~dp0.python" -PyVersion 3.12
-  if exist ".python\python.exe" set "PY=.python\python.exe"
+  if not errorlevel 1 if exist ".python\python.exe" (
+    ".python\python.exe" -c "import ensurepip, ssl, sys, venv; sys.exit(0 if (3,11)<=sys.version_info[:2]<=(3,12) else 1)" >nul 2>nul
+    if not errorlevel 1 set "PY=.python\python.exe"
+  )
 )
 
 REM 4) Download failed (offline?) -> fall back to ANY Python so the CORE app can
@@ -92,8 +95,11 @@ if not exist frontend\dist\index.html (
   echo frontend\dist is missing -- this repo ships it prebuilt. Run: cd frontend ^&^& pnpm install ^&^& pnpm run build
   exit /b 1
 )
+REM Install the launcher/recovery pair together before the first source launch.
+REM Settings -> Restart can then hand off only to this verified private copy.
+"%VPY%" backend\source_launcher.py --root "%CD%" --data-dir "%RECOVERY_DATA%" --install >nul || exit /b 1
 rem Port 5000 is a frequent collision (macOS AirPlay, another local Flask app).
 rem Use 5050 by default; override by setting LDS_PORT before running start.bat.
 if not defined LDS_PORT set "LDS_PORT=5050"
 start "" http://127.0.0.1:%LDS_PORT%/
-"%VPY%" backend\run.py
+"%VPY%" "%RECOVERY_DATA%\source-launcher.py" --root "%CD%" --data-dir "%RECOVERY_DATA%"

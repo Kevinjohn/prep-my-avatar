@@ -50,12 +50,13 @@ export function buildImageImprovementPairs(images = []) {
 
 /** Unresolved pairs belong only in side-by-side review; resolved pairs expose one winner. */
 export function filterImageImprovementGrid(images = []) {
-  const pairs = buildImageImprovementPairs(images);
+  const rows = Array.isArray(images) ? images : [];
+  const pairs = buildImageImprovementPairs(rows);
   const pairedIds = new Set(pairs.flatMap((pair) => pair.imageIds));
   const winnerIds = new Set();
   for (const pair of pairs) {
     if (pair.choice === 'original') winnerIds.add(pair.original.id);
     if (pair.choice === 'improved') winnerIds.add(pair.candidate.id);
   }
-  return images.filter((image) => !pairedIds.has(image.id) || winnerIds.has(image.id));
+  return rows.filter((image) => !pairedIds.has(image.id) || winnerIds.has(image.id));
 }

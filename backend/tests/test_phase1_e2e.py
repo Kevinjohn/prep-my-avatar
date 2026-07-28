@@ -89,7 +89,7 @@ def test_api_only_end_to_end(client, app, monkeypatch):
             assert len(rows) == 2
             assert all(row.filename for row in rows)  # generation actually "completed"
 
-    payload = client.get(f'/api/dataset/{did}').get_json()
+    payload = client.get(f'/api/dataset/{did}?include_images=1').get_json()
     assert len(payload['images']) == 2
 
     # Keep one, caption it manually, export.

@@ -56,6 +56,8 @@ test('manual improvement candidates cannot use the unrelated generic regenerate 
 
 test('reconstruction review renders the exact input and freezes both previews', () => {
   assert.match(improvementReview, /comparison\.source_filename/);
+  assert.match(improvementReview, /metricsOverride=\{comparison\.source_metrics\}/);
+  assert.match(improvementReview, /usefulnessOverride=\{comparison\.source_training_usefulness\}/);
   assert.match(improvementReview, /Exact reconstruction input/);
   assert.match(improvementReview, /_imageImprovementReviewPreview: true/);
   assert.match(workspace, /viewImgLive\._rescueReviewPreview \|\| viewImgLive\._imageImprovementReviewPreview/);

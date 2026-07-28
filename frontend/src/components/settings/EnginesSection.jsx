@@ -31,20 +31,40 @@ function ChatgptSubscriptionCard({ caps, config, setField, refreshCaps, toast })
 
   useEffect(() => {
     if (!device) return undefined
-    const id = setInterval(async () => {
+    let stopped = false
+    let timer
+    let failures = 0
+    let controller
+    const poll = async () => {
+      controller = new AbortController()
       try {
-        const r = await apiFetch('/api/settings/chatgpt-oauth/poll')
+        const r = await apiFetch('/api/settings/chatgpt-oauth/poll', { signal: controller.signal })
+        if (stopped) return
+        failures = 0
+        setError(null)
         if (r.status === 'connected') {
           setDevice(null)
           toast.success('ChatGPT subscription connected.')
           await refreshCaps(true)
+          return
         } else if (r.status === 'error') {
           setDevice(null)
           setError(r.detail || 'Login failed — try again.')
+          return
         }
-      } catch { /* transient — keep polling */ }
-    }, 3000)
-    return () => clearInterval(id)
+      } catch (e) {
+        if (stopped || e.name === 'AbortError') return
+        failures += 1
+        setError('Temporarily unable to check login status. Retrying…')
+      }
+      if (!stopped) timer = setTimeout(poll, Math.min(3000 * (2 ** failures), 30000))
+    }
+    timer = setTimeout(poll, 3000)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      controller?.abort()
+    }
   }, [device, refreshCaps, toast])
 
   const start = async () => {
@@ -123,7 +143,7 @@ function ChatgptSubscriptionCard({ caps, config, setField, refreshCaps, toast })
         </div>
       )}
 
-      {error && <p className="text-xs text-rose-400"><span aria-hidden="true">✗</span> {error}</p>}
+      {error && <p role="alert" className="text-xs text-rose-400"><span aria-hidden="true">✗</span> {error}</p>}
 
       <div>
         <label htmlFor="chatgpt-auth-mode" className="block text-sm font-medium text-content">ChatGPT engine auth</label>
@@ -183,7 +203,12 @@ export default function EnginesSection(props) {
             onChange={(e) => setField('engines', 'default', e.target.value)}
             className={INPUT_CLASS}
           >
-            {ENGINE_OPTIONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            {ENGINE_OPTIONS.map((o) => (
+              <option key={o.id} value={o.id}
+                disabled={!(config.engines.enabled || []).includes(o.id)}>
+                {o.label}
+              </option>
+            ))}
           </select>
         </div>
 

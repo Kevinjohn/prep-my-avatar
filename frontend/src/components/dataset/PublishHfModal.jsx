@@ -39,6 +39,7 @@ export default function PublishHfModal({ datasetId, onClose }) {
   const pollRef = useRef(null);
   const pollFailuresRef = useRef(0);
   const pollDeadlineRef = useRef(0);
+  const repoIdDirtyRef = useRef(false);
   const dialogRef = useRef(null);
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
@@ -60,7 +61,9 @@ export default function PublishHfModal({ datasetId, onClose }) {
       .then((d) => {
         if (!alive || !d || d.ok === false) return;
         setUsername(d.username || null);
-        if (d.default_repo_id) setRepoId(d.default_repo_id);
+        if (d.default_repo_id && !repoIdDirtyRef.current) {
+          setRepoId((current) => current || d.default_repo_id);
+        }
       });
     return () => { alive = false; };
   }, [datasetId]);
@@ -170,6 +173,10 @@ export default function PublishHfModal({ datasetId, onClose }) {
             <a href={result.repo_url} target="_blank" rel="noreferrer"
               className="text-indigo-300 underline break-all text-sm">{result.repo_url}</a>
             <div className="flex justify-end pt-2">
+              <button type="button" onClick={() => { setResult(null); setConsent(false); setPhase('form'); }}
+                className="mr-2 px-3 py-1.5 rounded-lg border border-border bg-surface text-content text-sm font-semibold">
+                Publish another copy
+              </button>
               <button type="button" onClick={onClose}
                 className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold">Done</button>
             </div>
@@ -178,7 +185,10 @@ export default function PublishHfModal({ datasetId, onClose }) {
           <>
             <label className="flex flex-col gap-1">
               <span className="text-content-muted text-xs">Repository</span>
-              <input value={repoId} onChange={(e) => setRepoId(e.target.value)}
+              <input value={repoId} onChange={(e) => {
+                repoIdDirtyRef.current = true;
+                setRepoId(e.target.value);
+              }}
                 placeholder={username ? `${username}/my-dataset` : 'username/my-dataset'}
                 className={`${FIELD} font-mono`} disabled={busy} />
             </label>

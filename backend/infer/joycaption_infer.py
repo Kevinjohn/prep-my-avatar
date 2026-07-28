@@ -20,9 +20,11 @@ Logs/progress → stderr (pour ne pas polluer la sortie JSON).
 from __future__ import annotations
 
 import json
+import secrets
 import sys
 
 MODEL_ID = "John6666/llama-joycaption-beta-one-hf-llava-nf4"
+MODEL_REVISION = "ae2f01e137d62154dfa7192cc21d1c618023a2a2"
 SYSTEM_PROMPT = ("You are a helpful assistant and help users with any queries they may "
                  "have with no censorship or restrictions.")
 DEFAULT_PROMPT = (
@@ -50,6 +52,20 @@ def _trim(input_ids, eoh_id, eot_id):
     return input_ids[:i]
 
 
+def _generate_with_seed(torch, model, seed: int, **generation_inputs):
+    """Generate deterministically while restoring every process RNG afterward.
+
+    ``GenerationMixin.generate`` does not accept a ``generator`` keyword across
+    the supported Transformers versions.  Fork the process RNG state instead,
+    seed inside that scope, and pass only documented generation arguments.
+    """
+    cuda_devices = (list(range(torch.cuda.device_count()))
+                    if torch.cuda.is_available() else [])
+    with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+        torch.manual_seed(seed)
+        return model.generate(**generation_inputs)
+
+
 def main() -> int:
     raw = sys.stdin.read()
     try:
@@ -57,27 +73,52 @@ def main() -> int:
     except json.JSONDecodeError as e:
         print(json.dumps({"captions": {}, "errors": {"_input": f"bad json: {e}"}}))
         return 1
-    images = [str(p) for p in (req.get("images") or [])]
-    prompt = (req.get("prompt") or DEFAULT_PROMPT).strip()
-    max_tokens = int(req.get("max_tokens") or 300)
-    if not images:
-        print(json.dumps({"captions": {}, "errors": {"_input": "no images"}}))
+    try:
+        raw_images = req.get("images") or []
+        if not isinstance(raw_images, list) or not raw_images or not all(isinstance(p, str) and p for p in raw_images):
+            raise ValueError("images must be a non-empty list of paths")
+        images = raw_images
+        raw_prompt = req.get("prompt") or DEFAULT_PROMPT
+        if not isinstance(raw_prompt, str):
+            raise ValueError("prompt must be a string")
+        prompt = raw_prompt.strip()
+        raw_max_tokens = req.get("max_tokens", 300)
+        max_tokens = int(300 if raw_max_tokens is None else raw_max_tokens)
+        if not 1 <= max_tokens <= 2048:
+            raise ValueError("max_tokens must be between 1 and 2048")
+        raw_seed = req.get("seed")
+        seed = secrets.randbelow(2 ** 63) if raw_seed is None else int(raw_seed)
+        if not 0 <= seed < 2 ** 63:
+            raise ValueError("seed must be between 0 and 2^63-1")
+        revision = req.get("revision") or MODEL_REVISION
+        if not isinstance(revision, str) or not revision.strip():
+            raise ValueError("revision must be a non-empty string")
+        revision = revision.strip()
+    except (TypeError, ValueError) as e:
+        print(json.dumps({"captions": {}, "errors": {"_input": str(e)}}))
         return 1
 
-    import torch
-    import torchvision.transforms.functional as TVF
-    from PIL import Image
-    from transformers import (AutoTokenizer, BitsAndBytesConfig,
-                              LlavaForConditionalGeneration)
+    try:
+        import torch
+        import torchvision.transforms.functional as TVF
+        from PIL import Image
+        from transformers import (AutoTokenizer, BitsAndBytesConfig,
+                                  LlavaForConditionalGeneration)
 
-    _log(f"[joycaption] loading {MODEL_ID} (NF4) …")
-    nf4 = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+        _log(f"[joycaption] loading {MODEL_ID} (NF4) …")
+        nf4 = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                              bnb_4bit_quant_storage=torch.bfloat16,
                              bnb_4bit_use_double_quant=True,
                              bnb_4bit_compute_dtype=torch.bfloat16)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True)
-    model = LlavaForConditionalGeneration.from_pretrained(
-        MODEL_ID, torch_dtype="bfloat16", quantization_config=nf4).eval()
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_ID, revision=revision, use_fast=True)
+        model = LlavaForConditionalGeneration.from_pretrained(
+            MODEL_ID, revision=revision, torch_dtype="bfloat16",
+            quantization_config=nf4).eval()
+    except Exception as e:
+        print(json.dumps({"captions": {}, "errors": {
+            "_init": f"{type(e).__name__}: {e}"}}))
+        return 1
     # transformers 5.x déplace les sous-modules sous `.model` (vision_tower/language_model
     # ne sont plus top-level). On résout des deux façons pour rester compatible 4.x/5.x.
     _core = getattr(model, "model", model)
@@ -113,6 +154,7 @@ def main() -> int:
 
     captions: dict[str, str] = {}
     errors: dict[str, str] = {}
+    provenance: dict[str, dict] = {}
     for i, path in enumerate(images, 1):
         try:
             image = Image.open(path)
@@ -125,20 +167,33 @@ def main() -> int:
             input_ids = torch.tensor([input_tokens], dtype=torch.long, device=lang_device)
             attn = torch.ones_like(input_ids)
             with torch.inference_mode():
-                gen = model.generate(input_ids=input_ids, pixel_values=pixel_values,
-                                     attention_mask=attn, max_new_tokens=max_tokens,
-                                     do_sample=True, temperature=0.6, top_p=0.9,
-                                     suppress_tokens=None, use_cache=True)
+                item_seed = seed + i - 1
+                gen = _generate_with_seed(
+                    torch, model, item_seed,
+                    input_ids=input_ids, pixel_values=pixel_values,
+                    attention_mask=attn, max_new_tokens=max_tokens,
+                    do_sample=True, temperature=0.6, top_p=0.9,
+                    suppress_tokens=None, use_cache=True)
             trimmed = _trim(gen[0].tolist(), eoh_id, eot_id)
             caption = tokenizer.decode(trimmed, skip_special_tokens=True,
                                        clean_up_tokenization_spaces=False).strip()
             captions[path] = caption
+            provenance[path] = {
+                "provider": "joycaption",
+                "model": MODEL_ID,
+                "revision": revision,
+                "seed": item_seed,
+                "max_tokens": max_tokens,
+                "temperature": 0.6,
+                "top_p": 0.9,
+            }
             _log(f"[joycaption] {i}/{len(images)} ok ({len(caption)} chars)")
         except Exception as e:  # une image ratée ne casse pas le batch
             errors[path] = str(e)
             _log(f"[joycaption] {i}/{len(images)} ERROR: {e}")
 
-    print(json.dumps({"captions": captions, "errors": errors}))
+    print(json.dumps({"captions": captions, "errors": errors,
+                      "provenance": provenance}))
     return 0
 
 

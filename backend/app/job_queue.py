@@ -12,10 +12,13 @@ imports the services that create jobs (avoids import cycles).
 from __future__ import annotations
 import json
 import logging
+import os
 from pathlib import Path
 import threading
 import time
 import uuid
+
+from sqlalchemy import text
 
 from .extensions import db
 from .models import ImageGenerationQueue, SystemState
@@ -26,6 +29,9 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 2
 POLL_TIMEOUT_SECONDS = 15 * 60
 IDLE_SLEEP_SECONDS = 1
+GPU_LEASE_KEY = 'gpu_workload_lease'
+_gpu_lease_lock = threading.Lock()
+_gpu_active_token = None
 
 
 def _validated_output_filename(image) -> str:
@@ -47,7 +53,11 @@ def _claim(job_id) -> bool:
                .update({'status': 'processing',
                         'started_at': utcnow(),
                         'last_heartbeat': utcnow()}))
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
     return bool(claimed)
 
 
@@ -87,12 +97,24 @@ def _poll_outputs(prompt_id, timeout=POLL_TIMEOUT_SECONDS):
     full timeout. Any exception here still degrades to a failed job rather
     than raising.
     """
-    from .utils.comfyui import get_comfyui_history
+    from .utils.comfyui import ComfyUIHistoryUnavailable, get_comfyui_history
     deadline = time.monotonic() + timeout
+    history_failures = 0
     while True:
         try:
             history = get_comfyui_history(prompt_id) or {}
             entry = history.get(prompt_id, history) if isinstance(history, dict) else {}
+            history_failures = 0
+        except ComfyUIHistoryUnavailable as exc:
+            history_failures += 1
+            if history_failures >= 3:
+                job = ImageGenerationQueue.query.filter_by(
+                    comfyui_prompt_id=prompt_id).first()
+                if job:
+                    job.error_message = str(exc)[:400]
+                    db.session.commit()
+                return None, True
+            entry = {}
         except Exception:
             entry = {}
         outputs = (entry or {}).get('outputs') or {}
@@ -125,6 +147,8 @@ def _poll_outputs(prompt_id, timeout=POLL_TIMEOUT_SECONDS):
 
         job = ImageGenerationQueue.query.filter_by(comfyui_prompt_id=prompt_id).first()
         if job:
+            if job.status == 'cancelled':
+                return None, True
             job.last_heartbeat = utcnow()
             db.session.commit()
 
@@ -186,6 +210,43 @@ def _dispatch_completion(job, filename, failed):
                     db.session.commit()
         except Exception:
             logger.exception('job_queue: could not mark linked row failed for job %s', job.job_id)
+    finally:
+        for staged_path in md.get('staged_inputs') or []:
+            if not isinstance(staged_path, str):
+                continue
+            try:
+                os.remove(staged_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception(
+                    'job_queue: could not clean staging file %s for job %s',
+                    staged_path, job.job_id)
+
+
+def _deliver_pending_completion(job) -> None:
+    """Deliver one durable terminal event and acknowledge it afterwards.
+
+    ``completion_pending`` is set in the same commit as the terminal queue
+    state.  A process death before or during the callback therefore leaves a
+    replayable row.  Owner callbacks are deliberately idempotent for terminal
+    rows, making the unavoidable crash-after-callback-before-ack window safe.
+    """
+    if not job.completion_pending:
+        return
+    failed = job.status != 'completed'
+    _dispatch_completion(job, job.result_filename, failed)
+    acknowledged = (ImageGenerationQueue.query
+                    .filter_by(job_id=job.job_id, completion_pending=True)
+                    .update({'completion_pending': False},
+                            synchronize_session=False))
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+    if acknowledged:
+        db.session.refresh(job)
 
 
 class JobQueueManager:
@@ -246,24 +307,55 @@ class JobQueueManager:
         ``sent_to_comfy`` owns a durable prompt id and remains resumable; the
         normal worker picks it up and continues polling after startup.
         """
+        # Replay terminal owner callbacks first.  Their queue transition may
+        # have committed immediately before the previous process died.
+        pending_deliveries = (ImageGenerationQueue.query
+                              .filter_by(completion_pending=True)
+                              .order_by(ImageGenerationQueue.completed_at.asc())
+                              .all())
+        for job in pending_deliveries:
+            _deliver_pending_completion(job)
+
         ambiguous = ImageGenerationQueue.query.filter_by(status='processing').all()
         for job in ambiguous:
-            job.update_status(
-                'failed', error_message='app restarted during ComfyUI submission')
+            job.update_status('failed', error_message=
+                              'app restarted during ComfyUI submission')
+            job.completion_pending = True
             db.session.commit()
-            _dispatch_completion(job, None, True)
+            _deliver_pending_completion(job)
 
     # -- worker -----------------------------------------------------------
     def process_one(self) -> bool:
         """Run one pending job end-to-end, synchronously. Returns True if a
         job was processed, False if the queue was empty (caller should back
         off). Assumes an active app context (pushed by the caller)."""
-        if self._get_system_state('training_in_progress') or self._get_system_state('vision_in_progress'):
+        # Drain the durable outbox during normal operation too.  This retries
+        # an acknowledgement whose database commit failed without requiring a
+        # second application restart, and callbacks do not consume the GPU.
+        pending_delivery = (ImageGenerationQueue.query
+                            .filter_by(completion_pending=True)
+                            .order_by(ImageGenerationQueue.completed_at.asc())
+                            .first())
+        if pending_delivery is not None:
+            _deliver_pending_completion(pending_delivery)
+            return True
+
+        if (self._get_system_state('training_in_progress')
+                or self._get_system_state('vision_in_progress')):
             return False  # GPU held by training/vision - leave jobs pending, retry later
 
+        lease_token = self._acquire_gpu_lease('generation', POLL_TIMEOUT_SECONDS + 60)
+        if lease_token is None:
+            return False
+
+        try:
+            return self._process_one_with_lease(lease_token)
+        finally:
+            self._release_gpu_lease(lease_token)
+
+    def _process_one_with_lease(self, lease_token) -> bool:
         job = (ImageGenerationQueue.query
                .filter(ImageGenerationQueue.status.in_(('sent_to_comfy', 'pending')))
-               # Resume paid/submitted work before starting another prompt.
                .order_by(
                    (ImageGenerationQueue.status == 'sent_to_comfy').desc(),
                    ImageGenerationQueue.priority.desc(),
@@ -281,11 +373,22 @@ class JobQueueManager:
                 prompt_id = _submit(workflow, job.job_id)
                 # Mirror _claim: only advance from 'processing'. If a cancel
                 # landed during submit, never resurrect or poll the row.
-                claimed = (ImageGenerationQueue.query
-                           .filter_by(job_id=job.job_id, status='processing')
-                           .update({'status': 'sent_to_comfy',
-                                    'comfyui_prompt_id': prompt_id}))
-                db.session.commit()
+                try:
+                    claimed = (ImageGenerationQueue.query
+                               .filter_by(job_id=job.job_id, status='processing')
+                               .update({'status': 'sent_to_comfy',
+                                        'comfyui_prompt_id': prompt_id}))
+                    db.session.commit()
+                except Exception:
+                    # The remote prompt already exists. Restore a usable
+                    # session and retry publication once so a transient local
+                    # commit failure does not discard its durable ownership.
+                    db.session.rollback()
+                    claimed = (ImageGenerationQueue.query
+                               .filter_by(job_id=job.job_id, status='processing')
+                               .update({'status': 'sent_to_comfy',
+                                        'comfyui_prompt_id': prompt_id}))
+                    db.session.commit()
                 if not claimed:
                     db.session.refresh(job)
                     _dispatch_completion(job, None, True)
@@ -309,13 +412,93 @@ class JobQueueManager:
 
         # Precedence on failure: submit exception > detail stashed by the poll
         # (already on the row) > generic. Never clobber a specific message.
-        job.update_status('failed' if failed else 'completed',
-                          result_filename=filename,
-                          error_message=None if not failed else
-                          (error_detail or job.error_message or 'generation failed'))
+        terminal_status = 'failed' if failed else 'completed'
+        terminal_error = None if not failed else (
+            error_detail or job.error_message or 'generation failed')
+        transitioned = (ImageGenerationQueue.query
+                        .filter_by(job_id=job.job_id)
+                        .filter(ImageGenerationQueue.status.in_(
+                            ('processing', 'sent_to_comfy')))
+                        .update({
+                            'status': terminal_status,
+                            'result_filename': filename,
+                            'error_message': terminal_error,
+                            'completed_at': utcnow(),
+                            'last_heartbeat': utcnow(),
+                            'completion_pending': True,
+                        }, synchronize_session=False))
         db.session.commit()
-        _dispatch_completion(job, filename, failed)
+        if not transitioned:
+            db.session.refresh(job)
+            _dispatch_completion(job, filename, True)
+            return True
+        db.session.refresh(job)
+        _deliver_pending_completion(job)
         return True
+
+    def _acquire_gpu_lease(self, owner, ttl_seconds):
+        """Atomically acquire the shared generation/vision GPU lease.
+
+        The conditional upsert is one SQLite statement, so two request threads
+        cannot both observe an absent/expired lease and then overwrite each
+        other.  The opaque token is required for renewal and release.
+        """
+        token = uuid.uuid4().hex
+        now = time.time()
+        encoded = json.dumps({
+            'v': {'token': token, 'owner': owner},
+            'exp': now + ttl_seconds,
+        })
+        # SQLite serializes this statement across processes.  The Python lock
+        # additionally protects in-memory SQLite test/development databases,
+        # where separate sessions can share one underlying connection.
+        global _gpu_active_token
+        with _gpu_lease_lock:
+            if _gpu_active_token is not None:
+                current = self._get_system_state(GPU_LEASE_KEY)
+                if (isinstance(current, dict)
+                        and current.get('token') == _gpu_active_token):
+                    return None
+                # The database is authoritative across app/database lifetimes.
+                # This process-local optimization can outlive a test app or a
+                # recovered/expired row and must not become a phantom lock.
+                _gpu_active_token = None
+            result = db.session.execute(text("""
+                INSERT INTO system_state (key, value)
+                VALUES (:key, :value)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                WHERE json_extract(system_state.value, '$.exp') IS NOT NULL
+                  AND json_extract(system_state.value, '$.exp') <= :now
+            """), {'key': GPU_LEASE_KEY, 'value': encoded, 'now': now})
+            db.session.commit()
+            if result.rowcount == 1:
+                _gpu_active_token = token
+                return token
+            return None
+
+    def _renew_gpu_lease(self, token, ttl_seconds) -> bool:
+        expires = time.time() + ttl_seconds
+        result = db.session.execute(text("""
+            UPDATE system_state
+               SET value = json_set(value, '$.exp', :expires)
+             WHERE key = :key
+               AND json_extract(value, '$.v.token') = :token
+        """), {'key': GPU_LEASE_KEY, 'token': token, 'expires': expires})
+        db.session.commit()
+        return result.rowcount == 1
+
+    def _release_gpu_lease(self, token) -> bool:
+        global _gpu_active_token
+        result = db.session.execute(text("""
+            DELETE FROM system_state
+             WHERE key = :key
+               AND json_extract(value, '$.v.token') = :token
+        """), {'key': GPU_LEASE_KEY, 'token': token})
+        db.session.commit()
+        with _gpu_lease_lock:
+            if _gpu_active_token == token:
+                _gpu_active_token = None
+        return result.rowcount == 1
 
     # -- public API (verbatim surface; lifted services call these) --------
     def add_job(self, job_type='image', user_id='local', workflow_data=None, prompt='',

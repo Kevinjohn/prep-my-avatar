@@ -14,12 +14,15 @@ import os
 import hashlib
 import importlib.metadata
 import json
+import logging
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,7 +30,20 @@ from ..config import REPO_ROOT, get as _cfg_get
 
 _GIT_TIMEOUT = 120
 _UPDATE_LOCK = threading.Lock()
+_RESTART_ACK_LOCK = threading.Lock()
 RESTART_EXIT_CODE = 75
+logger = logging.getLogger(__name__)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory metadata update where the platform supports it."""
+    if os.name == 'nt':
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _journal_path(root: Path) -> Path:
@@ -50,11 +66,14 @@ def _write_journal(root: Path, payload: dict) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     tmp.replace(path)
+    _fsync_directory(path.parent)
 
 
 def _clear_journal(root: Path) -> bool:
     try:
-        _journal_path(root).unlink()
+        path = _journal_path(root)
+        path.unlink()
+        _fsync_directory(path.parent)
         return True
     except FileNotFoundError:
         return True
@@ -62,24 +81,175 @@ def _clear_journal(root: Path) -> bool:
         return False
 
 
+def acknowledge_restart_readiness(nonce: str, root: Path = REPO_ROOT) -> bool:
+    """Publish and re-observe the exact replacement's durable ready receipt."""
+    with _RESTART_ACK_LOCK:
+        path = _journal_path(root)
+        try:
+            journal = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            journal = None
+        except (OSError, ValueError):
+            return False
+        if not nonce:
+            return False
+        if journal and journal.get('state') == 'awaiting_restart':
+            if nonce != journal.get('restart_nonce'):
+                return False
+            try:
+                current = (_git(root, 'rev-parse', 'HEAD').stdout or '').strip()
+            except (OSError, subprocess.SubprocessError):
+                return False
+            if current != journal.get('target'):
+                return False
+            journal['state'] = 'committed'
+            journal['ready_at'] = datetime.now(timezone.utc).isoformat()
+            try:
+                _write_journal(root, journal)
+            except OSError:
+                return False
+        elif journal and journal.get('state') == 'committed':
+            if nonce != journal.get('restart_nonce'):
+                return False
+            try:
+                current = (_git(root, 'rev-parse', 'HEAD').stdout or '').strip()
+            except (OSError, subprocess.SubprocessError):
+                return False
+            if current != journal.get('target'):
+                return False
+
+        # Manual restarts have no update transaction. Keep their exact process
+        # identity durable too, and do not consume either receipt on observation.
+        receipt = path.with_name('restart-readiness.json')
+        payload = {'restart_nonce': nonce,
+                   'ready_at': datetime.now(timezone.utc).isoformat()}
+        temporary = receipt.with_suffix('.json.tmp')
+        try:
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(receipt)
+            _fsync_directory(receipt.parent)
+        except OSError:
+            return False
+        return True
+
+
 def _install_recovery_bootstrap(root: Path) -> tuple[bool, str]:
-    """Persist recovery code outside the checkout before git mutates it."""
-    source = root / 'backend' / 'update_recovery.py'
-    target = _journal_path(root).parent / 'update-recovery.py'
+    """Persist recovery and launch code outside the checkout before mutation."""
+    sources = (
+        (root / 'backend' / 'update_recovery.py', 'update-recovery.py'),
+        (root / 'backend' / 'source_launcher.py', 'source-launcher.py'),
+    )
     try:
-        payload = source.read_bytes()
-        compile(payload, str(source), 'exec')
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix('.py.tmp')
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, 'wb') as handle:
-            handle.write(payload)
+        directory = _journal_path(root).parent
+        directory.mkdir(parents=True, exist_ok=True)
+        for source, name in sources:
+            payload = source.read_bytes()
+            compile(payload, str(source), 'exec')
+            target = directory / name
+            temporary = target.with_suffix('.py.tmp')
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, 'wb') as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(target)
+        manifest = {
+            'version': 1,
+            'files': {
+                name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                for _source, name in sources},
+        }
+        manifest_path = directory / 'boot-bundle.json'
+        manifest_tmp = manifest_path.with_suffix('.json.tmp')
+        descriptor = os.open(
+            manifest_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            json.dump(manifest, handle, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.replace(target)
+        manifest_tmp.replace(manifest_path)
+        _fsync_directory(directory)
         return True, ''
     except (OSError, SyntaxError) as exc:
         return False, str(exc)
+
+
+def record_migration_snapshot(database: Path, snapshot: Path,
+                              root: Path = REPO_ROOT) -> bool:
+    """Attach a verified pre-migration database image to an armed update."""
+    path = _journal_path(root)
+    try:
+        journal = json.loads(path.read_text(encoding='utf-8'))
+        if journal.get('state') != 'awaiting_restart':
+            return False
+        if Path(journal.get('root') or '').resolve() != root.resolve():
+            raise OSError('update journal root does not match this checkout')
+        current = (_git(root, 'rev-parse', 'HEAD').stdout or '').strip()
+        if current != journal.get('target'):
+            raise OSError('update journal target does not match this checkout')
+        with sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True) as connection:
+            if connection.execute('PRAGMA integrity_check').fetchone() != ('ok',):
+                raise OSError('migration snapshot failed SQLite integrity check')
+        journal['migration_database_snapshot'] = {
+            'database': str(database.resolve()),
+            'snapshot': str(snapshot.resolve()),
+            'sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+            'size': snapshot.stat().st_size,
+        }
+        _write_journal(root, journal)
+        return True
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, sqlite3.Error):
+        logger.exception('could not associate migration snapshot with update journal')
+        raise
+
+
+def _restore_migration_snapshot(journal: dict) -> bool:
+    metadata = journal.get('migration_database_snapshot')
+    if not metadata:
+        return True
+    try:
+        database = Path(metadata['database'])
+        snapshot = Path(metadata['snapshot'])
+        expected_hash = str(metadata['sha256'])
+        expected_size = int(metadata['size'])
+        if snapshot.stat().st_size != expected_size \
+                or hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_hash:
+            return False
+        with sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True) as connection:
+            if connection.execute('PRAGMA integrity_check').fetchone() != ('ok',):
+                return False
+        temporary = database.with_suffix(database.suffix + '.rollback.tmp')
+        with snapshot.open('rb') as incoming, temporary.open('wb') as outgoing:
+            shutil.copyfileobj(incoming, outgoing)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        for suffix in ('-wal', '-shm'):
+            Path(f'{database}{suffix}').unlink(missing_ok=True)
+        temporary.replace(database)
+        _fsync_directory(database.parent)
+        return True
+    except (KeyError, OSError, ValueError, sqlite3.Error):
+        return False
+
+
+def _cleanup_migration_snapshot(journal: dict) -> bool:
+    metadata = journal.get('migration_database_snapshot')
+    if not metadata:
+        return True
+    try:
+        Path(metadata['snapshot']).unlink(missing_ok=True)
+        return True
+    except (KeyError, OSError, TypeError):
+        return False
 
 
 def _run_checked(command, *, cwd, timeout=900, env=None):
@@ -282,6 +452,13 @@ def _tree_manifest(directory: Path) -> dict[str, str]:
     return manifest
 
 
+def _verify_frontend_bundle(root: Path) -> tuple[bool, str]:
+    index = root / 'frontend' / 'dist' / 'index.html'
+    if not index.is_file() or not index.read_bytes().strip():
+        return False, 'The update did not include a usable frontend/dist/index.html.'
+    return True, ''
+
+
 def _verify_frontend(root: Path, pnpm: list[str], logs: list[str]) -> tuple[bool, str]:
     """Run source gates and prove the checked-in bundle was built from them."""
     for script in ('lint', 'typecheck', 'test'):
@@ -292,9 +469,10 @@ def _verify_frontend(root: Path, pnpm: list[str], logs: list[str]) -> tuple[bool
         if not ok:
             return False, f'Frontend {script} verification failed.'
 
+    bundle_ok, bundle_reason = _verify_frontend_bundle(root)
+    if not bundle_ok:
+        return False, bundle_reason
     committed = root / 'frontend' / 'dist'
-    if not (committed / 'index.html').is_file():
-        return False, 'The update did not include a built frontend/dist/index.html.'
     try:
         with tempfile.TemporaryDirectory(prefix='lds-update-frontend-') as temporary:
             built = Path(temporary)
@@ -315,12 +493,25 @@ def _verify_frontend(root: Path, pnpm: list[str], logs: list[str]) -> tuple[bool
 
 
 def _verify_app_startup(root: Path, logs: list[str]) -> tuple[bool, str]:
-    """Initialize the updated Flask app against disposable private storage."""
+    """Initialize the updated app against a safe copy of current local state."""
     with tempfile.TemporaryDirectory(prefix='lds-update-smoke-') as temporary:
         temp = Path(temporary)
+        smoke_data = temp / 'data'
+        smoke_data.mkdir()
+        live_data = Path(os.environ.get('LDS_DATA_DIR', str(root / 'data')))
+        live_database = live_data / 'studio.db'
+        if live_database.is_file():
+            try:
+                # SQLite's backup API produces a transactionally consistent
+                # snapshot even while the live WAL-backed app is serving.
+                with sqlite3.connect(f'file:{live_database}?mode=ro', uri=True) as source:
+                    with sqlite3.connect(smoke_data / 'studio.db') as destination:
+                        source.backup(destination)
+            except sqlite3.Error as exc:
+                return False, f'Could not safely copy the current database: {exc}'
         env = dict(os.environ)
         env.update({
-            'LDS_DATA_DIR': str(temp / 'data'),
+            'LDS_DATA_DIR': str(smoke_data),
             'LDS_CONFIG': str(temp / 'config.json'),
             'LDS_ENV': str(temp / '.env'),
             'LDS_NO_REEXEC': '1',
@@ -375,7 +566,7 @@ def _rollback_update(root: Path, before: str, journal: dict, reason: str,
     if reset_log:
         logs.append(reset_log[-1500:])
     if reset.returncode == 0:
-        restore_ok = True
+        restore_ok = _restore_migration_snapshot(journal)
         # A resolver can fail after partially changing the environment.  Once
         # the old files are restored, re-apply their lock/requirements so code
         # and dependency state converge on the same revision again.
@@ -431,7 +622,8 @@ def _rollback_update(root: Path, before: str, journal: dict, reason: str,
                                'need recovery; restart the app to retry.'),
                     'from': before[:8], 'to': before[:8],
                     'log': '\n'.join(logs)[-4000:]}
-        cleared = _clear_journal(root)
+        snapshot_cleaned = _cleanup_migration_snapshot(journal)
+        cleared = snapshot_cleaned and _clear_journal(root)
         return {'ok': False, 'changed': False, 'rolled_back': True,
                 'environment_restored': restore_ok,
                 'recovery_journal_cleared': cleared,
@@ -487,34 +679,57 @@ def git_update_status(root=None) -> dict | None:
         return None
     base = {'ok': True, 'is_git': True, 'current': APP_VERSION, 'update_available': False}
     try:
-        branch = (_git(root, 'rev-parse', '--abbrev-ref', 'HEAD').stdout or '').strip() or 'main'
+        branch_result = _git(root, 'rev-parse', '--abbrev-ref', 'HEAD')
+        branch = (branch_result.stdout or '').strip()
+        if branch_result.returncode != 0 or not branch or branch == 'HEAD':
+            base['ok'] = False
+            base['reason'] = 'Could not resolve the current git branch.'
+            return base
         fetch = _git(root, 'fetch', '--quiet', 'origin', branch)
         if fetch.returncode != 0:
+            base['ok'] = False
             base['reason'] = 'git fetch failed (offline, or no access to the remote).'
             return base
-        behind = (_git(root, 'rev-list', '--count', f'HEAD..origin/{branch}').stdout or '0').strip()
+        behind_result = _git(root, 'rev-list', '--count', f'HEAD..origin/{branch}')
+        behind = (behind_result.stdout or '').strip()
+        local_result = _git(root, 'rev-parse', '--short', 'HEAD')
+        remote_result = _git(root, 'rev-parse', '--short', f'origin/{branch}')
+        if (behind_result.returncode != 0 or local_result.returncode != 0
+                or remote_result.returncode != 0):
+            base['ok'] = False
+            base['reason'] = 'Could not compare the local and fetched revisions.'
+            return base
         base['branch'] = branch
-        base['current_sha'] = (_git(root, 'rev-parse', '--short', 'HEAD').stdout or '').strip()
-        base['remote_sha'] = (_git(root, 'rev-parse', '--short', f'origin/{branch}').stdout or '').strip()
+        base['current_sha'] = (local_result.stdout or '').strip()
+        base['remote_sha'] = (remote_result.stdout or '').strip()
         try:
             n = int(behind)
         except ValueError:
-            n = 0
+            base['ok'] = False
+            base['reason'] = 'Git returned an invalid revision comparison.'
+            return base
+        if n < 0 or not re.fullmatch(r'[0-9a-fA-F]{4,64}', base['current_sha']) \
+                or not re.fullmatch(r'[0-9a-fA-F]{4,64}', base['remote_sha']):
+            base['ok'] = False
+            base['reason'] = 'Git returned an invalid revision comparison.'
+            return base
         base['behind'] = n
         base['update_available'] = n > 0
         # Links so the user can read WHAT the pending update contains before
         # pulling: a compare view of exactly the incoming commits when behind,
         # else the branch history. Short SHAs work fine in GitHub URLs.
-        repo = _cfg_get('updates.repo') or 'perfectgf/lora-dataset-studio'
+        repo = _cfg_get('updates.repo') or 'Kevinjohn/prep-my-avatar'
         base['repo'] = repo
         base['commits_url'] = f'https://github.com/{repo}/commits/{branch}'
         if n > 0 and base['current_sha'] and base['remote_sha']:
             base['compare_url'] = (f'https://github.com/{repo}/compare/'
                                    f"{base['current_sha']}...{base['remote_sha']}")
     except FileNotFoundError:
+        base['ok'] = False
         base['git_missing'] = True
         base['reason'] = 'git is not installed / not on PATH — install Git to enable in-app updates.'
     except subprocess.SubprocessError:
+        base['ok'] = False
         base['reason'] = 'git command timed out.'
     return base
 
@@ -540,7 +755,7 @@ def _apply_update_locked(root=None) -> dict:
     root = Path(root or REPO_ROOT)
     if not is_git_checkout(root):
         from ..config import get as cfg_get
-        repo = cfg_get('updates.repo') or 'perfectgf/lora-dataset-studio'
+        repo = cfg_get('updates.repo') or 'Kevinjohn/prep-my-avatar'
         return {'ok': False, 'manual': True,
                 'reason': 'This is a packaged build (no git checkout) — download the latest '
                           'release and replace the folder.',
@@ -595,6 +810,8 @@ def _apply_update_locked(root=None) -> dict:
     frontend_sources = any(
         name.startswith('frontend/') and not name.startswith('frontend/dist/')
         for name in changed_names)
+    frontend_bundle = any(name.startswith('frontend/dist/') for name in changed_names)
+    frontend_verification = frontend_sources or frontend_bundle
     python_snapshot = None
     if python_deps:
         python_snapshot, snapshot_error = _pip_environment_snapshot()
@@ -704,8 +921,11 @@ def _apply_update_locked(root=None) -> dict:
         journal['state_before_rollback'] = 'verifying'
         return _rollback_update(root, before, journal,
                                 f'{startup_reason} The update was rolled back.', logs)
-    if frontend_sources:
-        frontend_ok, frontend_reason = _verify_frontend(root, pnpm, logs)
+    if frontend_verification:
+        if frontend_sources:
+            frontend_ok, frontend_reason = _verify_frontend(root, pnpm, logs)
+        else:
+            frontend_ok, frontend_reason = _verify_frontend_bundle(root)
         if not frontend_ok:
             journal['state_before_rollback'] = 'verifying'
             return _rollback_update(root, before, journal,
@@ -715,25 +935,37 @@ def _apply_update_locked(root=None) -> dict:
         journal['state_before_rollback'] = 'verifying'
         return _rollback_update(root, before, journal,
                                 'Post-update revision verification failed; the update was rolled back.', logs)
-    journal['state'] = 'committed'
-    journal['committed_at'] = datetime.now(timezone.utc).isoformat()
+    # The replacement process executes this private copy before importing the
+    # updated checkout. Refresh it from the verified target so it understands
+    # the nonce-bearing awaiting_restart state introduced by that target.
+    recovery_ok, recovery_error = _install_recovery_bootstrap(root)
+    if not recovery_ok:
+        journal['state_before_rollback'] = 'verifying'
+        return _rollback_update(
+            root, before, journal,
+            'Could not publish the verified restart recovery bootstrap; '
+            'the update was rolled back.', logs + [recovery_error])
+    restart_nonce = uuid.uuid4().hex
+    journal['state'] = 'awaiting_restart'
+    journal['restart_nonce'] = restart_nonce
+    journal['verified_at'] = datetime.now(timezone.utc).isoformat()
     try:
         _write_journal(root, journal)
     except OSError as exc:
         journal['state_before_rollback'] = 'verifying'
         return _rollback_update(root, before, journal,
                                 f'Could not commit the recovery journal: {exc}', logs)
-    journal_cleared = _clear_journal(root)
     return {'ok': True, 'changed': True, 'from': before[:8], 'to': after[:8],
             'deps_changed': bool(python_deps or frontend_deps),
             'python_deps_changed': python_deps,
             'frontend_deps_changed': frontend_deps,
             'frontend_sources_changed': frontend_sources,
-            'verified': True, 'recovery_journal_cleared': journal_cleared,
+            'verified': True, 'restart_nonce': restart_nonce,
+            'recovery_journal_cleared': False,
             'log': '\n'.join(logs)[-4000:]}
 
 
-def schedule_restart(delay: float = 1.2) -> None:
+def schedule_restart(delay: float = 1.2, restart_nonce: str | None = None) -> None:
     """Restart without racing the old server or escaping a portable launcher.
 
     The portable launcher is the lifetime supervisor.  Its child exits with a
@@ -743,12 +975,32 @@ def schedule_restart(delay: float = 1.2) -> None:
     PID to disappear before relaunching.  Port availability is deliberately not
     used as the hand-off signal: another process can claim a just-freed port.
     """
+    supervised = os.environ.get('LDS_LAUNCHER_SUPERVISED') == '1'
+    journal_path = _journal_path(REPO_ROOT)
+    try:
+        previous = json.loads(journal_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        previous = None
+    if (previous and previous.get('state') == 'committed'
+            and previous.get('restart_nonce') != restart_nonce
+            and not _clear_journal(REPO_ROOT)):
+        raise RuntimeError(
+            'Could not retire the previous restart receipt; the server remains running')
+    if not supervised:
+        recovery_ok, recovery_error = _install_recovery_bootstrap(REPO_ROOT)
+        if not recovery_ok:
+            raise RuntimeError(
+                'Could not install the private restart bootstrap; '
+                f'the server remains running: {recovery_error}')
+
     py = sys.executable
     run_py = os.path.abspath(sys.argv[0])
     workdir = os.path.dirname(run_py) or None
+    data_dir = str(_journal_path(REPO_ROOT).parent)
+    private_launcher = os.path.join(data_dir, 'source-launcher.py')
     parent_pid = os.getpid()
 
-    if os.environ.get('LDS_LAUNCHER_SUPERVISED') == '1':
+    if supervised:
         data_dir = Path(os.environ.get('LDS_DATA_DIR', str(REPO_ROOT / 'data')))
         request_path = data_dir / 'restart-request.json'
         request_path.parent.mkdir(parents=True, exist_ok=True)
@@ -756,6 +1008,8 @@ def schedule_restart(delay: float = 1.2) -> None:
             'host': os.environ.get('LDS_HOST') or _cfg_get('server.host') or '127.0.0.1',
             'port': int(os.environ.get('LDS_PORT') or _cfg_get('server.port') or 5050),
         }
+        if restart_nonce:
+            payload['restart_nonce'] = restart_nonce
         temporary = request_path.with_suffix('.json.tmp')
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
@@ -763,6 +1017,7 @@ def schedule_restart(delay: float = 1.2) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(request_path)
+        _fsync_directory(request_path.parent)
 
         def _exit_for_supervisor():
             import time
@@ -785,7 +1040,12 @@ def schedule_restart(delay: float = 1.2) -> None:
         # DETACHED, so a default spawn would leave the server console-less and
         # the old launcher window frozen on stale output.
         'flags=0x00000010 if os.name=="nt" else 0\n'
-        f'subprocess.Popen([{py!r},{run_py!r}], cwd={workdir!r}, creationflags=flags)\n'
+        'env=dict(os.environ)\n'
+        f'env["LDS_RESTART_NONCE"]={restart_nonce!r} or ""\n'
+        f'child=subprocess.Popen([{py!r},{private_launcher!r},"--root",'
+        f'{str(REPO_ROOT)!r},"--data-dir",{data_dir!r}], cwd={workdir!r}, '
+        'creationflags=flags, env=env)\n'
+        'rc=child.wait()\n'
     )
 
     def _spawn_then_exit():
@@ -797,7 +1057,9 @@ def schedule_restart(delay: float = 1.2) -> None:
         try:
             subprocess.Popen([py, '-c', helper], cwd=workdir, env=dict(os.environ),
                              creationflags=flags, close_fds=True)
-        finally:
+        except OSError:
+            logger.exception('could not create restart helper; server remains running')
+        else:
             os._exit(0)
 
     threading.Thread(target=_spawn_then_exit, daemon=True).start()

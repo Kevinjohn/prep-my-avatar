@@ -215,7 +215,7 @@ def test_max_runtime_cap_kills_pod(ct, app, client, monkeypatch):
     with app.app_context():
         ct._monitor(app, run_id)
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)
-        assert run.status in ('stopped', 'error')
+        assert run.status == 'stopped'
         assert 'runtime' in (run.error or run.phase_detail or '').lower()
         assert destroyed == ['777']
 
@@ -233,7 +233,7 @@ def test_max_runtime_cap_counts_pre_restart_time(ct, app, client, monkeypatch):
                 created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))  # > 480 min cap
         ct._monitor(app, run_id)
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)
-        assert run.status in ('stopped', 'error')
+        assert run.status == 'stopped'
         assert 'runtime' in ((run.error or '') + (run.phase_detail or '')).lower()
         assert destroyed == ['777']
 
@@ -491,9 +491,18 @@ def test_stale_ui_port_8675_coerced_in_template_mode(ct, app, client, monkeypatc
     monkeypatch.setattr(ct.cfg, 'get', (lambda orig: (lambda k, d=None:
         8675 if k == 'cloud.ui_port'
         else ({**(orig('cloud') or {}), 'ui_port': 8675} if k == 'cloud' else orig(k, d))))(ct.cfg.get))
+    real_derive = ct.vast_client.derive_base_url
+    observed_ports = []
+
+    def record_port(instance, port):
+        observed_ports.append(port)
+        return real_derive(instance, port)
+
+    monkeypatch.setattr(ct.vast_client, 'derive_base_url', record_port)
     with app.app_context():
         ct._monitor(app, run_id)
         assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
+    assert observed_ports == [18675]
 
 
 def test_boot_wait_tolerates_transient_vast_errors(ct, app, client, monkeypatch):
@@ -549,6 +558,198 @@ def test_monitor_resume_skips_upload_and_submit(ct, app, client, monkeypatch):
         assert remote.uploaded == {}                 # upload_dataset never called
         assert remote.job_config is None              # create_job never called
         assert destroyed == ['777']
+
+
+def test_remote_submission_adopts_job_after_create_crash(ct, app, monkeypatch):
+    """A provider-accepted create with no local id is recovered by stable name."""
+    calls = []
+
+    class Remote:
+        def find_job_by_name(self, name):
+            calls.append(('find', name))
+            return {'id': 'existing-1', 'name': name, 'status': 'created',
+                    'job_config': {'config': {}}}
+
+        def create_job(self, *args):
+            raise AssertionError('must not duplicate the provider job')
+
+        def get_job(self, job_id):
+            return {'status': 'created'}
+
+        def start_job(self, job_id):
+            calls.append(('start', job_id))
+
+    monkeypatch.setattr(ct, '_seed_resume_checkpoint',
+                        lambda run, remote, settings: calls.append(('seed', run.id)))
+    with app.app_context():
+        run = ct.CloudTrainingRun(dataset_id=1, status='uploading', job_name='stable')
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        assert ct._submit_remote_job(run, Remote(), {}, {'config': {}}) == 'existing-1'
+        assert run.remote_job_id == 'existing-1'
+        assert run.remote_submission_phase == 'started'
+    assert calls == [('find', 'stable'), ('seed', run.id), ('start', 'existing-1')]
+
+
+def test_remote_submission_reconciles_crash_after_start(ct, app, monkeypatch):
+    """A durable seeded phase plus provider running status never starts twice."""
+    starts = []
+
+    class Remote:
+        def get_job(self, job_id):
+            return {'status': 'running'}
+
+        def start_job(self, job_id):
+            starts.append(job_id)
+
+    monkeypatch.setattr(
+        ct, '_seed_resume_checkpoint',
+        lambda *a: (_ for _ in ()).throw(AssertionError('seed was acknowledged')))
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='uploading', job_name='stable',
+            remote_job_id='existing-1', remote_submission_phase='seeded')
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        ct._submit_remote_job(run, Remote(), {}, {'config': {}})
+        assert run.remote_submission_phase == 'started'
+        assert run.status == 'training'
+    assert starts == []
+
+
+def test_remote_submission_resumes_between_job_and_queue_start(ct, app, monkeypatch):
+    calls = []
+
+    class Remote:
+        def get_job(self, job_id):
+            return {'status': 'queued'}
+
+        def queue_job(self, job_id):
+            raise AssertionError('job was already queued')
+
+        def start_queue(self, gpu_ids):
+            calls.append(('start_queue', gpu_ids))
+
+    monkeypatch.setattr(ct, '_seed_resume_checkpoint', lambda *a: None)
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='uploading', job_name='stable',
+            remote_job_id='existing-1', remote_submission_phase='seeded')
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        ct._submit_remote_job(run, Remote(), {}, {'config': {}})
+        assert run.remote_submission_phase == 'started'
+    assert calls == [('start_queue', '0')]
+
+
+def test_remote_submission_unknown_status_does_not_mutate(ct, app, monkeypatch):
+    mutations = []
+
+    class Remote:
+        def get_job(self, job_id):
+            raise RuntimeError('temporary 502')
+
+        def queue_job(self, job_id):
+            mutations.append('queue_job')
+
+        def start_queue(self, gpu_ids):
+            mutations.append('start_queue')
+
+    monkeypatch.setattr(ct, '_seed_resume_checkpoint', lambda *a: None)
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='uploading', job_name='stable',
+            remote_job_id='existing-1', remote_submission_phase='seeded')
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        with pytest.raises(RuntimeError, match='502'):
+            ct._submit_remote_job(run, Remote(), {}, {'config': {}})
+        assert run.remote_submission_phase == 'seeded'
+    assert mutations == []
+
+
+def test_queue_starting_with_stale_queued_never_repeats_start(ct, app, monkeypatch):
+    """Provider accepted queue start, process crashed before commit, and its
+    status replica still says queued: recovery observes only and never mutates."""
+    mutations = []
+
+    class Remote:
+        def get_job(self, job_id):
+            return {'status': 'queued'}
+
+        def start_queue(self, gpu_ids):
+            mutations.append(('start_queue', gpu_ids))
+
+    monkeypatch.setattr(ct, '_seed_resume_checkpoint', lambda *a: None)
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='uploading', job_name='stable',
+            remote_job_id='existing-1', remote_submission_phase='queue_starting')
+        ct.db.session.add(run)
+        ct.db.session.commit()
+
+        assert ct._submit_remote_job(run, Remote(), {}, {'config': {}}) == 'existing-1'
+        assert run.remote_submission_phase == 'queue_starting'
+        assert run.status == 'training'
+        assert 'acknowledgement' in run.phase_detail
+    assert mutations == []
+
+
+def test_final_checkpoint_preferred_over_step_save(ct):
+    class Files:
+        def list_files(self, _job_id):
+            return [
+                {'path': '/pod/out/job/job_000001000.safetensors', 'size': 4},
+                {'path': '/pod/out/job/job.safetensors', 'size': 4},
+            ]
+
+    assert ct._newest_remote_checkpoint(Files(), 'j')['path'].endswith(
+        '/job.safetensors')
+
+
+def test_cached_checkpoint_size_must_match_remote(ct, tmp_path):
+    class Remote:
+        def __init__(self):
+            self.downloaded = False
+
+        def download_public_file(self, _remote, dest, **_kwargs):
+            self.downloaded = True
+            Path(dest).write_bytes(b'good')
+
+    dest = tmp_path / 'job.safetensors'
+    dest.write_bytes(b'x')
+    run = type('Run', (), {
+        'staging_dir': str(tmp_path), 'checkpoint_local_path': str(dest),
+    })()
+    remote = Remote()
+    result = ct._fetch_checkpoint(
+        run, remote, {'path': '/pod/job.safetensors', 'size': 4})
+    assert result == str(dest)
+    assert remote.downloaded
+
+
+def test_log_mirror_replace_failure_preserves_previous_log(ct, tmp_path, monkeypatch):
+    staging = tmp_path / 'run'
+    (staging / 'samples').mkdir(parents=True)
+    log = staging / 'training.log'
+    log.write_text('complete previous poll', encoding='utf-8')
+
+    class Remote:
+        @staticmethod
+        def get_log(_job_id):
+            return 'new poll'
+
+        @staticmethod
+        def get_samples(_job_id):
+            return []
+
+    run = type('Run', (), {'staging_dir': str(staging)})()
+    monkeypatch.setattr(ct.os, 'replace',
+                        lambda *_args: (_ for _ in ()).throw(OSError('busy')))
+    ct._pull_log_and_samples(run, Remote(), 'job')
+
+    assert log.read_text(encoding='utf-8') == 'complete previous poll'
+    assert list(staging.glob('.*.tmp')) == []
 
 
 class FrozenRemote(FakeRemote):

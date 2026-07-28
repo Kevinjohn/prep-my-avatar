@@ -8,6 +8,9 @@ const CAPTIONING_OPTIONS = [
 ]
 
 export default function CaptioningSection({ config, setField }) {
+  const thresholdsValid = config.face_scoring.orange >= 0
+    && config.face_scoring.orange < config.face_scoring.green
+    && config.face_scoring.green <= 1
   return (
     <div className="space-y-6">
       <Card
@@ -60,6 +63,8 @@ export default function CaptioningSection({ config, setField }) {
               value={config.face_scoring.green}
               onChange={(e) => setField('face_scoring', 'green', parseFloat(e.target.value) || 0)}
               className={INPUT_CLASS}
+              aria-invalid={!thresholdsValid}
+              aria-describedby={!thresholdsValid ? 'face-threshold-error' : undefined}
             />
           </div>
           <div>
@@ -75,9 +80,16 @@ export default function CaptioningSection({ config, setField }) {
               value={config.face_scoring.orange}
               onChange={(e) => setField('face_scoring', 'orange', parseFloat(e.target.value) || 0)}
               className={INPUT_CLASS}
+              aria-invalid={!thresholdsValid}
+              aria-describedby={!thresholdsValid ? 'face-threshold-error' : undefined}
             />
           </div>
         </div>
+        {!thresholdsValid && (
+          <p id="face-threshold-error" role="alert" className="text-xs text-rose-300">
+            Orange must be at least 0 and lower than green; green must be no greater than 1.
+          </p>
+        )}
         <p className="text-xs text-content-muted">
           Green marks a strong match to the reference face; orange is borderline — review it before keeping.
           Anything below orange is likely a different person and worth rejecting.

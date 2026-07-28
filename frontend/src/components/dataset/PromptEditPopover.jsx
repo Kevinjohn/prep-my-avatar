@@ -4,10 +4,13 @@
  *  (expression / scene / lighting) — never the face lock. Presentational only:
  *  the parent wires onSubmit (which calls regenerate) and onClose. */
 import { useEffect, useRef, useState } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 
 export default function PromptEditPopover({ initialPrompt = '', onSubmit, onClose }) {
   const [text, setText] = useState(initialPrompt);
   const areaRef = useRef(null);
+  const dialogRef = useRef(null);
+  useFocusTrap(dialogRef, true);
   // Focus the textarea on open and select all so a full rewrite is one keystroke away.
   useEffect(() => {
     const el = areaRef.current;
@@ -22,9 +25,10 @@ export default function PromptEditPopover({ initialPrompt = '', onSubmit, onClos
     // inside from bubbling to the tile (which would trigger inspect/select).
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-2"
       onClick={(e) => { e.stopPropagation(); onClose(); }}>
-      <div className="w-full max-w-[15rem] rounded-lg border border-border bg-surface p-2 shadow-xl flex flex-col gap-2"
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="prompt-edit-title"
+        className="w-full max-w-[15rem] rounded-lg border border-border bg-surface p-2 shadow-xl flex flex-col gap-2"
         onClick={(e) => e.stopPropagation()}>
-        <span className="text-[0.625rem] uppercase text-content-muted">Edit prompt &amp; regenerate</span>
+        <span id="prompt-edit-title" className="text-[0.625rem] uppercase text-content-muted">Edit prompt &amp; regenerate</span>
         <textarea ref={areaRef} value={text} onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') { e.preventDefault(); onClose(); }

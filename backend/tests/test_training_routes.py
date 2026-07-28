@@ -4,6 +4,7 @@ Every test patches `app.capabilities.probe` so none of this ever touches a
 real HTTP/subprocess probe, and patches the `lora_training`/`zimage_convert`
 service functions it exercises so no test spawns a real subprocess.
 """
+import pytest
 
 def _create(client, name='Lola', trigger='lola'):
     return client.post('/api/dataset/create', json={'name': name, 'trigger_word': trigger}).get_json()['id']
@@ -55,6 +56,33 @@ def test_train_unknown_dataset_404(client, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_train_settings_unsupported_rank_is_typed_400(client, monkeypatch):
+    _valid(monkeypatch, True)
+    ds_id = _create(client)
+
+    response = client.post(
+        f'/api/dataset/{ds_id}/train/settings', json={'rank': 7})
+
+    assert response.status_code == 400
+    body = response.get_json()
+    assert body['error'] == 'rank must be one of (8, 16, 24, 32, 48, 64) (or auto)'
+    assert body['code'] == 'validation_error'
+
+
+def test_map_error_safely_maps_legacy_builtins_and_reraises_unknowns(app):
+    from app.routes._common import _map_error
+
+    with app.app_context():
+        validation, validation_status = _map_error(ValueError('internal parse'))
+        conflict, conflict_status = _map_error(RuntimeError('broken invariant'))
+        assert validation_status == 400
+        assert validation.get_json()['error'] == 'invalid request'
+        assert conflict_status == 409
+        assert conflict.get_json()['error'] == 'operation conflicts with current state'
+        with pytest.raises(KeyError, match='unknown'):
+            _map_error(KeyError('unknown'))
+
+
 # --- /train ---------------------------------------------------------------
 
 def test_train_configured_forwards_kwargs(client, monkeypatch):
@@ -94,20 +122,22 @@ def test_train_configured_forwards_kwargs(client, monkeypatch):
 
 
 def test_train_value_error_returns_400(client, monkeypatch):
+    from app.domain_errors import DomainValidationError
     _valid(monkeypatch, True)
     ds_id = _create(client)
     monkeypatch.setattr('app.services.lora_training.launch_training',
-                        lambda *a, **k: (_ for _ in ()).throw(ValueError('bad state')))
+                        lambda *a, **k: (_ for _ in ()).throw(DomainValidationError('bad state')))
     resp = client.post(f'/api/dataset/{ds_id}/train', json={})
     assert resp.status_code == 400
     assert resp.get_json()['error'] == 'bad state'
 
 
 def test_train_runtime_error_returns_409(client, monkeypatch):
+    from app.domain_errors import DomainConflictError
     _valid(monkeypatch, True)
     ds_id = _create(client)
     monkeypatch.setattr('app.services.lora_training.launch_training',
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('not installed')))
+                        lambda *a, **k: (_ for _ in ()).throw(DomainConflictError('not installed')))
     resp = client.post(f'/api/dataset/{ds_id}/train', json={})
     assert resp.status_code == 409
 
@@ -124,9 +154,10 @@ def test_continue_forwards_kwargs(client, monkeypatch):
         return {'started': True, 'resumed_from': 500, 'target_steps': 1500}
 
     monkeypatch.setattr('app.services.lora_training.continue_training', fake_continue)
-    resp = client.post(f'/api/dataset/{ds_id}/train/continue', json={'extra_steps': 1000, 'variant': 'base'})
+    resp = client.post(f'/api/dataset/{ds_id}/train/continue',
+                       json={'extra_steps': 1000, 'variant': 'base', 'train_type': 'krea'})
     assert resp.status_code == 200
-    assert captured == {'extra_steps': 1000, 'variant': 'base'}
+    assert captured == {'extra_steps': 1000, 'variant': 'base', 'train_type': 'krea'}
 
 
 # --- /train/enqueue ----------------------------------------------------------
@@ -152,12 +183,25 @@ def test_enqueue_forwards_kwargs(client, monkeypatch):
     }
 
 
+def test_enqueue_requires_and_forwards_explicit_fresh_mode(client, monkeypatch):
+    _valid(monkeypatch, True)
+    ds_id = _create(client)
+    assert client.post(f'/api/dataset/{ds_id}/train/enqueue', json={}).status_code == 400
+    captured = {}
+    monkeypatch.setattr('app.services.lora_training.enqueue_training',
+                        lambda *a, **kw: captured.update(kw) or {'queued': True})
+    resp = client.post(f'/api/dataset/{ds_id}/train/enqueue', json={'fresh': True})
+    assert resp.status_code == 200
+    assert captured['fresh'] is True
+
+
 # --- /train/schedule ---------------------------------------------------------
 
 def test_schedule_past_returns_400(client, monkeypatch):
     _valid(monkeypatch, True)
     ds_id = _create(client)
-    resp = client.post(f'/api/dataset/{ds_id}/train/schedule', json={'at': '2000-01-01T00:00'})
+    resp = client.post(f'/api/dataset/{ds_id}/train/schedule',
+                       json={'at': '2000-01-01T00:00', 'fresh': False})
     assert resp.status_code == 400
     assert resp.get_json()['error'] == 'scheduled time is in the past'
 
@@ -165,7 +209,8 @@ def test_schedule_past_returns_400(client, monkeypatch):
 def test_schedule_invalid_datetime_returns_400(client, monkeypatch):
     _valid(monkeypatch, True)
     ds_id = _create(client)
-    resp = client.post(f'/api/dataset/{ds_id}/train/schedule', json={'at': 'not-a-date'})
+    resp = client.post(f'/api/dataset/{ds_id}/train/schedule',
+                       json={'at': 'not-a-date', 'fresh': False})
     assert resp.status_code == 400
 
 
@@ -179,12 +224,14 @@ def test_schedule_future_enqueues_with_not_before(client, monkeypatch):
         return {'queued': True, 'position': 1, 'not_before': kw.get('not_before')}
 
     monkeypatch.setattr('app.services.lora_training.enqueue_training', fake_enqueue)
-    resp = client.post(f'/api/dataset/{ds_id}/train/schedule', json={'at': '2999-01-01T00:00'})
+    resp = client.post(f'/api/dataset/{ds_id}/train/schedule',
+                       json={'at': '2999-01-01T00:00', 'fresh': False})
     assert resp.status_code == 200
     assert captured == {
         'extra_steps': None,
         'not_before': '2999-01-01T00:00',
-        'masked': True
+        'masked': True,
+        'fresh': False,
     }
 
 
@@ -199,7 +246,8 @@ def test_schedule_tzaware_future_normalizes_and_enqueues(client, monkeypatch):
 
     monkeypatch.setattr('app.services.lora_training.enqueue_training', fake_enqueue)
     # Use UTC-05:00 offset so converting to local (UTC-based or positive) keeps date in 2999
-    resp = client.post(f'/api/dataset/{ds_id}/train/schedule', json={'at': '2999-01-02T00:00:00-05:00'})
+    resp = client.post(f'/api/dataset/{ds_id}/train/schedule',
+                       json={'at': '2999-01-02T00:00:00-05:00', 'fresh': False})
     assert resp.status_code == 200
     # tz-aware input is normalized; not_before should be naive local ISO format with year 2999+
     assert 'not_before' in captured
@@ -210,7 +258,8 @@ def test_schedule_tzaware_future_normalizes_and_enqueues(client, monkeypatch):
 def test_schedule_tzaware_past_returns_400(client, monkeypatch):
     _valid(monkeypatch, True)
     ds_id = _create(client)
-    resp = client.post(f'/api/dataset/{ds_id}/train/schedule', json={'at': '1999-01-01T00:00:00+02:00'})
+    resp = client.post(f'/api/dataset/{ds_id}/train/schedule',
+                       json={'at': '1999-01-01T00:00:00+02:00', 'fresh': False})
     assert resp.status_code == 400
     assert resp.get_json()['error'] == 'scheduled time is in the past'
 
@@ -229,10 +278,18 @@ def test_dequeue_calls_service(client, monkeypatch):
 def test_stop_calls_stop_training(client, monkeypatch):
     _valid(monkeypatch, True)
     calls = []
-    monkeypatch.setattr('app.services.lora_training.stop_training', lambda: calls.append(True))
-    resp = client.post('/api/dataset/train/stop')
+    monkeypatch.setattr('app.services.lora_training.stop_training',
+                        lambda **kw: calls.append(kw))
+    resp = client.post('/api/dataset/train/stop', json={'clear_queue': False})
     assert resp.status_code == 200
-    assert calls == [True]
+    assert calls == [{'clear_queue': False}]
+    assert resp.get_json()['queue_cleared'] is False
+
+
+def test_stop_rejects_non_boolean_queue_policy(client, monkeypatch):
+    _valid(monkeypatch, True)
+    assert client.post('/api/dataset/train/stop',
+                       json={'clear_queue': 'yes'}).status_code == 400
 
 
 # --- /train/checkpoints -------------------------------------------------------
@@ -348,10 +405,11 @@ def test_checkpoint_delete_calls_service(client, monkeypatch):
 
 
 def test_checkpoint_delete_unknown_returns_400(client, monkeypatch):
+    from app.domain_errors import DomainValidationError
     _valid(monkeypatch, True)
     ds_id = _create(client)
     monkeypatch.setattr('app.services.lora_training.delete_imported_checkpoint',
-                        lambda *a, **k: (_ for _ in ()).throw(ValueError('checkpoint inconnu')))
+                        lambda *a, **k: (_ for _ in ()).throw(DomainValidationError('checkpoint inconnu')))
     resp = client.post(f'/api/dataset/{ds_id}/train/checkpoint/delete', json={'filename': 'nope.safetensors'})
     assert resp.status_code == 400
 
@@ -364,3 +422,44 @@ def test_import_checkpoint_calls_service(client, monkeypatch):
     resp = client.post(f'/api/dataset/{ds_id}/train/import', json={'filename': 'x.safetensors'})
     assert resp.status_code == 200
     assert resp.get_json() == {'ok': True, 'dest': 'x.safetensors'}
+
+
+@pytest.mark.parametrize('payload', ['[]', '"text"', '1', 'null'])
+def test_training_json_posts_reject_non_object_bodies(client, monkeypatch, payload):
+    _valid(monkeypatch, True)
+    ds_id = _create(client)
+    for path in (f'/api/dataset/{ds_id}/train',
+                 f'/api/dataset/{ds_id}/train/enqueue',
+                 '/api/dataset/train/stop'):
+        response = client.post(path, data=payload, content_type='application/json')
+        assert response.status_code == 400
+        assert response.get_json()['error'] == 'request body must be a JSON object'
+
+
+def test_training_stop_maps_service_errors(client, monkeypatch):
+    from app.domain_errors import DomainConflictError
+    _valid(monkeypatch, True)
+    monkeypatch.setattr('app.services.lora_training.stop_training',
+                        lambda **kwargs: (_ for _ in ()).throw(DomainConflictError('cannot stop safely')))
+    response = client.post('/api/dataset/train/stop', json={'clear_queue': False})
+    assert response.status_code != 500
+    assert response.get_json()['error'] == 'cannot stop safely'
+
+
+@pytest.mark.parametrize(('error', 'status', 'message'), [
+    (ValueError('bug detail'), 400, 'invalid request'),
+    (RuntimeError('bug detail'), 409, 'operation conflicts with current state'),
+])
+def test_training_generic_builtins_keep_legacy_status_without_public_detail(
+        client, monkeypatch, error, status, message):
+    _valid(monkeypatch, True)
+    ds_id = _create(client)
+    monkeypatch.setattr(
+        'app.services.lora_training.launch_training',
+        lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    response = client.post(f'/api/dataset/{ds_id}/train', json={})
+
+    assert response.status_code == status
+    assert response.get_json()['error'] == message
+    assert 'bug detail' not in response.get_data(as_text=True)

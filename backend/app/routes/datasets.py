@@ -29,6 +29,14 @@ _PRESET_NAMES = ('balanced_25', 'zimage_12', 'balanced_multiformat',
                  'face_focused', 'fullbody_focused', 'body_emphasis')
 
 
+def _json_bool(data, name, default=False):
+    if name not in data or data[name] is None:
+        return default
+    if not isinstance(data[name], bool):
+        raise ValueError(f"'{name}' must be a boolean")
+    return data[name]
+
+
 @bp.post('/dataset/create')
 def dataset_create():
     data = request.get_json(silent=True) or {}
@@ -115,7 +123,9 @@ def dataset_list():
 
 @bp.get('/dataset/<int:dataset_id>')
 def dataset_get(dataset_id):
-    include_images = request.args.get('include_images', '1').strip().lower() not in {
+    # Image collections are unbounded and have their own cursor-paginated
+    # endpoint.  Keep the legacy projection opt-in for older API clients.
+    include_images = request.args.get('include_images', '0').strip().lower() not in {
         '0', 'false', 'no',
     }
     payload = svc.dataset_payload(LOCAL_USER, dataset_id, include_images=include_images)
@@ -387,6 +397,8 @@ def _autostart_optional_klein():
 def dataset_generate(dataset_id):
     data = request.get_json(silent=True) or {}
     generator = data.get('generator') or 'klein'
+    if generator not in {'klein', *svc.API_ENGINES}:
+        return jsonify({'error': f'unsupported generator: {generator}'}), 400
     variations = data.get('variations') or []
     # Route-level fail-closed: NSFW variations never reach an API engine — they
     # exist only on the local Klein path (the service re-checks, defense in depth).
@@ -460,25 +472,26 @@ def dataset_import(dataset_id):
 
     def consume_uploads():
         nonlocal failed
-        # FileStorage objects are usually spooled to disk. Read only a modest
-        # group at a time so a 400-photo corpus does not become a 400-photo RAM spike.
-        for start in range(0, len(uploads), 24):
-            batch = [(f.filename, f.read()) for f in uploads[start:start + 24]]
+        # FileStorage objects are usually spooled to disk. Consume one bounded
+        # image at a time so accepted multipart counts cannot multiply peak RAM.
+        for upload in uploads:
+            raw = upload.stream.read(svc.DATASET_IMAGE_MAX_BYTES + 1)
+            if len(raw) > svc.DATASET_IMAGE_MAX_BYTES:
+                failed += 1
+                continue
             batch_ids, batch_failed = svc.import_images(
-                LOCAL_USER, dataset_id, batch, crop=want_crop, dedupe=True, stats=stats)
+                LOCAL_USER, dataset_id, [(upload.filename, raw)],
+                crop=want_crop, dedupe=True, stats=stats)
             ids.extend(batch_ids)
             failed += batch_failed
 
-    if not want_crop:
-        consume_uploads()
-        return jsonify({'ok': True, 'imported': len(ids), 'failed': failed,
-                        'duplicates': stats.get('duplicates', 0),
-                        'near_duplicates': stats.get('near_duplicates', 0),
-                        'small': stats.get('small', 0)})
     try:
-        # batch (head-crop vision par image) : heartbeat de la fenêtre = ComfyUI arrêté
-        # tout le batch ; le TTL n'est qu'un filet anti-crash.
-        with gpu_exclusive_vision_window(flag_ttl=600):
+        if want_crop:
+            # batch (head-crop vision par image) : heartbeat de la fenêtre = ComfyUI arrêté
+            # tout le batch ; le TTL n'est qu'un filet anti-crash.
+            with gpu_exclusive_vision_window(flag_ttl=600):
+                consume_uploads()
+        else:
             consume_uploads()
     except Exception as e:
         return _map_error(e)
@@ -600,7 +613,10 @@ def dataset_caption(dataset_id):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     data = request.get_json(silent=True) or {}
-    force = bool(data.get('force'))
+    try:
+        force = _json_bool(data, 'force')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     mode = data.get('mode')  # 'prose' | 'booru' | None (None → auto selon train_type)
     try:
         with gpu_exclusive_vision_window(flag_ttl=1800):
@@ -631,7 +647,10 @@ def dataset_watermarks_detect(dataset_id):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     data = request.get_json(silent=True) or {}
-    include_dismissed = bool(data.get('include_dismissed'))
+    try:
+        include_dismissed = _json_bool(data, 'include_dismissed')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     try:
         with gpu_exclusive_vision_window(flag_ttl=1800):
             counts = svc.detect_watermarks(LOCAL_USER, dataset_id,
@@ -779,7 +798,12 @@ def dataset_image_regenerate(image_id):
         # which doesn't touch ComfyUI): surface a missing custom node as one 409
         # instead of a silent failed re-roll. Fail-open if /object_info is down;
         # combined with the model scan (same rationale as the batch generate).
-        if engine not in svc.API_ENGINES:
+        target_engine = engine
+        if target_engine is None:
+            from ..models import FaceDatasetImage
+            row = FaceDatasetImage.query.filter_by(id=image_id).first()
+            target_engine = (row.klein_model or '').strip() if row else None
+        if target_engine not in svc.API_ENGINES:
             from ..services import klein_edit_helper as keh
             missing_nodes = keh.klein_missing_nodes()
             if missing_nodes:
@@ -865,10 +889,7 @@ def dataset_captions_replace(dataset_id):
 
 @bp.post('/dataset/<int:dataset_id>/captions/write-files')
 def dataset_captions_write_files(dataset_id):
-    """Write kohya-style same-stem .txt captions NEXT TO the kept images in the
-    dataset folder (same text as the export ZIP: trigger prepended) — for
-    external tools that read the folder directly, no ZIP download needed.
-    Overwrites existing .txt files (resync)."""
+    """Atomically build a kept-only training projection with caption sidecars."""
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     try:
@@ -1059,10 +1080,16 @@ def dataset_publish_hf(dataset_id):
     license = (data.get('license') or '').strip().lower()
     if license not in hf_publish.LICENSE_CHOICES:
         return jsonify({'error': f'unsupported license: {license or "(empty)"}'}), 400
+    try:
+        private = _json_bool(data, 'private', True)
+        nfaa = _json_bool(data, 'nfaa', True)
+        include_ref = _json_bool(data, 'include_ref', False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     out = hf_publish.start_publish(
         current_app._get_current_object(), dataset_id, repo_id,
-        private=bool(data.get('private', True)), nfaa=bool(data.get('nfaa', True)),
-        license=license, include_ref=bool(data.get('include_ref', False)), token=token)
+        private=private, nfaa=nfaa, license=license,
+        include_ref=include_ref, token=token)
     return jsonify({'ok': True, **out})
 
 
@@ -1089,7 +1116,20 @@ def lora_test_status(dataset_id):
     """Poll payload: testable checkpoints, grid cells, scores, best cell,
     pending count and the persisted best_settings. `?family=` scope la pipeline
     (ZIT/SDXL/Krea) ; absent → famille effective par défaut du dataset."""
-    payload = lts.studio_payload(LOCAL_USER, dataset_id, family=request.args.get('family'))
+    payload = lts.studio_payload(
+        LOCAL_USER, dataset_id, family=request.args.get('family'),
+        run_id=request.args.get('run_id'))
+    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+
+
+@bp.get('/dataset/<int:dataset_id>/lora-test/runs')
+def lora_test_runs(dataset_id):
+    try:
+        payload = lts.studio_run_history(
+            LOCAL_USER, dataset_id, family=request.args.get('family'),
+            cursor=request.args.get('cursor'), limit=request.args.get('limit', 20))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid pagination'}), 400
     return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
 
 
@@ -1152,8 +1192,12 @@ def lora_test_resume(dataset_id):
         return gate
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
+    d = request.get_json(silent=True) or {}
+    family = d.get('family')
+    if family is not None and family not in ('zimage', 'krea', 'sdxl', 'flux2klein'):
+        return jsonify({'error': 'invalid family'}), 400
     try:
-        res = lts.resume_run(LOCAL_USER, dataset_id)
+        res = lts.resume_run(LOCAL_USER, dataset_id, family=family)
     except Exception as e:
         return _map_error(e)
     return jsonify({'ok': True, **res})
@@ -1162,12 +1206,13 @@ def lora_test_resume(dataset_id):
 @bp.post('/dataset/<int:dataset_id>/lora-test/best')
 def lora_test_best(dataset_id):
     d = request.get_json(silent=True) or {}
+    config = d.get('generation_config') if isinstance(d.get('generation_config'), dict) else d
     try:
         best = lts.set_best_settings(LOCAL_USER, dataset_id,
-                                     d.get('checkpoint'), d.get('strength'),
-                                     z_model=d.get('z_model'), cfg=d.get('cfg'),
-                                     steps=d.get('steps'), steps2=d.get('steps2'),
-                                     aspect=d.get('aspect'))
+                                     config.get('checkpoint'), config.get('strength'),
+                                     z_model=config.get('z_model'), cfg=config.get('cfg'),
+                                     steps=config.get('steps'), steps2=config.get('steps2'),
+                                     aspect=config.get('aspect'), generation_config=config)
     except ValueError as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     return jsonify({'ok': True, 'best_settings': best})

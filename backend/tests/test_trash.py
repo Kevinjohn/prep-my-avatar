@@ -53,6 +53,75 @@ def test_non_consuming_restore_can_be_rolled_back(app, tmp_path):
         assert trash.read_entry_file(entry['id'], 'recover.txt') == b'recoverable'
 
 
+def test_failed_compensation_keeps_the_only_payload_copy(app, tmp_path, monkeypatch):
+    from app.services import trash
+
+    first = tmp_path / 'first.txt'
+    second = tmp_path / 'second.txt'
+    first.write_text('first payload', encoding='utf-8')
+    second.write_text('second payload', encoding='utf-8')
+    real_move = trash.shutil.move
+    calls = 0
+
+    def failing_move(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise OSError('injected move failure')
+        return real_move(source, destination)
+
+    monkeypatch.setattr(trash.shutil, 'move', failing_move)
+    with app.app_context(), pytest.raises(OSError, match='injected'):
+        trash.send_paths_to_trash([first, second], context='rollback')
+
+    assert not first.exists()
+    entries = trash.list_entries()
+    recovery = next(entry for entry in entries if entry['context'] == 'rollback')
+    metadata = trash.entry_metadata(recovery['id'])
+    assert metadata['recovery_required'] is True
+    assert trash.read_entry_file(recovery['id'], metadata['files'][0]['stored_name']) == b'first payload'
+
+
+@pytest.mark.parametrize('context', ['dataset-1-Café', 'dataset-2-東京'])
+def test_unicode_context_creates_restorable_entry(app, tmp_path, context):
+    from app.services import trash
+
+    original = tmp_path / 'recover.txt'
+    original.write_text('recoverable', encoding='utf-8')
+    with app.app_context():
+        entry = trash.send_paths_to_trash([original], context=context)
+        assert entry['id'].isascii()
+        restored = trash.restore_entry(entry['id'])
+    assert restored['restored'] == 1
+    assert original.read_text(encoding='utf-8') == 'recoverable'
+
+
+def test_interruption_after_move_retains_recovery_intent(app, tmp_path, monkeypatch):
+    from app.services import trash
+
+    original = tmp_path / '.trash.json'
+    original.write_text('payload', encoding='utf-8')
+    real_write = trash._write_metadata
+    writes = 0
+
+    def interrupt_after_initial_intent(entry, metadata):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise KeyboardInterrupt
+        real_write(entry, metadata)
+
+    monkeypatch.setattr(trash, '_write_metadata', interrupt_after_initial_intent)
+    with app.app_context(), pytest.raises(KeyboardInterrupt):
+        trash.send_paths_to_trash([original], context='interrupted')
+
+    # The rollback succeeds for this injected interruption, so the source is
+    # restored and the temporary entry is removed. The reserved metadata name
+    # also prevents the payload from colliding with the journal itself.
+    assert original.read_text(encoding='utf-8') == 'payload'
+    assert not any(entry['context'] == 'interrupted' for entry in trash.list_entries())
+
+
 def test_empty_trash_waits_for_application_transaction(app, tmp_path):
     from app.services import trash
 

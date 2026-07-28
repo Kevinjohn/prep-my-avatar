@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+from sqlalchemy import or_
+
 from .. import config as cfg
 from ..extensions import db
 from ..models import CloudTrainingRun, TrainingRunRecord
@@ -39,9 +41,11 @@ _stop_events = {}        # run_id -> threading.Event
 _monitor_threads = {}    # run_id -> threading.Thread
 _LAUNCH_LOCK = threading.Lock()
 _BAD_HOSTS_LOCK = threading.RLock()
-_RECONCILE_LOCK = threading.Lock()
+_RECONCILE_LOCK = threading.RLock()
 _reconciler_started = False
 _reconciler_lock = threading.Lock()
+_reconciler_stop = threading.Event()
+_reconciler_thread = None
 
 
 def _stop_event_for(run_id):
@@ -189,6 +193,13 @@ def _run_family(run):
     return _run_param(run, 'train_type')
 
 
+def _effective_steps(dataset, steps) -> int:
+    """Apply the same minimum-step contract to estimates and launched runs."""
+    if steps is None:
+        return lt.default_steps(dataset)
+    return max(500, int(steps))
+
+
 class _RunConfigDataset:
     """Read-only view of a dataset with launch-time attributes frozen.
 
@@ -251,8 +262,8 @@ def _validated_config_snapshot(raw, snapshot, dataset_id, user_id, fam, variant)
 
 def latest_run_for(dataset_id, train_type=None):
     """Newest run of the dataset; with train_type, the newest run OF THAT
-    FAMILY. Falls back to the plain newest when none matches (or the filter
-    is absent) so rows without a stamped family stay reachable."""
+    FAMILY. With an explicit family, only an unstamped legacy row is a valid
+    fallback; a run stamped with another family must never bleed across."""
     q = (CloudTrainingRun.query.filter_by(dataset_id=dataset_id)
          .order_by(CloudTrainingRun.id.desc()))
     runs = q.all()
@@ -282,7 +293,8 @@ def _reconcile_before_launch(app):
     tests can no-op launch's reconcile call without also neutering tests
     that exercise reconcile_orphans() itself -- both are the same module-level
     name, so patching that name would silence both call sites at once."""
-    reconcile_orphans(app)
+    with _RECONCILE_LOCK:
+        reconcile_orphans(app)
 
 
 def retry_cloud_run(user_id, run_id) -> dict:
@@ -483,7 +495,7 @@ def launch_cloud_training(user_id, dataset_id, steps=None, base_model='',
         db.session.commit()
         # Same floor as the local path — a sub-500 target produces a run with
         # zero usable snapshots.
-        n_steps = max(500, int(steps)) if steps else lt.default_steps(ds)
+        n_steps = _effective_steps(ds, steps)
         # requested_gpu (from the launch-time speed picker) is a PREFERENCE, not
         # an offer-id lock: _provision re-searches live offers and rents a
         # reliable one of this class, or a similarly fast class if the exact
@@ -869,6 +881,13 @@ def _provision(run):
     """Search offers and create the instance, honoring the launch-time GPU
     choice when the picked class is still available.
     LEAK-SAFE: any failure after create_instance destroys the instance."""
+    # Serialize the provider create/register window with orphan snapshots. A
+    # pre-launch wait alone is insufficient because provisioning is async.
+    with _RECONCILE_LOCK:
+        return _provision_locked(run)
+
+
+def _provision_locked(run):
     c = cfg.get('cloud') or {}
     params = json.loads(run.train_params or '{}')
     fam = params.get('train_type') or 'zimage'
@@ -936,7 +955,11 @@ def _provision(run):
 
 def request_stop(run_id=None) -> bool:
     if run_id is not None:
-        run = db.session.get(CloudTrainingRun, int(run_id))
+        try:
+            normalized_run_id = int(run_id)
+        except (TypeError, ValueError):
+            return False
+        run = db.session.get(CloudTrainingRun, normalized_run_id)
         if not run:
             return False
         if run.status == 'error_pod_kept':
@@ -1009,7 +1032,7 @@ def _mark_cleanup_pending(run, status, detail='', error=None):
          billing_ended_at=None)
 
 
-def reconcile_orphans(app) -> int:
+def reconcile_orphans(app, *, wait=False) -> int:
     """Boot-time safety net: destroy every 'lds-*' vast instance that no
     active run owns. GENUINELY never raises (boot must not be blocked): the
     whole body — app_context included — sits under a blanket except, so an
@@ -1024,7 +1047,7 @@ def reconcile_orphans(app) -> int:
     the run annotated, status left untouched -- terminal states stay
     terminal)."""
     destroyed = 0
-    if not _RECONCILE_LOCK.acquire(blocking=False):
+    if not _RECONCILE_LOCK.acquire(blocking=wait):
         return 0
     try:
         with app.app_context():
@@ -1121,22 +1144,37 @@ def reconcile_orphans(app) -> int:
 
 def start_reconciler(app, interval_seconds=60):
     """Start the single periodic provider cleanup worker for this process."""
-    global _reconciler_started
+    global _reconciler_started, _reconciler_thread
     with _reconciler_lock:
         if _reconciler_started:
             return
+        _reconciler_stop.clear()
         _reconciler_started = True
 
     def _loop():
-        while True:
+        while not _reconciler_stop.is_set():
             try:
                 reconcile_orphans(app)
+                _recover_active_runs(app)
             except Exception:
                 logger.exception('periodic cloud reconcile failed')
-            _sleep(max(15, int(interval_seconds)))
+            _reconciler_stop.wait(max(15, int(interval_seconds)))
 
-    threading.Thread(target=_loop, daemon=True,
-                     name='cloud-provider-reconciler').start()
+    _reconciler_thread = threading.Thread(
+        target=_loop, daemon=True, name='cloud-provider-reconciler')
+    _reconciler_thread.start()
+
+
+def stop_reconciler(timeout=5) -> None:
+    """Stop the process-owned provider reconciler and permit restart."""
+    global _reconciler_started, _reconciler_thread
+    _reconciler_stop.set()
+    thread = _reconciler_thread
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
+    with _reconciler_lock:
+        _reconciler_thread = None
+        _reconciler_started = False
 
 
 def _start_monitor_for_app(app, run_id):
@@ -1144,7 +1182,12 @@ def _start_monitor_for_app(app, run_id):
     t = threading.Thread(
         target=_monitor, args=(app, run_id), daemon=True, name=f'cloud-train-{run_id}')
     _monitor_threads[int(run_id)] = t
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        if _monitor_threads.get(int(run_id)) is t:
+            _monitor_threads.pop(int(run_id), None)
+        raise
 
 
 def _start_monitor(run_id):
@@ -1162,11 +1205,23 @@ def boot_recover(app):
     it to 'error' so its slot is freed. Iterates every active run (not just
     one) so a restart with several concurrent runs resumes all of them."""
     try:
-        reconcile_orphans(app)
-        with app.app_context():
-            if not cfg.secret('VAST_API_KEY'):
-                return
-            for run in get_active_runs():
+        with _RECONCILE_LOCK:
+            reconcile_orphans(app)
+        _recover_active_runs(app)
+    except Exception:
+        logger.exception('cloud boot recovery failed')
+
+
+def _recover_active_runs(app):
+    """Resume every durable active row once provider credentials are usable."""
+    with app.app_context():
+        if not cfg.secret('VAST_API_KEY'):
+            return
+        for run in get_active_runs():
+            try:
+                current = _monitor_threads.get(int(run.id))
+                if current is not None and current.is_alive():
+                    continue
                 if run.vast_instance_id:
                     logger.info('resuming cloud run %s (pod %s kept training)',
                                 run.id, run.vast_instance_id)
@@ -1174,8 +1229,8 @@ def boot_recover(app):
                 else:
                     _set(run, status='error', finished_at=utcnow(),
                          error='app restarted before the pod was created')
-    except Exception:
-        logger.exception('cloud boot recovery failed')
+            except Exception:
+                logger.exception('cloud boot recovery failed for run %s', run.id)
 
 
 POLL_SECONDS = 10
@@ -1212,6 +1267,95 @@ def _cloudify_job_config(job_config: dict, job_name: str,
     proc['training_folder'] = pod_settings['TRAINING_FOLDER']
     proc['device'] = 'cuda:0'
     return out
+
+
+def _remote_job_status(remote, job_id) -> str:
+    """Read provider truth; ambiguity must never trigger another mutation."""
+    job = remote.get_job(job_id) or {}
+    return str(job.get('status') or '').strip().lower()
+
+
+def _validate_adopted_job(existing, expected_name, expected_config):
+    if existing.get('name') != expected_name:
+        raise RuntimeError('remote stable-name lookup returned the wrong job')
+    remote_config = existing.get('job_config')
+    if isinstance(remote_config, str):
+        try:
+            remote_config = json.loads(remote_config)
+        except ValueError as exc:
+            raise RuntimeError('remote job configuration is invalid') from exc
+    if remote_config != expected_config:
+        raise RuntimeError('remote stable-name job has a different configuration')
+
+
+def _submit_remote_job(run, remote, pod_settings, job_config):
+    """Crash-consistent create/seed/start using the run's stable remote name."""
+    phase = run.remote_submission_phase
+    recovering_submission = phase in {'seeded', 'job_queued', 'queue_starting'}
+    job_id = run.remote_job_id
+    if not job_id:
+        lookup = getattr(remote, 'find_job_by_name', None)
+        existing = lookup(run.job_name) if lookup else None
+        if existing:
+            _validate_adopted_job(existing, run.job_name, job_config)
+            job_id = str(existing['id'])
+        else:
+            job_id = remote.create_job(run.job_name, job_config)
+        _set(run, remote_job_id=job_id, remote_submission_phase='created',
+             phase_detail='Remote job created')
+        phase = 'created'
+
+    if phase == 'created':
+        # Deterministic destination: repeating this after a crash overwrites
+        # the same checkpoint rather than creating another artifact.
+        _seed_resume_checkpoint(run, remote, pod_settings)
+        _set(run, remote_submission_phase='seeded',
+             phase_detail='Remote checkpoint prepared')
+        phase = 'seeded'
+
+    if phase == 'seeded':
+        queue_job = getattr(remote, 'queue_job', None)
+        status = _remote_job_status(remote, job_id) if recovering_submission else ''
+        if status in {'running', 'training', 'completed', 'complete', 'done',
+                      'stopped', 'failed', 'error'}:
+            phase = 'started'
+        elif status == 'queued':
+            phase = 'job_queued'
+        elif queue_job is None:  # compatibility seam for older test drivers
+            remote.start_job(job_id)
+            phase = 'started'
+        else:
+            queue_job(job_id)
+            _set(run, remote_submission_phase='job_queued',
+                 phase_detail='Remote job queued')
+            phase = 'job_queued'
+
+    if phase == 'job_queued':
+        status = (_remote_job_status(remote, job_id)
+                  if recovering_submission else '')
+        if status in {'running', 'training', 'completed', 'complete', 'done',
+                      'stopped', 'failed', 'error'}:
+            phase = 'started'
+        else:
+            _set(run, remote_submission_phase='queue_starting',
+                 phase_detail='Starting remote queue')
+            remote.start_queue('0')
+            phase = 'started'
+
+    if phase == 'queue_starting':
+        status = _remote_job_status(remote, job_id)
+        if status in {'running', 'training', 'completed', 'complete', 'done',
+                      'stopped', 'failed', 'error'}:
+            phase = 'started'
+        else:
+            _set(run, status='training',
+                 phase_detail='Waiting for remote queue-start acknowledgement')
+
+    if phase == 'started':
+        _set(run, remote_submission_phase='started', status='training',
+             training_started_at=run.training_started_at or utcnow(),
+             phase_detail='Job queued on the pod')
+    return job_id
 
 
 def _finish(run, status, detail='', error=None, destroy=True):
@@ -1275,7 +1419,11 @@ def _monitor(app, run_id):
             # created_at (cap_anchor), so readiness measures the TOTAL time since
             # launch across every restart — the intended behaviour even for a pod
             # that was honestly still booting.
-            boot_started = cap_anchor if resuming_existing_pod else _now()
+            # Existing submitted jobs get a fresh, bounded reconnect window;
+            # the separate max-runtime cap remains anchored to created_at.
+            reconnecting_job = bool(resuming_existing_pod and run.remote_job_id)
+            boot_started = _now() if reconnecting_job else (
+                cap_anchor if resuming_existing_pod else _now())
 
             # -- wait until the pod's UI answers ----------------------------
             # Readiness is checked BEFORE the elapsed-time read: an
@@ -1360,7 +1508,9 @@ def _monitor(app, run_id):
             # -- resume contract: an already-submitted job (app restarted
             # mid-run) skips settings/upload/create/start entirely and goes
             # straight to polling the existing remote job. ------------------
-            if not run.remote_job_id:
+            if (not run.remote_job_id
+                    or run.remote_submission_phase in {
+                        'created', 'seeded', 'job_queued', 'queue_starting'}):
                 pod_settings = remote.ensure_settings(hf_token=cfg.secret('HF_TOKEN'))
 
                 # -- upload dataset (+ masks folder if present) --------------
@@ -1387,14 +1537,8 @@ def _monitor(app, run_id):
                     training_folder='__POD__')
                 job_config = _cloudify_job_config(job_config, run.job_name,
                                                   staging_dataset, pod_settings)
-                job_id = remote.create_job(run.job_name, job_config)
-                # Continue-in-cloud: drop the source checkpoint into the job's
-                # save_root BEFORE start so ai-toolkit auto-resumes from it.
-                _seed_resume_checkpoint(run, remote, pod_settings)
-                remote.start_job(job_id)
-                _set(run, remote_job_id=job_id, status='training',
-                     training_started_at=run.training_started_at or utcnow(),
-                     phase_detail='Job queued on the pod')
+                job_id = _submit_remote_job(
+                    run, remote, pod_settings, job_config)
             else:
                 job_id = run.remote_job_id
                 _set(run, phase_detail='Resuming — reattaching to running job')
@@ -1448,6 +1592,10 @@ def _monitor(app, run_id):
                     _sync_latest_checkpoint(run, remote)
                 status = job.get('status')
                 info = job.get('info') or ''
+                if (run.remote_submission_phase == 'queue_starting'
+                        and str(status).lower() not in {'queued', 'stopped', ''}):
+                    _set(run, remote_submission_phase='started',
+                         training_started_at=run.training_started_at or utcnow())
                 _set(run, phase_detail=f"{status}: {info}"[:500])
 
                 if status == 'completed':
@@ -1541,10 +1689,18 @@ def _pull_log_and_samples(run, remote, job_id):
     the exact local parsing/serving machinery. Never raises."""
     try:
         text = remote.get_log(job_id)
-        with open(os.path.join(run.staging_dir, 'training.log'), 'w',
-                  encoding='utf-8', errors='replace') as fh:
+        log_path = Path(run.staging_dir) / 'training.log'
+        tmp_path = log_path.with_name(f'.{log_path.name}.{pysecrets.token_hex(6)}.tmp')
+        with tmp_path.open('w', encoding='utf-8', errors='replace') as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, log_path)
     except Exception as e:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except (OSError, UnboundLocalError):
+            pass
         logger.debug('log mirror failed: %s', e)
     try:
         samples_dir = os.path.join(run.staging_dir, 'samples')
@@ -1565,7 +1721,14 @@ def _newest_remote_checkpoint(remote, job_id):
              if f.get('path', '').endswith('.safetensors')]
     if not files:
         return None
-    return sorted(files, key=lambda f: f['path'])[-1]
+    # ai-toolkit's unsuffixed <job>.safetensors is the completed final. Step-
+    # suffixed files are intermediate saves even when they sort after it.
+    unsuffixed = [f for f in files
+                  if not re.search(r'_\d+\.safetensors$', f['path'])]
+    if unsuffixed:
+        return sorted(unsuffixed, key=lambda f: f['path'])[-1]
+    return max(files, key=lambda f: int(
+        re.search(r'_(\d+)\.safetensors$', f['path']).group(1)))
 
 
 def _fetch_checkpoint(run, remote, ckpt, timeout=None, attempts=3) -> str:
@@ -1581,12 +1744,13 @@ def _fetch_checkpoint(run, remote, ckpt, timeout=None, attempts=3) -> str:
     remote_path = ckpt['path']
     name = os.path.basename(remote_path.replace('\\', '/'))
     dest = os.path.join(run.staging_dir, name)
+    want = int(ckpt.get('size') or 0)
     if run.checkpoint_local_path and os.path.isfile(dest) \
             and os.path.basename(run.checkpoint_local_path) == name:
-        return dest
+        if not want or os.path.getsize(dest) == want:
+            return dest
     remote.download_public_file(remote_path, dest, timeout=timeout,
                                 expected_size=ckpt.get('size'), attempts=attempts)
-    want = int(ckpt.get('size') or 0)
     got = os.path.getsize(dest)
     if want and got != want:
         try:
@@ -1777,10 +1941,9 @@ def _billing_window(run):
     # A provider id without a confirmed billing end is live regardless of the
     # local terminal label.  This also repairs cost reporting for rows written
     # by older versions after a failed one-shot destroy.
-    provider_may_be_live = bool(run.vast_instance_id and not run.billing_ended_at)
+    cleanup_pending = run.status in ('terminating', 'error_pod_kept')
     legacy_terminal_end = (run.finished_at
-                           if not provider_may_be_live
-                           and run.status != 'error_pod_kept' else None)
+                           if not cleanup_pending else None)
     end = run.billing_ended_at or legacy_terminal_end or utcnow()
     final = bool(run.billing_ended_at or legacy_terminal_end)
     return start, end, final
@@ -1797,13 +1960,27 @@ def _cost_estimate(run) -> float:
 
 
 def month_spend_usd() -> float:
-    """Total cost of the runs STARTED since the 1st of the current month
-    (UTC). A run's cost = price_per_hour x (finished_at or now - created_at);
-    runs that never got a priced pod (price_per_hour NULL) count for $0."""
+    """Sum each provider billing window's overlap with the current UTC month.
+
+    Billing timestamps are authoritative, with lifecycle timestamps used only
+    by ``_billing_window`` for legacy rows. Unpriced runs contribute $0.
+    """
     now = utcnow()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     total = 0.0
-    for r in CloudTrainingRun.query.all():
+    candidates = (CloudTrainingRun.query
+                  .filter(CloudTrainingRun.price_per_hour.isnot(None))
+                  .filter(or_(
+                      CloudTrainingRun.billing_ended_at >= month_start,
+                      CloudTrainingRun.finished_at >= month_start,
+                      CloudTrainingRun.billing_ended_at.is_(None)
+                      & or_(
+                          CloudTrainingRun.finished_at.is_(None),
+                          CloudTrainingRun.status.in_(
+                              ('terminating', 'error_pod_kept')),
+                      ),
+                  )).all())
+    for r in candidates:
         start, end, _final = _billing_window(r)
         if not r.price_per_hour or not start:
             continue
@@ -1827,7 +2004,20 @@ def _dataset_name(dataset_id):
         return None
 
 
-def _run_payload(run) -> dict:
+def _dataset_names(dataset_ids) -> dict:
+    """Load dataset display names in one query for Runs-hub payloads."""
+    from ..models import FaceDataset
+    ids = {dataset_id for dataset_id in dataset_ids if dataset_id is not None}
+    if not ids:
+        return {}
+    try:
+        return {row.id: row.name for row in
+                FaceDataset.query.filter(FaceDataset.id.in_(ids)).all()}
+    except Exception:
+        return {}
+
+
+def _run_payload(run, dataset_names=None) -> dict:
     now = utcnow()
     billing_start, billing_end, cost_final = _billing_window(run)
     billing_seconds = (max(0, int((billing_end - billing_start).total_seconds()))
@@ -1840,7 +2030,10 @@ def _run_payload(run) -> dict:
             # cloud row (active/finished/legacy) addresses by its pod row id;
             # local rows use 'rec-<record id>' (set in all_runs).
             'share_key': f'cloud-{run.id}',
-            'run_name': run.run_name, 'dataset_name': _dataset_name(run.dataset_id),
+            'run_name': run.run_name,
+            'dataset_name': (dataset_names.get(run.dataset_id)
+                             if dataset_names is not None
+                             else _dataset_name(run.dataset_id)),
             'vast_instance_id': run.vast_instance_id,   # for the per-run "console ↗" tooltip
             'phase_detail': run.phase_detail, 'gpu': run.gpu_name,
             'price_per_hour': run.price_per_hour,
@@ -1873,6 +2066,10 @@ def cloud_status() -> dict:
     limit = max(1, int((c.get('max_concurrent_runs') or 1)))
     last = (CloudTrainingRun.query
             .order_by(CloudTrainingRun.id.desc()).first())
+    recovery_required = (CloudTrainingRun.query
+                         .filter_by(status='error_pod_kept')
+                         .filter(CloudTrainingRun.vast_instance_id.isnot(None))
+                         .order_by(CloudTrainingRun.id.desc()).all())
     return {'configured': bool(cfg.secret('VAST_API_KEY')), 'limit': limit,
             'actives': [_run_payload(r) for r in actives],
             # compat: single 'active' field for old frontend/tests, first of actives
@@ -1884,6 +2081,7 @@ def cloud_status() -> dict:
             'month_spend': round(month_spend_usd(), 2),
             'monthly_budget': float(c.get('monthly_budget_usd') or 0),
             'max_runtime_minutes': int(c.get('max_runtime_minutes') or 480),
+            'recovery_required': [_run_payload(r) for r in recovery_required],
             'last': _run_payload(last) if last else None}
 
 
@@ -1900,13 +2098,23 @@ def all_runs(limit: int = 20) -> dict:
     actives = get_active_runs()
     c = cfg.get('cloud') or {}
     limit = max(1, min(int(limit or 20), 100))
+    # Active cloud admission rows are shown above the history. Fetch enough
+    # extra registry rows to backfill every active row omitted below.
     recs = (TrainingRunRecord.query
-            .order_by(TrainingRunRecord.id.desc()).limit(limit).all())
+            .order_by(TrainingRunRecord.id.desc())
+            .limit(limit + len(actives)).all())
     feedback_by_record = lts.feedback_for_records(recs)
     cloud_ids = {r.cloud_run_id for r in recs if r.cloud_run_id}
     cloud_by_id = ({r.id: r for r in CloudTrainingRun.query
                     .filter(CloudTrainingRun.id.in_(cloud_ids)).all()}
                    if cloud_ids else {})
+    legacy_runs = (CloudTrainingRun.query
+                   .filter(CloudTrainingRun.status.notin_(ACTIVE_STATES))
+                   .order_by(CloudTrainingRun.id.desc()).limit(limit).all())
+    dataset_names = _dataset_names(
+        [r.dataset_id for r in actives]
+        + [r.dataset_id for r in recs]
+        + [r.dataset_id for r in legacy_runs])
     recent = []
     for rec in recs:
         crun = cloud_by_id.get(rec.cloud_run_id)
@@ -1927,7 +2135,7 @@ def all_runs(limit: int = 20) -> dict:
         row = {'source': 'cloud' if rec.source == 'cloud' else 'local',
                'record_id': rec.id,
                'dataset_id': rec.dataset_id,
-               'dataset_name': _dataset_name(rec.dataset_id),
+               'dataset_name': dataset_names.get(rec.dataset_id),
                'train_type': rec.family, 'version': rec.version,
                'fingerprint': rec.fingerprint,
                'steps': rec.steps, 'masked': bool(rec.masked),
@@ -1941,7 +2149,7 @@ def all_runs(limit: int = 20) -> dict:
                'created_at': rec.created_at.isoformat() if rec.created_at else None}
         if crun is not None:
             # cloud enrichment wins on shared keys (status/cost/checkpoint/...)
-            row.update(_run_payload(crun))
+            row.update(_run_payload(crun, dataset_names))
             row['settings'] = settings
             row['preflight'] = preflight
             row['overrides'] = overrides
@@ -1949,14 +2157,12 @@ def all_runs(limit: int = 20) -> dict:
         recent.append(row)
     # Legacy cloud runs that predate the provenance registry (no record row).
     seen_cloud = {r.get('run_id') for r in recent if r.get('run_id')}
-    for crun in (CloudTrainingRun.query
-                 .filter(CloudTrainingRun.status.notin_(ACTIVE_STATES))
-                 .order_by(CloudTrainingRun.id.desc()).limit(limit).all()):
+    for crun in legacy_runs:
         if crun.id in seen_cloud:
             continue
         recent.append({'source': 'cloud', 'settings': None,
                        'preflight': None, 'overrides': None,
-                       **_run_payload(crun)})
+                       **_run_payload(crun, dataset_names)})
     recent.sort(key=lambda r: r.get('created_at') or '', reverse=True)
     recent = recent[:limit]
     # Live LOCAL training: shown as its own card next to the cloud actives;
@@ -1977,7 +2183,7 @@ def all_runs(limit: int = 20) -> dict:
     # Active cloud rows are omitted from ``recent`` above. Enrich their live
     # payloads with the immutable admission record as well, so provenance does
     # not disappear while a run is still provisioning/training.
-    active_payloads = [_run_payload(r) for r in actives]
+    active_payloads = [_run_payload(r, dataset_names) for r in actives]
     if actives:
         active_ids = [r.id for r in actives]
         admission_by_cloud = {}
@@ -1997,11 +2203,18 @@ def all_runs(limit: int = 20) -> dict:
             payload['record_id'] = rec.id if rec is not None else None
             payload['evaluation'] = (
                 active_feedback.get(rec.id) if rec is not None else None)
+    recovery_required = (CloudTrainingRun.query
+                         .filter_by(status='error_pod_kept')
+                         .filter(CloudTrainingRun.vast_instance_id.isnot(None))
+                         .order_by(CloudTrainingRun.id.desc()).all())
     return {'configured': bool(cfg.secret('VAST_API_KEY')),
             'limit': max(1, int((c.get('max_concurrent_runs') or 1))),
             'actives': active_payloads,
             'local_active': local_active,
             'recent': recent,
+            # Independent of history pagination: every retained provider pod
+            # remains visible until its instance is confirmed gone.
+            'recovery_required': [_run_payload(r) for r in recovery_required],
             'total_price_per_hour': round(sum(r.price_per_hour or 0 for r in actives), 4),
             'month_spend': round(month_spend_usd(), 2),
             'monthly_budget': float(c.get('monthly_budget_usd') or 0)}
@@ -2026,7 +2239,7 @@ def gpu_tiers(user_id, dataset_id, train_type=None, steps=None) -> dict:
     if fam == 'flux':
         raise ValueError('FLUX.1 training is local-only for now — '
                          'cloud training supports Z-Image, Krea and FLUX.2 Klein')
-    n_steps = int(steps) if steps else lt.default_steps(ds)
+    n_steps = _effective_steps(ds, steps)
     c = cfg.get('cloud') or {}
     min_vram = (c.get('min_vram_gb') or {}).get(fam, 24)
     price_cap = c.get('max_price_per_hour', 0.80)
@@ -2040,17 +2253,14 @@ def gpu_tiers(user_id, dataset_id, train_type=None, steps=None) -> dict:
         min_inet_down_mbps=int(c.get('min_inet_down_mbps') or 0),
         min_reliability=float(c.get('min_reliability') or 0.98),
         min_disk_bw_mbps=int(c.get('min_disk_bw_mbps') or 0)))
-    cheapest_by_gpu = {}
+    offers_by_gpu = {}
     for o in offers:
         name = o.get('gpu_name') or 'GPU'
-        cur = cheapest_by_gpu.get(name)
-        dph = o.get('dph_total')
-        if cur is None or (dph is not None and (cur.get('dph_total') is None
-                           or dph < cur['dph_total'])):
-            cheapest_by_gpu[name] = o
+        offers_by_gpu.setdefault(name, []).append(o)
     max_runtime = int(c.get('max_runtime_minutes') or 480)
     tiers = []
-    for name, o in cheapest_by_gpu.items():
+    for name, group in offers_by_gpu.items():
+        o = _best_of(group)
         dph = o.get('dph_total')
         est_min = gpu_speed.estimate_minutes(name, fam, n_steps)
         # Cost bills the whole pod life: training + boot/download/quantize.

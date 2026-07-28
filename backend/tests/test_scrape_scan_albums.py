@@ -22,7 +22,7 @@ def _mock_gdl_runs(monkeypatch):
     Retourne la liste des appels (url + image_range) pour inspection."""
     calls = []
 
-    def fake(url, max_items, cookies, extra_opts, image_range=None):
+    def fake(url, max_items, cookies, extra_opts, image_range=None, timeout=None):
         calls.append({'url': url, 'image_range': image_range})
         if 'category' in url:
             return [[6, 'https://x/album1/', {}], [6, 'https://x/album2/', {}]], None
@@ -155,20 +155,21 @@ def test_pornpics_covers_failure_falls_back_to_bounded_gdl(monkeypatch, _spies):
     assert _spies['enum']['per_album'] == 1         # repli borné : 1 image/album
 
 
-def test_scan_route_passes_include_albums_to_match(client, monkeypatch):
-    seen = {}
-
-    def fake_scan(self, match):
-        seen['include_albums'] = getattr(match, 'include_albums', None)
-        return [{'url': 'https://cdni.pornpics.com/x.jpg', 'title': '',
-                 'thumbnail': None, 'type': 'image', 'platform': 'pornpics'}], None
-    monkeypatch.setattr(PornpicsSource, 'scan', fake_scan)
+def test_scan_route_passes_include_albums_to_real_scan(client, _spies):
     r = client.post('/api/scrape/scan',
                     json={'url': 'https://www.pornpics.com/flexible/',
                           'include_albums': True})
     assert r.status_code == 200
-    assert seen['include_albums'] is True
+    assert _spies['enum']['per_album'] is None
+    _spies['enum'] = None
     r = client.post('/api/scrape/scan',
                     json={'url': 'https://www.pornpics.com/flexible/'})
     assert r.status_code == 200
-    assert seen['include_albums'] is False       # défaut : covers seulement
+    assert _spies['covers'] > 0                  # défaut : covers seulement
+
+
+def test_match_declares_include_albums():
+    from app.scrape.sources.base import Match
+
+    assert Match('https://example.com').include_albums is False
+    assert Match('https://example.com', include_albums=True).include_albums is True

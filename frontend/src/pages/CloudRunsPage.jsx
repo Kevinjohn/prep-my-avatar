@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   apiResponse, getJson, safePostJson as postJson,
@@ -33,7 +33,9 @@ const statusStyle = (s) =>
 function timeAgo(iso) {
   if (!iso) return '';
   // backend timestamps are naive UTC (isoformat of utcnow) — pin to UTC.
-  const t = new Date(/[Z+]/.test(iso) ? iso : `${iso}Z`).getTime();
+  const timestamp = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`;
+  const t = new Date(timestamp).getTime();
+  if (!Number.isFinite(t)) return '';
   const s = Math.max(0, (Date.now() - t) / 1000);
   if (s < 60) return 'just now';
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
@@ -102,6 +104,8 @@ export default function CloudRunsPage() {
   const promptDialog = usePromptDialog();
   const navigate = useNavigate();
   const [data, setData] = useState(null);
+  const [loadError, setLoadError] = useState('');
+  const pollRequest = useRef(0);
   const [stopping, setStopping] = useState({});     // run_id -> bool
   const [comparison, setComparison] = useState([]);
   const [recentCollapsed, setRecentCollapsed] = useState(() => {
@@ -112,9 +116,19 @@ export default function CloudRunsPage() {
   }, [recentCollapsed]);
 
   const poll = useCallback(async () => {
+    const requestId = ++pollRequest.current;
     try {
-      setData(await getJson('/api/dataset/train/cloud/runs?limit=15'));
-    } catch { /* transient — next tick retries */ }
+      const next = await getJson('/api/dataset/train/cloud/runs?limit=15');
+      if (requestId !== pollRequest.current) return;
+      setData(next);
+      setLoadError('');
+      const visible = new Set((next?.recent || []).map((run, index) => compareKey(run, index)));
+      setComparison((selected) => selected.filter((key) => visible.has(key)));
+    } catch {
+      if (requestId === pollRequest.current) {
+        setLoadError('Training runs could not be refreshed. Automatic retry remains active.');
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -154,6 +168,13 @@ export default function CloudRunsPage() {
   // (vanished vast offer, pod never ready) are transient by nature.
   const [retrying, setRetrying] = useState({});      // run_id -> bool
   const retry = async (run) => {
+    const estimate = costLabel(run);
+    if (!(await confirm({
+      title: 'Retry cloud training?',
+      message: `Retry ${run.dataset_name || run.run_name || `run #${run.run_id}`} on a fresh pod with the same settings.${estimate ? ` The previous run cost was ${estimate}; the new provider price may differ.` : ' Provider pricing is re-evaluated for the new pod.'}`,
+      confirmLabel: 'Retry run',
+      tone: 'warning',
+    }))) return;
     setRetrying((m) => ({ ...m, [run.run_id]: true }));
     try {
       const d = await postJson('/api/dataset/train/cloud/retry', { run_id: run.run_id });
@@ -169,6 +190,7 @@ export default function CloudRunsPage() {
   // run's last harvested checkpoint for `extra` more steps (ai-toolkit
   // auto-resume — the monitor seeds the checkpoint onto the pod before start).
   const [continuing, setContinuing] = useState({});   // run_id -> bool
+  const [cleaning, setCleaning] = useState(false);
   const continueRun = async (run) => {
     const raw = await promptDialog({
       title: 'Continue cloud training',
@@ -181,9 +203,10 @@ export default function CloudRunsPage() {
       confirmLabel: 'Continue training',
     });
     if (raw == null) return;                            // cancelled
-    const extra = parseInt(raw, 10);
-    if (!Number.isFinite(extra) || extra <= 0) {
-      toast.error('Enter a positive number of extra steps.');
+    const normalized = String(raw).trim();
+    const extra = /^\d+$/.test(normalized) ? Number(normalized) : NaN;
+    if (!Number.isSafeInteger(extra) || extra <= 0) {
+      toast.error('Enter a positive whole number of extra steps.');
       return;
     }
     setContinuing((m) => ({ ...m, [run.run_id]: true }));
@@ -222,6 +245,7 @@ export default function CloudRunsPage() {
   const configured = data?.configured;
   const actives = data?.actives || [];
   const recent = data?.recent || [];
+  const recoveryRequired = data?.recovery_required || [];
   const limit = data?.limit || 1;
   const budget = data?.monthly_budget || 0;
   const spent = data?.month_spend || 0;
@@ -261,6 +285,16 @@ export default function CloudRunsPage() {
           download a finished LoRA, and see the exact settings each launch used.
         </p>
       </header>
+
+      {loadError && (
+        <div role="alert" className="flex items-center gap-3 rounded-lg border border-rose-400/40 bg-rose-500/10 p-3 text-rose-200 text-sm">
+          <span>{loadError}</span>
+          <button type="button" onClick={poll}
+            className="ml-auto rounded border border-rose-300/40 px-2 py-1 font-semibold">
+            Retry now
+          </button>
+        </div>
+      )}
 
       {data && !configured && (
         <div className="rounded-lg border border-border bg-surface p-4 text-content-muted text-sm">
@@ -408,9 +442,10 @@ export default function CloudRunsPage() {
         onClear={() => setComparison([])} />
 
       {/* A pod kept alive for manual recovery bills until reaped — call it out. */}
-      {recent.some((r) => r.status === 'error_pod_kept') && (
+      {recoveryRequired.length > 0 && (
         <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-amber-200 text-xs">
-          ⚠ A finished run kept its pod for manual checkpoint recovery — it keeps billing until vast.ai confirms destruction. Download its LoRA below; after the recovery window the app requests cleanup and keeps retrying, but verify the provider console if the warning remains.
+          ⚠ {recoveryRequired.length} cloud pod(s) require recovery and may still be billing until vast.ai confirms destruction:
+          {' '}{recoveryRequired.map((run) => run.vast_instance_id || run.run_id).join(', ')}. Verify them in the provider console.
         </div>
       )}
 
@@ -436,12 +471,24 @@ export default function CloudRunsPage() {
                     confirmLabel: 'Move to trash',
                     tone: 'warning',
                   }))) return;
-                  const d = await postJson('/api/dataset/train/cloud/purge', {});
-                  if (d.ok) toast.info(`Cleaned ${d.purged_runs} run(s) — ${((d.moved_bytes || 0) / 1e9).toFixed(1)} GB moved to the trash (disk space is reclaimed when you empty it).`);
-                  poll();
+                  setCleaning(true);
+                  try {
+                    const d = await postJson('/api/dataset/train/cloud/purge', {});
+                    if (d.ok) {
+                      toast.info(`Cleaned ${d.purged_runs} run(s) — ${((d.moved_bytes || 0) / 1e9).toFixed(1)} GB moved to the trash (disk space is reclaimed when you empty it).`);
+                      poll();
+                    } else {
+                      toast.error(d.hint ? `${d.error || 'Cloud cleanup failed'} — ${d.hint}` : (d.error || 'Cloud cleanup failed'));
+                    }
+                  } catch {
+                    toast.error('Cloud cleanup failed — the server could not be reached.');
+                  } finally {
+                    setCleaning(false);
+                  }
                 }}
+                disabled={cleaning}
                 className="ml-auto px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-200 text-xs font-semibold">
-                🧹 Clean finished runs
+                {cleaning ? 'Cleaning…' : '🧹 Clean finished runs'}
               </button>
             )}
           </div>
@@ -467,7 +514,7 @@ export default function CloudRunsPage() {
                   <span className="text-content-subtle text-[0.625rem]" title="Dataset version">v{run.version}</span>
                 )}
                 <span className={`rounded border px-1.5 py-0.5 text-[0.625rem] ${statusStyle(run.status)}`}>
-                  {run.status}
+                  {run.status || (run.source === 'local' ? 'recorded' : 'unknown')}
                 </span>
                 <span className="text-content-subtle text-[0.625rem]">{timeAgo(run.finished_at || run.created_at)}</span>
                 {run.error && (run.status === 'error' || run.status === 'error_pod_kept') && (

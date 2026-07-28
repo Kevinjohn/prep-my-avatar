@@ -27,14 +27,14 @@
 
 /** Trim + lowercase a raw tag string (the canonical form used everywhere). */
 export function normalizeTag(tag) {
-  return (tag || '').trim().toLowerCase();
+  return (tag || '').normalize('NFC').trim().toLocaleLowerCase();
 }
 
 /** Booru tokenisation — identical to CaptionToolsBar's frequency panel. */
 export function tokenizeTags(caption) {
-  return (caption || '')
+  return (caption || '').normalize('NFC')
     .split(',')
-    .map((t) => t.trim().toLowerCase())
+    .map((t) => t.trim().toLocaleLowerCase())
     .filter(Boolean);
 }
 
@@ -48,7 +48,7 @@ function proseHasWord(caption, tag) {
   try {
     const re = new RegExp(
       `(?:^|[^\\p{L}\\p{N}])${escapeRegExp(tag)}(?=$|[^\\p{L}\\p{N}])`, 'iu');
-    return re.test(caption || '');
+    return re.test((caption || '').normalize('NFC'));
   } catch {
     // Ultra-defensive fallback (should never trip): plain case-insensitive contains.
     return (caption || '').toLowerCase().includes(tag);

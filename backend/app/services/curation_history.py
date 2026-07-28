@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from functools import wraps
 
 from ..extensions import db
 from ..models import CurationEvent, FaceDataset, FaceDatasetImage
@@ -13,6 +15,21 @@ _UNDO_FIELDS = {
     'coverage_value', 'coverage_provenance', 'variation_label', 'source_rights',
     'watermark_state', 'watermark_bbox', 'watermark_regions',
 }
+_CURATION_TRANSACTION_LOCK = threading.RLock()
+
+
+def serialized(function):
+    """Serialize curation snapshots, mutations, history rows, and undo.
+
+    The application runs one local server process but serves concurrent request
+    threads.  Entry points acquire this lock before loading ORM state, ensuring
+    each event's ``before`` snapshot observes the preceding committed edit.
+    """
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _CURATION_TRANSACTION_LOCK:
+            return function(*args, **kwargs)
+    return wrapped
 
 
 def new_batch_id() -> str:
@@ -50,7 +67,8 @@ def _owned_dataset(user_id, dataset_id):
                   and str(ds.user_id) == str(user_id)) else None
 
 
-def _decode(value):
+def decode_snapshot(value):
+    """Decode the persisted, undo-compatible curation snapshot schema."""
     try:
         parsed = json.loads(value)
     except (TypeError, ValueError):
@@ -58,6 +76,15 @@ def _decode(value):
     if not isinstance(parsed, dict) or any(key not in _UNDO_FIELDS for key in parsed):
         return None
     return parsed
+
+
+def decode_snapshot_pair(before_state, after_state):
+    """Return a compatible before/after pair, or ``None`` when corrupted."""
+    before = decode_snapshot(before_state)
+    after = decode_snapshot(after_state)
+    if before is None or after is None or set(before) != set(after):
+        return None
+    return before, after
 
 
 def list_events(user_id, dataset_id, *, limit=30, before_id=None) -> dict | None:
@@ -77,14 +104,19 @@ def list_events(user_id, dataset_id, *, limit=30, before_id=None) -> dict | None
                 CurationEvent.batch_id.in_(batch_ids))
         .group_by(CurationEvent.batch_id).all()
     ) if batch_ids else {}
-    events = [{
-        'id': row.id, 'batch_id': row.batch_id, 'image_id': row.image_id,
-        'batch_size': int(batch_sizes.get(row.batch_id, 1)),
-        'action': row.action, 'before': _decode(row.before_state) or {},
-        'after': _decode(row.after_state) or {},
-        'reverted': row.reverted_at is not None,
-        'created_at': row.created_at.isoformat() if row.created_at else None,
-    } for row in rows]
+    events = []
+    for row in rows:
+        snapshots = decode_snapshot_pair(row.before_state, row.after_state)
+        events.append({
+            'id': row.id, 'batch_id': row.batch_id, 'image_id': row.image_id,
+            'batch_size': int(batch_sizes.get(row.batch_id, 1)),
+            'action': row.action,
+            'before': snapshots[0] if snapshots else None,
+            'after': snapshots[1] if snapshots else None,
+            'snapshot_valid': snapshots is not None,
+            'reverted': row.reverted_at is not None,
+            'created_at': row.created_at.isoformat() if row.created_at else None,
+        })
     return {
         'events': events,
         'next_cursor': rows[-1].id if has_more and rows else None,
@@ -93,6 +125,7 @@ def list_events(user_id, dataset_id, *, limit=30, before_id=None) -> dict | None
     }
 
 
+@serialized
 def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
     """Undo the selected event's whole atomic batch, refusing stale state.
 
@@ -115,10 +148,10 @@ def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
     changes = []
     for event in events:
         image = db.session.get(FaceDatasetImage, event.image_id)
-        before = _decode(event.before_state)
-        after = _decode(event.after_state)
-        if image is None or image.dataset_id != int(dataset_id) or before is None or after is None:
+        snapshots = decode_snapshot_pair(event.before_state, event.after_state)
+        if image is None or image.dataset_id != int(dataset_id) or snapshots is None:
             raise ValueError('CURATION_UNDO_CONFLICT: a referenced image or snapshot is unavailable')
+        before, after = snapshots
         for field, expected in after.items():
             if getattr(image, field) != expected:
                 raise ValueError(
@@ -137,8 +170,8 @@ def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
                  .all())
         event_fields = set(before) | set(after)
         for later in newer:
-            later_before = _decode(later.before_state)
-            later_after = _decode(later.after_state)
+            later_before = decode_snapshot(later.before_state)
+            later_after = decode_snapshot(later.after_state)
             later_fields = set(later_before or {}) | set(later_after or {})
             if event_fields & later_fields:
                 raise ValueError(

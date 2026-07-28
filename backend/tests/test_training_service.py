@@ -338,12 +338,187 @@ def test_enqueue_snapshots_steps_and_not_before(app, monkeypatch):
         ds = svc.create_dataset(LOCAL_USER, 'Q', 'q')
         monkeypatch.setattr(lt, 'assert_trainable', lambda *a, **k: None)
         lt.enqueue_training(LOCAL_USER, ds.id, steps=2000, not_before='2999-01-01T00:00',
+                            train_type='zimage', variant='turbo',
                             allow_caption_mismatch=True, allow_uncaptioned=True)
         q = lt.get_train_queue()
         assert q[0]['steps'] == 2000 and q[0]['not_before'].startswith('2999')
         assert q[0]['allow_caption_mismatch'] is True
         assert q[0]['allow_uncaptioned'] is True
+        view = lt.train_queue_view(LOCAL_USER)
+        assert view[0]['train_type'] == 'zimage'
+        assert view[0]['variant'] == 'turbo'
         assert lt._due_index(q) is None                   # scheduled in the future -> not due
+
+
+def test_deferred_training_snapshots_fresh_mode(app, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Fresh queue', 'freshq')
+        monkeypatch.setattr(lt, 'assert_trainable', lambda *a, **k: None)
+        monkeypatch.setattr(lt, 'preflight_custom_paths', lambda *a, **k: None)
+        lt.enqueue_training(LOCAL_USER, ds.id, fresh=True)
+        item = lt.get_train_queue()[0]
+        assert item['fresh'] is True
+        captured = {}
+        monkeypatch.setattr(lt, 'launch_training',
+                            lambda *a, **kw: captured.update(kw))
+        lt._launch_queued_item(item)
+        assert captured['fresh'] is True
+
+
+def test_queued_continuation_forwards_complete_snapshot(app, monkeypatch):
+    from app.services import lora_training as lt
+
+    captured = {}
+    item = {
+        'dataset_id': 7, 'user_id': 'local', 'extra_steps': 600,
+        'base_model': '/models/base.safetensors', 'variant': 'raw',
+        'train_type': 'krea', 'masked': False, 'fresh': True,
+        'allow_caption_mismatch': True, 'allow_uncaptioned': True,
+        'vae_path': '/models/vae.safetensors',
+        'te_path': '/models/te.safetensors',
+        'allow_unverified_weights': True,
+    }
+    monkeypatch.setattr(
+        lt, 'continue_training', lambda *args, **kwargs: captured.update(kwargs))
+
+    lt._launch_queued_item(item)
+
+    assert captured == {
+        'extra_steps': 600, 'base_model': '/models/base.safetensors',
+        'variant': 'raw', 'train_type': 'krea', 'masked': False,
+        'fresh': True, 'allow_caption_mismatch': True,
+        'allow_uncaptioned': True, 'vae_path': '/models/vae.safetensors',
+        'te_path': '/models/te.safetensors',
+        'allow_unverified_weights': True,
+    }
+
+
+def test_concurrent_queue_admission_does_not_lose_updates(monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+    from app.services import lora_training as lt
+
+    state = {'queue': []}
+    state_lock = threading.Lock()
+
+    def load_queue():
+        with state_lock:
+            snapshot = [dict(item) for item in state['queue']]
+        time.sleep(0.005)
+        return snapshot
+
+    def save_queue(queue):
+        with state_lock:
+            state['queue'] = [dict(item) for item in queue]
+
+    monkeypatch.setattr(
+        lt.fds, 'get_dataset',
+        lambda _user, dataset_id: SimpleNamespace(
+            id=dataset_id, train_type='zimage', train_base_model=None,
+            train_variant='turbo', train_vae_path=None, train_te_path=None))
+    monkeypatch.setattr(lt, 'assert_trainable', lambda *a, **k: None)
+    monkeypatch.setattr(lt, 'preflight_custom_paths', lambda *a, **k: None)
+    monkeypatch.setattr(lt, 'find_run_collision', lambda *a, **k: None)
+    monkeypatch.setattr(lt, 'get_train_queue', load_queue)
+    monkeypatch.setattr(lt, '_save_queue', save_queue)
+
+    threads = [threading.Thread(target=lt.enqueue_training, args=('local', index))
+               for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert {item['dataset_id'] for item in state['queue']} == set(range(8))
+
+
+def test_rejected_enqueue_does_not_persist_requested_settings(app, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Rejected queue', 'rejectedq')
+        original = (ds.train_type, ds.train_vae_path, ds.train_te_path)
+        monkeypatch.setattr(lt, 'assert_trainable', lambda *a, **k: None)
+        monkeypatch.setattr(lt, 'preflight_custom_paths', lambda *a, **k: None)
+        monkeypatch.setattr(lt, '_aitoolkit_supports_krea', lambda: False)
+
+        with pytest.raises(ValueError, match="doesn't support Krea"):
+            lt.enqueue_training(
+                LOCAL_USER, ds.id, train_type='krea',
+                vae_path=None, te_path=None)
+
+        svc.db.session.refresh(ds)
+        assert (ds.train_type, ds.train_vae_path, ds.train_te_path) == original
+
+
+def test_whitespace_only_caption_requires_uncaptioned_confirmation(app, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Whitespace caption', 'whitecap')
+        for index in range(12):
+            svc.db.session.add(lt.FaceDatasetImage(
+                dataset_id=ds.id, status='keep', filename=f'x{index}.webp',
+                caption='   ' if index == 0 else 'a caption here'))
+        svc.db.session.commit()
+        monkeypatch.setattr(
+            lt, 'training_preflight', lambda *a, **k: {'blockers': []})
+
+        with pytest.raises(ValueError, match='UNCAPTIONED: 1'):
+            lt.assert_trainable(ds.id)
+        lt.assert_trainable(ds.id, allow_uncaptioned=True)
+
+
+def test_failed_queued_launch_remains_visible_and_status_reports_error(
+        app, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Failed queue', 'failedq')
+        item = {'dataset_id': ds.id, 'user_id': LOCAL_USER}
+        lt._save_queue([item])
+        monkeypatch.setattr(
+            lt, '_launch_queued_item',
+            lambda _item: (_ for _ in ()).throw(RuntimeError('launch broke')))
+
+        assert lt.process_training_queue() is None
+        queued = lt.get_train_queue()
+        assert queued[0]['status'] == 'failed'
+        assert queued[0]['error'] == 'launch broke'
+        status = lt.training_status(LOCAL_USER)
+        assert status['error']['error'] == 'launch broke'
+        assert status['queue'][0]['status'] == 'failed'
+
+
+def test_atomic_checkpoint_copy_preserves_existing_destination_on_failure(
+        tmp_path, monkeypatch):
+    from app.services import lora_training as lt
+
+    source = tmp_path / 'source.safetensors'
+    destination = tmp_path / 'deployed.safetensors'
+    source.write_bytes(b'new complete bytes')
+    destination.write_bytes(b'old usable bytes')
+
+    def partial_copy(_source, temporary):
+        Path(temporary).write_bytes(b'partial')
+        raise OSError('disk full')
+
+    monkeypatch.setattr(lt.shutil, 'copy2', partial_copy)
+    with pytest.raises(OSError, match='disk full'):
+        lt._atomic_copy(source, destination)
+
+    assert destination.read_bytes() == b'old usable bytes'
+    assert list(tmp_path.glob('.deployed.safetensors.*.tmp')) == []
 
 
 def test_step_cap_floor_500(app, tmp_path, monkeypatch):
@@ -514,6 +689,55 @@ def test_process_training_queue_rearms_ttl_while_pid_alive(app, monkeypatch):
         assert queue_manager._get_system_state('training_pid', None) == 4242
         assert queue_manager._get_system_state('training_dataset_id', None) == 7
         assert queue_manager._get_system_state('training_target_step', None) == 1500
+
+
+def test_training_process_identity_rejects_reused_pid(app, monkeypatch):
+    from app.services import lora_training as lt
+    from app.job_queue import queue_manager
+
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+        @staticmethod
+        def create_time():
+            return 200.0
+
+        @staticmethod
+        def is_running():
+            return True
+
+    import psutil
+    monkeypatch.setattr(psutil, 'Process', Process)
+    with app.app_context():
+        queue_manager._set_system_state('training_launch', {
+            'phase': 'running',
+            'process_identity': {'pid': 4242, 'created_at': 100.0},
+        }, ttl_seconds=None)
+        assert lt._owned_training_process_alive(4242) is False
+
+
+def test_restart_acknowledges_queued_launch_already_running(app, monkeypatch):
+    from app.services import lora_training as lt
+    from app.job_queue import queue_manager
+
+    with app.app_context():
+        item = {'id': 'queue-1', 'dataset_id': 7, 'user_id': 'local',
+                'status': 'launching'}
+        lt._save_queue([item])
+        queue_manager._set_system_state('training_in_progress', True, ttl_seconds=None)
+        queue_manager._set_system_state('training_pid', 4242, ttl_seconds=None)
+        queue_manager._set_system_state('training_launch', {
+            'phase': 'running', 'queue_item_id': 'queue-1',
+        }, ttl_seconds=None)
+        monkeypatch.setattr(lt, '_owned_training_process_alive', lambda _pid: True)
+        monkeypatch.setattr(
+            lt, '_launch_queued_item',
+            lambda _item: (_ for _ in ()).throw(
+                AssertionError('an acknowledged launch must not replay')))
+
+        assert lt.process_training_queue() is None
+        assert lt.get_train_queue() == []
 
 
 def test_import_list_delete_checkpoint_roundtrip_filesystem_scan(app, tmp_path):
@@ -711,6 +935,41 @@ def test_disk_usage_includes_every_immutable_training_dataset(app, tmp_path, mon
         assert usage['training_dataset_bytes'] == len(
             b'legacyfirst immutablemasks')
         assert usage['total_bytes'] >= usage['training_dataset_bytes']
+
+
+def test_abandoned_local_launch_staging_is_reclaimed_and_live_staging_counted(
+        app, tmp_path, monkeypatch):
+    import json
+    import os
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    _configure_aitoolkit(tmp_path, monkeypatch, app)
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Storage', 'stagingtrig')
+        root = lt._datasets_dir()
+        stale = root / f'{lt._LOCAL_STAGING_PREFIX}stale'
+        live = root / f'{lt._LOCAL_STAGING_PREFIX}live'
+        for folder, pid, payload in (
+                (stale, 999_999_999, b'abandoned bytes'),
+                (live, os.getpid(), b'live bytes')):
+            folder.mkdir(parents=True)
+            (folder / lt._LOCAL_STAGING_OWNER).write_text(json.dumps({
+                'format': 'prep-my-avatar-local-training-staging',
+                'version': 1,
+                'pid': pid,
+                'dataset_id': ds.id,
+            }), encoding='utf-8')
+            (folder / 'snapshot.bin').write_bytes(payload)
+
+        usage = lt.dataset_disk_usage(LOCAL_USER, ds.id)
+        assert usage['local_staging_bytes'] >= len(b'abandoned byteslive bytes')
+
+        assert lt.cleanup_abandoned_local_training_staging() == 1
+        assert not stale.exists()
+        assert live.exists()
+        after = lt.dataset_disk_usage(LOCAL_USER, ds.id)
+        assert after['local_staging_bytes'] >= len(b'live bytes')
 
 
 def test_failed_fresh_launch_restores_previous_run_and_removes_provenance(
@@ -1002,3 +1261,42 @@ def test_sample_prompts_string_cap_and_reset(app):
         eff3 = lt.update_train_settings(LOCAL_USER, ds.id, {'sample_prompts': ''})
         assert eff3['sample_prompts'] == []                             # cleared → defaults
         assert any('portrait' in p for p in lt._sample_prompts(ds, 'ztrig'))
+
+
+def test_sample_prompts_reject_non_string_elements_without_mutation(app):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Z', 'ztrig', train_type='zimage')
+        lt.update_train_settings(
+            LOCAL_USER, ds.id, {'sample_prompts': ['valid prompt']})
+
+        for invalid in (None, 7, True, ['nested'], {'scene': 1}):
+            with pytest.raises(ValueError, match='list of strings'):
+                lt.update_train_settings(
+                    LOCAL_USER, ds.id,
+                    {'sample_prompts': ['replacement', invalid]})
+            assert lt.snapshot_train_settings(LOCAL_USER, ds.id) == {
+                'sample_prompts': ['valid prompt']}
+
+
+def test_style_placeholder_only_prompts_fall_back_without_literal_token(app):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(
+            LOCAL_USER, 'Style', 'unused', train_type='zimage', kind='style')
+
+        lt.update_train_settings(
+            LOCAL_USER, ds.id,
+            {'sample_prompts': ['{trigger}', ' {trigger}, ', 'a valid scene']})
+        assert lt._sample_prompts(ds, 'unused') == ['a valid scene']
+
+        lt.update_train_settings(
+            LOCAL_USER, ds.id,
+            {'sample_prompts': ['{trigger}', ' {trigger}, ']})
+        prompts = lt._sample_prompts(ds, 'unused')
+        assert prompts == [lt._DEFAULT_SAMPLE_PROMPTS_STYLE[0]]
+        assert all('{trigger}' not in prompt for prompt in prompts)

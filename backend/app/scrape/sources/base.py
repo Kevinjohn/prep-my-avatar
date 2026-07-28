@@ -6,7 +6,31 @@ d'import : les sources concrètes importent `validators` paresseusement dans
 leur match(), jamais ce module."""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import os
+from pathlib import Path
+import tempfile
 from typing import Optional
+
+
+def atomic_write_bytes(destination, data: bytes) -> None:
+    """Publish a complete download without exposing a partial final file."""
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 @dataclass(frozen=True)
@@ -33,6 +57,9 @@ class Match:
     validation: object = None
     source: object = None
     page: int = 0
+    # True asks album-capable image sources to enumerate album contents rather
+    # than returning cover images only. Other sources intentionally ignore it.
+    include_albums: bool = False
 
 
 class Source(ABC):
@@ -55,7 +82,8 @@ class Source(ABC):
 
     @abstractmethod
     def scan(self, match: Match) -> tuple[list, Optional[str]]:
-        """Retourne (items: list, error: str|None). Ne lève jamais."""
+        """Retourne (items, diagnostic). Un diagnostic avec des items signifie
+        résultat partiel ; sans items, il signifie échec total. Ne lève jamais."""
         ...
 
     def download(self, url: str, dest_base: str) -> tuple[bool, Optional[str], Optional[str]]:

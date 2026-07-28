@@ -84,9 +84,10 @@ training-set rejection.
 The coverage planner uses framing plus angle, expression, lighting, pose,
 background, and occlusion metadata. Optional Qwen/Ollama classification and the
 manual editor write the same structured contract. It distinguishes covered,
-weak, missing, and unknown states and preselects at most eight proven catalogue
-gaps. An unclassified image remains unknown rather than an excuse to spend an
-API call.
+weak, missing, and unknown states. Recommendation limits are profile-specific:
+at most 6 proven catalogue gaps for strict, 8 for balanced, and 12 for
+experimental. An unclassified image remains unknown rather than an excuse to
+spend an API call.
 
 Only accepted (`keep`) rows count as training coverage. Generated candidates
 store engine, prompt, catalogue gap ids, exact anchor descriptors and imported

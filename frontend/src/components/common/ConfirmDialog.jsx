@@ -123,6 +123,8 @@ export function ConfirmDialogProvider({ children }) {
   const activeRef = useRef(null);
   const queueRef = useRef([]);
   const requestSequenceRef = useRef(0);
+  const activationTimerRef = useRef(null);
+  const activationPendingRef = useRef(false);
 
   const activate = useCallback((entry) => {
     activeRef.current = entry;
@@ -134,7 +136,7 @@ export function ConfirmDialogProvider({ children }) {
       kind: 'confirm', ...(typeof options === 'string' ? { message: options } : options), resolve,
       id: ++requestSequenceRef.current,
     };
-    if (activeRef.current) queueRef.current.push(entry);
+    if (activeRef.current || activationPendingRef.current) queueRef.current.push(entry);
     else activate(entry);
   }), [activate]);
 
@@ -143,7 +145,7 @@ export function ConfirmDialogProvider({ children }) {
       kind: 'prompt', ...(typeof options === 'string' ? { title: options } : options), resolve,
       id: ++requestSequenceRef.current,
     };
-    if (activeRef.current) queueRef.current.push(entry);
+    if (activeRef.current || activationPendingRef.current) queueRef.current.push(entry);
     else activate(entry);
   }), [activate]);
 
@@ -151,12 +153,23 @@ export function ConfirmDialogProvider({ children }) {
     const current = activeRef.current;
     if (!current) return;
     current.resolve(current.kind === 'prompt' ? value : Boolean(value));
-    const next = queueRef.current.shift() || null;
-    activeRef.current = next;
-    setActive(next);
-  }, []);
+    activeRef.current = null;
+    setActive(null);
+    // Leave a short interaction boundary between queued requests. This prevents a
+    // double-click/key repeat intended for the visible dialog from activating
+    // the same-position control on the next request.
+    activationPendingRef.current = true;
+    activationTimerRef.current = setTimeout(() => {
+      activationTimerRef.current = null;
+      activationPendingRef.current = false;
+      const next = queueRef.current.shift() || null;
+      if (next) activate(next);
+    }, 300);
+  }, [activate]);
 
   useEffect(() => () => {
+    if (activationTimerRef.current) clearTimeout(activationTimerRef.current);
+    activationPendingRef.current = false;
     if (activeRef.current) activeRef.current.resolve(activeRef.current.kind === 'prompt' ? null : false);
     queueRef.current.forEach((entry) => entry.resolve(entry.kind === 'prompt' ? null : false));
     queueRef.current = [];

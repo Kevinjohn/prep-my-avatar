@@ -1,6 +1,6 @@
 {
   "20": {
-    "inputs": { "unet_name": "Krea\\krea2_turbo_fp8.safetensors", "weight_dtype": "fp8_e4m3fn" },
+    "inputs": { "unet_name": "Krea/krea2_turbo_fp8.safetensors", "weight_dtype": "fp8_e4m3fn" },
     "class_type": "UNETLoader",
     "_meta": { "title": "Load Diffusion Model (Krea 2 Turbo)" }
   },

@@ -16,48 +16,60 @@ const FIELD =
 
 export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
   const concept = d.kind === 'concept';
+  const style = d.kind === 'style';
   const [name, setName] = useState(d.name || '');
   const [trigger, setTrigger] = useState(d.trigger_word || '');
   const [desc, setDesc] = useState(d.concept_desc || '');
+  const [submitting, setSubmitting] = useState(false);
   const dialogRef = useRef(null);
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
 
   useEffect(() => {
     const closeOnEscape = (event) => {
-      if (event.key === 'Escape' && !busy) onClose();
+      if (event.key === 'Escape' && !busy && !submitting) onClose();
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => {
       window.removeEventListener('keydown', closeOnEscape);
     };
-  }, [busy, onClose]);
+  }, [busy, onClose, submitting]);
 
-  const canSave = name.trim() && trigger.trim() && (!concept || desc.trim());
+  const pending = busy || submitting;
+  const canSave = name.trim() && (style || trigger.trim()) && (!concept || desc.trim());
   const save = async () => {
-    if (!canSave || busy) return;
-    const res = await onSave({
-      name: name.trim(),
-      trigger_word: trigger.trim(),
-      concept_desc: concept ? desc.trim() : undefined,
-    });
-    if (res?.ok) onClose();
+    if (!canSave || pending) return;
+    setSubmitting(true);
+    try {
+      const res = await onSave({
+        name: name.trim(),
+        trigger_word: style ? undefined : trigger.trim(),
+        concept_desc: concept ? desc.trim() : undefined,
+      });
+      if (res?.ok) onClose();
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Dataset settings"
-      aria-busy={busy || undefined}
+      aria-busy={pending || undefined}
       className="fixed inset-0 z-[9990] bg-black/80 flex items-center justify-center p-3"
-      onClick={() => { if (!busy) onClose(); }}>
+      onClick={() => { if (!pending) onClose(); }}>
       <div ref={dialogRef}
         className="w-full max-w-md rounded-xl border border-border bg-surface-overlay p-4 flex flex-col gap-3"
         onClick={(e) => e.stopPropagation()}>
         <h2 className="text-content font-semibold flex items-center gap-1.5">⚙️ Dataset settings</h2>
 
-        <label className="flex flex-col gap-1">
+        {!style && <label className="flex flex-col gap-1">
           <span className="text-content-muted text-xs">Name</span>
           <input value={name} onChange={(e) => setName(e.target.value)} className={FIELD} />
-        </label>
+        </label>}
+
+        {style && <p className="m-0 text-content-subtle text-xs">
+          Style LoRAs apply their aesthetic when loaded and do not use a prompt trigger.
+        </p>}
 
         <label className="flex flex-col gap-1">
           <span className="text-content-muted text-xs">Trigger word</span>
@@ -84,13 +96,13 @@ export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
         )}
 
         <div className="flex justify-end gap-2 pt-1">
-          <button type="button" onClick={onClose} disabled={busy}
+          <button type="button" onClick={onClose} disabled={pending}
             className="px-3 py-1.5 rounded-lg border border-border bg-surface text-content-muted hover:text-content text-sm disabled:opacity-40">
             Cancel
           </button>
-          <button type="button" onClick={save} disabled={!canSave || busy}
+          <button type="button" onClick={save} disabled={!canSave || pending}
             className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
-            {busy ? 'Saving…' : 'Save'}
+            {pending ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>

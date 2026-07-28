@@ -16,10 +16,19 @@ export default function ImportDropzone({ onImport, busy, cropOption = false, def
 
   return (
     <div
+      role="button"
+      tabIndex={busy ? -1 : 0}
+      aria-disabled={busy || undefined}
       onDragOver={(e) => { e.preventDefault(); setOver(true); }}
       onDragLeave={() => setOver(false)}
       onDrop={(e) => { e.preventDefault(); setOver(false); handle(e.dataTransfer.files); }}
       onClick={() => inputRef.current?.click()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          if (!busy) inputRef.current?.click();
+        }
+      }}
       className={`flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed p-4 cursor-pointer text-center
         ${over ? 'border-primary bg-primary/10' : 'border-border bg-surface'} ${busy ? 'opacity-50 pointer-events-none' : ''}`}
     >

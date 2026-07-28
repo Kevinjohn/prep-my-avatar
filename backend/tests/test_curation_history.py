@@ -1,4 +1,7 @@
 """Human curation audit trail and conflict-safe transactional undo."""
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 from app.extensions import db
 
 
@@ -40,6 +43,52 @@ def test_single_status_and_caption_edits_are_audited_and_undoable(client, app):
     with app.app_context():
         from app.models import FaceDatasetImage
         assert db.session.get(FaceDatasetImage, image_id).status == 'pending'
+
+
+def test_concurrent_status_edits_form_a_serial_undo_chain(app, client, monkeypatch):
+    dataset_id, (image_id, _) = _dataset_with_images(client, app)
+    from app.services import curation_history
+    original_snapshot = curation_history.snapshot
+    first_snapshot_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def paused_snapshot(image, fields):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            first_snapshot_started.set()
+            assert release_first.wait(timeout=2)
+        return original_snapshot(image, fields)
+
+    monkeypatch.setattr(curation_history, 'snapshot', paused_snapshot)
+
+    def update(status):
+        with app.app_context():
+            from app.services import face_dataset_service as service
+            return service.set_image_status('local', image_id, status)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(update, 'keep')
+        assert first_snapshot_started.wait(timeout=2)
+        second = pool.submit(update, 'reject')
+        release_first.set()
+        assert first.result(timeout=2) is True
+        assert second.result(timeout=2) is True
+
+    with app.app_context():
+        from app.models import CurationEvent, FaceDatasetImage
+        events = CurationEvent.query.filter_by(dataset_id=dataset_id).order_by(
+            CurationEvent.id.asc()).all()
+        assert [event.before_state for event in events] == [
+            '{"status": "pending"}', '{"status": "keep"}']
+        assert db.session.get(FaceDatasetImage, image_id).status == 'reject'
+        result = curation_history.undo('local', dataset_id)
+        assert result['undone'] == 1
+        assert db.session.get(FaceDatasetImage, image_id).status == 'keep'
 
 
 def test_batch_undo_restores_every_selected_image_atomically(client, app):
@@ -90,6 +139,24 @@ def test_history_is_owned_and_cursor_paginated(client, app):
     ).get_json()
     assert len(older['events']) == 1
     assert client.get('/api/dataset/999999/curation/history').status_code == 404
+
+
+def test_history_marks_invalid_snapshot_instead_of_rendering_empty_change(client, app):
+    dataset_id, (image_id, _) = _dataset_with_images(client, app)
+    with app.app_context():
+        from app.models import CurationEvent
+        db.session.add(CurationEvent(
+            dataset_id=dataset_id, image_id=image_id, batch_id='invalid',
+            actor_user_id='local', action='legacy',
+            before_state='{"unsupported": 1}', after_state='{"unsupported": 2}'))
+        db.session.commit()
+
+    event = client.get(
+        f'/api/dataset/{dataset_id}/curation/history').get_json()['events'][0]
+
+    assert event['snapshot_valid'] is False
+    assert event['before'] is None
+    assert event['after'] is None
 
 
 def test_can_undo_looks_beyond_a_page_of_reverted_events(client, app):

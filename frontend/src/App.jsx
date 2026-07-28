@@ -1,13 +1,14 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { HashRouter, Routes, Route, Navigate, Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { apiFetch, fetchWithCsrfRetry, postJson } from './api/fetchClient'
-import { JobsProvider } from './context/JobsContext'
+import { apiFetch, postJson } from './api/fetchClient'
+import { restartTarget, waitForRestart } from './utils/restartReadiness'
 import { ToastProvider, useToast } from './components/common/Toast'
 import { CapabilitiesProvider, useCapabilities } from './context/CapabilitiesContext'
-import { setToastRef } from './api/fetchClient'
 import ErrorBoundary from './components/common/ErrorBoundary'
 import { ConfirmDialogProvider } from './components/common/ConfirmDialog'
 import { recommendedMet } from './hooks/useSetupSteps'
+import { readSession, removeSession, writeSession } from './utils/sessionStorage'
+import { installUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard'
 
 // Route-level chunks keep the first app shell small. The dataset workspace is
 // intentionally its own chunk because its training/curation tools dominate the
@@ -47,7 +48,7 @@ function CheckUpdatesButton() {
         // The dot always lights up; the banner only surfaces if the user
         // hasn't dismissed it this session (manual checks clear the flag).
         if (d?.update_available
-            && sessionStorage.getItem('updateBannerDismissed') !== '1') {
+            && readSession('updateBannerDismissed') !== '1') {
           window.dispatchEvent(new CustomEvent('lds:update-available', { detail: d }))
         }
       } catch { /* offline — the manual button stays available */ }
@@ -65,7 +66,7 @@ function CheckUpdatesButton() {
       const d = await apiFetch('/api/update/check?force=1')
       setAvailable(!!d?.update_available)
       if (d?.update_available) {
-        sessionStorage.removeItem('updateBannerDismissed')     // re-show even if dismissed
+        removeSession('updateBannerDismissed')     // re-show even if dismissed
         window.dispatchEvent(new CustomEvent('lds:update-available', { detail: d }))
         toast.success(`Update available — v${d.latest || d.remote_sha || 'new'}`)
       } else if (d?.ok) {
@@ -143,13 +144,12 @@ function NavBar() {
         {/* Workflow first (make → train in cloud → test), docs/config last. */}
         <nav className="hidden md:flex gap-1" aria-label="Main navigation">
           {navLinks}
-          <CheckUpdatesButton />
         </nav>
-        <div className="ml-auto flex items-center gap-1 md:hidden">
+        <div className="ml-auto flex items-center gap-1">
           <CheckUpdatesButton />
           <button type="button" onClick={() => setOpen((v) => !v)}
             aria-expanded={open} aria-label={open ? 'Close navigation menu' : 'Open navigation menu'}
-            className="rounded-md p-2 text-content-muted hover:text-content hover:bg-surface-raised">
+            className="rounded-md p-2 text-content-muted hover:text-content hover:bg-surface-raised md:hidden">
             <span aria-hidden className="block text-lg leading-none">{open ? '✕' : '☰'}</span>
           </button>
         </div>
@@ -172,12 +172,9 @@ function UpdateBanner() {
   const [applying, setApplying] = useState(false)
   const [phase, setPhase] = useState('')     // '' | 'pulling' | 'restarting'
   const [error, setError] = useState(null)
-  useEffect(() => {
-    if (sessionStorage.getItem('updateBannerDismissed') === '1') return
-    apiFetch('/api/update/check')
-      .then((d) => { if (d && d.update_available) setInfo(d) })
-      .catch(() => { /* best-effort */ })
-  }, [])
+  const [manualUrl, setManualUrl] = useState(null)
+  const restartControllerRef = useRef(null)
+  useEffect(() => () => restartControllerRef.current?.abort(), [])
   // A manual "Check for updates" (nav button) surfaces the banner even after it
   // was dismissed this session, or when the passive mount check found nothing yet.
   useEffect(() => {
@@ -188,28 +185,31 @@ function UpdateBanner() {
 
   // Poll /api/health until the re-execed server answers, then hard-reload so the
   // new frontend/dist loads. Mirrors the Settings "Updates" card.
-  const waitForHealthAndReload = async () => {
-    for (let i = 0; i < 120; i += 1) {
-      await new Promise((r) => setTimeout(r, 1000))
-      try {
-        const res = await fetchWithCsrfRetry('/api/health/ready', { cache: 'no-store' })
-        if (res.ok) { window.location.reload(); return }
-      } catch { /* still restarting — keep waiting */ }
+  const waitForHealthAndReload = async (restartNonce) => {
+    const lifecycleController = new AbortController()
+    restartControllerRef.current?.abort()
+    restartControllerRef.current = lifecycleController
+    const target = restartTarget(window.location, window.location.port)
+    if (await waitForRestart({ restartNonce, target, signal: lifecycleController.signal })) {
+      window.location.reload(); return
     }
-    setApplying(false); setPhase('')          // gave up after ~2 min
+    if (restartControllerRef.current === lifecycleController) restartControllerRef.current = null
+    setError('The restarted server did not become reachable within two minutes. Reload or restart the app manually.')
+    setApplying(false); setPhase('')
   }
 
   // One-click pull + restart, same backend action as the Settings card. A packaged
   // build (no git) comes back {manual:true} → fall back to the download page.
   const apply = async () => {
-    setApplying(true); setPhase('pulling'); setError(null)
+    setApplying(true); setPhase('pulling'); setError(null); setManualUrl(null)
     try {
       const res = await postJson('/api/update/apply', {})
       if (res.restarting) {
         setPhase('restarting')
-        waitForHealthAndReload()              // not awaited: the banner shows "restarting…"
+        waitForHealthAndReload(res.restart_nonce) // not awaited: banner shows "restarting…"
       } else if (res.manual) {
-        window.open(res.url || info.url, '_blank', 'noreferrer')
+        setManualUrl(res.url || info.url)
+        setError('This build must be updated manually. Use the download link below.')
         setApplying(false); setPhase('')
       } else {
         setApplying(false); setPhase('')
@@ -257,8 +257,14 @@ function UpdateBanner() {
               </a>
             )}
             {error && <span className="text-rose-300">{error}</span>}
+            {manualUrl && (
+              <a href={manualUrl} target="_blank" rel="noreferrer"
+                className="font-medium text-emerald-300 underline">
+                Download update
+              </a>
+            )}
             <button type="button"
-              onClick={() => { setInfo(null); sessionStorage.setItem('updateBannerDismissed', '1') }}
+              onClick={() => { setInfo(null); writeSession('updateBannerDismissed', '1') }}
               aria-label="Dismiss update notice"
               className="ml-auto px-1.5 text-content-subtle hover:text-content">✕</button>
           </>
@@ -281,14 +287,14 @@ const SETUP_REDIRECT_KEY = 'lds_setup_redirected'
  * the redirect already happened; it dies with the tab, so a NEW tab (or next
  * browser session) re-offers Setup once — fine; an in-session trap is not. */
 function OnboardingRedirect() {
-  const { caps, loading } = useCapabilities()
+  const { caps, loading, error } = useCapabilities()
   const navigate = useNavigate()
   useEffect(() => {
-    if (loading || caps.configured) return
-    if (sessionStorage.getItem(SETUP_REDIRECT_KEY)) return
-    sessionStorage.setItem(SETUP_REDIRECT_KEY, '1')
+    if (loading || error || caps.configured) return
+    if (readSession(SETUP_REDIRECT_KEY)) return
+    writeSession(SETUP_REDIRECT_KEY, '1')
     navigate('/setup', { replace: true })
-  }, [loading, caps.configured, navigate])
+  }, [loading, error, caps.configured, navigate])
   return null
 }
 
@@ -308,8 +314,7 @@ function Shell() {
 }
 
 function AppInner() {
-  const toast = useToast()
-  useEffect(() => { setToastRef(toast) }, [toast])
+  installUnsavedChangesGuard()
   return (
     <>
       <a
@@ -351,15 +356,13 @@ export default function App() {
     // Root error boundary — outermost so it also catches crashes thrown from
     // the providers themselves.
     <ErrorBoundary showReload>
-      <JobsProvider>
-        <ToastProvider>
-          <ConfirmDialogProvider>
-            <CapabilitiesProvider>
-              <AppInner />
-            </CapabilitiesProvider>
-          </ConfirmDialogProvider>
-        </ToastProvider>
-      </JobsProvider>
+      <ToastProvider>
+        <ConfirmDialogProvider>
+          <CapabilitiesProvider>
+            <AppInner />
+          </CapabilitiesProvider>
+        </ConfirmDialogProvider>
+      </ToastProvider>
     </ErrorBoundary>
   )
 }

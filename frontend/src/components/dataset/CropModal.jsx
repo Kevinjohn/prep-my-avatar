@@ -10,7 +10,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { CROP_MIN_SIDE as MIN_SIDE, clampCropBox, clampRatioCropBox } from '../../utils/cropGeometry';
 
+/** @type {Array<[string, number | null]>} */
 const ASPECTS = [
   ['free', null],
   ['1:1', 1],
@@ -21,9 +23,8 @@ const ASPECTS = [
   ['3:2', 3 / 2],
   ['16:9', 16 / 9],
 ];
-const MIN_SIDE = 32;   // natural px — below this a crop is useless for training
-
 // Handles: name -> which box edges the drag moves.
+/** @type {Array<[string, Record<string, boolean>]>} */
 const HANDLES = [
   ['nw', { left: true, top: true }], ['n', { top: true }], ['ne', { right: true, top: true }],
   ['w', { left: true }], ['e', { right: true }],
@@ -40,22 +41,16 @@ const HANDLE_POS = {
   se: 'right-0 bottom-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize',
 };
 
-function clampBox(b, W, H) {
-  const w = Math.min(Math.max(b.w, MIN_SIDE), W);
-  const h = Math.min(Math.max(b.h, MIN_SIDE), H);
-  return { x: Math.min(Math.max(b.x, 0), W - w), y: Math.min(Math.max(b.y, 0), H - h), w, h };
-}
-
 // Best centered box of `ratio` (w/h) fitting inside W x H, centered on the current box.
 function ratioBox(cur, ratio, W, H) {
   let w = cur.w; let h = w / ratio;
   if (h > H) { h = H; w = h * ratio; }
   if (w > W) { w = W; h = w / ratio; }
   const cx = cur.x + cur.w / 2; const cy = cur.y + cur.h / 2;
-  return clampBox({ x: cx - w / 2, y: cy - h / 2, w, h }, W, H);
+  return clampRatioCropBox({ x: cx - w / 2, y: cy - h / 2, w, h }, ratio, W, H);
 }
 
-export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
+export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = null,
                                     lockSquare = false, defaultAspect = null }) {
   const [nat, setNat] = useState(null);        // {W, H} natural size
   const [box, setBox] = useState(null);        // crop box in NATURAL px
@@ -64,8 +59,23 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
   const dialogRef = useRef(null);
   const cancelRef = useRef(null);
   const dragRef = useRef(null);                // {mode, start, startBox}
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
+
+  const confirmCrop = async () => {
+    if (!box || submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onConfirm({ x: Math.round(box.x), y: Math.round(box.y),
+                        w: Math.round(box.w), h: Math.round(box.h) });
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
 
   const onImgLoad = (e) => {
     const W = e.target.naturalWidth; const H = e.target.naturalHeight;
@@ -77,7 +87,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
       if (h > H) { h = H; w = h * a; }
       setBox({ x: (W - w) / 2, y: (H - h) / 2, w, h });
     } else {
-      setBox(clampBox({ x: W * 0.1, y: H * 0.1, w: W * 0.8, h: H * 0.8 }, W, H));
+      setBox(clampCropBox({ x: W * 0.1, y: H * 0.1, w: W * 0.8, h: H * 0.8 }, W, H));
     }
   };
 
@@ -117,7 +127,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
     const { W, H } = nat;
     const b0 = d.start;
     if (d.mode === 'move') {
-      setBox(clampBox({ ...b0, x: b0.x + dx, y: b0.y + dy }, W, H));
+      setBox(clampCropBox({ ...b0, x: b0.x + dx, y: b0.y + dy }, W, H));
       return;
     }
     const edges = Object.fromEntries(HANDLES)[d.mode] || {};
@@ -145,7 +155,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
       if (nb.x + nb.w > W) { nb.w = W - nb.x; nb.h = nb.w / ratio; if (edges.top) nb.y = y2 - nb.h; }
       if (nb.y + nb.h > H) { nb.h = H - nb.y; nb.w = nb.h * ratio; if (edges.left) nb.x = x2 - nb.w; }
     }
-    setBox(clampBox(nb, W, H));
+    setBox(ratio ? clampRatioCropBox(nb, ratio, W, H) : clampCropBox(nb, W, H));
   }, [nat, aspect, lockSquare, scale]);
 
   const endDrag = useCallback(() => { dragRef.current = null; }, []);
@@ -158,6 +168,14 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
   const pickAspect = (value) => {
     setAspect(value);
     if (value && box && nat) setBox(ratioBox(box, value, nat.W, nat.H));
+  };
+
+  const setBoxField = (field, value) => {
+    if (!box || !nat || value === '') return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    setAspect(null);
+    setBox(clampCropBox({ ...box, [field]: parsed }, nat.W, nat.H));
   };
 
   const s = scale();
@@ -203,21 +221,40 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset,
             <span className="text-white/40 text-[10px]">free = stretch the box any way you like</span>
           </div>
         )}
+        {box && nat && (
+          <fieldset className="flex items-center gap-2 flex-wrap border-0 p-0 text-white/70 text-xs">
+            <legend className="sr-only">Crop selection coordinates and size</legend>
+            <span>Keyboard crop</span>
+            {/** @type {Array<[string, string, number, number]>} */ ([
+              ['x', 'Left', 0, nat.W - box.w],
+              ['y', 'Top', 0, nat.H - box.h],
+              ['w', 'Width', MIN_SIDE, nat.W - box.x],
+              ['h', 'Height', MIN_SIDE, nat.H - box.y],
+            ]).map(([field, label, min, max]) => (
+              <label key={field} className="flex items-center gap-1">
+                <span>{label}</span>
+                <input type="number" value={Math.round(box[field])} min={Math.round(min)} max={Math.round(max)}
+                  onChange={(event) => setBoxField(field, event.target.value)}
+                  className="w-20 rounded border border-white/20 bg-black/30 px-1.5 py-1 text-white tabular-nums" />
+              </label>
+            ))}
+            <span className="text-white/40">pixels</span>
+          </fieldset>
+        )}
         <div className="flex gap-2 justify-end">
           {onReset && (
-            <button type="button" onClick={onReset}
+            <button type="button" onClick={onReset} disabled={submitting}
               title="Re-run the automatic head-crop on the original image"
               className="mr-auto px-4 py-2 rounded-lg bg-surface text-content-muted text-sm">
               ↺ Reset to auto
             </button>
           )}
-          <button type="button" ref={cancelRef} onClick={onCancel}
+          <button type="button" ref={cancelRef} onClick={onCancel} disabled={submitting}
             className="px-4 py-2 rounded-lg bg-surface text-content text-sm">Cancel</button>
-          <button type="button" disabled={!box}
-            onClick={() => onConfirm({ x: Math.round(box.x), y: Math.round(box.y),
-                                       w: Math.round(box.w), h: Math.round(box.h) })}
+          <button type="button" disabled={!box || submitting}
+            onClick={confirmCrop}
             className="px-4 py-2 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
-            Crop
+            {submitting ? 'Cropping…' : 'Crop'}
           </button>
         </div>
       </div>

@@ -1,5 +1,6 @@
 const STORAGE_PREFIX = 'lds:scraper-scan:v1:';
 const API_GENERATION_ENGINES = new Set(['nanobanana', 'chatgpt']);
+const MAX_CACHED_SCAN_ITEMS = 1000;
 const emptyState = () => ({ url: '', kw: '', sub: '', items: [], page: 0,
   paginated: false, fullAlbums: false, rescueSmall: false, selected: new Set() });
 const storageFor = (storage) => {
@@ -36,7 +37,7 @@ export function loadScraperScanState(datasetId, storage) {
 export function saveScraperScanState(datasetId, state, storage) {
   const target = storageFor(storage);
   if (!datasetId || !target) return;
-  const items = Array.isArray(state?.items) ? state.items : [];
+  const items = Array.isArray(state?.items) ? state.items.slice(-MAX_CACHED_SCAN_ITEMS) : [];
   try {
     if (!items.length) { target.removeItem(keyFor(datasetId)); return; }
     target.setItem(keyFor(datasetId), JSON.stringify({
@@ -44,7 +45,8 @@ export function saveScraperScanState(datasetId, state, storage) {
       page: Number.isInteger(state?.page) ? state.page : 0,
       paginated: !!state?.paginated, fullAlbums: !!state?.fullAlbums,
       rescueSmall: !!state?.rescueSmall,
-      selected: [...(state?.selected instanceof Set ? state.selected : state?.selected || [])],
+      selected: [...(state?.selected instanceof Set ? state.selected : state?.selected || [])]
+        .filter((url) => items.some((item) => item.url === url)),
     }));
   } catch { /* cache quota/private mode must never break the scraper */ }
 }

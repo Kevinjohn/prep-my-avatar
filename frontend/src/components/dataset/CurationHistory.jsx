@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../api/fetchClient';
 
 const LABELS = {
@@ -21,16 +21,33 @@ export default function CurationHistory({ datasetId, refreshKey, onUndo }) {
   const [history, setHistory] = useState({ events: [], can_undo: false });
   const [loading, setLoading] = useState(true);
   const [undoing, setUndoing] = useState(false);
+  const [error, setError] = useState('');
+  const requestRef = useRef(0);
 
   const load = useCallback(async () => {
+    const request = ++requestRef.current;
     try {
       const result = await apiFetch(`/api/dataset/${datasetId}/curation/history?limit=8`);
+      if (request !== requestRef.current) return;
       setHistory(result);
-    } catch { /* the workspace keeps working if history is temporarily unavailable */ }
-    finally { setLoading(false); }
+      setError('');
+    } catch {
+      if (request !== requestRef.current) return;
+      setHistory({ events: [], can_undo: false });
+      setError('Curation history is temporarily unavailable.');
+    } finally {
+      if (request === requestRef.current) setLoading(false);
+    }
   }, [datasetId]);
 
-  useEffect(() => { setLoading(true); load(); }, [load, refreshKey]);
+  useEffect(() => {
+    requestRef.current += 1;
+    setHistory({ events: [], can_undo: false });
+    setError('');
+    setLoading(true);
+    load();
+    return () => { requestRef.current += 1; };
+  }, [load, refreshKey]);
 
   const undo = async (eventId) => {
     setUndoing(true);
@@ -55,6 +72,7 @@ export default function CurationHistory({ datasetId, refreshKey, onUndo }) {
         </span>
       </summary>
       <div className="mt-2 flex flex-col gap-2">
+        {error && <p role="alert" className="m-0 text-xs text-amber-300">{error}</p>}
         {!loading && history.events.length === 0 && (
           <p className="m-0 text-xs text-content-subtle">No manual curation changes yet.</p>
         )}

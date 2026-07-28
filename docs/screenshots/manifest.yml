@@ -1,0 +1,14 @@
+screenshots:
+  - path: readme/05-training-readiness.jpg
+    status: retired
+    capture_revision: e77aa6c7397c682bf104f6c5712fd90b4fbe753d
+    page: dataset training readiness
+    viewport: 1274x717
+    sha256: 36774e9fe0836885903551629fc04438a9ed4bbe43a96595ce8f21cbdfe8cf76
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources:
+      - path: frontend/src/components/dataset/NextStepCard.jsx
+        sha256: 73acb38a5533ecbd90fe1a69d516f891b8be3877a8d9efd557509894342b395d
+      - path: frontend/src/components/dataset/PreflightModal.jsx
+        sha256: 06ec617666b0e188998b343f069177d79e4c9e16ed6486da0c022bffa0ff16c9
+    reason: Captured copy says captions are required, but launch permits Start anyway.

@@ -51,7 +51,75 @@ def test_resolve_checkpoint_ckpt_name_unconfigured_falls_back_to_name(app):
     with app.app_context():
         assert resolve_checkpoint_ckpt_name('foo.safetensors') == 'foo.safetensors'
         assert resolve_checkpoint_ckpt_name('') == ''
-        assert resolve_checkpoint_ckpt_name('sdxl/foo.safetensors') == 'sdxl\\foo.safetensors'
+        assert resolve_checkpoint_ckpt_name('sdxl/foo.safetensors') == 'sdxl/foo.safetensors'
+
+
+def test_checkpoint_models_preserve_duplicate_relative_paths(app, tmp_path, monkeypatch):
+    """A basename is not a checkpoint identity when nested folders are supported."""
+    from app.utils import comfyui
+
+    output_dir = tmp_path / 'comfyui' / 'output'
+    checkpoints = tmp_path / 'comfyui' / 'models' / 'checkpoints'
+    output_dir.mkdir(parents=True)
+    (checkpoints / 'Biglove').mkdir(parents=True)
+    (checkpoints / 'sdxl').mkdir()
+    (checkpoints / 'Biglove' / 'duplicate.safetensors').write_bytes(b'a')
+    (checkpoints / 'sdxl' / 'duplicate.safetensors').write_bytes(b'b')
+
+    with app.app_context():
+        monkeypatch.setattr(comfyui, '_out_dir', lambda: str(output_dir))
+        comfyui.clear_model_caches()
+        names = [item['name'] for item in comfyui.get_checkpoint_models()]
+
+        assert names == [
+            'Biglove/duplicate.safetensors',
+            'sdxl/duplicate.safetensors',
+        ]
+        assert comfyui.resolve_checkpoint_ckpt_name(names[0]) == names[0]
+        # A legacy ambiguous basename must not select whichever os.walk sees first.
+        assert comfyui.resolve_checkpoint_ckpt_name('duplicate.safetensors') == 'duplicate.safetensors'
+
+
+def test_resolve_unique_legacy_checkpoint_basename(app, tmp_path, monkeypatch):
+    from app.utils import comfyui
+
+    output_dir = tmp_path / 'comfyui' / 'output'
+    checkpoint = tmp_path / 'comfyui' / 'models' / 'checkpoints' / 'Biglove' / 'only.safetensors'
+    output_dir.mkdir(parents=True)
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b'model')
+
+    with app.app_context():
+        monkeypatch.setattr(comfyui, '_out_dir', lambda: str(output_dir))
+        assert comfyui.resolve_checkpoint_ckpt_name('only.safetensors') == 'Biglove/only.safetensors'
+
+
+def test_checkpoint_cache_serves_both_wire_shapes_from_one_scan(app, tmp_path, monkeypatch):
+    from app.utils import comfyui
+
+    output_dir = tmp_path / 'comfyui' / 'output'
+    checkpoint = tmp_path / 'comfyui' / 'models' / 'checkpoints' / 'model.safetensors'
+    output_dir.mkdir(parents=True)
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b'model')
+    real_walk = comfyui.os.walk
+    scans = 0
+
+    def counting_walk(path):
+        nonlocal scans
+        scans += 1
+        return real_walk(path)
+
+    with app.app_context():
+        monkeypatch.setattr(comfyui, '_out_dir', lambda: str(output_dir))
+        monkeypatch.setattr(comfyui.os, 'walk', counting_walk)
+        comfyui.clear_model_caches()
+        assert comfyui.get_checkpoint_models() == [
+            {'name': 'model.safetensors', 'civitai_url': None},
+        ]
+        assert comfyui.get_checkpoint_models(include_hidden=True) == ['model.safetensors']
+
+    assert scans == 1
 
 
 def test_api_address_has_default_even_when_unconfigured(app):
@@ -149,6 +217,30 @@ def test_inject_zimage_loras_empty_allowed_injects_nothing():
     assert not any(n.get("class_type") == "LoraLoaderModelOnly" for n in workflow.values())
 
 
+def test_lora_injectors_do_not_create_orphans_without_consumers():
+    from app.utils.comfyui import inject_krea_loras
+
+    z_workflow = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "base.safetensors"}},
+    }
+    assert inject_zimage_loras(
+        z_workflow,
+        [{"filename": "z image/lora.safetensors", "strength": 1}],
+        allowed={"z image/lora.safetensors"},
+    ) == 0
+    assert set(z_workflow) == {"1"}
+
+    krea_workflow = {
+        "20": {"class_type": "UNETLoader", "inputs": {"unet_name": "base.safetensors"}},
+    }
+    assert inject_krea_loras(
+        krea_workflow,
+        [{"filename": "krea/lora.safetensors", "strength": 1}],
+        allowed={"krea/lora.safetensors"},
+    ) == 0
+    assert set(krea_workflow) == {"20"}
+
+
 def test_sampler_params_path_points_to_backend_workflows():
     from app.utils import comfyui
     from app import config as cfg
@@ -170,3 +262,25 @@ def test_apply_optimal_sampler_params_uses_code_defaults(app):
         assert inputs["scheduler"] == "ddim_uniform"
         assert inputs["cfg"] == 1.0
         assert inputs["steps"] == 20  # steps intentionally left untouched
+
+
+def test_partial_sampler_override_preserves_missing_selector_fields(app, monkeypatch):
+    from app.utils import comfyui
+
+    workflow = {
+        "select": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "schedule": {"class_type": "BasicScheduler", "inputs": {
+            "scheduler": "normal", "steps": 20,
+        }},
+        "sample": {"class_type": "KSampler", "inputs": {
+            "sampler_name": "euler", "scheduler": "normal", "cfg": 7.0,
+        }},
+    }
+    monkeypatch.setattr(comfyui, '_resolve_optimal_params', lambda _name: {'cfg': 1.5})
+
+    with app.app_context():
+        comfyui.apply_optimal_sampler_params(workflow, 'custom.safetensors')
+
+    assert workflow['select']['inputs']['sampler_name'] == 'euler'
+    assert workflow['schedule']['inputs']['scheduler'] == 'normal'
+    assert workflow['sample']['inputs']['cfg'] == 1.5

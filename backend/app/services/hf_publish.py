@@ -31,6 +31,7 @@ import re
 import shutil
 import tempfile
 import threading
+from collections.abc import Mapping
 
 from ..config import LOCAL_USER
 from ..utils.redact import redact_user_paths
@@ -82,7 +83,8 @@ def _safe_stem(ds) -> str:
 
 def default_repo_id(username, ds) -> str:
     """`<username>/<slug-of-dataset-name>` — the modal's pre-filled default."""
-    stem = _slug(ds.name) if ds is not None else 'dataset'
+    stem = (_slug(ds.name) if ds is not None else 'dataset')[:96].rstrip('-._')
+    stem = stem or 'dataset'
     return f'{username}/{stem}' if username else stem
 
 
@@ -123,9 +125,12 @@ def hf_namespace(token):
         return None
     try:
         who = _make_api(token).whoami()
+        if not isinstance(who, Mapping):
+            return None
+        name = who.get('name')
+        return name if isinstance(name, str) and name.strip() else None
     except Exception:
         return None
-    return (who or {}).get('name') or None
 
 
 # --- write-scope preflight ---------------------------------------------------
@@ -294,6 +299,7 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
     ) for img in kept]
     entries = []
     stem = _safe_stem(ds)
+    missing = []
 
     # Real reference photo: opt-in only. Caption = the bare trigger (an identity
     # anchor, not a described image).
@@ -309,12 +315,15 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
             entries.append({'file_name': name, 'text': text,
                             'content_sha256': content_sha256,
                             'source': 'reference'})
+        else:
+            missing.append(f'reference:{ds.ref_filename}')
 
     for n, img in enumerate(kept, 1):
         if not img.filename:
             continue
         src = fds._img_path(img)
         if not os.path.exists(src):
+            missing.append(f'image:{img.id}:{img.filename}')
             continue
         ext = os.path.splitext(img.filename)[1].lower() or '.webp'
         name = f'{stem}_{n:03d}{ext}'
@@ -346,6 +355,10 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
             'coverage_provenance': fds._safe_json(img.coverage_provenance),
         })
 
+    if missing:
+        raise HfPublishError(
+            'dataset_incomplete',
+            'selected dataset files are missing: ' + ', '.join(missing))
     if not entries:
         raise HfPublishError('no_images', 'no kept images with files on disk to publish')
 
@@ -381,7 +394,8 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
 # --- the synchronous publish flow (the tested seam) --------------------------
 
 def publish_to_hf(dataset_id, repo_id, private, nfaa, license, include_ref, token,
-                  user_id=LOCAL_USER, _api=None):
+                  user_id=LOCAL_USER, _api=None, *, job_id=None,
+                  resume_owned_repo=False):
     """Full synchronous publish: validate -> write-scope preflight -> build temp
     folder -> create_repo(exist_ok=False) -> upload_folder. Returns
     {ok, repo_url, repo_id, count} or raises HfPublishError. `_api` lets tests
@@ -408,20 +422,30 @@ def publish_to_hf(dataset_id, repo_id, private, nfaa, license, include_ref, toke
             api.create_repo(repo_id=repo_id, repo_type='dataset',
                             private=bool(private), exist_ok=False)
             created_repo = True
+            if job_id:
+                from . import background_jobs
+                background_jobs.touch(
+                    job_id, progress={'phase': 'repo_created', 'repo_id': repo_id})
         except HfPublishError:
             raise
         except Exception as e:
             status = _http_status(e)
             if status == 409:
-                raise HfPublishError(
-                    'repo_exists',
-                    f'the dataset repo "{repo_id}" already exists — pick a new '
-                    'name (this tool never overwrites an existing repo)') from e
-            if status in (401, 403):
+                if resume_owned_repo:
+                    # A prior attempt durably recorded that it created this exact
+                    # repository. Resume the idempotent folder upload after a crash.
+                    created_repo = True
+                else:
+                    raise HfPublishError(
+                        'repo_exists',
+                        f'the dataset repo "{repo_id}" already exists — pick a new '
+                        'name (this tool never overwrites an existing repo)') from e
+            elif status in (401, 403):
                 raise HfPublishError(
                     'auth', 'Hugging Face refused to create the repo (401/403) — '
                     'check the token has write access') from e
-            raise HfPublishError('network', f'could not create the repo: {e}') from e
+            else:
+                raise HfPublishError('network', f'could not create the repo: {e}') from e
 
         try:
             api.upload_folder(folder_path=tmp, repo_id=repo_id, repo_type='dataset',
@@ -431,6 +455,11 @@ def publish_to_hf(dataset_id, repo_id, private, nfaa, license, include_ref, toke
             if created_repo:
                 try:
                     api.delete_repo(repo_id=repo_id, repo_type='dataset')
+                    if job_id:
+                        from . import background_jobs
+                        background_jobs.touch(
+                            job_id, progress={'phase': 'repo_removed',
+                                              'repo_id': repo_id})
                 except Exception as cleanup_exc:
                     cleanup_error = cleanup_exc
             status = _http_status(e)
@@ -461,6 +490,26 @@ def publish_to_hf(dataset_id, repo_id, private, nfaa, license, include_ref, toke
 
 _lock = threading.Lock()
 _jobs = {}   # dataset_id -> {state, repo_url, repo_id, error, error_code, count}
+
+
+def _terminal_job(job_id, result, app, *, attempts=3):
+    """Persist terminal state, retrying after transaction failures."""
+    from . import background_jobs
+    last_error = None
+    for _attempt in range(attempts):
+        try:
+            background_jobs.touch(
+                job_id, state='done' if result['state'] == 'done' else 'error',
+                result={key: result.get(key) for key in ('repo_url', 'repo_id', 'count')},
+                error=result.get('error'), error_code=result.get('error_code'))
+            return True
+        except Exception as exc:
+            last_error = exc
+            from ..extensions import db
+            db.session.rollback()
+    app.logger.error('Could not persist Hugging Face job %s terminal state: %s',
+                     job_id, last_error)
+    return False
 
 
 def _job_snapshot(dataset_id):
@@ -505,11 +554,20 @@ def start_publish(app, dataset_id, repo_id, private, nfaa, license, include_ref,
         job_id = None
         with app.app_context():
             from . import background_jobs
+            previous = background_jobs.latest('hf_publish', str(dataset_id))
+            previous_snapshot = background_jobs.snapshot(previous)
+            previous_progress = previous_snapshot.get('progress') or {}
+            resume_owned_repo = (
+                previous_snapshot.get('state') in ('error', 'interrupted')
+                and previous_progress.get('phase') == 'repo_created'
+                and previous_progress.get('repo_id') == repo_id
+            )
             job, created = background_jobs.create_or_get('hf_publish', str(dataset_id), {
                 'dataset_id': dataset_id, 'repo_id': repo_id,
                 'private': bool(private), 'nfaa': bool(nfaa),
                 'license': license, 'include_ref': bool(include_ref),
                 'user_id': user_id,
+                'resume_owned_repo': resume_owned_repo,
             })
             if not created:
                 return {**background_jobs.snapshot(job), 'already': True}
@@ -517,19 +575,32 @@ def start_publish(app, dataset_id, repo_id, private, nfaa, license, include_ref,
         _jobs[dataset_id] = {'state': 'running', 'repo_url': None, 'repo_id': repo_id,
                              'error': None, 'error_code': None, 'count': None,
                              'job_id': job_id}
-    threading.Thread(
-        target=_run_publish_job,
-        args=(app, dataset_id, repo_id, private, nfaa, license, include_ref, token, user_id),
-        daemon=True).start()
+    try:
+        threading.Thread(
+            target=_run_publish_job,
+            args=(app, dataset_id, repo_id, private, nfaa, license, include_ref,
+                  token, user_id, resume_owned_repo),
+            daemon=True).start()
+    except Exception as exc:
+        result = {'state': 'error', 'repo_url': None, 'repo_id': repo_id,
+                  'error': f'could not start publish worker: {exc}',
+                  'error_code': 'worker_start_failed', 'count': None}
+        with _lock:
+            _jobs[dataset_id] = {**result, 'job_id': job_id}
+        with app.app_context():
+            _terminal_job(job_id, result, app)
+        return {**result, 'job_id': job_id}
     return {'state': 'running'}
 
 
 def _run_publish_job(app, dataset_id, repo_id, private, nfaa, license, include_ref,
-                     token, user_id):
+                     token, user_id, resume_owned_repo=False):
     try:
         with app.app_context():
             res = publish_to_hf(dataset_id, repo_id, private, nfaa, license,
-                                include_ref, token, user_id=user_id)
+                                include_ref, token, user_id=user_id, job_id=(
+                                    (_jobs.get(dataset_id) or {}).get('job_id')),
+                                resume_owned_repo=resume_owned_repo)
         result = {'state': 'done', 'repo_url': res['repo_url'], 'repo_id': res['repo_id'],
                   'error': None, 'error_code': None, 'count': res['count']}
     except HfPublishError as e:
@@ -543,8 +614,4 @@ def _run_publish_job(app, dataset_id, repo_id, private, nfaa, license, include_r
         _jobs[dataset_id] = {**result, 'job_id': job_id}
     if job_id:
         with app.app_context():
-            from . import background_jobs
-            background_jobs.touch(
-                job_id, state='done' if result['state'] == 'done' else 'error',
-                result={key: result.get(key) for key in ('repo_url', 'repo_id', 'count')},
-                error=result.get('error'), error_code=result.get('error_code'))
+            _terminal_job(job_id, result, app)

@@ -42,3 +42,13 @@ def test_install_ollama_precondition_400(client, monkeypatch):
 def test_status_idle(client):
     r = client.get('/api/setup/install/ml_extras/status')
     assert r.status_code == 200 and r.get_json()['state'] == 'idle'
+
+
+def test_cancel_install_calls_owner(client, monkeypatch):
+    from app import setup_installer
+    monkeypatch.setattr(
+        setup_installer, 'cancel',
+        lambda action: {'state': 'running', 'action': action})
+    response = client.post('/api/setup/install/ml_extras/cancel')
+    assert response.status_code == 200
+    assert response.get_json()['action'] == 'ml_extras'

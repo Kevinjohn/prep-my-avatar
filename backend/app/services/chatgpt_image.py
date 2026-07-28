@@ -111,7 +111,12 @@ def _generate_via_api(ref_bytes: bytes | list[bytes], prompt: str, model: str | 
         # can switch that shot to Klein (local) — mirrored from the skill notes.
         logger.warning(f"chatgpt_image: HTTP {r.status_code}: {r.text[:300]}")
         return None
-    img = parse_image_response(r.json())
+    try:
+        response_data = r.json()
+    except ValueError as exc:
+        logger.warning("chatgpt_image: malformed JSON response: %s", exc)
+        return None
+    img = parse_image_response(response_data)
     if img is None:
         logger.warning("chatgpt_image: no image in response")
     return img
@@ -215,8 +220,11 @@ def _generate_via_subscription(refs: list, prompt: str, aspect_ratio: str) -> by
         except requests.RequestException as e:
             logger.warning(f"chatgpt_image: subscription request error: {e}")
             return None
-        if r.status_code == 401 and attempt == 0:
-            continue
+        if r.status_code == 401:
+            if attempt == 0:
+                continue
+            raise SubscriptionUnavailable(
+                'ChatGPT connection lost — reconnect in Settings')
         if r.status_code == 429:
             raise SubscriptionQuotaExceeded(
                 'ChatGPT subscription image quota reached — rerun in API-key mode '

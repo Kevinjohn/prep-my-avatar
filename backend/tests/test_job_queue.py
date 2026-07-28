@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from unittest.mock import patch
 import pytest
@@ -73,6 +74,93 @@ def test_worker_completes_job_and_dispatches(app):
             queue_manager.process_one()          # synchronous single-step API for tests
             row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
             assert row.status == 'completed' and done == {'fn': 'out.png', 'failed': False}
+            assert row.completion_pending is False
+
+
+def test_terminal_commit_leaves_durable_delivery_after_process_death(app):
+    """Fault injection at the old crash gap: terminal state must carry an
+    outbox bit in the same commit, even when the process dies before callback."""
+    from app.job_queue import queue_manager
+    from app.models import ImageGenerationQueue
+
+    with app.app_context():
+        jid = queue_manager.add_job(
+            workflow_data={'1': {}},
+            metadata={'model_name': 'klein_edit_dataset'},
+        )
+        with patch('app.job_queue._submit', return_value='prompt-1'), \
+             patch('app.job_queue._poll_outputs', return_value=('out.png', False)), \
+             patch('app.job_queue._deliver_pending_completion',
+                   side_effect=SystemExit('simulated process death')):
+            with pytest.raises(SystemExit, match='process death'):
+                queue_manager.process_one()
+
+        row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
+        assert row.status == 'completed'
+        assert row.result_filename == 'out.png'
+        assert row.completion_pending is True
+
+
+def test_boot_replays_and_acknowledges_durable_completion(app):
+    from app.extensions import db
+    from app.job_queue import queue_manager
+    from app.models import ImageGenerationQueue
+
+    delivered = []
+    with app.app_context():
+        jid = queue_manager.add_job(
+            workflow_data={'1': {}},
+            metadata={'model_name': 'klein_edit_dataset'},
+        )
+        row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
+        row.update_status('completed', result_filename='recovered.png')
+        row.completion_pending = True
+        db.session.commit()
+
+        with patch('app.job_queue._dispatch_completion',
+                   side_effect=lambda job, filename, failed:
+                   delivered.append((job.job_id, filename, failed))):
+            queue_manager._recover_stuck_jobs()
+
+        db.session.refresh(row)
+        assert delivered == [(jid, 'recovered.png', False)]
+        assert row.completion_pending is False
+
+        # A second restart must not redeliver an acknowledged event.
+        with patch('app.job_queue._dispatch_completion') as dispatch:
+            queue_manager._recover_stuck_jobs()
+            dispatch.assert_not_called()
+
+
+def test_failed_ack_commit_is_retried_by_normal_worker(app):
+    from app.extensions import db
+    from app.job_queue import _deliver_pending_completion, queue_manager
+    from app.models import ImageGenerationQueue
+
+    delivered = []
+    with app.app_context():
+        jid = queue_manager.add_job(workflow_data={'1': {}})
+        row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
+        row.update_status('failed', error_message='remote failure')
+        row.completion_pending = True
+        db.session.commit()
+
+        with patch('app.job_queue._dispatch_completion',
+                   side_effect=lambda *args: delivered.append('delivered')), \
+             patch.object(db.session, 'commit',
+                          side_effect=RuntimeError('ack commit failed')):
+            with pytest.raises(RuntimeError, match='ack commit failed'):
+                _deliver_pending_completion(row)
+
+        db.session.expire_all()
+        assert ImageGenerationQueue.query.filter_by(job_id=jid).one().completion_pending is True
+
+        with patch('app.job_queue._dispatch_completion',
+                   side_effect=lambda *args: delivered.append('replayed')):
+            assert queue_manager.process_one() is True
+
+        assert delivered == ['delivered', 'replayed']
+        assert ImageGenerationQueue.query.filter_by(job_id=jid).one().completion_pending is False
 
 
 def test_worker_dispatches_failed_on_poll_failure(app):
@@ -147,6 +235,46 @@ def test_process_one_skips_while_vision_in_progress(app):
             submit.assert_not_called()
 
 
+def test_generation_lease_blocks_vision_for_entire_poll(app, monkeypatch):
+    from app.gpu_window import GpuBusyError, gpu_exclusive_vision_window
+    from app.job_queue import queue_manager
+
+    monkeypatch.setattr('app.utils.comfyui.free_comfyui_vram', lambda: True)
+    with app.app_context():
+        queue_manager.add_job(workflow_data={'1': {}})
+
+        def poll_while_trying_vision(*args):
+            with pytest.raises(GpuBusyError):
+                with gpu_exclusive_vision_window():
+                    pass
+            return 'out.png', False
+
+        with patch('app.job_queue._submit', return_value='prompt-1'), \
+             patch('app.job_queue._poll_outputs', side_effect=poll_while_trying_vision), \
+             patch('app.job_queue._dispatch_completion'):
+            assert queue_manager.process_one() is True
+
+
+def test_history_transport_failure_is_bounded_and_preserved(app, monkeypatch):
+    from app.job_queue import _poll_outputs, queue_manager
+    from app.models import ImageGenerationQueue
+    from app.utils.comfyui import ComfyUIHistoryUnavailable
+
+    with app.app_context():
+        jid = queue_manager.add_job(workflow_data={'1': {}})
+        row = ImageGenerationQueue.query.filter_by(job_id=jid).one()
+        row.status = 'sent_to_comfy'
+        row.comfyui_prompt_id = 'prompt-down'
+        from app.extensions import db
+        db.session.commit()
+        error = ComfyUIHistoryUnavailable('history endpoint unavailable')
+        with patch('app.utils.comfyui.get_comfyui_history', side_effect=error) as history, \
+             patch('app.job_queue.time.sleep'):
+            assert _poll_outputs('prompt-down', timeout=60) == (None, True)
+        assert history.call_count == 3
+        assert 'history endpoint unavailable' in row.error_message
+
+
 def test_cancel_during_submit_window_not_resurrected(app):
     """A cancel landing between _submit() returning and the sent_to_comfy write
     must not be overwritten back to sent_to_comfy, and must never be polled."""
@@ -190,6 +318,33 @@ def test_dispatch_completion_crash_marks_linked_row_failed(app):
 
         row = FaceDatasetImage.query.filter_by(job_id=jid).one()
         assert row.status == 'failed'
+
+
+def test_dispatch_completion_removes_owned_staging_files(app, tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from app.job_queue import _dispatch_completion
+    from app.services import face_dataset_service
+
+    source = tmp_path / 'edit_source.png'
+    extra = tmp_path / 'edit_ref.png'
+    source.write_bytes(b'source')
+    extra.write_bytes(b'extra')
+    monkeypatch.setattr(
+        face_dataset_service, 'link_completed_dataset_image', lambda *args, **kwargs: None)
+    job = SimpleNamespace(
+        job_id='staged-job', error_message=None,
+        job_metadata=json.dumps({
+            'model_name': 'klein_edit_dataset',
+            'staged_inputs': [str(source), str(extra)],
+        }))
+
+    with app.app_context():
+        _dispatch_completion(job, 'result.png', False)
+
+    assert not source.exists()
+    assert not extra.exists()
 
 
 def test_cancel_pending(app):
@@ -316,6 +471,53 @@ def test_claim_on_cancelled_returns_false_stays_cancelled(app):
         assert row.status == 'cancelled'
 
 
+def test_file_backed_concurrent_claim_has_exactly_one_owner(tmp_path, monkeypatch):
+    from app import create_app
+    from app.job_queue import _claim, queue_manager
+
+    monkeypatch.setenv('LDS_DATA_DIR', str(tmp_path / 'claim-data'))
+    application = create_app({
+        'TESTING': True,
+        'WTF_CSRF_ENABLED': False,
+        'SQLALCHEMY_DATABASE_URI': f'sqlite:///{tmp_path / "claims.db"}',
+    })
+    with application.app_context():
+        job_id = queue_manager.add_job(workflow_data={'1': {}})
+    barrier = threading.Barrier(3)
+    results = []
+
+    def contender():
+        with application.app_context():
+            barrier.wait()
+            results.append(_claim(job_id))
+
+    threads = [threading.Thread(target=contender) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert sorted(results) == [False, True]
+
+
+def test_failed_claim_commit_rolls_back_session(app, monkeypatch):
+    from app.extensions import db
+    from app.job_queue import _claim, queue_manager
+    from app.models import ImageGenerationQueue
+
+    with app.app_context():
+        job_id = queue_manager.add_job(workflow_data={'1': {}})
+        original_commit = db.session.commit
+        monkeypatch.setattr(
+            db.session, 'commit',
+            lambda: (_ for _ in ()).throw(RuntimeError('commit failed')))
+        with pytest.raises(RuntimeError, match='commit failed'):
+            _claim(job_id)
+        monkeypatch.setattr(db.session, 'commit', original_commit)
+        assert ImageGenerationQueue.query.filter_by(job_id=job_id).one().status == 'pending'
+
+
 def test_cancel_during_claim_race_guard(app):
     """Simulate the race: _claim on a job that was cancelled after SELECT but before claim.
     The atomic _claim must fail, returning False, preventing submission to ComfyUI."""
@@ -370,6 +572,33 @@ def test_poll_outputs_completed_with_no_outputs_fails(app):
         with patch('app.utils.comfyui.get_comfyui_history', return_value=history):
             filename, failed = _poll_outputs('prompt-1', timeout=1)
     assert (filename, failed) == (None, True)
+
+
+def test_poll_outputs_stops_waiting_when_job_is_cancelled(app):
+    from app.extensions import db
+    from app.job_queue import _poll_outputs, queue_manager
+    from app.models import ImageGenerationQueue
+
+    calls = 0
+    with app.app_context():
+        job_id = queue_manager.add_job(workflow_data={'1': {}})
+        job = ImageGenerationQueue.query.filter_by(job_id=job_id).one()
+        job.status = 'sent_to_comfy'
+        job.comfyui_prompt_id = 'cancelled-prompt'
+        db.session.commit()
+
+        def cancel_during_history(prompt_id):
+            nonlocal calls
+            calls += 1
+            queue_manager.cancel_job(job_id)
+            return {}
+
+        with patch('app.utils.comfyui.get_comfyui_history', cancel_during_history):
+            filename, failed = _poll_outputs('cancelled-prompt', timeout=60)
+
+        assert (filename, failed) == (None, True)
+        assert calls == 1
+        assert ImageGenerationQueue.query.filter_by(job_id=job_id).one().status == 'cancelled'
 
 
 def test_poll_outputs_all_temp_images_keeps_polling_then_times_out(app):

@@ -1,12 +1,4 @@
-/**
- * Centralized API fetch client with global error interception via toast.
- */
-
-let toastRef = null;
-
-export function setToastRef(toast) {
-  toastRef = toast;
-}
+/** Centralized API transport. Callers own user-facing error presentation. */
 
 export function getCsrfToken() {
   const match = document.cookie.match(/csrf_token=([^;]+)/);
@@ -31,15 +23,19 @@ export class ApiError extends Error {
 export const CSRF_EXPIRED_MESSAGE =
   'Session token expired — refresh the page (Ctrl+Shift+R) and try again.';
 
-/* Flask-WTF rejects a stale/missing CSRF token with a 400 whose body is an HTML
-   page, NOT one of our JSON error envelopes (which are always application/json).
-   That content-type mismatch is the honest, body-safe signal to refresh + retry;
-   a genuine 400 from our own handlers is application/json and is left untouched. */
+/* Flask-WTF marks a stale/missing CSRF token with an explicit response header.
+   Only that pre-handler rejection is safe to replay: content type alone cannot
+   prove that an unrelated HTML error occurred before the mutation took effect. */
 function isCsrfRejection(res) {
-  if (res.status !== 400) return false;
-  if (res.headers.get('x-csrf-error') === '1') return true;
-  const ct = res.headers.get('content-type') || '';
-  return !ct.includes('application/json');
+  return res.status === 400 && res.headers.get('x-csrf-error') === '1';
+}
+
+async function parseSuccessfulJson(res) {
+  if (res.status === 204 || res.status === 205 || res.headers.get('content-length') === '0') {
+    return null;
+  }
+  const text = await res.text();
+  return text === '' ? null : JSON.parse(text);
 }
 
 // A request carries an X-CSRFToken header only when it mutates state (our
@@ -95,7 +91,6 @@ export async function apiFetch(url, options = {}) {
   try {
     res = await fetchWithCsrfRetry(url, options);
   } catch {
-    toastRef?.error('Connection lost. Please check your network.');
     throw new Error('Network error');
   }
 
@@ -110,16 +105,9 @@ export async function apiFetch(url, options = {}) {
     } catch {}
 
     if (res.status === 400 && !parsed) {
-      // A 400 whose body still isn't our JSON envelope after the retry above is
-      // an unrecoverable CSRF rejection — surface the actionable message, not
-      // the raw "HTTP 400".
+      // A non-JSON 400 is not safe to replay. Surface the session-token guidance
+      // while preserving the one-request mutation guarantee.
       msg = CSRF_EXPIRED_MESSAGE;
-    } else if (res.status === 401) {
-      toastRef?.error('Session expired. Please log in again.');
-    } else if (res.status === 429) {
-      toastRef?.warning('Too many requests. Please wait a moment.');
-    } else if (res.status >= 500) {
-      toastRef?.error('Server error. Please try again later.');
     }
 
     // Carry the parsed error body so callers can read structured fields (e.g. a
@@ -128,7 +116,7 @@ export async function apiFetch(url, options = {}) {
       body?.request_id || res.headers.get('x-request-id') || null);
   }
 
-  return res.json();
+  return parseSuccessfulJson(res);
 }
 
 export const getJson = (url, options = {}) => apiFetch(url, options);
@@ -141,7 +129,6 @@ export async function apiResponse(url, options = {}) {
   try {
     res = await fetchWithCsrfRetry(url, options);
   } catch {
-    toastRef?.error('Connection lost. Please check your network.');
     throw new Error('Network error');
   }
   if (res.ok) return res;
@@ -166,7 +153,7 @@ export async function safeJson(url, options = {}) {
       return { ...(body || {}), ok: false, status: res.status,
         error: body?.error || body?.detail || body?.message || fallback };
     }
-    return body || { ok: true };
+    return parsed ? body : null;
   } catch (error) {
     return { ok: false, status: 0, error: error?.message || 'Network error' };
   }

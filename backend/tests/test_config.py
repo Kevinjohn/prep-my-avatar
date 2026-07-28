@@ -5,6 +5,8 @@ import stat
 import threading
 from pathlib import Path
 
+import pytest
+
 def _fresh(monkeypatch, tmp_path):
     monkeypatch.setenv('LDS_DATA_DIR', str(tmp_path / 'data'))
     monkeypatch.setenv('LDS_CONFIG', str(tmp_path / 'config.json'))
@@ -65,6 +67,42 @@ def test_load_config_returns_defensive_copy(tmp_path, monkeypatch):
     cfg = config.load_config()
     cfg['server']['port'] = 9999          # caller mutation must not corrupt the cache
     assert config.get('server.port') == 5050
+
+
+@pytest.mark.parametrize('contents', ['{broken', '[]', '[1]', 'null', '"text"'])
+def test_invalid_config_is_preserved_and_rejected(tmp_path, monkeypatch, contents):
+    config = _fresh(monkeypatch, tmp_path)
+    path = tmp_path / 'config.json'
+    path.write_text(contents, encoding='utf-8')
+    with pytest.raises(config.ConfigError):
+        config.load_config(force=True)
+    with pytest.raises(config.ConfigError):
+        config.save_config({'server': {'port': 6000}})
+    assert path.read_text(encoding='utf-8') == contents
+    assert config.is_configured() is False
+
+
+def test_invalid_config_section_is_rejected(tmp_path, monkeypatch):
+    config = _fresh(monkeypatch, tmp_path)
+    (tmp_path / 'config.json').write_text('{"server": 5}', encoding='utf-8')
+    with pytest.raises(config.ConfigError, match="server"):
+        config.load_config(force=True)
+
+
+def test_legacy_upstream_update_default_migrates_in_memory(tmp_path, monkeypatch):
+    config = _fresh(monkeypatch, tmp_path)
+    (tmp_path / 'config.json').write_text(
+        '{"updates":{"repo":"perfectgf/lora-dataset-studio"}}', encoding='utf-8')
+    assert config.get('updates.repo') == 'Kevinjohn/prep-my-avatar'
+
+
+def test_legacy_empty_engine_list_migrates_to_explicit_local_default(
+        tmp_path, monkeypatch):
+    config = _fresh(monkeypatch, tmp_path)
+    (tmp_path / 'config.json').write_text(
+        '{"engines":{"enabled":[],"default":"chatgpt"}}', encoding='utf-8')
+    assert config.get('engines.enabled') == ['klein']
+    assert config.get('engines.default') == 'klein'
 
 
 def test_example_config_matches_all_defaults(tmp_path, monkeypatch):
@@ -143,3 +181,35 @@ def test_concurrent_secret_key_creation_is_stable(tmp_path, monkeypatch):
     assert all(not worker.is_alive() for worker in workers)
     assert len(values) == 4
     assert len(set(values)) == 1
+
+
+@pytest.mark.parametrize('contents', ['', '   \n', 'abcd'])
+def test_invalid_secret_key_is_regenerated(tmp_path, monkeypatch, contents):
+    config = _fresh(monkeypatch, tmp_path)
+    key_path = tmp_path / 'data' / 'secret_key'
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text(contents, encoding='utf-8')
+    value = config.secret_key()
+    assert len(value) == 64
+    assert value != contents.strip()
+    assert key_path.read_text(encoding='utf-8') == value
+
+
+def test_failed_secret_write_keeps_runtime_and_disk_state(tmp_path, monkeypatch):
+    config = _fresh(monkeypatch, tmp_path)
+    config.set_secrets({'OPENAI_API_KEY': 'old-value'})
+    original = config.ENV_PATH.read_text(encoding='utf-8')
+
+    def fail_write(path, value):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(config, '_write_private_text', fail_write)
+    with pytest.raises(OSError):
+        config.set_secrets({'OPENAI_API_KEY': 'new-value'})
+    assert os.environ['OPENAI_API_KEY'] == 'old-value'
+    assert config.ENV_PATH.read_text(encoding='utf-8') == original
+
+    with pytest.raises(OSError):
+        config.delete_secrets(['OPENAI_API_KEY'])
+    assert os.environ['OPENAI_API_KEY'] == 'old-value'
+    assert config.ENV_PATH.read_text(encoding='utf-8') == original

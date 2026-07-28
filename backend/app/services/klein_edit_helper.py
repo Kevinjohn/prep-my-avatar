@@ -304,7 +304,7 @@ def _comfy_output_dir():
 def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
                        extra_metadata=None, lora_strength=None, source_path=None,
                        extra_ref_paths=None, sampler_steps=None,
-                       base_lora_strength=None):
+                       base_lora_strength=None, job_id=None):
     """Copy the source into ComfyUI input, configure the single Klein edit
     workflow, and enqueue it. Returns the app job_id. Raises ValueError on a
     missing source / unloadable workflow / missing required node, RuntimeError
@@ -347,7 +347,10 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
     comfy_input_dir = _comfy_input_dir()
     uid = uuid.uuid4().hex[:8]
     comfy_input = f"edit_source_{uid}_{source_filename}"
-    shutil.copy2(source_path, os.path.join(comfy_input_dir, comfy_input))
+    staged_inputs = []
+    source_staging_path = os.path.join(comfy_input_dir, comfy_input)
+    shutil.copy2(source_path, source_staging_path)
+    staged_inputs.append(source_staging_path)
 
     workflow["52"]["inputs"]["image"] = comfy_input
     # Prompt into the CLIPTextEncode widget directly (node 6). The old RES4LYF
@@ -382,7 +385,9 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
             logger.warning(f"klein multi-ref: extra ref missing on disk: {ref_path}")
             continue
         ref_input = f"edit_ref{i}_{uid}_{os.path.basename(ref_path)}"
-        shutil.copy2(ref_path, os.path.join(comfy_input_dir, ref_input))
+        ref_staging_path = os.path.join(comfy_input_dir, ref_input)
+        shutil.copy2(ref_path, ref_staging_path)
+        staged_inputs.append(ref_staging_path)
         load_id, scale_id = f"ds_ref{i}_load", f"ds_ref{i}_scale"
         enc_id, lat_id = f"ds_ref{i}_encode", f"ds_ref{i}_latent"
         workflow[load_id] = {"class_type": "LoadImage", "inputs": {"image": ref_input},
@@ -438,10 +443,20 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
         logger.info("base LoRA %r absent — bypassing node 139", base_lora)
         _bypass_node(workflow, "139", "model")
 
-    job_id = str(uuid.uuid4())
-    meta = {"model_name": "klein_edit_dataset"}
+    job_id = str(job_id or uuid.uuid4())
+    meta = {"model_name": "klein_edit_dataset", "staged_inputs": staged_inputs}
     if extra_metadata:
         meta.update(extra_metadata)
-    queue_manager.add_job(job_type="image", user_id=str(user_id), workflow_data=workflow,
-                          prompt=edit_prompt, job_id=job_id, metadata=meta)
+    try:
+        queue_manager.add_job(job_type="image", user_id=str(user_id), workflow_data=workflow,
+                              prompt=edit_prompt, job_id=job_id, metadata=meta)
+    except Exception:
+        for staged_path in staged_inputs:
+            try:
+                os.remove(staged_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception('could not clean failed Klein staging file %s', staged_path)
+        raise
     return job_id

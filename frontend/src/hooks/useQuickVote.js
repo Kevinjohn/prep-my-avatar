@@ -23,10 +23,9 @@ export function useQuickVote(rate) {
     if (!voteQueue || voteIdx + 1 >= voteQueue.length) close();
     else setVoteIdx((i) => i + 1);
   };
-  const voteCurrent = (rating) => {
+  const voteCurrent = async (rating) => {
     const c = voteQueue && voteQueue[voteIdx];
-    if (c) rate(c.id, rating);
-    advanceVote();
+    if (c && await rate(c.id, rating)) advanceVote();
   };
   const onTouchStart = (e) => {
     const t = e.touches && e.touches[0];

@@ -31,8 +31,8 @@ def scrape_scan():
     only matters for gallery-listing sources (PornPics category/tag/search):
     false (default) returns one cover per matched gallery, true dives into every
     photo of each gallery. Returns {scannable, platform, url_type, count, items,
-    paginated, page, category} (200), {error, suggestions} (400), or {error}
-    (502) on a source-level failure. Downloads nothing."""
+    paginated, page, category, partial, warning?} (200), {error, suggestions}
+    (400), or {error} (502) on a total source-level failure. Downloads nothing."""
     data = request.get_json(silent=True) or {}
     url = data.get('url')
     if not url or not isinstance(url, str):
@@ -41,11 +41,14 @@ def scrape_scan():
         return jsonify({'error': 'URL too long.'}), 400
     # "Load more" pagination (paginable sources): 0-based, hard-capped (deep pages
     # make gallery-dl re-paginate the whole listing → slow + abuse vector).
-    try:
-        page = int(data.get('page', 0))
-    except (TypeError, ValueError):
-        page = 0
-    page = max(0, min(page, MAX_SCAN_PAGE))
+    page_value = data.get('page', 0)
+    if isinstance(page_value, bool) or not isinstance(page_value, int):
+        return jsonify({'error': 'page must be an integer.'}), 400
+    page = max(0, min(page_value, MAX_SCAN_PAGE))
+
+    include_albums = data.get('include_albums', False)
+    if not isinstance(include_albums, bool):
+        return jsonify({'error': 'include_albums must be a boolean.'}), 400
 
     from ..scrape.validators import url_validator
     result = url_validator.validate_url(url)
@@ -54,26 +57,31 @@ def scrape_scan():
                         'suggestions': result.suggestions}), 400
 
     from ..scrape.sources import registry  # local import: avoid an import cycle at load
-    match = registry.resolve(url)
+    canonical_url = result.original_url
+    match = registry.resolve(canonical_url)
     if match is None or match.source is None:
         return jsonify({'error': result.error or 'unsupported URL.',
                         'suggestions': result.suggestions or
                         ['Check the URL is a reachable media page.']}), 400
 
     match.page = page
-    match.include_albums = bool(data.get('include_albums'))
+    match.include_albums = include_albums
     items, err = match.source.scan(match)
-    if err:
+    if err and not items:
         return jsonify({'error': err, 'platform': result.platform.value,
                         'url_type': result.url_type.value}), 502
-    return jsonify({
+    payload = {
         'scannable': True, 'platform': result.platform.value,
         'url_type': result.url_type.value,
         'count': len(items or []), 'items': items or [],
         'paginated': bool(getattr(match.source, 'paginated', False)),
         'page': page,
         'category': getattr(match.source, 'category', 'video'),
-    })
+        'partial': bool(err),
+    }
+    if err:
+        payload['warning'] = err
+    return jsonify(payload)
 
 
 @bp.get('/scrape/thumb')

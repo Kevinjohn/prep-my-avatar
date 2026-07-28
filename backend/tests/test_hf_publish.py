@@ -219,6 +219,34 @@ def test_include_ref_on_adds_anchor(app, tmp_path):
     assert (tmp_path / 'Lola_000_ref.webp').exists()
 
 
+def test_publish_staging_rejects_missing_kept_file(app, tmp_path):
+    from app.models import FaceDatasetImage
+    from app.services import hf_publish
+    with app.app_context():
+        ds_id = _make_dataset(app, captions=('a', 'b'))
+        image = FaceDatasetImage.query.filter_by(dataset_id=ds_id).first()
+        os.remove(hf_publish.fds._img_path(image))
+        with pytest.raises(hf_publish.HfPublishError) as exc:
+            hf_publish.build_publish_dir(
+                'local', ds_id, str(tmp_path), include_ref=False,
+                license='cc0-1.0', nfaa=False)
+    assert exc.value.code == 'dataset_incomplete'
+    assert f'image:{image.id}:' in exc.value.message
+
+
+def test_publish_staging_rejects_missing_requested_reference(app, tmp_path):
+    from app.services import hf_publish
+    with app.app_context():
+        ds_id = _make_dataset(app, with_ref=True)
+        ds = hf_publish.fds.get_dataset('local', ds_id)
+        os.remove(hf_publish.fds._ref_path(ds))
+        with pytest.raises(hf_publish.HfPublishError) as exc:
+            hf_publish.build_publish_dir(
+                'local', ds_id, str(tmp_path), include_ref=True,
+                license='cc0-1.0', nfaa=False)
+    assert exc.value.code == 'dataset_incomplete'
+
+
 # --- write-scope preflight ----------------------------------------------------
 
 def test_read_only_token_refused_before_upload(app):
@@ -292,6 +320,34 @@ def test_publish_success_returns_url(app):
     assert any(n.endswith('.webp') for n in api.uploaded_files)
 
 
+@pytest.mark.parametrize('length', (96, 97, 100))
+def test_default_repo_id_always_passes_its_validator(app, length):
+    from app.services import hf_publish
+    with app.app_context():
+        ds_id = _make_dataset(app, name='A' * length)
+        ds = hf_publish.fds.get_dataset('local', ds_id)
+        repo_id = hf_publish.default_repo_id('alice', ds)
+    assert hf_publish._valid_repo_id(repo_id)
+    assert len(repo_id.split('/', 1)[1]) <= 96
+
+
+@pytest.mark.parametrize('payload', (None, 'malformed', ['alice'], {}, {'name': ''}))
+def test_hf_namespace_ignores_malformed_success_payloads(monkeypatch, payload):
+    from app.services import hf_publish
+    api = FakeApi()
+    monkeypatch.setattr(api, 'whoami', lambda: payload)
+    monkeypatch.setattr(hf_publish, '_make_api', lambda _token: api)
+    assert hf_publish.hf_namespace('hf_x') is None
+
+
+def test_hf_namespace_accepts_mapping_username(monkeypatch):
+    from app.services import hf_publish
+    api = FakeApi()
+    monkeypatch.setattr(api, 'whoami', lambda: {'name': 'alice'})
+    monkeypatch.setattr(hf_publish, '_make_api', lambda _token: api)
+    assert hf_publish.hf_namespace('hf_x') == 'alice'
+
+
 def test_upload_failure_deletes_new_empty_repo(app):
     from app.services import hf_publish
     api = FakeApi(role='write', upload_exc=RuntimeError('upload failed'))
@@ -318,6 +374,46 @@ def test_upload_failure_reports_partial_repo_when_cleanup_fails(app):
                 license='cc0-1.0', include_ref=False, token='hf_x', _api=api)
     assert error.value.code == 'upload_failed_repo_retained'
     assert 'delete "alice/lola"' in error.value.message
+
+
+def test_owned_partial_repo_is_resumed_after_process_interruption(app):
+    from app.services import hf_publish
+    api = FakeApi(role='write', create_exc=FakeHTTPError(409))
+    with app.app_context():
+        ds_id = _make_dataset(app)
+        out = hf_publish.publish_to_hf(
+            ds_id, 'alice/lola', private=True, nfaa=True,
+            license='cc0-1.0', include_ref=False, token='hf_x', _api=api,
+            resume_owned_repo=True)
+    assert out['ok'] is True
+    assert api.uploaded['repo_id'] == 'alice/lola'
+
+
+def test_retry_detects_durably_owned_partial_repo(app, monkeypatch):
+    from app.services import background_jobs, hf_publish
+    dataset_id = 993
+    hf_publish._jobs.pop(dataset_id, None)
+    with app.app_context():
+        prior = background_jobs.create('hf_publish', str(dataset_id))
+        background_jobs.touch(
+            prior.id, state='interrupted', error='process restarted',
+            error_code='process_restarted',
+            progress={'phase': 'repo_created', 'repo_id': 'alice/lola'})
+    captured = {}
+
+    class CapturingThread:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(hf_publish.threading, 'Thread', CapturingThread)
+    result = hf_publish.start_publish(
+        app, dataset_id, 'alice/lola', True, True, 'cc0-1.0', False, 'hf_x')
+
+    assert result['state'] == 'running'
+    assert captured['args'][-1] is True
 
 
 def test_invalid_license_rejected(app):
@@ -398,6 +494,53 @@ def test_start_publish_reuses_durable_job_without_duplicate_worker(app, monkeypa
 
     assert result['already'] is True
     assert result['job_id'] == existing_id
+
+
+def test_start_publish_terminalizes_worker_start_failure(app, monkeypatch):
+    from app.services import background_jobs, hf_publish
+    dataset_id = 992
+    hf_publish._jobs.pop(dataset_id, None)
+
+    class BrokenThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError('thread limit')
+
+    monkeypatch.setattr(hf_publish.threading, 'Thread', BrokenThread)
+    result = hf_publish.start_publish(
+        app, dataset_id, 'alice/lola', True, True, 'cc0-1.0', False, 'hf_x')
+
+    assert result['state'] == 'error'
+    assert result['error_code'] == 'worker_start_failed'
+    with app.app_context():
+        saved = background_jobs.snapshot(background_jobs.get(result['job_id']))
+    assert saved['state'] == 'error'
+    assert saved['error_code'] == 'worker_start_failed'
+
+
+def test_terminal_job_retries_transient_ledger_failure(app, monkeypatch):
+    from app.services import background_jobs, hf_publish
+    with app.app_context():
+        job = background_jobs.create('hf_publish', 'retry-terminal')
+        real_touch = background_jobs.touch
+        calls = []
+
+        def flaky_touch(*args, **kwargs):
+            calls.append(args[0])
+            if len(calls) < 3:
+                raise RuntimeError('database busy')
+            return real_touch(*args, **kwargs)
+
+        monkeypatch.setattr(background_jobs, 'touch', flaky_touch)
+        result = {'state': 'done', 'repo_url': 'https://example.test/repo',
+                  'repo_id': 'alice/lola', 'count': 2, 'error': None,
+                  'error_code': None}
+        assert hf_publish._terminal_job(job.id, result, app) is True
+        saved = background_jobs.snapshot(background_jobs.get(job.id))
+    assert len(calls) == 3
+    assert saved['state'] == 'done'
 
 
 def test_capability_reflects_hf_token(app, monkeypatch):

@@ -14,7 +14,7 @@ pipeline behind one UI.
 
 ## Two ways to run it
 
-| | API-only | Full local |
+| Capability | API-only | Full local |
 |---|---|---|
 | **What works** | Create datasets, generate via Gemini/ChatGPT, curate, caption via API, export ZIP | Everything — plus local (Klein) generation, JoyCaption, face scoring, masks, training, Test Studio |
 | **Needs** | Python 3.10–3.12, an API key | ComfyUI and/or ai-toolkit + an NVIDIA GPU (12 GB+ for local generation) |
@@ -35,15 +35,17 @@ opens the app at `http://127.0.0.1:5050/`.
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r backend/requirements.txt
-python backend/run.py
+python backend/source_launcher.py --install --root . --data-dir data
+python data/source-launcher.py --root . --data-dir data
 ```
 
 **Docker (API-only):** `cp .env.example .env`, set `LDS_ACCESS_TOKEN` in `.env`
 to a long random value, then run `docker compose up --build`. Open
 `http://127.0.0.1:5050/remote-login` and enter that token.
 
-The full install matrix (portable bundle, GPU requirements, external tools)
-lives in the README on GitHub.
+The supported launch options and requirements are in
+[Installation and launch](https://github.com/Kevinjohn/prep-my-avatar#installation-and-launch)
+in this repository's README.
 
 ## The Setup wizard
 

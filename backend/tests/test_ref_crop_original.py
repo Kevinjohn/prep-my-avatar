@@ -48,6 +48,7 @@ def test_crop_reference_reads_original_not_the_cropped_ref(app):
         ds = svc.create_dataset('local', 'Emma', 'zchar_emma')
         d, orig_fn, ref_fn = _seed_ref(
             ds, original=_webp((255, 0, 0), (600, 400)), cropped=_webp((0, 255, 0), (64, 64)))
+        before = svc.dataset_change_state('local', ds.id)
         # A 400px-wide box is IMPOSSIBLE from the 64px green ref (would clamp to 64) —
         # so a red 1024² result proves the crop was taken from the original.
         assert svc.crop_reference('local', ds.id, 0, 0, 400, 400) is True
@@ -59,6 +60,8 @@ def test_crop_reference_reads_original_not_the_cropped_ref(app):
         assert r > 200 and g < 60                       # red = from the original
         with Image.open(os.path.join(d, orig_fn)) as original:
             assert original.size == (600, 400)  # original untouched
+        after = svc.dataset_change_state('local', ds.id)
+        assert after['revision'] > before['revision']
 
 
 def test_crop_reference_legacy_without_original_crops_ref_in_place(app):
@@ -80,6 +83,7 @@ def test_recrop_reference_auto_reruns_head_crop_on_original(app, monkeypatch):
         ds = svc.create_dataset('local', 'Mia', 'zchar_mia')
         d, _o, ref_fn = _seed_ref(
             ds, original=_webp((255, 0, 0), (400, 400)), cropped=_webp((0, 255, 0), (64, 64)))
+        before = svc.dataset_change_state('local', ds.id)
         monkeypatch.setattr(svc, 'detect_head_bbox', lambda *a, **k: (0.25, 0.25, 0.75, 0.75))
         ok, detected = svc.recrop_reference_auto('local', ds.id)
         assert ok is True and detected is True
@@ -89,6 +93,8 @@ def test_recrop_reference_auto_reruns_head_crop_on_original(app, monkeypatch):
         r, g, _b = im.getpixel((512, 512))
         im.close()
         assert r > 200 and g < 60                       # regenerated from the red original
+        after = svc.dataset_change_state('local', ds.id)
+        assert after['revision'] > before['revision']
 
 
 def test_recrop_reference_auto_no_reference_returns_false(app):

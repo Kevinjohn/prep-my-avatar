@@ -15,6 +15,9 @@ export default function RunSelector({
   displayedCount,
   showResults,
   onToggleResults,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore = () => {},
 }) {
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -49,11 +52,17 @@ export default function RunSelector({
             const pct = voted ? Math.round((r.likes / voted) * 100) : null;
             return (
               <option key={r.key} value={r.key}>
-                {i === 0 ? '● Current run' : `Run #${runs.length - i}`} — {r.modelLabel || '?'} · 👍{r.likes} 👎{r.dislikes}{pct !== null ? ` · ${pct}% 👍` : ''} · «{(r.prompt || '').slice(0, 22)}»
+                {i === 0 ? '● Current run' : `Run #${runs.length - i}`} — {r.modelLabel || `${r.cells || 0} img`} · 👍{r.likes || 0} 👎{r.dislikes || 0}{pct !== null ? ` · ${pct}% 👍` : ''} · «{(r.prompt || '').slice(0, 22)}»
               </option>
             );
           })}
         </select>
+      )}
+      {hasMore && (
+        <button type="button" disabled={loadingMore} onClick={onLoadMore}
+          className="rounded-lg border border-border px-2 py-1 text-[0.6875rem] text-content-muted disabled:opacity-40">
+          {loadingMore ? 'Loading…' : 'Older runs'}
+        </button>
       )}
     </div>
   );

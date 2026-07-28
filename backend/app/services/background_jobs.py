@@ -15,6 +15,23 @@ _LOG_MAX = 400
 _CREATE_LOCK = threading.Lock()
 
 
+def _identity(kind, dedupe_key) -> tuple[str, str]:
+    """Validate an identity exactly as it is persisted.
+
+    Silently truncating these values aliases otherwise distinct operations and
+    also makes a subsequent ``latest`` lookup with the original key fail.
+    """
+    normalized_kind = str(kind).strip()
+    normalized_key = str(dedupe_key).strip()
+    if not normalized_kind or not normalized_key:
+        raise ValueError('background jobs require a kind and dedupe key')
+    if len(normalized_kind) > 32:
+        raise ValueError('background-job kind must be at most 32 characters')
+    if len(normalized_key) > 160:
+        raise ValueError('background-job dedupe key must be at most 160 characters')
+    return normalized_kind, normalized_key
+
+
 def _loads(value, fallback):
     try:
         parsed = json.loads(value) if value else fallback
@@ -32,10 +49,7 @@ def create_or_get(kind, dedupe_key, payload=None, *, resumable=False) \
         -> tuple[BackgroundJob, bool]:
     """Return ``(job, created)`` so callers never launch a second worker for an
     already-active durable key."""
-    normalized_kind = str(kind).strip()[:32]
-    normalized_key = str(dedupe_key).strip()[:160]
-    if not normalized_kind or not normalized_key:
-        raise ValueError('background jobs require a kind and dedupe key')
+    normalized_kind, normalized_key = _identity(kind, dedupe_key)
     with _CREATE_LOCK:
         active = (BackgroundJob.query
                   .filter_by(kind=normalized_kind, dedupe_key=normalized_key)
@@ -56,8 +70,9 @@ def create_or_get(kind, dedupe_key, payload=None, *, resumable=False) \
 
 
 def latest(kind, dedupe_key) -> BackgroundJob | None:
+    normalized_kind, normalized_key = _identity(kind, dedupe_key)
     return (BackgroundJob.query
-            .filter_by(kind=str(kind), dedupe_key=str(dedupe_key))
+            .filter_by(kind=normalized_kind, dedupe_key=normalized_key)
             .order_by(BackgroundJob.created_at.desc()).first())
 
 
@@ -82,30 +97,44 @@ def touch(job_id, *, state=None, result=None, error=None, error_code=None,
                 f'background job {row.id} is already terminal ({row.state})')
         return row
     now = utcnow()
+    values = {'heartbeat_at': now, 'updated_at': now}
     if state is not None:
         if state not in (*ACTIVE_STATES, *TERMINAL_STATES):
             raise ValueError(f'unknown background-job state: {state}')
-        row.state = state
+        values['state'] = state
     if result is not None:
-        row.result = json.dumps(result, ensure_ascii=False)
+        values['result'] = json.dumps(result, ensure_ascii=False)
     if error is not None:
-        row.error = str(error)[:4000]
+        values['error'] = str(error)[:4000]
     if error_code is not None:
-        row.error_code = str(error_code)[:64]
+        values['error_code'] = str(error_code)[:64]
     if progress is not None:
-        row.progress = json.dumps(progress, ensure_ascii=False)
+        values['progress'] = json.dumps(progress, ensure_ascii=False)
     if log is not None:
         lines = _loads(row.log, [])
         if not isinstance(lines, list):
             lines = []
         lines.append(str(log).rstrip('\n')[-4000:])
-        row.log = json.dumps(lines[-_LOG_MAX:], ensure_ascii=False)
-    row.heartbeat_at = now
-    row.updated_at = now
-    if row.state in TERMINAL_STATES:
-        row.completed_at = row.completed_at or now
+        values['log'] = json.dumps(lines[-_LOG_MAX:], ensure_ascii=False)
+    if state in TERMINAL_STATES:
+        values['completed_at'] = now
+
+    # The state predicate is the database-level terminal immutability guard.
+    # A session-local check alone can race another worker that commits after
+    # this row was loaded.
+    updated = (db.session.query(BackgroundJob)
+               .filter(BackgroundJob.id == row.id)
+               .filter(BackgroundJob.state.in_(ACTIVE_STATES))
+               .update(values, synchronize_session=False))
+    if updated != 1:
+        db.session.rollback()
+        current = get(job_id)
+        if current is None:
+            return None
+        raise RuntimeError(
+            f'background job {current.id} is already terminal ({current.state})')
     db.session.commit()
-    return row
+    return get(job_id)
 
 
 def snapshot(row: BackgroundJob | None) -> dict:
@@ -128,6 +157,8 @@ def snapshot(row: BackgroundJob | None) -> dict:
         'error_code': row.error_code,
         'log': lines,
         'progress': progress,
+        'resumable': bool(row.resumable),
+        'attempts': row.attempts,
         'created_at': row.created_at.isoformat() if row.created_at else None,
         'started_at': row.started_at.isoformat() if row.started_at else None,
         'completed_at': row.completed_at.isoformat() if row.completed_at else None,
@@ -137,19 +168,26 @@ def snapshot(row: BackgroundJob | None) -> dict:
 def recover_interrupted() -> int:
     """Close request-spawned jobs whose daemon died with the old process.
 
-    Retrying remote writes automatically can duplicate paid generations or
+    ``resumable`` records are exposed to callers as retry-eligible metadata,
+    but are still interrupted: this generic ledger has no operation-specific
+    replay callback and must not imply that replay occurred. Retrying remote
+    writes automatically can duplicate paid generations or
     publish a repository twice.  The durable terminal state therefore explains
     the interruption and lets the owning UI offer an explicit retry.
     """
-    rows = BackgroundJob.query.filter(BackgroundJob.state.in_(ACTIVE_STATES)).all()
-    for row in rows:
-        row.state = 'interrupted'
-        row.error_code = 'process_restarted'
-        row.error = ('The app restarted while this operation was running. Its final '
-                     'remote state is unknown; inspect the provider before retrying.')
-        row.completed_at = utcnow()
-        row.heartbeat_at = row.completed_at
-        row.updated_at = row.completed_at
-    if rows:
+    now = utcnow()
+    updated = (db.session.query(BackgroundJob)
+               .filter(BackgroundJob.state.in_(ACTIVE_STATES))
+               .update({
+                   'state': 'interrupted',
+                   'error_code': 'process_restarted',
+                   'error': ('The app restarted while this operation was running. '
+                             'Its final remote state is unknown; inspect the '
+                             'provider before retrying.'),
+                   'completed_at': now,
+                   'heartbeat_at': now,
+                   'updated_at': now,
+               }, synchronize_session=False))
+    if updated:
         db.session.commit()
-    return len(rows)
+    return updated

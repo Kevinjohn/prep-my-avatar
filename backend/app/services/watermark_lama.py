@@ -12,8 +12,11 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from .. import config as cfg
@@ -115,7 +118,54 @@ def _run_lama_payload(payload, timeout: int = 300) -> tuple[bool, dict | None]:
     return True, None
 
 
-def inpaint_watermarks(image_path, bboxes, timeout: int = 300, device: str = 'cpu') -> tuple[bool, dict | None]:
+def _staged_image_path(image_path: str, output_path: str | None = None) -> str:
+    """Copy an image to a same-filesystem sibling for destructive ML work."""
+    source = Path(image_path)
+    fd, staged = tempfile.mkstemp(
+        prefix=f'.{source.name}.lama-',
+        suffix=Path(output_path or image_path).suffix,
+        dir=source.parent,
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(source, staged)
+    except Exception:
+        Path(staged).unlink(missing_ok=True)
+        raise
+    return staged
+
+
+def _publish_staged_image(staged: str, destination: str) -> None:
+    """Durably publish completed pixels without exposing a partial overwrite."""
+    with open(staged, 'rb') as handle:
+        os.fsync(handle.fileno())
+    os.replace(staged, destination)
+
+
+def _inpaint_staged(payload: dict, timeout: int, output_path=None) -> tuple[bool, dict | None]:
+    """Run the in-place helper on a copy and publish only a reported success."""
+    source = str(payload['image_path'])
+    destination = str(output_path or source)
+    try:
+        staged = _staged_image_path(source, destination)
+    except OSError as exc:
+        return False, {'kind': 'failed', 'detail': f'could not stage image: {exc}'}
+    try:
+        staged_payload = {**payload, 'image_path': staged}
+        ok, error = _run_lama_payload(staged_payload, timeout=timeout)
+        if not ok:
+            return False, error
+        try:
+            _publish_staged_image(staged, destination)
+        except OSError as exc:
+            return False, {'kind': 'failed', 'detail': f'could not publish image: {exc}'}
+        return True, None
+    finally:
+        Path(staged).unlink(missing_ok=True)
+
+
+def inpaint_watermarks(image_path, bboxes, timeout: int = 300, device: str = 'cpu',
+                       output_path=None) -> tuple[bool, dict | None]:
     """Repeint en une passe LaMa les rectangles normalises de ``bboxes``.
 
     L'image est modifiee en place. Le retour ``(ok, error)`` conserve le contrat
@@ -123,10 +173,11 @@ def inpaint_watermarks(image_path, bboxes, timeout: int = 300, device: str = 'cp
     et ``detail``.
     """
     payload = {'image_path': str(image_path), 'bboxes': bboxes, 'device': device}
-    return _run_lama_payload(payload, timeout=timeout)
+    return _inpaint_staged(payload, timeout=timeout, output_path=output_path)
 
 
-def inpaint_watermark(image_path, bbox, timeout: int = 300, device: str = 'cpu') -> tuple[bool, dict | None]:
+def inpaint_watermark(image_path, bbox, timeout: int = 300, device: str = 'cpu',
+                      output_path=None) -> tuple[bool, dict | None]:
     """Adaptateur compatible pour l'ancien appel a un seul rectangle."""
     try:
         bbox = [float(value) for value in bbox]
@@ -145,7 +196,9 @@ def inpaint_watermark(image_path, bbox, timeout: int = 300, device: str = 'cpu')
         max(0.0, min(1.0, right)),
         max(0.0, min(1.0, bottom)),
     ]
-    return inpaint_watermarks(image_path, [normalized], timeout=timeout, device=device)
+    return inpaint_watermarks(
+        image_path, [normalized], timeout=timeout, device=device,
+        output_path=output_path)
 
 
 def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
@@ -155,34 +208,114 @@ def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
         path = str(job.get('image_path') or '')
         if not path or not os.path.isfile(path):
             raise ValueError(f'image not found: {path}')
-        normalized.append({'image_path': path, 'bboxes': job.get('bboxes') or []})
+        normalized.append({
+            'image_path': path,
+            'output_path': str(job.get('output_path') or path),
+            'bboxes': job.get('bboxes') or [],
+        })
     if not normalized:
         return {}
     if not is_available():
         err = {'kind': 'unavailable', 'detail': 'watermark inpainting is not installed (ML extras)'}
         return {job['image_path']: (False, err) for job in normalized}
-    payload_json = json.dumps({'jobs': normalized, 'device': device})
+    staged_by_original = {}
+    try:
+        for job in normalized:
+            staged_by_original[job['image_path']] = _staged_image_path(
+                job['image_path'], job['output_path'])
+    except OSError as exc:
+        for staged in staged_by_original.values():
+            Path(staged).unlink(missing_ok=True)
+        err = {'kind': 'failed', 'detail': f'could not stage image: {exc}'}
+        return {job['image_path']: (False, err) for job in normalized}
+    original_by_staged = {staged: original for original, staged in staged_by_original.items()}
+    staged_jobs = [
+        {**job, 'image_path': staged_by_original[job['image_path']]}
+        for job in normalized
+    ]
+    payload_json = json.dumps({'jobs': staged_jobs, 'device': device})
+    proc = None
+    interrupted_error = None
     try:
         proc = subprocess.run([lama_python(), _SCRIPT], input=payload_json,
                               capture_output=True, text=True, encoding='utf-8',
                               errors='replace', timeout=timeout,
                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    except (subprocess.TimeoutExpired, OSError) as e:
-        err = {'kind': 'failed', 'detail': str(e)}
-        return {job['image_path']: (False, err) for job in normalized}
-    line = next((ln for ln in reversed((proc.stdout or '').splitlines())
+    except subprocess.TimeoutExpired as exc:
+        interrupted_error = {'kind': 'failed', 'detail': str(exc)}
+        stdout = exc.stdout or ''
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode('utf-8', errors='replace')
+    except OSError as exc:
+        interrupted_error = {'kind': 'failed', 'detail': str(exc)}
+        stdout = ''
+    else:
+        stdout = proc.stdout or ''
+    lines = stdout.splitlines()
+    line = next((ln for ln in reversed(lines)
                  if ln.strip().startswith('{')), '')
     try:
         data = json.loads(line) if line else {}
     except json.JSONDecodeError:
         data = {}
-    if not data.get('ok'):
-        err = {'kind': 'failed', 'detail': data.get('error') or _stderr_tail(proc) or 'inpaint worker failed'}
-        return {job['image_path']: (False, err) for job in normalized}
-    by_path = {}
-    for item in data.get('results') or []:
+    streamed = {}
+    for candidate in lines:
+        try:
+            item = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict) or item.get('type') != 'result':
+            continue
         path = str(item.get('image_path') or '')
+        err = None if item.get('ok') else {
+            'kind': 'failed', 'detail': item.get('error') or 'inpaint failed'}
+        streamed[path] = (bool(item.get('ok')), err)
+    if interrupted_error is not None:
+        staged_results = {job['image_path']: streamed.get(
+            staged_by_original[job['image_path']], (False, interrupted_error))
+                          for job in normalized}
+        return _publish_batch_results(staged_results, staged_by_original, normalized)
+    if not isinstance(data, dict) or not data.get('ok'):
+        detail = data.get('error') if isinstance(data, dict) else None
+        err = {'kind': 'failed', 'detail': detail or _stderr_tail(proc) or 'inpaint worker failed'}
+        return _publish_batch_results(
+            {job['image_path']: (False, err) for job in normalized},
+            staged_by_original, normalized)
+    results = data.get('results') or []
+    if not isinstance(results, list) or any(not isinstance(item, dict) for item in results):
+        err = {'kind': 'failed', 'detail': 'invalid inpaint worker results schema'}
+        return _publish_batch_results(
+            {job['image_path']: (False, err) for job in normalized},
+            staged_by_original, normalized)
+    by_path = {}
+    for item in results:
+        path = original_by_staged.get(str(item.get('image_path') or ''), '')
         err = None if item.get('ok') else {'kind': 'failed', 'detail': item.get('error') or 'inpaint failed'}
         by_path[path] = (bool(item.get('ok')), err)
-    return {job['image_path']: by_path.get(job['image_path'], (False, {'kind': 'failed', 'detail': 'missing worker result'}))
-            for job in normalized}
+    staged_results = {
+        job['image_path']: by_path.get(
+            job['image_path'],
+            (False, {'kind': 'failed', 'detail': 'missing worker result'}),
+        )
+        for job in normalized
+    }
+    return _publish_batch_results(staged_results, staged_by_original, normalized)
+
+
+def _publish_batch_results(results: dict, staged_by_original: dict[str, str],
+                           jobs: list[dict]) -> dict:
+    """Publish successful staged batch outputs and discard every other copy."""
+    published = {}
+    destinations = {job['image_path']: job['output_path'] for job in jobs}
+    for original, staged in staged_by_original.items():
+        ok, error = results.get(
+            original, (False, {'kind': 'failed', 'detail': 'missing worker result'}))
+        if ok:
+            try:
+                _publish_staged_image(staged, destinations[original])
+            except OSError as exc:
+                ok = False
+                error = {'kind': 'failed', 'detail': f'could not publish image: {exc}'}
+        Path(staged).unlink(missing_ok=True)
+        published[original] = (ok, error)
+    return published

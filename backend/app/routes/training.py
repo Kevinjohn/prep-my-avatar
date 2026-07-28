@@ -1,10 +1,10 @@
 """Training API: launch/continue/queue/stop a LoRA training run via ai-toolkit,
 plus checkpoint listing/import/delete and Z-Image base-conversion prep.
 
-No login - single local user (`cfg.LOCAL_USER`). Every route except
-`/dataset/train/status` is gated on `capabilities.probe()['aitoolkit']['valid']`
-(409 with a UI hint): `/train/status` must stay pollable even when
-ai-toolkit isn't configured, so it degrades to `{'available': False}` instead.
+No login - single local user (`cfg.LOCAL_USER`). Launch/process routes call the
+ai-toolkit or cloud capability gates explicitly. Preset, feedback, local-folder,
+checkpoint discovery, and status routes remain available without ai-toolkit;
+status must stay pollable and degrades to `{'available': False}`.
 """
 import os
 import re
@@ -24,6 +24,16 @@ from ..utils.comfyui import get_zimage_models, get_checkpoint_models
 from ._common import _map_error
 
 bp = Blueprint('training', __name__, url_prefix='/api')
+
+
+@bp.before_request
+def _require_json_objects_for_posts():
+    if request.method != 'POST' or not request.content_length:
+        return None
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': 'request body must be a JSON object'}), 400
+    return None
 
 
 def _require_aitoolkit():
@@ -101,6 +111,8 @@ def dataset_train_continue(dataset_id):
         kw['base_model'] = d.get('base_model')
     if d.get('variant'):
         kw['variant'] = d.get('variant')
+    if d.get('train_type'):
+        kw['train_type'] = d.get('train_type')
     try:
         res = lt.continue_training(LOCAL_USER, dataset_id, **kw)
     except Exception as e:
@@ -129,8 +141,12 @@ def dataset_train_enqueue(dataset_id):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     d = request.get_json(silent=True) or {}
+    if d.get('extra_steps') is None and not isinstance(d.get('fresh'), bool):
+        return jsonify({'error': "'fresh' must be explicitly true or false"}), 400
     # base_model/variant = base CHOISIE pour le job en file (absente → persistée).
     kw = {'extra_steps': d.get('extra_steps'), 'masked': d.get('masked', True)}
+    if d.get('extra_steps') is None:
+        kw['fresh'] = d['fresh']
     if 'base_model' in d:
         kw['base_model'] = d.get('base_model')
     if d.get('variant'):
@@ -170,6 +186,8 @@ def dataset_train_schedule(dataset_id):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     d = request.get_json(silent=True) or {}
+    if d.get('extra_steps') is None and not isinstance(d.get('fresh'), bool):
+        return jsonify({'error': "'fresh' must be explicitly true or false"}), 400
     raw = str(d.get('at') or '').strip()   # datetime-local: "YYYY-MM-DDTHH:MM"
     try:
         at = datetime.fromisoformat(raw)
@@ -182,6 +200,8 @@ def dataset_train_schedule(dataset_id):
         return jsonify({'error': 'invalid schedule time'}), 400
     kw = {'extra_steps': d.get('extra_steps'), 'not_before': at.isoformat(timespec='minutes'),
           'masked': d.get('masked', True)}
+    if d.get('extra_steps') is None:
+        kw['fresh'] = d['fresh']
     if 'base_model' in d:
         kw['base_model'] = d.get('base_model')
     if d.get('variant'):
@@ -225,8 +245,15 @@ def dataset_train_stop():
     gate = _require_aitoolkit()
     if gate:
         return gate
-    lt.stop_training()
-    return jsonify({'ok': True})
+    d = request.get_json(silent=True) or {}
+    clear_queue = d.get('clear_queue', False)
+    if not isinstance(clear_queue, bool):
+        return jsonify({'error': "'clear_queue' must be a boolean"}), 400
+    try:
+        lt.stop_training(clear_queue=clear_queue)
+    except Exception as exc:
+        return _map_error(exc)
+    return jsonify({'ok': True, 'queue_cleared': clear_queue})
 
 
 @bp.get('/dataset/<int:dataset_id>/train/checkpoints')
@@ -802,7 +829,13 @@ def dataset_train_cloud_progress(dataset_id):
 @bp.post('/dataset/train/cloud/stop')
 def dataset_train_cloud_stop():
     d = request.get_json(silent=True) or {}
-    return jsonify({'ok': ct.request_stop(d.get('run_id'))})
+    run_id = d.get('run_id')
+    if run_id is not None:
+        try:
+            run_id = int(run_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'run_id must be an integer'}), 400
+    return jsonify({'ok': ct.request_stop(run_id)})
 
 
 @bp.get('/dataset/<int:dataset_id>/train/cloud/sample/<path:filename>')

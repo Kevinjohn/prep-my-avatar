@@ -14,40 +14,65 @@
  *                    voted, net, wilson}],
  *     pending, resumable, gpu_busy }
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useToast } from '../components/common/Toast';
 import { getJson, safePostJson as postJson } from '../api/fetchClient';
 
-export function useStudioRun(runId) {
+export function useStudioRun(runId, { pollMs = 3000 } = {}) {
   const toast = useToast();
   const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const requestRef = useRef(0);
 
   const refresh = useCallback(async () => {
-    if (!runId) return;
+    if (!runId) return false;
+    const request = ++requestRef.current;
     try {
-      setData(await getJson(`/api/studio/run/${runId}/status`));
-    } catch { /* transient network error — the poll retries */ }
+      const next = await getJson(`/api/studio/run/${runId}/status`);
+      if (request === requestRef.current) {
+        setData(next);
+        setError(null);
+      }
+      return true;
+    } catch (cause) {
+      if (request === requestRef.current) setError(cause?.message || 'Could not load this run');
+      return false;
+    }
   }, [runId]);
 
   // Vide la grille DÈS que le run change : sinon on garde les cellules du run
   // précédent tant que le refetch n'a pas répondu (et si le fetch échoue ça reste
   // bloqué sur l'ancien run). null = pas de run sélectionné → studio vierge.
-  useEffect(() => { setData(null); }, [runId]);
+  useEffect(() => {
+    requestRef.current += 1;
+    setData(null);
+    setError(null);
+  }, [runId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Poll while generations are in flight (pending cells fill the grid live).
+  // Self-scheduling poll: retries a failed first request and never overlaps.
   useEffect(() => {
-    if (!data?.pending) return undefined;
-    const id = setInterval(refresh, 3000);
-    return () => clearInterval(id);
-  }, [data, refresh]);
+    if (!runId || (data && !data.pending)) return undefined;
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      await refresh();
+      if (!cancelled) timer = setTimeout(poll, pollMs);
+    };
+    timer = setTimeout(poll, pollMs);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [runId, data, refresh, pollMs]);
 
   // Vote sur une image de test — réutilise la route existante lora-test/rate.
   const rate = useCallback(async (imageId, rating) => {
     const d = await postJson(`/api/dataset/lora-test/image/${imageId}/rate`, { rating });
-    if (!d.ok) toast.error(d.error);
+    if (!d.ok) {
+      toast.error(d.error);
+      return false;
+    }
     await refresh();
+    return true;
   }, [refresh, toast]);
 
   const cancel = useCallback(async () => {
@@ -68,5 +93,5 @@ export function useStudioRun(runId) {
     return d;
   }, [runId, refresh, toast]);
 
-  return { data, refresh, rate, cancel, resume };
+  return { data, error, refresh, rate, cancel, resume };
 }

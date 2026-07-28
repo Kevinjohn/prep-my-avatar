@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, createContext, useContext } from 'react'
+import { useState, useEffect, useCallback, useMemo, createContext, useContext, useRef } from 'react'
 
 // ── Context ──
 
@@ -8,19 +8,49 @@ let _nextId = 0
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([])
+  const timers = useRef(new Map())
 
-  const addToast = useCallback((message, type = 'info', duration = 4000) => {
-    const id = ++_nextId
-    setToasts((prev) => [...prev, { id, message, type }])
-    if (duration > 0) {
-      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), duration)
-    }
-    return id
+  const clearTimer = useCallback((id) => {
+    const timer = timers.current.get(id)
+    if (timer?.handle) clearTimeout(timer.handle)
+    timers.current.delete(id)
   }, [])
 
   const removeToast = useCallback((id) => {
+    clearTimer(id)
     setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [clearTimer])
+
+  const startTimer = useCallback((id, duration) => {
+    if (duration <= 0) return
+    const startedAt = Date.now()
+    const handle = setTimeout(() => removeToast(id), duration)
+    timers.current.set(id, { handle, startedAt, remaining: duration })
+  }, [removeToast])
+
+  const addToast = useCallback((message, type = 'info', duration = 4000) => {
+    const id = ++_nextId
+    setToasts((prev) => [...prev, { id, message, type, duration }])
+    startTimer(id, duration)
+    return id
+  }, [startTimer])
+
+  const pauseToast = useCallback((id) => {
+    const timer = timers.current.get(id)
+    if (!timer?.handle) return
+    clearTimeout(timer.handle)
+    timers.current.set(id, {
+      handle: null,
+      startedAt: 0,
+      remaining: Math.max(1, timer.remaining - (Date.now() - timer.startedAt)),
+    })
   }, [])
+
+  const resumeToast = useCallback((id) => {
+    const timer = timers.current.get(id)
+    if (!timer || timer.handle) return
+    startTimer(id, timer.remaining)
+  }, [startTimer])
 
   const toast = useMemo(() => ({
     info: (msg, d) => addToast(msg, 'info', d),
@@ -30,12 +60,24 @@ export function ToastProvider({ children }) {
   }), [addToast])
 
   // Expose on window for non-React usage
-  useEffect(() => { window.__adminToast = toast }, [toast])
+  useEffect(() => {
+    window.__adminToast = toast
+    return () => {
+      if (window.__adminToast === toast) delete window.__adminToast
+    }
+  }, [toast])
+
+  useEffect(() => () => {
+    for (const timer of timers.current.values()) {
+      if (timer.handle) clearTimeout(timer.handle)
+    }
+    timers.current.clear()
+  }, [])
 
   return (
     <ToastContext.Provider value={toast}>
       {children}
-      <ToastContainer toasts={toasts} onRemove={removeToast} />
+      <ToastContainer toasts={toasts} onRemove={removeToast} onPause={pauseToast} onResume={resumeToast} />
     </ToastContext.Provider>
   )
 }
@@ -62,7 +104,7 @@ const ICONS = {
   warning: '\u26A0\uFE0F',
 }
 
-function ToastContainer({ toasts, onRemove }) {
+function ToastContainer({ toasts, onRemove, onPause, onResume }) {
   if (!toasts.length) return null
 
   // Plain positioning wrapper — NOT a live region. Each toast is its own live
@@ -76,6 +118,15 @@ function ToastContainer({ toasts, onRemove }) {
           role={t.type === 'error' ? 'alert' : 'status'}
           aria-live={t.type === 'error' ? 'assertive' : 'polite'}
           aria-atomic="true"
+          onMouseEnter={() => onPause(t.id)}
+          onMouseLeave={(event) => {
+            if (!event.currentTarget.contains(document.activeElement)) onResume(t.id)
+          }}
+          onFocus={() => onPause(t.id)}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)
+                && !event.currentTarget.matches(':hover')) onResume(t.id)
+          }}
           className={`flex items-start gap-2 border rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm animate-slideIn ${
             TYPE_STYLES[t.type] || TYPE_STYLES.info
           }`}

@@ -11,9 +11,11 @@ Closes #
 
 ## How I tested
 
-- [ ] `python -m pytest backend/tests -q` passes
-- [ ] Frontend `pnpm run build` succeeds **and I committed the regenerated `frontend/dist/`** (only if I touched `frontend/src`)
-- [ ] N/A — docs / config only
+- [ ] `python -m pytest backend/tests tests -q` passes (Python changes)
+- [ ] `python -m ruff check backend src tests` passes (Python changes)
+- [ ] Frontend `pnpm run gate` passes and I committed regenerated `frontend/dist/` (frontend changes)
+- [ ] Frontend `pnpm run e2e` passes (user-flow changes)
+- [ ] N/A items above are explained because this is docs/config-only or the check is outside the change's scope
 
 ## Screenshots
 

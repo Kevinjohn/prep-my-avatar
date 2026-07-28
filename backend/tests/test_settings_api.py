@@ -33,6 +33,23 @@ def test_put_settings_persists_config_and_secret(client, tmp_path):
     assert r.get_json()['config']['ollama']['url'] == 'http://127.0.0.1:11500'
     assert r.get_json()['secrets']['GEMINI_API_KEY'] is True
 
+
+def test_field_level_settings_writes_preserve_another_tabs_unrelated_change(client):
+    """The SPA sends only its draft's changed leaves. The API's deep merge must
+    preserve a write committed by another tab after this tab loaded."""
+    first = client.put('/api/settings', json={
+        'config': {'server': {'port': 6123}},
+    })
+    assert first.status_code == 200
+
+    stale_other_tab = client.put('/api/settings', json={
+        'config': {'captioning': {'backend': 'ollama'}},
+    })
+    assert stale_other_tab.status_code == 200
+    config = stale_other_tab.get_json()['config']
+    assert config['server']['port'] == 6123
+    assert config['captioning']['backend'] == 'ollama'
+
 def test_put_settings_saves_scrape_credentials(client):
     """REDDIT_CLIENT_ID / CIVITAI_API_KEY ride the same secrets store as the engine
     keys: presence-only in the payload, env stamped on save — the scrape sources
@@ -85,6 +102,140 @@ def test_put_rejects_non_object_config(client):
 
 def test_put_rejects_non_object_secrets(client):
     assert client.put('/api/settings', json={'secrets': ['x']}).status_code == 400
+
+
+@pytest.mark.parametrize('value', [123, True, ['secret'], {'value': 'secret'}])
+def test_invalid_secret_value_is_rejected_before_any_settings_write(
+        client, monkeypatch, value):
+    import os
+    from app import config as cfg
+
+    config_path = cfg._config_path()
+    before_config = config_path.read_bytes() if config_path.exists() else None
+    before_env_file = cfg.ENV_PATH.read_bytes() if cfg.ENV_PATH.exists() else None
+    before_runtime = os.environ.get('OPENAI_API_KEY')
+    writes = []
+    original_write = cfg._write_private_text
+
+    def track_write(path, text):
+        writes.append(path)
+        return original_write(path, text)
+
+    monkeypatch.setattr(cfg, '_write_private_text', track_write)
+    response = client.put('/api/settings', json={
+        'config': {'server': {'port': 6123}},
+        'secrets': {'OPENAI_API_KEY': value},
+    })
+
+    assert response.status_code == 400
+    assert response.get_json()['error'] == 'secret OPENAI_API_KEY must be a string'
+    assert writes == []
+    assert (config_path.read_bytes() if config_path.exists() else None) == before_config
+    assert (cfg.ENV_PATH.read_bytes() if cfg.ENV_PATH.exists() else None) == before_env_file
+    assert cfg.get('server.port') == 5050
+    assert os.environ.get('OPENAI_API_KEY') == before_runtime
+
+
+@pytest.mark.parametrize('body', [None, [], 'text', 1, True])
+def test_put_rejects_non_object_request_body_without_writing(client, body):
+    before = client.get('/api/settings').get_json()['config']
+    response = client.put('/api/settings', json=body)
+    assert response.status_code == 400
+    assert response.get_json()['error'] == 'request body must be an object'
+    assert client.get('/api/settings').get_json()['config'] == before
+
+
+@pytest.mark.parametrize(('section', 'field', 'value'), [
+    ('server', 'port', '5050'),
+    ('server', 'port', 0),
+    ('server', 'port', 65536),
+    ('server', 'host', 'localhost'),
+    ('server', 'require_token', 1),
+    ('privacy', 'allow_remote_generation', 'false'),
+    ('captioning', 'backend', 'invalid'),
+    ('watermark', 'device', 'metal'),
+    ('ollama', 'unknown', 'value'),
+])
+def test_put_rejects_invalid_nested_config_values(client, section, field, value):
+    before = client.get('/api/settings').get_json()['config']
+    response = client.put('/api/settings', json={
+        'config': {section: {field: value}},
+    })
+    assert response.status_code == 400
+    assert f'{section}.{field}' in response.get_json()['error']
+    assert client.get('/api/settings').get_json()['config'] == before
+
+
+def test_combined_settings_write_rolls_back_config_when_secret_write_fails(
+        client, monkeypatch):
+    from app import config as cfg
+    config_path = cfg._config_path()
+    before_config = config_path.read_bytes() if config_path.exists() else None
+    original_write = cfg._write_private_text
+
+    def fail_env_write(path, value):
+        if path == cfg.ENV_PATH:
+            raise OSError('disk full')
+        original_write(path, value)
+
+    monkeypatch.setattr(cfg, '_write_private_text', fail_env_write)
+    response = client.put('/api/settings', json={
+        'config': {'server': {'port': 6000}},
+        'secrets': {'OPENAI_API_KEY': 'new-secret'},
+    })
+    assert response.status_code == 500
+    if before_config is None:
+        assert not config_path.exists()
+    else:
+        assert config_path.read_bytes() == before_config
+    assert cfg.get('server.port') == 5050
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('max_concurrent_runs', 0), ('max_concurrent_runs', 11),
+    ('max_price_per_hour', 0.09), ('max_price_per_hour', 5.01),
+    ('monthly_budget_usd', -1),
+    ('stall_timeout_minutes', 4), ('stall_timeout_minutes', 241),
+])
+def test_put_rejects_cloud_guardrails_outside_displayed_bounds(client, field, value):
+    response = client.put('/api/settings', json={'config': {'cloud': {field: value}}})
+    assert response.status_code == 400
+    assert f'cloud.{field}' in response.get_json()['error']
+
+
+def test_put_accepts_cloud_guardrail_boundaries(client):
+    response = client.put('/api/settings', json={'config': {'cloud': {
+        'max_concurrent_runs': 10,
+        'max_price_per_hour': 5,
+        'monthly_budget_usd': 0,
+        'stall_timeout_minutes': 5,
+    }}})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize('face_scoring', [
+    {'orange': -0.1, 'green': 0.5},
+    {'orange': 0.4, 'green': 1.1},
+    {'orange': 0.6, 'green': 0.5},
+    {'orange': 0.5, 'green': 0.5},
+])
+def test_put_rejects_invalid_face_score_thresholds(client, face_scoring):
+    response = client.put('/api/settings', json={
+        'config': {'face_scoring': face_scoring},
+    })
+    assert response.status_code == 400
+    assert 'orange < green' in response.get_json()['error']
+
+
+@pytest.mark.parametrize('engines', [
+    {'enabled': [], 'default': 'klein'},
+    {'enabled': ['klein'], 'default': 'chatgpt'},
+    {'enabled': ['unknown'], 'default': 'unknown'},
+])
+def test_put_rejects_contradictory_engine_settings(client, engines):
+    response = client.put('/api/settings', json={'config': {'engines': engines}})
+    assert response.status_code == 400
+    assert 'engine' in response.get_json()['error']
 
 def test_put_settings_autocorrects_portable_base_dir(client, tmp_path):
     """Saving a base_dir that points at the portable WRAPPER
@@ -201,6 +352,27 @@ class _FakeResp:
         return self._body
 
 
+def test_failed_git_update_check_is_not_cached(client, monkeypatch,
+                                                _reset_update_cache):
+    from app.routes import settings as sroutes
+    from app.services import updater
+    calls = []
+    monkeypatch.setattr(updater, 'is_git_checkout', lambda: True)
+    monkeypatch.setattr(
+        updater, 'git_update_status',
+        lambda: calls.append(1) or {
+            'ok': False, 'is_git': True, 'update_available': False,
+            'reason': 'comparison failed',
+        },
+    )
+
+    assert client.get('/api/update/check?auto=1').get_json()['ok'] is False
+    assert client.get('/api/update/check?auto=1').get_json()['ok'] is False
+
+    assert len(calls) == 2
+    assert sroutes._git_check_cache['data'] is None
+
+
 def test_update_check_detects_newer_release(client, monkeypatch, _reset_update_cache):
     import requests
     monkeypatch.setattr(requests, 'get', lambda *a, **k: _FakeResp(200, {
@@ -252,6 +424,19 @@ def test_update_check_bare_passive_never_fetches_git(client, monkeypatch, _reset
     monkeypatch.setattr(requests, 'get', lambda *a, **k: _FakeResp(404))
     d = client.get('/api/update/check').get_json()
     assert d['ok'] is True
+
+
+@pytest.mark.parametrize('query', ['force=0', 'force=false', 'auto=no'])
+def test_update_check_false_flags_do_not_run_git_check(
+        client, monkeypatch, _reset_update_cache, query):
+    import requests
+    from app.services import updater
+    monkeypatch.setattr(updater, 'is_git_checkout', lambda root=None: True)
+    monkeypatch.setattr(updater, 'git_update_status',
+                        lambda root=None: (_ for _ in ()).throw(
+                            AssertionError('git check must not run')))
+    monkeypatch.setattr(requests, 'get', lambda *a, **k: _FakeResp(404))
+    assert client.get(f'/api/update/check?{query}').status_code == 200
 
 
 def test_update_check_degrades_when_feed_unreachable(client, monkeypatch, _reset_update_cache):
@@ -411,11 +596,46 @@ def test_is_cgnat_classifies_tailscale_range():
     assert sroutes._is_cgnat(None) is False
 
 
+@pytest.mark.parametrize('value', [
+    '100.64', '100.64.nope', '100.64.0.1.2', '100.64.256.1', '100.64.-1.1',
+])
+def test_is_cgnat_rejects_malformed_addresses(value):
+    from app.routes import settings as sroutes
+    assert sroutes._is_cgnat(value) is False
+
+
+@pytest.mark.parametrize('query', ['0', 'false', 'no'])
+def test_capabilities_false_force_flag_uses_cached_probe(client, monkeypatch, query):
+    from app import capabilities
+    calls = []
+    monkeypatch.setattr(capabilities, 'probe',
+                        lambda force=False: calls.append(force) or {'ok': True})
+    assert client.get(f'/api/capabilities?force={query}').status_code == 200
+    assert calls == [False]
+
+
 def test_settings_restart_triggers_schedule_restart(client, monkeypatch):
     from app.services import updater
     called = []
     monkeypatch.setattr(updater, 'schedule_restart', lambda *a, **k: called.append(1))
     r = client.post('/api/settings/restart')
     assert r.status_code == 200
-    assert r.get_json() == {'ok': True, 'restarting': True}
+    body = r.get_json()
+    assert body['ok'] is True and body['restarting'] is True
+    assert len(body['restart_nonce']) == 32
     assert called == [1]
+
+
+def test_settings_restart_refuses_active_package_mutation(client, monkeypatch):
+    from app import setup_installer
+    from app.services import updater
+    called = []
+    monkeypatch.setattr(
+        setup_installer, 'active_pip_mutations', lambda: ['ml_extras'])
+    monkeypatch.setattr(updater, 'schedule_restart', lambda: called.append(True))
+
+    response = client.post('/api/settings/restart')
+
+    assert response.status_code == 409
+    assert response.get_json()['active_installs'] == ['ml_extras']
+    assert called == []

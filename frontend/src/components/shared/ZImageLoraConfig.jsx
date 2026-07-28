@@ -27,11 +27,28 @@ const strengthRangeFor = (filename, krea) => {
 // checkpoint FINAL (entraînement terminé).
 const stepLabel = (l) => (l.step != null ? `${l.step} steps` : 'final');
 
-export default function ZImageLoraConfig({ loras = [], onChange, zModel = '', isFavorite, onToggleFavorite,
+const normalizedConfig = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([filename, entry]) => {
+    const row = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
+    const parsed = typeof row.strength === 'number'
+      ? row.strength
+      : (typeof row.strength === 'string' && row.strength.trim() ? Number(row.strength) : Number.NaN);
+    return [filename, {
+      enabled: !!row.enabled,
+      strength: Number.isFinite(parsed) ? Math.max(-2, Math.min(20, parsed)) : 1,
+      locked: !!row.locked,
+      ...(row.batch ? { batch: true } : {}),
+    }];
+  }));
+};
+
+export default function ZImageLoraConfig({ loras = [], onChange, zModel = '',
+                                          isFavorite = null, onToggleFavorite = null,
                                           storageKey = 'zimageLoras_v1', label = 'Character / style LoRA', emptyHint,
                                           krea = false, batchToggle = false }) {
   const [cfg, setCfg] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey)) || {}; } catch { return {}; }
+    try { return normalizedConfig(JSON.parse(localStorage.getItem(storageKey))); } catch { return {}; }
   });
   // Quels groupes de checkpoints (dataset) sont dépliés — persisté à part du cfg
   // (le cfg reste indexé par filename : aucune migration d'état de sélection).
@@ -56,6 +73,25 @@ export default function ZImageLoraConfig({ loras = [], onChange, zModel = '', is
       }));
     onChange?.(enabled);
   }, [cfg, loras, onChange, storageKey, batchToggle]);
+
+  // Reconcile long-lived browser state with the current family's supported range.
+  useEffect(() => {
+    setCfg((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const lora of loras) {
+        const entry = current[lora.filename];
+        if (!entry) continue;
+        const range = strengthRangeFor(lora.filename, krea);
+        const strength = Math.max(range.min, Math.min(range.max, entry.strength));
+        if (strength !== entry.strength) {
+          next[lora.filename] = { ...entry, strength };
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [loras, krea]);
 
   // Favoris d'abord (pour le modèle courant) → repérage « d'un coup d'œil ».
   const favFirst = useMemo(() => {
@@ -122,7 +158,7 @@ export default function ZImageLoraConfig({ loras = [], onChange, zModel = '', is
         // « 2000 steps » quand la ligne est un enfant d'un groupe déplié). Les
         // aria-label gardent le displayName COMPLET (contexte lecteur d'écran).
         const renderLora = (l, visibleLabel) => {
-        const c = cfg[l.filename] || {};
+        const c = /** @type {any} */ (cfg[l.filename] || {});
         const fav = !!(zModel && isFavorite?.(zModel, l.filename));
         return (
           <div key={l.filename} className="flex flex-col gap-1 rounded-md border border-border bg-app/40 px-2 py-1.5">
@@ -150,6 +186,7 @@ export default function ZImageLoraConfig({ loras = [], onChange, zModel = '', is
                   </span>
                   <button type="button" onClick={() => toggleLock(l.filename)}
                     aria-pressed={!!c.locked}
+                    aria-label={`${c.locked ? 'Unlock' : 'Lock'} strength for ${l.displayName}`}
                     title={c.locked ? 'Strength locked — click to unlock' : 'Lock the strength (prevents accidental changes)'}
                     className={`px-1 py-0.5 rounded text-[0.75rem] border leading-none ${c.locked ? 'border-amber-400/60 bg-amber-400/15 text-amber-300' : 'border-border bg-surface text-content-muted hover:text-content'}`}>
                     {c.locked ? '🔒' : '🔓'}

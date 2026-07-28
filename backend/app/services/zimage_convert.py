@@ -19,8 +19,11 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import threading
+from pathlib import Path
 
 from .. import config as cfg
 from ..job_queue import queue_manager
@@ -32,6 +35,8 @@ logger = logging.getLogger(__name__)
 _CONVERTER = str(cfg.BACKEND_DIR / 'infer' / 'convert_comfy_zimage_to_diffusers.py')
 _CONVERT_KEY = 'zimage_base_convert'  # system_state : statut de conversion en cours
 _convert_lock = threading.Lock()      # sérialise l'acquisition du verrou de conversion
+_active_conversions: set[str] = set()
+_COMPLETE_MARKER = '.conversion-complete'
 
 
 def _converted_root():
@@ -81,9 +86,12 @@ def converted_dir(z_model: str) -> str:
 
 
 def is_converted(z_model: str) -> bool:
-    d = os.path.join(converted_dir(z_model), 'transformer')
-    return (os.path.isfile(os.path.join(d, 'diffusion_pytorch_model.safetensors'))
-            and os.path.isfile(os.path.join(d, 'config.json')))
+    root = Path(converted_dir(z_model))
+    weights = root / 'transformer' / 'diffusion_pytorch_model.safetensors'
+    config = root / 'transformer' / 'config.json'
+    return ((root / _COMPLETE_MARKER).is_file()
+            and weights.is_file() and weights.stat().st_size > 0
+            and config.is_file() and config.stat().st_size > 0)
 
 
 def convert(z_model: str) -> str:
@@ -98,20 +106,57 @@ def convert(z_model: str) -> str:
     if not official_config_path:
         raise ValueError("config.json for Z-Image-Turbo is missing from the HF cache - first run "
                          "a training on the official base (this downloads the model)")
-    out = converted_dir(z_model)
-    os.makedirs(out, exist_ok=True)
-    logger.info(f'conversion base {z_model} -> {out}')
-    proc = subprocess.run([str(_venv_python()), _CONVERTER, merge, official_config_path, '--save', out],
-                          capture_output=True, text=True, timeout=2400)
-    if not is_converted(z_model):
-        tail = (proc.stdout or '')[-600:] + ' | ' + (proc.stderr or '')[-600:]
-        raise ValueError(f'conversion failed: {tail}')
-    return out
+    final = Path(converted_dir(z_model))
+    final.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f'.{final.name}.', suffix='.staging', dir=final.parent))
+    logger.info(f'conversion base {z_model} -> {final}')
+    try:
+        proc = subprocess.run(
+            [str(_venv_python()), _CONVERTER, merge, official_config_path,
+             '--save', str(staging)], capture_output=True, text=True, timeout=2400)
+        weights = staging / 'transformer' / 'diffusion_pytorch_model.safetensors'
+        config = staging / 'transformer' / 'config.json'
+        if proc.returncode != 0 or not weights.is_file() or weights.stat().st_size == 0 \
+                or not config.is_file() or config.stat().st_size == 0:
+            tail = (proc.stdout or '')[-600:] + ' | ' + (proc.stderr or '')[-600:]
+            raise ValueError(f'conversion failed: {tail}')
+        (staging / _COMPLETE_MARKER).write_text('ok\n', encoding='utf-8')
+        previous = final.with_name(f'.{final.name}.previous')
+        if previous.exists():
+            shutil.rmtree(previous)
+        if final.exists():
+            final.replace(previous)
+        try:
+            staging.replace(final)
+        except Exception:
+            if previous.exists() and not final.exists():
+                previous.replace(final)
+            raise
+        if previous.exists():
+            shutil.rmtree(previous)
+        return str(final)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 # --- Conversion en arrière-plan + statut (poll UI) ----------------------------
 def convert_status() -> dict:
-    return queue_manager._get_system_state(_CONVERT_KEY, {}) or {}
+    state = queue_manager._get_system_state(_CONVERT_KEY, {}) or {}
+    if state.get('status') != 'running':
+        return state
+    z_model = state.get('z_model')
+    with _convert_lock:
+        active = isinstance(z_model, str) and z_model in _active_conversions
+    if active:
+        return state
+    if isinstance(z_model, str) and is_converted(z_model):
+        reconciled = {'z_model': z_model, 'status': 'done'}
+    else:
+        reconciled = {'z_model': z_model, 'status': 'error',
+                      'error': 'conversion was interrupted; retry the conversion'}
+    queue_manager._set_system_state(_CONVERT_KEY, reconciled, ttl_seconds=3600)
+    return reconciled
 
 
 def start_convert_async(app, z_model: str) -> None:
@@ -125,8 +170,10 @@ def start_convert_async(app, z_model: str) -> None:
     # Acquisition ATOMIQUE du verrou (check-then-set sous lock) : empêche deux
     # conversions 12 Go concurrentes (double-clic / 2 datasets en même temps).
     with _convert_lock:
-        if convert_status().get('status') == 'running':
+        state = queue_manager._get_system_state(_CONVERT_KEY, {}) or {}
+        if state.get('status') == 'running' and state.get('z_model') in _active_conversions:
             raise ValueError('a conversion is already in progress')
+        _active_conversions.add(z_model)
         queue_manager._set_system_state(_CONVERT_KEY, {'z_model': z_model, 'status': 'running'},
                                         ttl_seconds=3600)
 
@@ -142,5 +189,18 @@ def start_convert_async(app, z_model: str) -> None:
                     _CONVERT_KEY, {'z_model': z_model, 'status': 'error', 'error': str(e)},
                     ttl_seconds=3600)
                 logger.error(f'conversion base échouée ({z_model}) : {e}')
+            finally:
+                with _convert_lock:
+                    _active_conversions.discard(z_model)
 
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception as exc:
+        with _convert_lock:
+            _active_conversions.discard(z_model)
+        queue_manager._set_system_state(
+            _CONVERT_KEY,
+            {'z_model': z_model, 'status': 'error',
+             'error': f'conversion worker failed to start: {exc}'},
+            ttl_seconds=3600)
+        raise

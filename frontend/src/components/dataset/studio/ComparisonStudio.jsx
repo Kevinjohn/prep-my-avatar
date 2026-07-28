@@ -31,7 +31,8 @@ import ResultLightbox from './ResultLightbox';
 
 const rollSeed = () => Math.floor(Math.random() * 2 ** 31);
 
-export default function ComparisonStudio({ selection, baseModels = [], runType = 'zimage' }) {
+export default function ComparisonStudio({ selection, baseModels = [], runType = 'zimage',
+  baseModelsState = 'ready', onRetryBaseModels, maxImages = 24 }) {
   const toast = useToast();
 
   // --- Réglages du run (persistés : recharger la page ne les perd plus) --------
@@ -62,7 +63,7 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
   const [archMismatch, setArchMismatch] = useState(null);
   // Réglages de génération GLOBAUX (parité Generate) remontés par StudioGenerationSettings.
   // Objet snake_case déjà prêt à fusionner dans le POST /run (voir launch()).
-  const [genSettings, setGenSettings] = useState({});
+  const [genSettings, setGenSettings] = useState(/** @type {any} */ ({}));
   const toggleStrength = (s) =>
     setStrengths((cur) => (cur.includes(s) ? cur.filter((v) => v !== s) : [...cur, s].sort((a, b) => a - b)));
 
@@ -74,7 +75,17 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
   }, [baseModels]);
 
   // --- Run piloté --------------------------------------------------------------
-  const [runId, setRunId] = useState(null);
+  const runStorageKey = useMemo(() => `studioComp_activeRun_v1_${runType}_${selection
+    .map((item) => item.dataset_id).sort().join('-')}`, [runType, selection]);
+  const [runId, setRunId] = useState(() => {
+    try { return localStorage.getItem(runStorageKey) || null; } catch { return null; }
+  });
+  useEffect(() => {
+    try {
+      if (runId) localStorage.setItem(runStorageKey, runId);
+      else localStorage.removeItem(runStorageKey);
+    } catch { /* persistence is best-effort */ }
+  }, [runId, runStorageKey]);
   const run = useStudioRun(runId);
   const data = run.data;
   const loras = data?.loras || [];
@@ -83,9 +94,10 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
   const vote = useQuickVote(run.rate);
   const [lbImg, setLbImg] = useState(null);
   const [showResults, setShowResults] = useState(true);
-  const rateLightbox = (id, nv) => {
-    run.rate(id, nv);
-    setLbImg((p) => (p && p.id === id ? { ...p, rating: nv } : p));
+  const rateLightbox = async (id, nv) => {
+    if (await run.rate(id, nv)) {
+      setLbImg((p) => (p && p.id === id ? { ...p, rating: nv } : p));
+    }
   };
 
   const unvoted = useMemo(
@@ -96,9 +108,17 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
     () => cells.filter((c) => c.status === 'done' && c.filename && c.rating === 1),
     [cells],
   );
+  const cellCount = selection.length * strengths.length * count
+    * (1 + ((genSettings.batch_loras || []).length));
+  const requiresBaseModel = runType !== 'krea';
+  const baseReady = baseModelsState === 'ready'
+    && (!requiresBaseModel || baseModels.length > 0)
+    && (requiresBaseModel ? !!selectedBase : true);
+  const canLaunch = !!selection.length && !!strengths.length && cellCount > 0
+    && cellCount <= maxImages && !launching && !data?.gpu_busy && baseReady;
 
   const launch = async () => {
-    if (!selection.length || !strengths.length) return;
+    if (!canLaunch) return;
     setLaunching(true);
     try {
       const body = {
@@ -169,6 +189,8 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
             launching={launching}
             gpuBusy={data?.gpu_busy}
             batchMult={1 + ((genSettings.batch_loras || []).length)}
+            maxImages={maxImages}
+            metadataReady={baseReady}
           />
         </div>
         {/* Réglages de génération globaux (parité Generate, hors prompt builder).
@@ -185,9 +207,26 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
         <LoraRankingPanel ranking={data?.lora_ranking} />
       </aside>
 
-      <main id="st-results" className="flex flex-col gap-3 min-w-0 scroll-mt-16">
+      <section id="st-results" aria-label="Studio results" className="flex flex-col gap-3 min-w-0 scroll-mt-16">
         <StudioPreflightBanner missing={preflight} archMismatch={archMismatch}
           onDismiss={() => { setPreflight(null); setArchMismatch(null); }} />
+        {baseModelsState === 'loading' && (
+          <p className="m-0 rounded border border-border p-2 text-content-muted" role="status">
+            Loading available base models…
+          </p>
+        )}
+        {baseModelsState === 'error' && (
+          <div className="flex items-center gap-2 rounded border border-red-400/40 p-2" role="alert">
+            <span className="text-red-300">Could not load base models.</span>
+            <button type="button" onClick={onRetryBaseModels}
+              className="rounded border border-border px-2 py-1 text-content">Retry</button>
+          </div>
+        )}
+        {baseModelsState === 'ready' && requiresBaseModel && baseModels.length === 0 && (
+          <p className="m-0 rounded border border-amber-400/40 p-2 text-amber-200" role="alert">
+            No compatible base model is available. Configure one before launching.
+          </p>
+        )}
         {data?.pending > 0 && (
           <div className="flex items-center gap-2 rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-3 py-2" role="status">
             <span className="inline-block w-4 h-4 border-2 border-indigo-400/40 border-t-indigo-400 rounded-full animate-spin" aria-hidden />
@@ -232,7 +271,7 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
             )}
           </div>
         )}
-      </main>
+      </section>
 
       <QuickVoteModal vote={vote} datasetId={vote.current?.dataset_id} fmt={fmt} />
       {lbImg && (
@@ -254,7 +293,7 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
           ...(runType === 'zimage' ? [{ id: 'st-negative', emoji: '🚫', label: 'Negative' }] : []),
           { id: 'st-results', emoji: '🖼️', label: 'Results' },
         ]}
-        canRun={!!selection.length && !!strengths.length && !launching && !data?.gpu_busy}
+        canRun={canLaunch}
         running={launching}
         onRun={launch}
       />

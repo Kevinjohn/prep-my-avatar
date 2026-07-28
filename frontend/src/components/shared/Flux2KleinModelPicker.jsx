@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useCapabilities } from '../../context/CapabilitiesContext';
 
 const STORAGE_KEY = 'editPage_flux2KleinModel_v1';
@@ -16,7 +16,7 @@ const STORAGE_KEY = 'editPage_flux2KleinModel_v1';
  */
 export default function Flux2KleinModelPicker({ onChange }) {
   const { caps } = useCapabilities();
-  const models = caps.comfyui.models.klein || [];
+  const models = useMemo(() => caps.comfyui.models.klein || [], [caps.comfyui.models.klein]);
   const [selected, setSelected] = useState(() => {
     try { return localStorage.getItem(STORAGE_KEY) || ''; } catch { return ''; }
   });
@@ -24,10 +24,15 @@ export default function Flux2KleinModelPicker({ onChange }) {
   useEffect(() => {
     // Reconcile persisted choice with the current available list.
     const valid = models.includes(selected) ? selected : (models[0] || '');
-    if (valid !== selected) setSelected(valid);
+    if (valid !== selected) {
+      setSelected(valid);
+      try {
+        if (valid) localStorage.setItem(STORAGE_KEY, valid);
+        else localStorage.removeItem(STORAGE_KEY);
+      } catch { /* quota / private mode */ }
+    }
     onChange?.(valid || null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [models.join('|')]);
+  }, [models, selected, onChange]);
 
   function handleChange(e) {
     const next = e.target.value;

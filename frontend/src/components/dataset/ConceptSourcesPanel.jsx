@@ -60,7 +60,8 @@ export default function ConceptSourcesPanel({ datasetId, onImport, busy }) {
   // Preview tile size (px). A category scrape returns whole galleries (many
   // off-concept frames) → larger previews speed up eyeballing. Persisted.
   const [tile, setTile] = useState(() => {
-    const v = Number(localStorage.getItem('conceptTileSize'));
+    let v;
+    try { v = Number(localStorage.getItem('conceptTileSize')); } catch { return 120; }
     return v >= 72 && v <= 320 ? v : 120;
   });
   const changeTile = (v) => {
@@ -69,8 +70,10 @@ export default function ConceptSourcesPanel({ datasetId, onImport, busy }) {
   };
 
   useEffect(() => {
-    saveScraperScanState(datasetId, { url, kw, sub, items, page, paginated,
-      fullAlbums, rescueSmall, selected });
+    const timer = setTimeout(() => saveScraperScanState(datasetId, {
+      url, kw, sub, items, page, paginated, fullAlbums, rescueSmall, selected,
+    }), 250);
+    return () => clearTimeout(timer);
   }, [datasetId, url, kw, sub, items, page, paginated, fullAlbums, rescueSmall, selected]);
 
   // `explicitUrl` lets the Reddit keyword search scan a freshly-built URL without
@@ -85,7 +88,19 @@ export default function ConceptSourcesPanel({ datasetId, onImport, busy }) {
       if (!body || !body.scannable) { toast.error((body && body.error) || 'Could not scan this URL.'); return; }
       // Images only (the dataset import rejects video/gif anyway).
       const imgs = (body.items || []).filter((it) => it.type === 'image');
-      setItems((prev) => (nextPage === 0 ? imgs : [...prev, ...imgs]));
+      setItems((prev) => {
+        const merged = nextPage === 0 ? imgs : [...prev, ...imgs];
+        const unique = new Map();
+        for (const item of merged) {
+          try {
+            const normalized = new URL(item.url).href.replace(/#.*$/, '');
+            if (!unique.has(normalized)) unique.set(normalized, item);
+          } catch {
+            if (!unique.has(item.url)) unique.set(item.url, item);
+          }
+        }
+        return [...unique.values()];
+      });
       setPaginated(!!body.paginated);
       setPage(nextPage);
       if (nextPage === 0) { setSelected(new Set()); setBroken(new Set()); }  // fresh scan resets; "Load more" keeps it

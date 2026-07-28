@@ -11,16 +11,28 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
 
 from . import config as cfg
+from .utils.resolution import resolution_metadata
+
+GENERATION_PRICE_ESTIMATES = {
+    'version': 1,
+    'as_of': '2026-07-27',
+    'currency': 'USD',
+    'per_image': {'nanobanana': 0.15, 'chatgpt_api': 0.17},
+}
 
 _CACHE_TTL = 30
+_clock = time.monotonic
 _cache = None
 _cache_ts = 0.0
+_probe_lock = threading.Lock()
 
 _IMPORT_TTL = 600
 _import_cache = {}  # key -> (ts, ok)
@@ -53,7 +65,7 @@ def _import_ok(python: str, module_expr: str, timeout=60):
 
 
 def _cached_import(key: str, python: str, module_expr: str) -> bool:
-    now = time.time()
+    now = _clock()
     cache_key = f'{key}:{python}:{module_expr}'
     cached = _import_cache.get(cache_key)
     if cached is not None and now - cached[0] < _IMPORT_TTL:
@@ -72,12 +84,13 @@ def probe_gemini() -> dict:
     return {'ok': ok, 'detail': 'key set' if ok else 'key missing'}
 
 
-def probe_openai() -> dict:
+def probe_openai(subscription_status=None) -> dict:
     """ChatGPT engine readiness: a pay-per-use API key OR a connected ChatGPT
     subscription (Codex OAuth) both light the engine up."""
     from .services import chatgpt_oauth
     key = bool(cfg.secret('OPENAI_API_KEY'))
-    sub = chatgpt_oauth.status()['connected']
+    status = subscription_status if subscription_status is not None else chatgpt_oauth.status()
+    sub = status['connected']
     parts = (['key set'] if key else []) + (['subscription connected'] if sub else [])
     return {'ok': key or sub, 'detail': ' + '.join(parts) if parts else 'key missing'}
 
@@ -159,6 +172,8 @@ def _model_present(configured: str, names: list) -> bool:
         return False
     if configured in names:
         return True
+    if ':' in configured:
+        return False
     base = configured.split(':')[0]                    # config w/o :tag matches any tag
     return any((n or '').split(':')[0] == base for n in names)
 
@@ -400,7 +415,7 @@ def gpu_vram_gb():
     be determined (no NVIDIA GPU / nvidia-smi absent) — callers must treat None
     as 'unknown', never as 0 (an unknown GPU must not trigger OOM warnings)."""
     import subprocess
-    now = time.time()
+    now = _clock()
     if _gpu_cache['ts'] and (now - _gpu_cache['ts']) < _GPU_TTL:
         return _gpu_cache['gb']
     gb = None
@@ -487,9 +502,17 @@ def autodetect() -> dict:
 
 
 def probe(force=False) -> dict:
+    started = _clock()
+    with _probe_lock:
+        return _probe_locked(force=force, request_started=started)
+
+
+def _probe_locked(force=False, request_started=0.0) -> dict:
     global _cache, _cache_ts
-    now = time.time()
-    if _cache is not None and not force and (now - _cache_ts) < _CACHE_TTL:
+    now = _clock()
+    if (_cache is not None
+            and ((_cache_ts >= request_started) or
+                 (not force and (now - _cache_ts) < _CACHE_TTL))):
         return copy.deepcopy(_cache)
 
     comfy = probe_comfyui()
@@ -497,16 +520,22 @@ def probe(force=False) -> dict:
     ollama_installed = probe_ollama_installed()
     aitoolkit = probe_aitoolkit()
     gemini = probe_gemini()
-    openai_ = probe_openai()
-    face_scoring = probe_face_scoring()
-    masks = probe_masks()
-    watermark_inpaint = probe_watermark_inpaint()
+    from .services import chatgpt_oauth
+    sub_status = chatgpt_oauth.status()
+    openai_ = probe_openai(subscription_status=sub_status)
+    # These subprocess imports are independent. Run them concurrently so the
+    # aggregate cold-path latency is one timeout rather than three, while the
+    # outer single-flight lock makes concurrent HTTP callers share this refresh.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        face_future = executor.submit(probe_face_scoring)
+        masks_future = executor.submit(probe_masks)
+        watermark_future = executor.submit(probe_watermark_inpaint)
+        face_scoring = face_future.result()
+        masks = masks_future.result()
+        watermark_inpaint = watermark_future.result()
     models = _scan_models()
     base_dir = cfg.get('comfyui.base_dir') or ''
     comfy_dir = resolve_comfyui_base(base_dir)
-
-    from .services import chatgpt_oauth
-    sub_status = chatgpt_oauth.status()
 
     caps = {
         'configured': cfg.is_configured(),
@@ -563,7 +592,12 @@ def probe(force=False) -> dict:
         'scrape_deps': probe_scrape_deps()['ok'],
         'training_visible': aitoolkit['ok'] or bool(cfg.secret('VAST_API_KEY')),
         'studio_visible': comfy['ok'],
+        # One authoritative, versioned estimate drives every frontend badge,
+        # total and paid-launch confirmation. These are estimates, not billing
+        # guarantees; `as_of` makes staleness visible to clients.
+        'generation_pricing': copy.deepcopy(GENERATION_PRICE_ESTIMATES),
+        'resolution_metadata': resolution_metadata(),
     }
 
-    _cache, _cache_ts = caps, now
+    _cache, _cache_ts = caps, _clock()
     return copy.deepcopy(caps)

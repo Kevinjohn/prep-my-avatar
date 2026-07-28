@@ -17,10 +17,12 @@ const COPY = {
 };
 
 export default function NextStepCard({ step, trainMode, busy, totalImages, onAction, actionLabel }) {
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(LS_KEY) === '1');
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem(LS_KEY) === '1'; } catch { return false; }
+  });
   const forceOpen = totalImages === 0;
   const open = forceOpen || !collapsed;
-  useEffect(() => { if (!forceOpen) localStorage.setItem(LS_KEY, collapsed ? '1' : '0'); },
+  useEffect(() => { if (!forceOpen) try { localStorage.setItem(LS_KEY, collapsed ? '1' : '0'); } catch { /* preference is best-effort */ } },
     [collapsed, forceOpen]);
   if (!step) return null;
   const key = step.id === 'finish' ? (trainMode ? 'finish_train' : 'finish_export') : step.id;

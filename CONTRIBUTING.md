@@ -6,8 +6,14 @@ Thanks for wanting to make LoRA Dataset Studio better. This is a small, self-hos
 
 For anything bigger than a typo or a one-line fix, **talk about it first**. It saves you from building something that's already in progress or that doesn't fit the direction.
 
-- **Discord** ([join](https://discord.gg/j6hnJBFtXE)) — usually the fastest way. Ask in **#help**; float feature ideas in **#feature-requests**; talk implementation in **#dev-chat**. The curated **#community-ideas** board shows what people voted for (the roadmap follows it), and **#roadmap** shows what's shipped and coming.
-- **[GitHub issues](https://github.com/perfectgf/lora-dataset-studio/issues)** — bug reports and feature requests. There are templates for both; for a bug, the app can write most of the report for you (**Guide → Getting help → Copy diagnostic report** — it includes version, OS and a log tail, no keys, no paths).
+- **[GitHub issues](https://github.com/Kevinjohn/prep-my-avatar/issues)** are the
+  canonical intake for bug reports and feature requests. The templates explain
+  what to include; for a bug, the app can write most of the report for you
+  (**Guide → Getting help → Copy diagnostic report** — it includes version, OS
+  and a log tail, no keys, no paths).
+- The inherited upstream [Discord](https://discord.gg/j6hnJBFtXE) can be useful
+  for general LoRA Dataset Studio discussion, but it does not own this fork's
+  issue intake or enforcement.
 
 A quick "I'm going to look at X" in an issue or on Discord means nobody duplicates your work.
 
@@ -20,22 +26,25 @@ You only need the backend to work on backend code. You need Node and pnpm 10.21.
 The core app supports **CPython 3.10–3.12**. Use **3.11 or 3.12** if you need the optional ML extras: their current, security-reviewed InsightFace/rembg/ONNX/Torch graph is tested on that narrower range. Pick the version explicitly; a bare `python`/`py -3` can select an unsupported newer interpreter.
 
 ```bash
-git clone https://github.com/perfectgf/lora-dataset-studio.git
-cd lora-dataset-studio
+git clone https://github.com/Kevinjohn/prep-my-avatar.git
+cd prep-my-avatar
 
 python -m venv .venv                 # on Windows: py -3.12 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r backend/requirements-dev.txt
+python -m pip install -e . -r backend/requirements-dev.txt
 
 # optional, only if you're touching face scoring / masks / watermark inpainting:
-pip install -r backend/requirements-ml.txt
+python -m pip install -r backend/requirements-ml.txt
 # optional, only if you're touching the scraper:
-pip install -r backend/requirements-scrape.txt
+python -m pip install -r backend/requirements-scrape.txt
 
-python backend/run.py
+python backend/source_launcher.py --install --root . --data-dir data
+python data/source-launcher.py --root . --data-dir data
 ```
 
-`run.py` re-execs itself into `.venv` if it exists, so every launch method converges on the same interpreter. On Windows you can instead just double-click **`start.bat`**, which finds (or downloads) a suitable Python, builds the venv, and starts the server on port **5050**.
+The installed launcher lives outside the mutable checkout, runs interrupted-update
+recovery first, and then lets `run.py` re-exec into `.venv`. On Windows you can
+instead double-click **`start.bat`**, which applies the same private recovery step.
 
 ### Frontend
 

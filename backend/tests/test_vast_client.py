@@ -86,6 +86,28 @@ def test_create_instance_returns_contract_id(vc, monkeypatch):
     assert seen['json']['env']['-p 8675:8675'] == '1'
 
 
+@pytest.mark.parametrize('contract_id', [None, '', [], {}, True])
+def test_create_instance_rejects_missing_or_malformed_contract_id(
+        vc, monkeypatch, contract_id):
+    monkeypatch.setattr(
+        vc.requests, 'request',
+        lambda *a, **k: FakeResp(200, {
+            'success': True, 'new_contract': contract_id,
+        }))
+    with pytest.raises(vc.VastError, match='valid contract id'):
+        vc.create_instance(99, image='img:tag', disk_gb=60, label='lds-7')
+
+
+def test_get_instance_translates_malformed_json(vc, monkeypatch):
+    class Malformed(FakeResp):
+        def json(self):
+            raise ValueError('truncated gateway response')
+
+    monkeypatch.setattr(vc.requests, 'request', lambda *a, **k: Malformed())
+    with pytest.raises(vc.VastError, match='malformed JSON'):
+        vc.get_instance('777')
+
+
 def test_create_instance_via_template(vc, monkeypatch):
     """Template launch (the smoke-validated path): the body carries ONLY
     template_hash_id + label + disk — env/ports/entrypoint come from the

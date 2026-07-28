@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-import tempfile
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -32,7 +32,7 @@ _DEFAULT_URL = 'http://127.0.0.1:11434'
 # a genuinely stuck launch (→ structured error + the stderr tail).
 _READY_TIMEOUT = 15.0
 _POLL_INTERVAL = 0.5
-_STDERR_TAIL = 2000     # chars of the launch log surfaced on failure
+_start_lock = threading.Lock()
 
 
 def _url() -> str:
@@ -46,14 +46,14 @@ def _reachable(url) -> bool:
 
 
 def _spawn_detached(binary: str):
-    """Spawn ``ollama serve`` fully DETACHED so it survives this app. stdout+stderr
-    go to a temp FILE, never a PIPE: a chatty server would eventually fill an
-    undrained pipe buffer and stall — the file avoids that AND lets us read the
-    tail if the launch dies early. Returns the Popen; its ``stderr_path``
-    attribute points at the log file."""
-    log = tempfile.NamedTemporaryFile(prefix='lds_ollama_', suffix='.log', delete=False)
-    kwargs = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                  close_fds=True)
+    """Spawn ``ollama serve`` fully detached with bounded output ownership."""
+    environment = os.environ.copy()
+    parsed = urlparse(_url())
+    environment['OLLAMA_HOST'] = parsed.netloc
+    # A detached lifetime log cannot be safely rotated by this process after it
+    # exits. Use the bounded null sink instead of leaking anonymous temp files.
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL, close_fds=True, env=environment)
     if os.name == 'nt':
         # DETACHED_PROCESS (0x8): no console, not tied to ours.
         # CREATE_NEW_PROCESS_GROUP (0x200): our termination / Ctrl-C can't cascade.
@@ -62,20 +62,11 @@ def _spawn_detached(binary: str):
     else:
         kwargs['start_new_session'] = True     # POSIX: own session, survives us
     proc = subprocess.Popen([binary, 'serve'], **kwargs)
-    log.close()          # parent lets go; the child keeps the fd it inherited
-    proc.stderr_path = log.name
     return proc
 
 
-def _stderr_tail(proc) -> str:
-    path = getattr(proc, 'stderr_path', None)
-    if not path:
-        return ''
-    try:
-        with open(path, encoding='utf-8', errors='replace') as fh:
-            return fh.read()[-_STDERR_TAIL:].strip()
-    except OSError:
-        return ''
+def _stderr_tail(_proc) -> str:
+    return ''
 
 
 def start_ollama(*, wait_timeout: float = _READY_TIMEOUT,
@@ -87,10 +78,21 @@ def start_ollama(*, wait_timeout: float = _READY_TIMEOUT,
       launch failed        -> {ok:False, reachable:False, error:...}
       spawned, never ready -> {ok:False, reachable:False, error:..., stderr:...}
     Never raises."""
+    # Serialize the reachability-check/spawn/readiness sequence. Concurrent
+    # HTTP requests join the same startup attempt and re-check reachability
+    # after the first caller publishes it.
+    with _start_lock:
+        return _start_ollama_locked(wait_timeout=wait_timeout, poll_interval=poll_interval)
+
+
+def _start_ollama_locked(*, wait_timeout: float, poll_interval: float) -> dict:
     url = _url()
     # Idempotent no-op: a running server must never be double-spawned.
     if _reachable(url):
         return {'ok': True, 'reachable': True, 'already_running': True}
+    if not _is_loopback_url(url):
+        return {'ok': False, 'reachable': False,
+                'error': f'Remote Ollama server cannot be started locally: {url}'}
 
     binary = capabilities._ollama_binary()
     if not binary:

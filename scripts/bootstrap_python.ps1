@@ -24,7 +24,7 @@ $UA = @{ 'User-Agent' = 'lora-dataset-studio-bootstrap' }
 
 $exe = Join-Path $Dest 'python.exe'
 if (Test-Path $exe) {
-  $ok = & $exe -c "import sys; print(1 if (3,11)<=sys.version_info[:2]<=(3,12) else 0)" 2>$null
+  $ok = & $exe -c "import ensurepip, ssl, sys, venv; print(1 if (3,11)<=sys.version_info[:2]<=(3,12) else 0)" 2>$null
   if ($ok -eq '1') { Write-Host "Reusing the standalone Python already at $exe"; exit 0 }
   Remove-Item -Recurse -Force $Dest                      # stale/unsupported -> refetch
 }
@@ -36,25 +36,34 @@ $asset = $rel.assets |
   Select-Object -First 1
 if (-not $asset) { throw "No CPython $PyVersion install_only build in the latest python-build-standalone release." }
 
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) $asset.name
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("{0}-{1}" -f ([guid]::NewGuid()), $asset.name)
+$destPath = [System.IO.Path]::GetFullPath($Dest)
+$destParent = Split-Path -Parent $destPath
+$stage = Join-Path $destParent (".{0}.staging-{1}" -f (Split-Path -Leaf $destPath), ([guid]::NewGuid()))
 Write-Host "Downloading $($asset.name) (~$([math]::Round($asset.size / 1MB)) MB)..."
-Invoke-WebRequest -Headers $UA -Uri $asset.browser_download_url -OutFile $tmp
-
-if ($asset.digest -and $asset.digest -match '^sha256:(.+)$') {
+try {
+  Invoke-WebRequest -Headers $UA -Uri $asset.browser_download_url -OutFile $tmp
+  if (-not ($asset.digest -and $asset.digest -match '^sha256:(.+)$')) {
+    throw "Release metadata did not provide a SHA-256 digest for $($asset.name)."
+  }
   $want = $Matches[1].ToLower()
   $got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
-  if ($got -ne $want) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue; throw "SHA-256 mismatch for $($asset.name)." }
+  if ($got -ne $want) { throw "SHA-256 mismatch for $($asset.name)." }
   Write-Host "Checksum OK."
+
+  New-Item -ItemType Directory -Force $stage | Out-Null
+  Write-Host "Extracting..."
+  tar -xzf $tmp --strip-components=1 -C $stage
+  if ($LASTEXITCODE -ne 0) { throw "tar extraction failed (exit $LASTEXITCODE)." }
+  $stageExe = Join-Path $stage 'python.exe'
+  if (-not (Test-Path $stageExe)) { throw "Extraction did not produce python.exe." }
+  & $stageExe -c "import ensurepip, ssl, sys, venv; sys.exit(0 if (3,11)<=sys.version_info[:2]<=(3,12) else 1)"
+  if ($LASTEXITCODE -ne 0) { throw "Extracted runtime failed validation." }
+  Move-Item -LiteralPath $stage -Destination $destPath
+} finally {
+  Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+  Remove-Item -Force $tmp -ErrorAction SilentlyContinue
 }
 
-New-Item -ItemType Directory -Force $Dest | Out-Null
-Write-Host "Extracting..."
-# The install_only tarball nests everything under a leading `python/` dir; strip it
-# so the interpreter lands exactly at <Dest>\python.exe.
-tar -xzf $tmp --strip-components=1 -C $Dest
-if ($LASTEXITCODE -ne 0) { throw "tar extraction failed (exit $LASTEXITCODE)." }
-Remove-Item -Force $tmp -ErrorAction SilentlyContinue
-
-if (-not (Test-Path $exe)) { throw "Extraction did not produce $exe." }
 & $exe --version
 Write-Host "Ready: $exe"

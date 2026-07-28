@@ -4,8 +4,10 @@
 Chaque module expose `scan(validation_result) -> (items, error)` où items est une
 liste de dicts au schéma commun :
     { 'url', 'title', 'thumbnail', 'type' ('video'|'image'), 'platform', ... }
-Le téléchargement effectif d'un item passe par /api/scrape/download (yt-dlp ou
-stratégie dédiée), pas par ces modules.
+For image sources, ``item.url`` must be directly fetchable by the dataset import
+route; ``thumbnail`` is preview-only. Source-specific ``download`` methods are
+retained for legacy/video consumers but the current image flow is scan then
+direct dataset import (there is no scrape-download HTTP route).
 """
 # Enregistrement explicite des sources (ordre indifférent : la priorité décide).
 # AJOUTER UNE SOURCE = créer sources/<name>.py (sous-classe de base.Source,

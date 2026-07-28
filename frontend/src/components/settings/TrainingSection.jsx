@@ -75,7 +75,7 @@ function CloudTrainingCard({ config, setField }) {
             max="10"
             step="1"
             value={config.cloud?.max_concurrent_runs ?? 1}
-            onChange={(e) => setField('cloud', 'max_concurrent_runs', parseInt(e.target.value) || 1)}
+            onChange={(e) => setField('cloud', 'max_concurrent_runs', Math.min(10, Math.max(1, parseInt(e.target.value, 10) || 1)))}
             className={INPUT_CLASS}
           />
         </div>
@@ -90,7 +90,7 @@ function CloudTrainingCard({ config, setField }) {
             max="5"
             step="0.05"
             value={config.cloud?.max_price_per_hour ?? 0.8}
-            onChange={(e) => setField('cloud', 'max_price_per_hour', Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+            onChange={(e) => setField('cloud', 'max_price_per_hour', Math.min(5, Math.max(0.1, parseFloat(e.target.value) || 0.1)))}
             className={INPUT_CLASS}
           />
         </div>
@@ -104,7 +104,7 @@ function CloudTrainingCard({ config, setField }) {
             min="0"
             step="1"
             value={config.cloud?.monthly_budget_usd ?? 0}
-            onChange={(e) => setField('cloud', 'monthly_budget_usd', parseFloat(e.target.value) || 0)}
+            onChange={(e) => setField('cloud', 'monthly_budget_usd', Math.max(0, parseFloat(e.target.value) || 0))}
             className={INPUT_CLASS}
           />
         </div>
@@ -119,7 +119,7 @@ function CloudTrainingCard({ config, setField }) {
             max="240"
             step="1"
             value={config.cloud?.stall_timeout_minutes ?? 30}
-            onChange={(e) => setField('cloud', 'stall_timeout_minutes', parseInt(e.target.value) || 30)}
+            onChange={(e) => setField('cloud', 'stall_timeout_minutes', Math.min(240, Math.max(5, parseInt(e.target.value, 10) || 30)))}
             className={INPUT_CLASS}
           />
         </div>

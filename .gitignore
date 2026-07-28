@@ -2,16 +2,15 @@
 venv/
 __pycache__/
 *.py[cod]
-*.pyc
 .pytest_cache/
 .DS_Store
 
 # Local avatar runs can contain personal photographs.
 /runs/
-output/
+/output/
 
 # Upstream runtime data and local configuration.
-data/
+/data/
 *.db
 *.db-shm
 *.db-wal
@@ -19,7 +18,7 @@ data/
 
 # Secrets and local config — never commit.
 .env
-config.json
+/config.json
 
 # Frontend and packaging outputs.
 frontend/node_modules/
@@ -34,6 +33,7 @@ packaging/*.spec
 .claude/
 .playwright-mcp/
 docs/superpowers/
+code-reviews/
 
 # Windows OS noise.
 Thumbs.db

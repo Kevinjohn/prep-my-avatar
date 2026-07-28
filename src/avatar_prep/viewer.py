@@ -1,12 +1,37 @@
 from __future__ import annotations
 
 import json
+import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .core import load_json, load_records, write_selection_csv
+from .core import _json_dump, load_json, load_records, write_reports, write_selection_csv
+
+
+_REVIEW_LOCK = threading.Lock()
+_REVIEW_FIELDS = {"status", "caption", "training_usefulness", "coverage_value", "special", "manual"}
+_RATINGS = {"green", "amber", "red"}
+
+
+def _validate_review_patch(out_dir: Path, image_id: object, payload: dict[str, object]) -> None:
+    manifest = load_json(out_dir / "manifest.json", {})
+    known_ids = {record.get("id") for record in manifest.get("records", []) if isinstance(record, dict)}
+    if not isinstance(image_id, str) or image_id not in known_ids:
+        raise ValueError("id must identify a record in this run")
+    unknown = set(payload) - _REVIEW_FIELDS
+    if unknown:
+        raise ValueError(f"Unknown review fields: {', '.join(sorted(unknown))}")
+    for field in ("status", "training_usefulness", "coverage_value"):
+        if field in payload and payload[field] not in _RATINGS:
+            raise ValueError(f"{field} must be green, amber, or red")
+    if "caption" in payload and (not isinstance(payload["caption"], str) or len(payload["caption"]) > 20_000):
+        raise ValueError("caption must be a string of at most 20000 characters")
+    if "special" in payload and payload["special"] not in {None, "holdout"}:
+        raise ValueError("special must be holdout or null")
+    if "manual" in payload and not isinstance(payload["manual"], dict):
+        raise ValueError("manual must be an object")
 
 
 VIEWER_HTML = r'''<!doctype html>
@@ -77,10 +102,12 @@ VIEWER_HTML = r'''<!doctype html>
 <script>
 let manifest = null;
 let review = {};
+let page = 0;
+const pageSize = 100;
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const label = value => String(value ?? 'unknown').replaceAll('_',' ');
 const statusText = value => value === 'green' ? 'green' : value === 'red' ? 'red' : 'amber';
-const pathFor = value => encodeURI(String(value ?? '').replaceAll('\\','/'));
+const pathFor = value => String(value ?? '').replaceAll('\\','/').split('/').map(encodeURIComponent).join('/');
 
 async function load() {
   manifest = await fetch('/manifest.json?ts=' + Date.now()).then(r => r.json());
@@ -108,27 +135,34 @@ function renderGrid() {
     const haystack = [r.source_name, ...(r.reasons || []), JSON.stringify(r.annotations || {})].join(' ').toLowerCase();
     return (filter === 'all' || statusText(r.status) === filter) && (!term || haystack.includes(term));
   });
-  document.getElementById('grid').innerHTML = records.length ? records.map(card).join('') : '<div class="empty">No images match this filter.</div>';
+  const pageCount = Math.max(1, Math.ceil(records.length / pageSize));
+  page = Math.min(page, pageCount - 1);
+  const visible = records.slice(page * pageSize, (page + 1) * pageSize);
+  const controls = records.length > pageSize ? `<div class="empty"><button onclick="changePage(-1)" ${page === 0 ? 'disabled' : ''}>Previous</button> Page ${page + 1} of ${pageCount} <button onclick="changePage(1)" ${page + 1 === pageCount ? 'disabled' : ''}>Next</button></div>` : '';
+  document.getElementById('grid').innerHTML = records.length ? visible.map(card).join('') + controls : '<div class="empty">No images match this filter.</div>';
 }
+function changePage(delta) { page += delta; renderGrid(); window.scrollTo({top:0, behavior:'smooth'}); }
 
 function card(record) {
   const status = statusText(record.status);
   const a = record.annotations || {};
   const chips = ['view','framing','expression','lighting','background','face_visibility'].map(k => `<span class="chip">${esc(k)}: ${esc(label(a[k]))}</span>`).join('');
-  const clothing = [...(a.clothing || []), ...(a.accessories || [])].map(v => `<span class="chip">${esc(label(v))}</span>`).join('');
+  const values = value => Array.isArray(value) ? value : value ? [value] : [];
+  const clothing = [...values(a.clothing), ...values(a.accessories)].map(v => `<span class="chip">${esc(label(v))}</span>`).join('');
   const reasons = (record.reasons || []).map(v => `<li>${esc(v)}</li>`).join('');
   const special = record.special ? `<span class="chip">${esc(label(record.special))}</span>` : '';
   const original = pathFor(record.original_path);
   const cropName = record.primary_crop || 'square';
-  const crop = pathFor((record.crops || {})[cropName] || (record.crops || {}).square);
+  const cropValue = (record.crops || {})[cropName] || (record.crops || {}).square;
+  const crop = pathFor(cropValue);
   return `<article class="card" data-id="${esc(record.id)}">
     <div class="card-head"><div><strong>${esc(record.source_name)}</strong><div class="subtle">${record.width || '?'} × ${record.height || '?'} · ${Math.round((record.file_size || 0)/1024)} KB</div></div><span class="rag ${status}"><i class="dot"></i>${status}</span></div>
-    <div class="image-row"><figure><img src="/${original}" alt="Original ${esc(record.source_name)}"><figcaption>Original</figcaption></figure><figure><img src="/${crop}" alt="Proposed ${esc(label(cropName))} crop"><figcaption>Proposed ${esc(label(cropName))} crop</figcaption></figure></div>
+    <div class="image-row"><figure><img loading="lazy" src="/${original}" alt="Original ${esc(record.source_name)}"><figcaption>Original</figcaption></figure>${cropValue ? `<figure><img loading="lazy" src="/${crop}" alt="Proposed ${esc(label(cropName))} crop"><figcaption>Proposed ${esc(label(cropName))} crop</figcaption></figure>` : '<div class="notice">Crop unavailable because image processing failed.</div>'}</div>
     <div class="details"><div class="chips">${special}${chips}${clothing}</div>
       <div class="metrics"><div class="metric"><span>Sharpness</span><strong>${record.metrics?.sharpness ?? 0}</strong></div><div class="metric"><span>Exposure</span><strong>${record.metrics?.exposure ?? 0}</strong></div><div class="metric"><span>Resolution</span><strong>${record.metrics?.resolution ?? 0}</strong></div></div>
       ${reasons ? `<ul class="reasons">${reasons}</ul>` : '<div class="subtle">No warnings from automated analysis.</div>'}
       <label class="subtle" for="caption-${esc(record.id)}">Caption</label><textarea id="caption-${esc(record.id)}">${esc(record.caption || '')}</textarea>
-      <div class="actions"><button data-status="green" onclick="setStatus('${esc(record.id)}','green')">Training green</button><button data-status="amber" onclick="setStatus('${esc(record.id)}','amber')">Amber / review</button><button data-status="red" onclick="setStatus('${esc(record.id)}','red')">Do not train</button><button onclick="setSpecial('${esc(record.id)}','holdout')">Holdout</button><button class="save" onclick="saveCaption('${esc(record.id)}')">Save caption</button></div>
+      <div class="actions"><button data-status="green" onclick="setStatus('${esc(record.id)}','green')">Training green</button><button data-status="amber" onclick="setStatus('${esc(record.id)}','amber')">Amber / review</button><button data-status="red" onclick="setStatus('${esc(record.id)}','red')">Do not train</button><button onclick="setSpecial('${esc(record.id)}','holdout')">Holdout</button><button onclick="setSpecial('${esc(record.id)}',null)">Clear holdout</button><button class="save" onclick="saveCaption('${esc(record.id)}')">Save caption</button></div>
     </div></article>`;
 }
 
@@ -137,11 +171,13 @@ async function update(id, patch) {
   if (!response.ok) { alert('Could not save review decision'); return; }
   await load();
 }
-function setStatus(id, status) { update(id, {status, training_usefulness:status}); }
-function setSpecial(id, special) { update(id, {special}); }
+function captionFor(id) { return document.getElementById('caption-' + id).value; }
+function setStatus(id, status) { update(id, {status, training_usefulness:status, caption:captionFor(id)}); }
+function setSpecial(id, special) { update(id, {special, caption:captionFor(id)}); }
 function saveCaption(id) { const value = document.getElementById('caption-' + id).value; update(id, {caption:value}); }
-document.getElementById('filter').addEventListener('change', renderGrid);
-document.getElementById('search').addEventListener('input', renderGrid);
+document.getElementById('filter').addEventListener('change', () => { page = 0; renderGrid(); });
+let searchTimer;
+document.getElementById('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { page = 0; renderGrid(); }, 150); });
 document.getElementById('refresh').addEventListener('click', load);
 load().catch(error => { document.getElementById('notice').textContent = 'Could not load the manifest: ' + error; });
 </script>
@@ -168,19 +204,28 @@ class ReviewHandler(SimpleHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 64 * 1024:
+                raise ValueError("review payload must be between 1 byte and 64 KiB")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("review payload must be a JSON object")
             image_id = payload.pop("id")
-            if not isinstance(image_id, str):
-                raise ValueError("id is required")
-            review_path = self.out_dir / "review.json"
-            review = load_json(review_path, {})
-            current = review.setdefault(image_id, {})
-            allowed = {"status", "caption", "training_usefulness", "coverage_value", "special", "manual"}
-            current.update({key: value for key, value in payload.items() if key in allowed})
-            review_path.write_text(json.dumps(review, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            _, records = load_records(self.out_dir)
-            write_selection_csv(self.out_dir, records)
-            body = b'{"ok":true}'
+            _validate_review_patch(self.out_dir, image_id, payload)
+            with _REVIEW_LOCK:
+                review_path = self.out_dir / "review.json"
+                review = load_json(review_path, {})
+                current = review.setdefault(image_id, {})
+                current.update(payload)
+                _json_dump(review_path, review)
+                derived_updated = True
+                try:
+                    manifest, records = load_records(self.out_dir)
+                    write_selection_csv(self.out_dir, records)
+                    write_reports(self.out_dir, records, manifest.get("token", "pm_subject"))
+                except Exception as exc:
+                    derived_updated = False
+                    print(f"[review] decision saved but derived reports could not be refreshed: {exc}")
+            body = json.dumps({"ok": True, "derived_updated": derived_updated}).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -195,7 +240,10 @@ class ReviewHandler(SimpleHTTPRequestHandler):
 
 def serve(out_dir: Path, port: int = 8765) -> None:
     write_viewer(out_dir)
-    handler = lambda *args, **kwargs: ReviewHandler(*args, directory=str(out_dir), out_dir=out_dir, **kwargs)
+
+    def handler(*args, **kwargs):
+        return ReviewHandler(*args, directory=str(out_dir), out_dir=out_dir, **kwargs)
+
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     print(f"Review viewer: http://127.0.0.1:{port}/reports/index.html")
     print("Press Ctrl-C to stop the local viewer.")

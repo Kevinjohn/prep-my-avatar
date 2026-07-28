@@ -3,7 +3,7 @@
  * (GET /api/capabilities). Drives feature gating (e.g. the Studio nav item)
  * and the onboarding redirect when the app has never been configured.
  */
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
 import { apiFetch } from '../api/fetchClient'
 
 const CapabilitiesContext = createContext(null)
@@ -21,28 +21,43 @@ const EMPTY_CAPS = {
   training_visible: false,
   cloud_training: false,
   studio_visible: false,
+  generation_pricing: {
+    version: 1, as_of: null, currency: 'USD',
+    per_image: { nanobanana: 0, chatgpt_api: 0 },
+  },
+  resolution_metadata: null,
 }
 
 export function CapabilitiesProvider({ children }) {
   const [caps, setCaps] = useState(EMPTY_CAPS)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const requestRef = useRef(0)
+  useEffect(() => () => { requestRef.current += 1 }, [])
 
   const refresh = useCallback(async (force = false) => {
+    const request = ++requestRef.current
+    setLoading(true)
     try {
       const data = await apiFetch(`/api/capabilities${force ? '?force=1' : ''}`)
+      if (request !== requestRef.current) return null
       setCaps(data)
-    } catch {
+      setError(null)
+      return data
+    } catch (cause) {
       // Keep the last-known caps on a transient network error rather than
       // resetting to EMPTY_CAPS — that would bounce the user into onboarding.
+      if (request === requestRef.current) setError(cause)
+      return null
     } finally {
-      setLoading(false)
+      if (request === requestRef.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => { refresh() }, [refresh])
 
   return (
-    <CapabilitiesContext.Provider value={{ caps, loading, refresh }}>
+    <CapabilitiesContext.Provider value={{ caps, loading, error, refresh }}>
       {children}
     </CapabilitiesContext.Provider>
   )

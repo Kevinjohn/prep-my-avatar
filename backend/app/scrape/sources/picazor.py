@@ -287,6 +287,7 @@ def scan(validation):
         seen = set()
         total_pages = None
         page = start_page
+        partial_error = None
 
         for _ in range(MAX_PAGES):
             page_url = f"{BASE_URL}/fr/{creator}" + (f"/page/{page}" if page > 1 else "")
@@ -294,6 +295,7 @@ def scan(validation):
             if err:
                 # Si on a déjà des items, on dégrade gracieusement sans planter.
                 if all_items:
+                    partial_error = err
                     break
                 return None, err
 
@@ -321,6 +323,9 @@ def scan(validation):
 
         if not all_items:
             return None, "Picazor : aucun média trouvé pour ce profil."
+        if partial_error:
+            return all_items[:MAX_ITEMS], (
+                f"Picazor : résultats partiels, pagination interrompue ({partial_error}).")
         return all_items[:MAX_ITEMS], None
 
     except Exception as e:  # garde-fou ultime — ne jamais lever
@@ -380,16 +385,23 @@ def download(url, dest_path):
         except Exception:
             content_type = ""
 
+        def finish(result):
+            try:
+                response.close()
+            except Exception:
+                pass
+            return result
+
         if status in (401, 404, 410):
-            return False, None, f"Picazor : ressource indisponible (HTTP {status})."
+            return finish((False, None, f"Picazor : ressource indisponible (HTTP {status})."))
         if status == 403 or status == 429 or status == 503:
-            return False, None, "Picazor (Cloudflare) a bloqué l'accès."
+            return finish((False, None, "Picazor (Cloudflare) a bloqué l'accès."))
         if status >= 400:
-            return False, None, f"Picazor : réponse HTTP {status}."
+            return finish((False, None, f"Picazor : réponse HTTP {status}."))
 
         # Une réponse HTML n'est PAS un média (Cloudflare ou page d'erreur).
         if "text/html" in content_type.lower():
-            return False, None, "Picazor : réponse HTML au lieu d'un média (accès bloqué ?)."
+            return finish((False, None, "Picazor : réponse HTML au lieu d'un média (accès bloqué ?)."))
 
         # Extension finale selon le content-type (fallback : URL).
         final_ext = _ext_from_content_type(content_type, resolved_url)
@@ -412,15 +424,15 @@ def download(url, dest_path):
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return False, None, f"Picazor : erreur d'écriture ({e})."
+            return finish((False, None, f"Picazor : erreur d'écriture ({e})."))
 
         # Fichier vide = échec.
         try:
             if not tmp_path.exists() or tmp_path.stat().st_size == 0:
                 tmp_path.unlink(missing_ok=True)
-                return False, None, "Picazor : fichier téléchargé vide."
+                return finish((False, None, "Picazor : fichier téléchargé vide."))
         except OSError:
-            return False, None, "Picazor : fichier téléchargé invalide."
+            return finish((False, None, "Picazor : fichier téléchargé invalide."))
 
         # Renommage atomique .tmp -> final.
         try:
@@ -430,9 +442,9 @@ def download(url, dest_path):
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return False, None, f"Picazor : erreur de finalisation ({e})."
+            return finish((False, None, f"Picazor : erreur de finalisation ({e})."))
 
-        return True, final_path.name, None
+        return finish((True, final_path.name, None))
 
     except Exception as e:  # garde-fou ultime — ne jamais lever
         logger.exception("Picazor download: erreur inattendue")

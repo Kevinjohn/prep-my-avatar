@@ -2,4 +2,4 @@ blank_issues_enabled: true
 contact_links:
   - name: 💬 Discord — questions & help
     url: https://discord.gg/j6hnJBFtXE
-    about: Ask in #help — usually the fastest way to get unstuck. Feature ideas live in #roadmap.
+    about: "Ask in #help for inherited LoRA Dataset Studio behavior; fork bugs and feature ideas belong in this repository's issues."

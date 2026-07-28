@@ -8,6 +8,7 @@ const LABEL = { face: 'Face', bust: 'Bust', body: 'Body', back: 'Back' };
 
 export default function CompositionBar({ composition, upscaled, bodyFidelity = false, targets = null }) {
   const TARGET = targets || (bodyFidelity ? TARGET_BODY : TARGET_FACE);
+  const targetTotal = Object.values(TARGET).reduce((sum, value) => sum + value, 0);
   const c = composition || { face: 0, bust: 0, body: 0, back: 0 };
   const u = upscaled || { face: 0, bust: 0, body: 0, back: 0 };
   const total = (c.face || 0) + (c.bust || 0) + (c.body || 0) + (c.back || 0);
@@ -41,7 +42,7 @@ export default function CompositionBar({ composition, upscaled, bodyFidelity = f
       {missing.length > 0 ? (
         <p className="m-0 text-amber-300/90 text-[0.6875rem]">
           ⚠ Missing: {missing.map((m) => `${m.n} ${LABEL[m.k].toLowerCase()}`).join(' · ')}
-          <span className="text-content-subtle"> — generate or import these types (target ≈25 balanced)</span>
+          <span className="text-content-subtle"> — generate or import these types (target ≈{targetTotal}{targets ? ' custom' : bodyFidelity ? ' body fidelity' : ' balanced'})</span>
         </p>
       ) : (
         <p className="m-0 text-green-300/80 text-[0.6875rem]">✓ Target composition reached — ready to caption/export</p>

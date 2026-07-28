@@ -338,7 +338,8 @@ export default function WatermarkReviewLightbox({ datasetId, queue, caps, nonces
   const doReject = useCallback(() => {
     if (!item || isSaveBlocked(item.id)) return;
     return run('reject', async (it) => {
-      await onReject(it.id);
+      const saved = await onReject(it.id);
+      if (!saved) return { note: { tone: 'err', text: 'Could not reject this image. Try again.' } };
       return { key: 'rejected' };
     });
   }, [isSaveBlocked, item, onReject, run]);

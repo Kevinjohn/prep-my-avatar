@@ -8,6 +8,28 @@ enforces or defaults to — when in doubt, the app's warnings are this guide app
 > across your images and NOT described in the captions**. Keep the subject constant,
 > vary everything else, and never describe the subject — that's the trigger word's job.
 
+## Evidence status of operational guidance
+
+Hardware ranges, download sizes, run-time descriptions, and checkpoint regions
+in this guide are planning heuristics, not benchmark guarantees. They have not
+been reproduced across a controlled hardware matrix in this repository. Treat
+them as starting points and record the actual peak memory, duration, dependency
+versions, GPU and dataset shape for your run before making a purchasing or
+capacity decision.
+
+The behavior the application actually enforces is reviewable in these sources:
+
+- training defaults and checkpoint cadence: `backend/app/services/lora_training.py`;
+- family/model choices and validation: `backend/app/routes/training.py` and
+  `backend/app/services/cloud_training.py`;
+- GPU speed estimates: `backend/app/services/gpu_speed.py`;
+- frontend preset presentation: `frontend/src/components/dataset/TrainingPanel.jsx`.
+
+When an estimate changes, update this guide with the measurement date, GPU,
+driver/tool versions, model revision, dataset image count and resolution, peak
+memory method, elapsed time, and checkpoint scoring method. Until such a result
+is committed, wording here deliberately remains approximate.
+
 ---
 
 ## 1. Pick your model family first
@@ -15,7 +37,7 @@ enforces or defaults to — when in doubt, the app's warnings are this guide app
 The family changes the caption style, the image count, and the settings — so decide
 before you caption anything.
 
-| | Z-Image | SDXL | Krea 2 | FLUX.1 | FLUX.2 Klein |
+| Setting | Z-Image | SDXL | Krea 2 | FLUX.1 | FLUX.2 Klein |
 |---|---|---|---|---|---|
 | **Caption style** | Prose sentences | Booru tags | Prose sentences | Prose sentences | Prose sentences |
 | **Images (min → good)** | 12 → 20+ | 20 → 30+ | 15 → 20+ | 15 → 20+ | 15 → 20+ |
@@ -23,8 +45,10 @@ before you caption anything.
 | **Preview quality** | Fast, distilled | Depends on checkpoint | Raw: slow but faithful | High, ~20 steps | Non-distilled, real CFG (~25 steps) |
 | **Best for** | Fast iteration, prose-driven prompting | Booru-native checkpoints, NSFW ecosystems | Highest realism ceiling | The largest LoRA ecosystem, strong prompt fidelity | Modern FLUX.2 stack; 4B trains on mid-range GPUs |
 
-**Krea note:** the default trains on **Krea-2-Raw** — the official recommendation is
-*"train on Raw, validate on Turbo"*. Raw runs are long (hours); that's normal, not stuck.
+**Krea note:** the project default trains on **Krea-2-Raw** and uses the working
+strategy *train on Raw, validate on Turbo*. Raw runs can take hours; use live
+step progress and the configured stall timeout rather than elapsed time alone
+to decide whether a run is stuck.
 
 **FLUX.1 note:** trains on **FLUX.1-dev**, a *gated* Hugging Face model — accept its
 license and set a HF token before the first run (the initial download is ~24 GB). It's

@@ -4,9 +4,11 @@ Endpoint contract verified against the ai-toolkit UI source (Next.js routes):
 bearer auth on /api/* except /api/img/ and /api/files/ (public, path-restricted);
 job_config is stored verbatim and executed by the pod's worker, so the config
 built by lora_training.build_job_config() is submitted as-is (with cloud
-overrides applied by the orchestrator)."""
+overrides applied by the orchestrator). Jobs/list/start semantics are pinned to
+revision 0e1784176708e351ae664002a53baa585b5949fb in the contract fixture."""
 import os
 import posixpath
+import re
 from urllib.parse import quote
 
 import requests
@@ -110,11 +112,53 @@ class RemoteAiToolkit:
                           json={'name': name, 'gpu_ids': gpu_ids, 'job_config': job_config})
         if r.status_code != 200:
             raise RemoteError(f'create_job -> HTTP {r.status_code}: {r.text[:200]}')
-        return str(r.json().get('id'))
+        try:
+            payload = r.json()
+        except (TypeError, ValueError) as exc:
+            raise RemoteError('create_job returned invalid JSON') from exc
+        if not isinstance(payload, dict):
+            raise RemoteError('create_job returned a non-object response')
+        job_id = payload.get('id')
+        if job_id is None or not str(job_id).strip():
+            raise RemoteError('create_job response is missing a job id')
+        return str(job_id)
+
+    def find_job_by_name(self, name: str) -> dict | None:
+        """Look up ai-toolkit's stable job name before creating a replacement.
+
+        The pinned UI contract exposes list-all at ``GET /api/jobs`` and makes
+        ``Job.name`` unique. There is no name path route, so scan exact names.
+        """
+        path = '/api/jobs'
+        r = self._request('GET', path)
+        if r.status_code != 200:
+            raise RemoteError(f'find_job_by_name -> HTTP {r.status_code}: {r.text[:200]}')
+        try:
+            payload = r.json()
+        except (TypeError, ValueError) as exc:
+            raise RemoteError('find_job_by_name returned invalid JSON') from exc
+        if not isinstance(payload, dict):
+            raise RemoteError('find_job_by_name returned a non-object response')
+        jobs = payload.get('jobs')
+        if not isinstance(jobs, list):
+            raise RemoteError('find_job_by_name response is missing the jobs list')
+        for job in jobs:
+            if isinstance(job, dict) and job.get('name') == name:
+                job_id = job.get('id')
+                if job_id is None or not str(job_id).strip():
+                    raise RemoteError('find_job_by_name response is missing a job id')
+                return {**job, 'id': str(job_id)}
+        return None
+
+    def queue_job(self, job_id: str) -> None:
+        self._json('GET', f'/api/jobs/{job_id}/start')
+
+    def start_queue(self, gpu_ids: str = '0') -> None:
+        self._json('GET', f'/api/queue/{gpu_ids}/start')
 
     def start_job(self, job_id: str, gpu_ids: str = '0') -> None:
-        self._json('GET', f'/api/jobs/{job_id}/start')
-        self._json('GET', f'/api/queue/{gpu_ids}/start')
+        self.queue_job(job_id)
+        self.start_queue(gpu_ids)
 
     def stop_job(self, job_id: str) -> None:
         self._json('GET', f'/api/jobs/{job_id}/stop')
@@ -150,11 +194,14 @@ class RemoteAiToolkit:
             pass
         got = 0
         want = int(expected_size or 0)
+        representation = None
         for _ in range(max(1, int(attempts))):
             before = got
             clean = False
             try:
                 headers = {'Range': f'bytes={got}-'} if got else {}
+                if got and representation:
+                    headers['If-Range'] = representation
                 with self._request('GET', url_path, stream=True, headers=headers,
                                    timeout=timeout or _UPLOAD_TIMEOUT) as r:
                     if got and r.status_code == 416:
@@ -165,6 +212,25 @@ class RemoteAiToolkit:
                                 f'download {remote_path} -> HTTP {r.status_code}')
                         if got and r.status_code == 200:
                             got = 0           # Range ignored -> full restart
+                        response_headers = getattr(r, 'headers', {})
+                        if r.status_code == 206:
+                            content_range = (response_headers.get('Content-Range') or '').strip()
+                            match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+|\*)',
+                                                 content_range)
+                            if not match or int(match.group(1)) != got:
+                                raise RemoteError(
+                                    f'download {remote_path} returned an invalid byte range')
+                            if want and match.group(3) != '*' and int(match.group(3)) != want:
+                                raise RemoteError(
+                                    f'download {remote_path} changed size while resuming')
+                        response_representation = (response_headers.get('ETag') or
+                                                   response_headers.get('Last-Modified'))
+                        if got:
+                            if not representation or response_representation != representation:
+                                raise RemoteError(
+                                    f'download {remote_path} changed while resuming')
+                        elif response_representation:
+                            representation = response_representation
                         with open(tmp, 'ab' if got else 'wb') as fh:
                             for chunk in r.iter_content(chunk_size=1024 * 256):
                                 if chunk:

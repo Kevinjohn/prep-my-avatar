@@ -42,6 +42,8 @@ function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
 Step 'Clean workspace'
 Remove-Item -Recurse -Force $Build, $Stage -ErrorAction SilentlyContinue
+Remove-Item -Force $Zip -ErrorAction SilentlyContinue
+Remove-Item -Force "$Zip.sha256" -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $Build, $Stage, (Split-Path $Zip) | Out-Null
 
 # 1) Fetch one immutable, reviewed CPython asset and verify its publisher digest.
@@ -83,6 +85,7 @@ Copy-Item -Recurse -Force (Join-Path $Root 'frontend\dist') (Join-Path $Stage 'f
 Copy-Item -Force (Join-Path $Here 'icon.ico') $Stage
 Copy-Item -Force (Join-Path $Root 'README.md') $Stage -ErrorAction SilentlyContinue
 Copy-Item -Force (Join-Path $Root 'LICENSE')   $Stage -ErrorAction SilentlyContinue
+Copy-Item -Force (Join-Path $Root 'NOTICE.md') $Stage
 
 # 4) Launcher exe (host python + PyInstaller; tkinter is bundled automatically).
 #    PyInstaller needs CPython 3.9-3.12 — bare `python` may resolve to a newer one
@@ -114,8 +117,30 @@ Copy-Item -Force (Join-Path $Build 'launcher\LoRA Dataset Studio.exe') $Stage
 
 # 5) Zip the folder (extraction yields the LoRA-Dataset-Studio\ folder).
 Step 'Zipping the bundle'
-Remove-Item -Force $Zip -ErrorAction SilentlyContinue
-Compress-Archive -Path $Stage -DestinationPath $Zip
+$ZipBaseName = [System.IO.Path]::GetFileNameWithoutExtension($Zip)
+$ZipTemporary = Join-Path (Split-Path $Zip) (".{0}.{1}.tmp.zip" -f $ZipBaseName, ([guid]::NewGuid()))
+try {
+  Compress-Archive -Path $Stage -DestinationPath $ZipTemporary
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipTemporary)
+  try {
+    if ($archive.Entries.Count -eq 0) { throw 'Portable archive is empty.' }
+    $launcherEntry = $archive.Entries | Where-Object { $_.FullName -like '*/LoRA Dataset Studio.exe' } | Select-Object -First 1
+    if (-not $launcherEntry) { throw 'Portable archive does not contain the launcher.' }
+    foreach ($notice in 'LICENSE', 'NOTICE.md') {
+      if (-not ($archive.Entries | Where-Object { $_.FullName -like "*/$notice" } | Select-Object -First 1)) {
+        throw "Portable archive does not contain $notice."
+      }
+    }
+  } finally {
+    $archive.Dispose()
+  }
+  Move-Item -LiteralPath $ZipTemporary -Destination $Zip
+} finally {
+  Remove-Item -Force $ZipTemporary -ErrorAction SilentlyContinue
+}
+$ZipHash = (Get-FileHash -Algorithm SHA256 $Zip).Hash.ToLowerInvariant()
+Set-Content -Encoding ASCII -NoNewline -Path "$Zip.sha256" -Value "$ZipHash  $(Split-Path -Leaf $Zip)"
 $mb = [math]::Round((Get-Item $Zip).Length / 1MB, 1)
 Step "Done -> $Zip ($mb MB)"
 Write-Host '    Test it: extract the zip and double-click "LoRA Dataset Studio.exe".'

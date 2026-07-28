@@ -55,7 +55,7 @@ def trash_root() -> Path:
 
 def _new_entry(context='', metadata=None) -> tuple[Path, dict]:
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    safe_ctx = ''.join(ch if ch.isalnum() or ch in '-_' else '_'
+    safe_ctx = ''.join(ch if ch.isascii() and (ch.isalnum() or ch in '-_') else '_'
                        for ch in str(context))[:60]
     base = f'{stamp}_{safe_ctx}' if safe_ctx else stamp
     with _ENTRY_CREATE_LOCK:
@@ -114,8 +114,9 @@ def send_paths_to_trash(paths, context='', metadata=None) -> dict:
             raise ValueError('trash targets cannot contain one another')
     entry, meta = _new_entry(context, metadata)
     moved = []
+    planned = []
     try:
-        used = set()
+        used = {_META_NAME, f'{_META_NAME}.tmp'}
         for source in sources:
             name = source.name
             stem, suffix = source.stem, source.suffix
@@ -125,22 +126,46 @@ def send_paths_to_trash(paths, context='', metadata=None) -> dict:
                 name = f'{stem}_{n}{suffix}'
             used.add(name)
             destination = entry / name
-            shutil.move(str(source), str(destination))
-            moved.append((source, destination))
-            meta['files'].append({
+            item = {
                 'stored_name': name,
                 'original_path': str(source.resolve(strict=False)),
-                'is_dir': destination.is_dir(),
-            })
+                'is_dir': source.is_dir(),
+                'state': 'pending',
+            }
+            meta['files'].append(item)
+            planned.append((source, destination, item))
+        meta['transaction_state'] = 'moving'
         _write_metadata(entry, meta)
-    except Exception:
+        for source, destination, item in planned:
+            shutil.move(str(source), str(destination))
+            moved.append((source, destination))
+            item['state'] = 'moved'
+            _write_metadata(entry, meta)
+        meta['transaction_state'] = 'complete'
+        _write_metadata(entry, meta)
+    except BaseException:
+        rollback_failed = False
         for source, destination in reversed(moved):
             try:
                 source.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(destination), str(source))
+                for planned_source, _planned_destination, item in planned:
+                    if planned_source == source:
+                        item['state'] = 'rolled_back'
+                        break
             except OSError:
+                rollback_failed = True
                 logger.exception('could not roll back failed trash move %s', source)
-        shutil.rmtree(entry, ignore_errors=True)
+        if rollback_failed:
+            meta['recovery_required'] = True
+            meta['transaction_state'] = 'recovery_required'
+            meta['error'] = 'A failed trash operation could not be fully rolled back'
+            try:
+                _write_metadata(entry, meta)
+            except OSError:
+                logger.exception('could not publish recovery metadata for %s', entry)
+        else:
+            shutil.rmtree(entry, ignore_errors=True)
         raise
     logger.info('trashed %d path(s) -> %s', len(moved), entry)
     return {'id': entry.name, 'path': str(entry), 'files': meta['files']}
@@ -325,9 +350,9 @@ def remove_entry(entry_id) -> None:
         raise
 
 
-@serialized_transaction
-def list_entries() -> list[dict]:
+def _inventory() -> tuple[int, list[dict]]:
     result = []
+    total = 0
     for entry in sorted(trash_root().iterdir(), reverse=True):
         if not entry.is_dir():
             continue
@@ -340,10 +365,11 @@ def list_entries() -> list[dict]:
         size = 0
         for dirpath, _dirs, files in os.walk(entry):
             for filename in files:
-                if filename == _META_NAME:
-                    continue
                 try:
-                    size += os.path.getsize(os.path.join(dirpath, filename))
+                    file_size = os.path.getsize(os.path.join(dirpath, filename))
+                    total += file_size
+                    if filename != _META_NAME:
+                        size += file_size
                 except OSError:
                     pass
         result.append({
@@ -354,19 +380,23 @@ def list_entries() -> list[dict]:
             'size_bytes': size,
             'restorable': bool(meta.get('files')) and meta.get('restorable') is not False,
         })
-    return result
+    return total, result
+
+
+@serialized_transaction
+def inventory() -> tuple[int, list[dict]]:
+    """Return aggregate bytes and entry rows from one filesystem walk."""
+    return _inventory()
+
+
+@serialized_transaction
+def list_entries() -> list[dict]:
+    return _inventory()[1]
 
 
 @serialized_transaction
 def trash_size() -> int:
-    total = 0
-    for dirpath, _dirs, files in os.walk(trash_root()):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(dirpath, f))
-            except OSError:
-                pass
-    return total
+    return _inventory()[0]
 
 
 def _path_size(path: Path) -> int:

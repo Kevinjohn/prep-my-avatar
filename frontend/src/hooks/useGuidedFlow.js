@@ -7,6 +7,7 @@ import { buildImageImprovementPairs } from '../utils/imageImprovement.js';
 export function deriveSteps(d, caps, checkpointCount = 0) {
   const images = (d && d.images) || [];
   const live = images.filter((i) => i.status !== 'failed');
+  /** @type {any[]} */
   const unresolvedPairs = [
     ...buildSmallImageRescuePairs(images).filter((pair) => !pair.resolved),
     ...buildImageImprovementPairs(images).filter((pair) => !pair.resolved),
@@ -32,6 +33,7 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
   const anchorPlan = d && d.anchor_plan;
   const visionReady = !!(caps?.ollama?.reachable && caps?.ollama?.vision_model_ready);
 
+  /** @type {any[]} */
   const steps = [
     { id: 'corpus', label: 'Import corpus', targetId: 'ds-add-import',
       done: hasImportedCorpus, optional: !!(d && d.ref_filename),

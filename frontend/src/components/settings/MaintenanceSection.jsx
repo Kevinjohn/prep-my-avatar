@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { apiFetch, fetchWithCsrfRetry, postJson } from '../../api/fetchClient'
+import { apiFetch, postJson } from '../../api/fetchClient'
+import { restartTarget, waitForRestart } from '../../utils/restartReadiness'
 import DiagnosticReport from '../common/DiagnosticReport'
 import { useConfirmDialog } from '../common/ConfirmDialog'
 import { Card, TextField } from './primitives'
@@ -35,17 +36,13 @@ function UpdatesCard() {
     }
   }
 
-  const waitForHealthAndReload = async () => {
-    // The server is re-execing: /api/health refuses connections for a few seconds,
-    // then answers again on the same port. Poll, then hard-reload to pull new dist.
-    for (let i = 0; i < 120; i += 1) {
-      await new Promise((r) => setTimeout(r, 1000))
-      try {
-        const res = await fetchWithCsrfRetry('/api/health/ready', { cache: 'no-store' })
-        if (res.ok) { window.location.reload(); return }
-      } catch { /* still down — keep waiting */ }
+  const waitForHealthAndReload = async (restartNonce) => {
+    const target = restartTarget(window.location, window.location.port)
+    if (await waitForRestart({ restartNonce, target })) {
+      window.location.reload(); return
     }
-    setApplying(false); setPhase('')          // gave up after ~2 min
+    setStatus({ ok: false, reason: 'The restarted server did not become reachable within two minutes. Reload or restart the app manually.' })
+    setApplying(false); setPhase('')
   }
 
   const apply = async () => {
@@ -54,7 +51,7 @@ function UpdatesCard() {
       const res = await postJson('/api/update/apply', {})
       if (res.restarting) {
         setPhase('restarting')
-        waitForHealthAndReload()              // not awaited: UI shows "restarting…"
+        waitForHealthAndReload(res.restart_nonce) // not awaited: UI shows "restarting…"
       } else {
         setStatus(res.ok ? { ...res, up_to_date: true } : res)
         setApplying(false); setPhase('')
@@ -151,11 +148,15 @@ function LogViewer() {
   const [open, setOpen] = useState(false)
   const [file, setFile] = useState(null)
   const [lines, setLines] = useState([])
+  const [error, setError] = useState('')
+  const [copyStatus, setCopyStatus] = useState('')
   const load = async () => {
     try {
       const d = await apiFetch('/api/logs/tail?n=300')
-      setFile(d.file); setLines(d.lines || [])
-    } catch { /* viewer is best-effort */ }
+      setFile(d.file); setLines(d.lines || []); setError('')
+    } catch (loadError) {
+      setError(loadError?.message || 'Could not load the server log')
+    }
   }
   useEffect(() => {
     if (!open) return undefined
@@ -163,14 +164,22 @@ function LogViewer() {
     const id = setInterval(load, 5000)
     return () => clearInterval(id)
   }, [open])
-  const copy = () => { try { navigator.clipboard.writeText(lines.join('\n')) } catch { /* ignore */ } }
+  const copy = async () => {
+    setCopyStatus('')
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      setCopyStatus('Log copied to clipboard')
+    } catch {
+      setCopyStatus('Could not copy the log. Select the text below and copy it manually.')
+    }
+  }
   return (
     <section className="rounded-xl border border-border bg-surface p-5">
       <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
         className="flex w-full items-center gap-2 text-left">
         <h2 className="text-base font-semibold text-content">🪵 Server log</h2>
         <span className="text-xs text-content-subtle">
-          {open ? (file ? `data/${file} — last ${lines.length} lines, refreshes every 5 s` : 'no log file yet')
+          {open ? (error ? 'server log unavailable' : file ? `data/${file} — last ${lines.length} lines, refreshes every 5 s` : 'no log file yet')
             : 'something failed? open this and copy the log into your bug report'}
         </span>
         <span aria-hidden className="ml-auto text-content-subtle">{open ? '▾' : '▸'}</span>
@@ -187,8 +196,14 @@ function LogViewer() {
               📋 Copy all
             </button>
           </div>
+          {error && (
+            <p role="alert" className="text-xs text-red-300">
+              Server log unavailable: {error}. Use Refresh to retry.
+            </p>
+          )}
+          {copyStatus && <p role="status" className="text-xs text-content-muted">{copyStatus}</p>}
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-app/60 p-2 text-[11px] leading-snug text-content-muted">
-            {lines.length ? lines.join('\n') : 'Log is empty.'}
+            {lines.length ? lines.join('\n') : error ? 'Log data is unavailable.' : 'Log is empty.'}
           </pre>
         </div>
       )}
@@ -205,11 +220,19 @@ function TrashCard() {
   const [entries, setEntries] = useState([])
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  const load = () => apiFetch('/api/trash')
-    .then((d) => {
+  const [loadError, setLoadError] = useState('')
+  const load = async () => {
+    try {
+      const d = await apiFetch('/api/trash')
       setSize(d?.size_bytes ?? null)
       setEntries(Array.isArray(d?.entries) ? d.entries : [])
-    })
+      setLoadError('')
+      return true
+    } catch (error) {
+      setLoadError(error?.message || 'Could not load the trash inventory')
+      return false
+    }
+  }
   useEffect(() => {
     let alive = true
     apiFetch('/api/trash')
@@ -217,8 +240,11 @@ function TrashCard() {
         if (!alive) return
         setSize(d?.size_bytes ?? null)
         setEntries(Array.isArray(d?.entries) ? d.entries : [])
+        setLoadError('')
       })
-      .catch(() => { /* best-effort */ })
+      .catch((error) => {
+        if (alive) setLoadError(error?.message || 'Could not load the trash inventory')
+      })
     return () => { alive = false }
   }, [])
   const fmt = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB`
@@ -234,12 +260,14 @@ function TrashCard() {
     setBusy(true)
     try {
       const d = await postJson('/api/trash/empty', {})
-      await load()
+      let outcome = ''
       if (d?.failed) {
-        setMessage(`${d.failed} trash item${d.failed === 1 ? '' : 's'} could not be deleted`)
+        outcome = `${d.failed} trash item${d.failed === 1 ? '' : 's'} could not be deleted`
       } else if (d?.ok) {
-        setMessage('Trash emptied')
+        outcome = 'Trash emptied'
       }
+      setMessage(outcome)
+      if (!(await load())) setMessage(`${outcome || 'Trash operation completed'} — inventory could not be refreshed`)
     } catch (error) {
       setMessage(error?.message || 'Could not empty the trash')
     } finally {
@@ -255,7 +283,11 @@ function TrashCard() {
       setMessage(d.kind === 'dataset_backup'
         ? 'Dataset restored — open Datasets to continue'
         : 'Item restored to its original location')
-      await load()
+      if (!(await load())) {
+        setMessage(d.kind === 'dataset_backup'
+          ? 'Dataset restored — inventory could not be refreshed'
+          : 'Item restored — inventory could not be refreshed')
+      }
     } catch (error) {
       setMessage(error?.message || 'Could not restore this item')
     } finally {
@@ -273,7 +305,16 @@ function TrashCard() {
           className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-300 disabled:opacity-40">
           {busy ? 'Emptying…' : 'Empty trash'}
         </button>
+        <button type="button" onClick={load} disabled={busy}
+          className="rounded-md border border-border bg-surface-raised px-2.5 py-1.5 text-xs text-content disabled:opacity-40">
+          ↻ Refresh
+        </button>
       </div>
+      {loadError && (
+        <p role="alert" className="mt-2 text-xs text-red-300">
+          Trash inventory unavailable: {loadError}. Use Refresh to retry.
+        </p>
+      )}
       {message && <p role="status" className="mt-2 text-xs text-content-muted">{message}</p>}
       {entries.length > 0 && (
         <ul className="mt-3 max-h-64 space-y-2 overflow-auto" aria-label="Recoverable trash entries">

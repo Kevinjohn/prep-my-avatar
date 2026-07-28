@@ -225,6 +225,36 @@ export default function WatermarkRegionEditor({
     emitCommit(next);
   }, [disabled, emitCommit, selectedIndex, updateSelectedIndex]);
 
+  const adjustWithKeyboard = useCallback((event, index, corner = null) => {
+    const direction = {
+      ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+    }[event.key];
+    if (disabled || !direction) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const step = event.shiftKey ? 0.05 : 0.01;
+    const current = draftRegionsRef.current[index];
+    if (!current) return;
+    const nextRegion = corner
+      ? resizeRegion(current, corner, direction[0] * step, direction[1] * step)
+      : moveRegion(current, direction[0] * step, direction[1] * step);
+    if (regionChanged(current, nextRegion)) {
+      updateSelectedIndex(index);
+      emitCommit(replaceRegion(draftRegionsRef.current, index, nextRegion));
+    }
+  }, [disabled, emitCommit, updateSelectedIndex]);
+
+  const addWithKeyboard = useCallback((event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (disabled || draftRegionsRef.current.length >= MAX_WATERMARK_REGIONS) return;
+    const next = [...cloneRegions(draftRegionsRef.current), [0.35, 0.35, 0.65, 0.65]];
+    updateSelectedIndex(next.length - 1);
+    emitCommit(next);
+    onAddModeChangeRef.current?.(false);
+  }, [disabled, emitCommit, updateSelectedIndex]);
+
   const selectedText = selectedIndex == null
     ? 'No zone selected.'
     : `Zone ${selectedIndex + 1} selected.`;
@@ -281,25 +311,28 @@ export default function WatermarkRegionEditor({
               type="button"
               disabled={disabled}
               aria-label={`Select and move watermark zone ${index + 1} of ${draftRegions.length}`}
+              aria-description="Use arrow keys to move. Hold Shift for larger steps."
               aria-pressed={selected}
               className="absolute inset-0 min-h-0 min-w-0 cursor-move bg-transparent disabled:cursor-default"
               style={{ touchAction: disabled ? undefined : 'none' }}
               onFocus={() => updateSelectedIndex(index)}
               onClick={(event) => { event.stopPropagation(); updateSelectedIndex(index); }}
               onPointerDown={(event) => beginInteraction(event, 'move', index)}
+              onKeyDown={(event) => adjustWithKeyboard(event, index)}
             />
 
             {selected && HANDLES.map(([corner, label, position]) => (
               <button
                 key={corner}
                 type="button"
-                tabIndex={-1}
                 disabled={disabled}
                 aria-label={`Resize watermark zone ${index + 1} from the ${label} corner`}
+                aria-description="Use arrow keys to resize. Hold Shift for larger steps."
                 className={`absolute z-30 flex h-11 w-11 items-center justify-center bg-transparent ${position} disabled:cursor-default`}
                 style={{ touchAction: disabled ? undefined : 'none' }}
                 onClick={(event) => event.stopPropagation()}
                 onPointerDown={(event) => beginInteraction(event, 'resize', index, corner)}
+                onKeyDown={(event) => adjustWithKeyboard(event, index, corner)}
               >
                 <span
                   aria-hidden="true"
@@ -314,8 +347,12 @@ export default function WatermarkRegionEditor({
       {addMode && !disabled && !limitReached && (
         <div
           className="absolute inset-0 z-40 cursor-crosshair"
+          role="button"
+          tabIndex={0}
           aria-label="Drag to add a watermark zone"
+          aria-description="Press Enter or Space to add a centered zone, then use its controls to move or resize it."
           onPointerDown={(event) => beginInteraction(event, 'add')}
+          onKeyDown={addWithKeyboard}
           style={{ touchAction: 'none' }}
         />
       )}

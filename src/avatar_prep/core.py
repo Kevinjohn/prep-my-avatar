@@ -7,11 +7,12 @@ import math
 import os
 import shutil
 import statistics
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageFilter, ImageOps, ImageStat
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
@@ -38,8 +39,20 @@ LIGHTING_TARGETS = {"soft_daylight": 6, "indoor_diffuse": 6, "side_light": 3}
 def _json_dump(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     temp.replace(path)
+    try:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        # Some platforms/filesystems do not support syncing directories.
+        pass
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -64,6 +77,8 @@ def average_hash(image: Image.Image, size: int = 16) -> str:
 
 
 def hamming_distance(left: str, right: str) -> int:
+    if len(left) != len(right):
+        raise ValueError("Hashes must have equal lengths")
     return sum(a != b for a, b in zip(left, right))
 
 
@@ -169,7 +184,10 @@ def import_annotations(path: Path | None) -> dict[str, dict[str, Any]]:
     raw = load_json(path, {})
     if not isinstance(raw, dict):
         raise ValueError("Annotations must be a JSON object keyed by source filename")
-    return {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+    invalid = [str(key) for key, value in raw.items() if not isinstance(value, dict)]
+    if invalid:
+        raise ValueError(f"Annotations for {', '.join(invalid)} must be JSON objects")
+    return {str(key): value for key, value in raw.items()}
 
 
 def maybe_face_boxes(image: Image.Image) -> list[tuple[int, int, int, int]]:
@@ -195,9 +213,9 @@ def crop_box(width: int, height: int, aspect: float, face_boxes: list[tuple[int,
         cy = y + face_height * 1.8
         desired_height = max(face_height * 4.8, height * 0.38)
         desired_width = desired_height * aspect
-        if desired_width > width:
-            desired_width = width
-            desired_height = desired_width / aspect
+        scale = min(1.0, width / desired_width, height / desired_height)
+        desired_width *= scale
+        desired_height *= scale
         left = cx - desired_width / 2
         top = cy - desired_height * 0.42
     else:
@@ -219,8 +237,16 @@ def save_crop(image: Image.Image, box: tuple[int, int, int, int], destination: P
     crop.save(destination, quality=95 if destination.suffix.lower() in {".jpg", ".jpeg"} else None)
 
 
-def analyse_image(path: Path, original_path: str, annotations: dict[str, Any], token: str) -> ImageRecord:
-    image = ImageOps.exif_transpose(Image.open(path))
+def analyse_image(
+    path: Path,
+    original_path: str,
+    annotations: dict[str, Any],
+    token: str,
+    *,
+    image: Image.Image | None = None,
+    face_boxes: list[tuple[int, int, int, int]] | None = None,
+) -> ImageRecord:
+    image = image if image is not None else ImageOps.exif_transpose(Image.open(path)).convert("RGB")
     width, height = image.size
     digest = sha256(path)
     ahash = average_hash(image)
@@ -229,7 +255,7 @@ def analyse_image(path: Path, original_path: str, annotations: dict[str, Any], t
         "exposure": exposure_score(image),
         "resolution": resolution_score(width, height),
     }
-    face_boxes = maybe_face_boxes(image)
+    face_boxes = maybe_face_boxes(image) if face_boxes is None else face_boxes
     enriched = {
         "view": "unknown",
         "framing": "unknown",
@@ -303,16 +329,62 @@ def analyse_image(path: Path, original_path: str, annotations: dict[str, Any], t
 
 
 def mark_duplicates(records: list[ImageRecord]) -> None:
-    groups: list[tuple[str, str]] = []
+    representatives: list[tuple[ImageRecord, str]] = []
+    exact_hashes: dict[str, int] = {}
+    perceptual_buckets: dict[tuple[int, str, tuple[int, int, int]], list[int]] = {}
+    threshold = 5
+    chunk_count = threshold + 1
     for record in records:
+        if not record.average_hash:
+            record.duplicate_group = None
+            continue
         group = None
-        for existing_hash, existing_group in groups:
-            if hamming_distance(record.average_hash, existing_hash) <= 5:
+        candidates: set[int] = set()
+        if record.sha256 in exact_hashes:
+            candidates.add(exact_hashes[record.sha256])
+        record_colour = record.annotations.get("_average_rgb")
+        colour_cell: tuple[int, int, int] | None = None
+        if isinstance(record_colour, list) and len(record_colour) == 3:
+            colour_cell = tuple(int(value) // 30 for value in record_colour)
+            chunk_size = math.ceil(len(record.average_hash) / chunk_count)
+            for chunk_index in range(chunk_count):
+                start = chunk_index * chunk_size
+                chunk = record.average_hash[start : start + chunk_size]
+                for red_offset in (-1, 0, 1):
+                    for green_offset in (-1, 0, 1):
+                        for blue_offset in (-1, 0, 1):
+                            nearby = (
+                                colour_cell[0] + red_offset,
+                                colour_cell[1] + green_offset,
+                                colour_cell[2] + blue_offset,
+                            )
+                            candidates.update(perceptual_buckets.get((chunk_index, chunk, nearby), ()))
+        for candidate in candidates:
+            existing, existing_group = representatives[candidate]
+            # Exact bytes are definitive. Perceptual hashes are only trusted when
+            # the coarse colour signature also agrees, avoiding flat-colour false positives.
+            same_bytes = record.sha256 == existing.sha256
+            existing_colour = existing.annotations.get("_average_rgb")
+            similar_colour = (
+                isinstance(record_colour, list)
+                and isinstance(existing_colour, list)
+                and len(record_colour) == len(existing_colour) == 3
+                and sum((left - right) ** 2 for left, right in zip(record_colour, existing_colour)) <= 30**2
+            )
+            if same_bytes or (similar_colour and hamming_distance(record.average_hash, existing.average_hash) <= 5):
                 group = existing_group
                 break
         if group is None:
-            group = f"dup-{len(groups) + 1:03d}"
-            groups.append((record.average_hash, group))
+            group = f"dup-{len(representatives) + 1:03d}"
+            representative_index = len(representatives)
+            representatives.append((record, group))
+            exact_hashes.setdefault(record.sha256, representative_index)
+            if colour_cell is not None:
+                chunk_size = math.ceil(len(record.average_hash) / chunk_count)
+                for chunk_index in range(chunk_count):
+                    start = chunk_index * chunk_size
+                    chunk = record.average_hash[start : start + chunk_size]
+                    perceptual_buckets.setdefault((chunk_index, chunk, colour_cell), []).append(representative_index)
         record.duplicate_group = group
     by_group: dict[str, list[ImageRecord]] = {}
     for record in records:
@@ -329,12 +401,31 @@ def mark_duplicates(records: list[ImageRecord]) -> None:
                 member.reasons.append(f"near-duplicate of {keeper.source_name}")
 
 
-def ingest(input_dir: Path, out_dir: Path, token: str, annotation_path: Path | None = None, vision: str = "auto") -> list[ImageRecord]:
+def _build_run(
+    input_dir: Path,
+    out_dir: Path,
+    token: str,
+    annotation_path: Path | None,
+    vision: str,
+    excluded_output: Path,
+) -> list[ImageRecord]:
     del vision  # Kept in the public contract for future provider selection.
-    source_files = sorted(path for path in input_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS)
+    input_root = input_dir.resolve()
+    output_root = excluded_output.resolve()
+    output_is_below_input = output_root.is_relative_to(input_root)
+    source_files = sorted(
+        path
+        for path in input_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in IMAGE_EXTENSIONS
+        and (not output_is_below_input or not path.resolve().is_relative_to(output_root))
+    )
     if not source_files:
         raise ValueError(f"No supported images found in {input_dir}")
     annotations = import_annotations(annotation_path)
+    basename_counts: dict[str, int] = {}
+    for source in source_files:
+        basename_counts[source.name] = basename_counts.get(source.name, 0) + 1
     originals_dir = out_dir / "originals"
     crop_dir = out_dir / "crops"
     records: list[ImageRecord] = []
@@ -344,17 +435,38 @@ def ingest(input_dir: Path, out_dir: Path, token: str, annotation_path: Path | N
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         try:
-            record = analyse_image(source, str(destination.relative_to(out_dir)), annotations.get(source.name, {}), token)
+            relative_key = relative.as_posix()
+            annotation = annotations.get(relative_key)
+            if annotation is None and basename_counts[source.name] == 1:
+                annotation = annotations.get(source.name, {})
             image = ImageOps.exif_transpose(Image.open(source)).convert("RGB")
             face_boxes = maybe_face_boxes(image)
-            for crop_name, aspect in {"square": 1.0, "portrait": 2 / 3, "landscape": 3 / 2}.items():
-                crop_path = crop_dir / crop_name / f"{record.id}.jpg"
-                save_crop(image, crop_box(record.width, record.height, aspect, face_boxes), crop_path)
-                record.crops[crop_name] = str(crop_path.relative_to(out_dir))
+            annotation = dict(annotation or {})
+            annotation["_average_rgb"] = [round(value) for value in ImageStat.Stat(image.resize((1, 1))).mean[:3]]
+            record = analyse_image(
+                source,
+                str(destination.relative_to(out_dir)),
+                annotation,
+                token,
+                image=image,
+                face_boxes=face_boxes,
+            )
+            path_digest = hashlib.sha256(relative_key.encode("utf-8")).hexdigest()[:8]
+            record.id = f"{record.sha256[:12]}-{path_digest}"
+            try:
+                for crop_name, aspect in {"square": 1.0, "portrait": 2 / 3, "landscape": 3 / 2}.items():
+                    crop_path = crop_dir / crop_name / f"{record.id}.jpg"
+                    save_crop(image, crop_box(record.width, record.height, aspect, face_boxes), crop_path)
+                    record.crops[crop_name] = str(crop_path.relative_to(out_dir))
+            except Exception as exc:
+                record.crops.clear()
+                record.status = "red"
+                record.training_usefulness = "red"
+                record.reasons.append(f"could not generate crops: {exc}")
             records.append(record)
         except Exception as exc:  # Preserve the source and surface the failure in the viewer.
             record = ImageRecord(
-                id=sha256(source)[:12],
+                id=f"{sha256(source)[:12]}-{hashlib.sha256(relative.as_posix().encode('utf-8')).hexdigest()[:8]}",
                 source_name=source.name,
                 source_path=str(source),
                 original_path=str(destination.relative_to(out_dir)),
@@ -372,17 +484,67 @@ def ingest(input_dir: Path, out_dir: Path, token: str, annotation_path: Path | N
             )
             records.append(record)
     mark_duplicates(records)
+    previous_review = load_json(out_dir / "review.json", {})
+    if not isinstance(previous_review, dict):
+        previous_review = {}
+    record_ids = {record.id for record in records}
+    retained_review = {key: value for key, value in previous_review.items() if key in record_ids}
     _json_dump(out_dir / "manifest.json", {"version": 1, "token": token, "records": [record.to_dict() for record in records]})
-    _json_dump(out_dir / "review.json", {})
+    _json_dump(out_dir / "review.json", retained_review)
     write_selection_csv(out_dir, records)
     write_reports(out_dir, records, token)
     return records
 
 
+def ingest(input_dir: Path, out_dir: Path, token: str, annotation_path: Path | None = None, vision: str = "auto") -> list[ImageRecord]:
+    """Build a complete run beside the destination, then publish it atomically."""
+    out_dir = out_dir.resolve()
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = out_dir.with_name(f".{out_dir.name}.staging-{uuid.uuid4().hex}")
+    previous_dir = out_dir.with_name(f".{out_dir.name}.previous-{uuid.uuid4().hex}")
+    staging_dir.mkdir()
+    review_path = out_dir / "review.json"
+    if review_path.exists():
+        shutil.copy2(review_path, staging_dir / "review.json")
+    try:
+        records = _build_run(input_dir, staging_dir, token, annotation_path, vision, out_dir)
+        if out_dir.exists():
+            out_dir.replace(previous_dir)
+        try:
+            staging_dir.replace(out_dir)
+        except Exception:
+            if previous_dir.exists() and not out_dir.exists():
+                previous_dir.replace(out_dir)
+            raise
+        if previous_dir.exists():
+            shutil.rmtree(previous_dir)
+        return records
+    except Exception:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise
+
+
 def load_records(out_dir: Path) -> tuple[dict[str, Any], list[ImageRecord]]:
-    manifest = load_json(out_dir / "manifest.json", {})
-    records = [ImageRecord(**item) for item in manifest.get("records", [])]
-    review = load_json(out_dir / "review.json", {})
+    manifest_path = out_dir / "manifest.json"
+    review_path = out_dir / "review.json"
+    if not manifest_path.is_file() or not review_path.is_file():
+        raise ValueError("Run is incomplete: manifest.json and review.json are required")
+    try:
+        manifest = load_json(manifest_path, {})
+        review = load_json(review_path, {})
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Run state is unreadable: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("records"), list):
+        raise ValueError("Run manifest is missing, malformed, or uses an unsupported version")
+    try:
+        records = [ImageRecord(**item) for item in manifest["records"] if isinstance(item, dict)]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Run manifest contains an invalid image record: {exc}") from exc
+    if len(records) != len(manifest["records"]):
+        raise ValueError("Run manifest contains an invalid image record")
+    if not isinstance(review, dict):
+        raise ValueError("Run review state must be a JSON object")
     for record in records:
         decision = review.get(record.id, {})
         for key in ("status", "caption", "manual", "special"):
@@ -433,6 +595,8 @@ def coverage_lines(records: list[ImageRecord]) -> list[str]:
     ):
         counts: dict[str, int] = {}
         for record in records:
+            if record.status == "red" or record.training_usefulness == "red":
+                continue
             value = record.annotations.get(key, "unknown")
             counts[value] = counts.get(value, 0) + 1
         lines.append(f"## {label}")
@@ -472,25 +636,73 @@ def write_reports(out_dir: Path, records: list[ImageRecord], token: str) -> None
     (report_dir / "coverage-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def validate_export_target(target: str) -> str:
+    """Return a safe export directory name, rejecting paths and traversal."""
+    candidate = Path(target)
+    if (
+        not target
+        or target in {".", ".."}
+        or candidate.is_absolute()
+        or len(candidate.parts) != 1
+        or "/" in target
+        or "\\" in target
+    ):
+        raise ValueError(f"Invalid export target {target!r}: expected a simple directory name")
+    return target
+
+
 def export_packs(out_dir: Path, targets: list[str], include_amber: bool = False) -> list[Path]:
+    out_dir = out_dir.resolve()
+    exports_dir = out_dir / "exports"
+    if exports_dir.is_symlink():
+        raise ValueError("Export directory must not be a symbolic link")
+
+    target_dirs: list[tuple[str, Path]] = []
+    for target in targets:
+        validate_export_target(target)
+        target_dir = exports_dir / target
+        if target_dir.resolve(strict=False).parent != exports_dir.resolve(strict=False):
+            raise ValueError(f"Invalid export target {target!r}: target escapes the export directory")
+        target_dirs.append((target, target_dir))
+
     manifest, records = load_records(out_dir)
     token = manifest.get("token", "pm_subject")
     allowed = {"green", "amber"} if include_amber else {"green"}
     created: list[Path] = []
-    for target in targets:
-        target_dir = out_dir / "exports" / target
-        target_dir.mkdir(parents=True, exist_ok=True)
+    for target, target_dir in target_dirs:
+        staging_dir = target_dir.with_name(f".{target_dir.name}.staging")
+        previous_dir = target_dir.with_name(f".{target_dir.name}.previous")
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        staging_dir.mkdir(parents=True)
         count = 0
         for record in records:
-            if record.status not in allowed or record.special == "holdout" or not record.crops.get(record.primary_crop):
+            if (
+                record.status not in allowed
+                or record.training_usefulness not in allowed
+                or record.special == "holdout"
+                or not record.crops.get(record.primary_crop)
+            ):
                 continue
             source = out_dir / record.crops[record.primary_crop]
-            destination = target_dir / f"{count:04d}_{record.id}.jpg"
+            destination = staging_dir / f"{count:04d}_{record.id}.jpg"
             shutil.copy2(source, destination)
             destination.with_suffix(".txt").write_text(record.caption + "\n", encoding="utf-8")
             count += 1
         metadata = {"target": target, "token": token, "images": count, "include_amber": include_amber}
-        _json_dump(target_dir / "metadata.json", metadata)
+        _json_dump(staging_dir / "metadata.json", metadata)
+        if previous_dir.exists():
+            shutil.rmtree(previous_dir)
+        if target_dir.exists():
+            target_dir.replace(previous_dir)
+        try:
+            staging_dir.replace(target_dir)
+        except Exception:
+            if previous_dir.exists() and not target_dir.exists():
+                previous_dir.replace(target_dir)
+            raise
+        if previous_dir.exists():
+            shutil.rmtree(previous_dir)
         created.append(target_dir)
     # Keep CSV current after any browser decisions.
     write_selection_csv(out_dir, records)

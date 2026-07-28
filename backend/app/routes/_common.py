@@ -2,6 +2,7 @@
 from flask import jsonify
 
 from .. import capabilities
+from ..domain_errors import PublicDomainError
 from ..gpu_window import GpuBusyError
 
 
@@ -15,10 +16,17 @@ def _map_error(e: Exception):
             'error': str(e),
             'code': getattr(e, 'code', 'permission_denied'),
         }), 403
+    if isinstance(e, PublicDomainError):
+        return jsonify({'error': str(e), 'code': e.error_code}), e.status_code
+    # Compatibility boundary while older services still use built-in exception
+    # types for expected client failures. Preserve their established HTTP class,
+    # but do not expose arbitrary exception text: untyped built-ins can also
+    # originate in parsers or invariants and their detail is not trusted.
     if isinstance(e, ValueError):
-        return jsonify({'error': str(e)}), 400
+        return jsonify({'error': 'invalid request', 'code': 'validation_error'}), 400
     if isinstance(e, RuntimeError):
-        return jsonify({'error': str(e)}), 409
+        return jsonify({'error': 'operation conflicts with current state',
+                        'code': 'conflict'}), 409
     raise e
 
 
@@ -52,7 +60,12 @@ def _studio_missing_response(e):
         bits.append(f"{len(e.missing_files)} required model file(s)")
     if e.missing_nodes:
         bits.append(f"{len(e.missing_nodes)} custom node(s)")
-    msg = f"The {fam} test pipeline can't run — your ComfyUI is missing " + " and ".join(bits) + ". "
+    if bits:
+        msg = (f"The {fam} test pipeline can't run — your ComfyUI is missing "
+               + " and ".join(bits) + ". ")
+    else:
+        msg = (f"The {fam} test pipeline can't run because its required assets "
+               "could not be validated. ")
     if e.missing_files:
         msg += "Place the file(s) at the shown path(s) inside your ComfyUI folder. "
     if e.missing_nodes:

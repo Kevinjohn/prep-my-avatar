@@ -16,6 +16,10 @@ from app.scrape.sources.base import Match
 from app.scrape.validators import Platform, url_validator
 
 
+def setup_function():
+    reddit._cursor_cache.clear()
+
+
 # --- _endpoint_for : routage (pur) ------------------------------------------
 def test_endpoint_global_search():
     ep = reddit._endpoint_for('https://www.reddit.com/search/?q=film%20portrait')
@@ -153,6 +157,29 @@ def test_scan_pagination_walks_cursor_no_overlap(monkeypatch):
     assert i0 == ['https://i.redd.it/p0.jpg']
     assert i1 == ['https://i.redd.it/p1.jpg']       # page 1 = next batch, not page 0
     assert set(i0).isdisjoint(i1)
+    assert calls == [None, 'c1']
+
+
+def test_scan_sequential_pages_reuse_cached_cursor(monkeypatch):
+    monkeypatch.setattr(reddit, '_get_token', lambda: 'tok')
+    pages = {
+        None: _listing([_img_post('p0')], after='c1'),
+        'c1': _listing([_img_post('p1')], after='c2'),
+        'c2': _listing([_img_post('p2')], after='c3'),
+    }
+    calls = []
+
+    def fake_get(path, params, tok):
+        calls.append(params.get('after'))
+        return pages[params.get('after')]
+
+    monkeypatch.setattr(reddit, '_api_get', fake_get)
+    src = reddit.RedditSource()
+    for page in range(3):
+        match = Match(url='https://www.reddit.com/r/x/top/')
+        match.page = page
+        assert src.scan(match)[1] is None
+    assert calls == [None, 'c1', 'c2']
 
 
 def test_scan_pagination_past_end_returns_empty(monkeypatch):

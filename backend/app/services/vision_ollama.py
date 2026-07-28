@@ -162,7 +162,9 @@ def unload_vision_model(*, ollama_url: str | None = None, model: str | None = No
         return False
     for attempt in (1, 2):
         try:
-            requests.post(f'{url}/api/generate', json=payload, timeout=(10, 30))
+            response = requests.post(
+                f'{url}/api/generate', json=payload, timeout=(10, 30))
+            response.raise_for_status()
             return True
         except Exception as e:
             logger.warning('vision_ollama: unload attempt %d échoué : %s', attempt, e)

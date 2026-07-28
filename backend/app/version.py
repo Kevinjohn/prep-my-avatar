@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date
 
 
-APP_VERSION = '2026.07.21.1'
+APP_VERSION = '2026.07.28.1'
 
 
 def calver_key(value: str) -> tuple[int, int, int, int]:
@@ -23,7 +23,9 @@ def calver_key(value: str) -> tuple[int, int, int, int]:
     for that date. Numeric comparison avoids the classic lexical mistake where
     release ``.10`` sorts below ``.9``.
     """
-    raw = str(value or '').strip().lstrip('vV')
+    raw = str(value or '').strip()
+    if raw[:1] in ('v', 'V'):
+        raw = raw[1:]
     parts = raw.split('.')
     if len(parts) not in (3, 4) or any(not part.isdigit() for part in parts):
         raise ValueError(f'invalid CalVer: {value!r}')
@@ -32,7 +34,7 @@ def calver_key(value: str) -> tuple[int, int, int, int]:
     year, month, day = (int(part) for part in parts[:3])
     date(year, month, day)  # reject impossible calendar dates
     release = int(parts[3]) if len(parts) == 4 else 0
-    if release < 0:
+    if len(parts) == 4 and release < 1:
         raise ValueError(f'invalid CalVer: {value!r}')
     return year, month, day, release
 

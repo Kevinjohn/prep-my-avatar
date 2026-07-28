@@ -28,6 +28,9 @@ load_dotenv(ENV_PATH)
 SECRET_KEYS = ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'HF_TOKEN', 'VAST_API_KEY',
                'REDDIT_CLIENT_ID', 'CIVITAI_API_KEY')
 
+DEFAULT_UPDATE_REPO = 'Kevinjohn/prep-my-avatar'
+_LEGACY_UPDATE_REPO = 'perfectgf/lora-dataset-studio'
+
 DEFAULTS = {
     # host: '127.0.0.1' = this machine only ; '0.0.0.0' = reachable from the LAN
     # (phone, tablet, another PC) — the Settings "Server" card's LAN toggle just
@@ -100,11 +103,28 @@ DEFAULTS = {
               # Manual "Upscale & improve" uses its own fixed quality profile.
               # Empty is intentional: never invent a restoration prompt for the user.
               'small_image_prompt': ''},
-    'updates': {'repo': 'perfectgf/lora-dataset-studio'},      # GitHub repo for the release feed
+    'updates': {'repo': DEFAULT_UPDATE_REPO},      # GitHub repo for the release feed
 }
 
 _lock = threading.Lock()
 _cache = None
+
+
+class ConfigError(ValueError):
+    """The persisted configuration cannot be safely loaded or updated."""
+
+
+def _read_user_config(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f'Invalid configuration at {path}; repair or remove the file before continuing') from exc
+    if not isinstance(value, dict):
+        raise ConfigError(f'Configuration at {path} must contain a JSON object')
+    for key, default in DEFAULTS.items():
+        if key in value and isinstance(default, dict) and not isinstance(value[key], dict):
+            raise ConfigError(f'Configuration section {key!r} must contain a JSON object')
+    return value
 
 
 def _restrict_private_file(path: Path) -> None:
@@ -136,6 +156,15 @@ def _write_private_text(path: Path, value: str) -> None:
             os.fsync(handle.fileno())
         _restrict_private_file(temporary_path)
         temporary_path.replace(path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            # Windows and some filesystems do not expose syncable directories.
+            pass
         _restrict_private_file(path)
     except Exception:
         try:
@@ -161,11 +190,20 @@ def load_config(force=False) -> dict:
         user = {}
         p = _config_path()
         if p.exists():
-            try:
-                user = json.loads(p.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                user = {}
+            user = _read_user_config(p)
         _cache = _deep_merge(DEFAULTS, user)
+        if _cache.get('updates', {}).get('repo') == _LEGACY_UPDATE_REPO:
+            _cache['updates']['repo'] = DEFAULT_UPDATE_REPO
+        engines = _cache.get('engines', {})
+        enabled = engines.get('enabled')
+        if enabled == []:
+            # Historical empty lists meant "use legacy defaults" in the
+            # backend but "disable all" in the browser. Migrate to the safest
+            # explicit local default so every consumer sees the same state.
+            engines['enabled'] = ['klein']
+            enabled = engines['enabled']
+        if isinstance(enabled, list) and enabled and engines.get('default') not in enabled:
+            engines['default'] = enabled[0]
         return copy.deepcopy(_cache)
 
 def save_config(partial: dict) -> dict:
@@ -174,13 +212,68 @@ def save_config(partial: dict) -> dict:
         p = _config_path()
         current = {}
         if p.exists():
-            try:
-                current = json.loads(p.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                current = {}
+            current = _read_user_config(p)
         merged = _deep_merge(current, partial or {})
         _write_private_text(p, json.dumps(merged, indent=2, ensure_ascii=False))
         _cache = None
+    return load_config()
+
+
+def save_settings(config_partial: dict, secrets_partial: dict) -> dict:
+    """Persist one settings request as a recoverable two-file transaction.
+
+    Both files use atomic replacement individually.  If the environment-file
+    replacement fails after config.json was committed, restore the exact prior
+    config bytes before returning the error.  Runtime secrets are updated only
+    after both durable writes succeed.
+    """
+    validated_secrets = {}
+    for name, value in (secrets_partial or {}).items():
+        if name not in SECRET_KEYS:
+            raise ValueError(f'unknown secret key: {name}')
+        if not isinstance(value, str):
+            raise ValueError(f'secret {name} must be a string')
+        if '\r' in value or '\n' in value or '\x00' in value:
+            raise ValueError(f'secret {name} contains invalid characters')
+        if value:
+            validated_secrets[name] = value
+    global _cache
+    with _lock:
+        config_path = _config_path()
+        previous_config = (
+            config_path.read_text(encoding='utf-8') if config_path.exists() else None
+        )
+        current = _read_user_config(config_path) if config_path.exists() else {}
+        merged = _deep_merge(current, config_partial or {})
+        config_text = json.dumps(merged, indent=2, ensure_ascii=False)
+
+        previous_env = ENV_PATH.read_text(encoding='utf-8') if ENV_PATH.exists() else None
+        env_lines = previous_env.splitlines() if previous_env is not None else []
+        accepted_secrets = validated_secrets
+        for name, value in accepted_secrets.items():
+            env_lines = [line for line in env_lines if not line.startswith(f'{name}=')]
+            env_lines.append(f'{name}={value}')
+        env_text = '\n'.join(env_lines) + '\n'
+
+        wrote_config = False
+        try:
+            if config_partial:
+                _write_private_text(config_path, config_text)
+                wrote_config = True
+            if secrets_partial:
+                _write_private_text(ENV_PATH, env_text)
+        except Exception:
+            if wrote_config:
+                if previous_config is None:
+                    config_path.unlink(missing_ok=True)
+                else:
+                    _write_private_text(config_path, previous_config)
+            _cache = None
+            raise
+
+        _cache = None
+        for name, value in accepted_secrets.items():
+            os.environ[name] = value
     return load_config()
 
 def get(dotted: str, default=None):
@@ -192,7 +285,14 @@ def get(dotted: str, default=None):
     return node
 
 def is_configured() -> bool:
-    return _config_path().exists()
+    p = _config_path()
+    if not p.exists():
+        return False
+    try:
+        _read_user_config(p)
+    except ConfigError:
+        return False
+    return True
 
 def secret(name: str):
     val = (os.environ.get(name) or '').strip()
@@ -211,8 +311,10 @@ def set_secrets(d: dict) -> None:
                 continue
             lines = [line for line in lines if not line.startswith(f'{name}=')]
             lines.append(f'{name}={value}')
-            os.environ[name] = value
         _write_private_text(ENV_PATH, '\n'.join(lines) + '\n')
+        for name, value in (d or {}).items():
+            if name in SECRET_KEYS and value:
+                os.environ[name] = value
         load_dotenv(ENV_PATH, override=True)
 
 def delete_secrets(names) -> None:
@@ -226,8 +328,9 @@ def delete_secrets(names) -> None:
         lines = ENV_PATH.read_text(encoding='utf-8').splitlines() if ENV_PATH.exists() else []
         for name in names:
             lines = [line for line in lines if not line.startswith(f'{name}=')]
-            os.environ.pop(name, None)   # load_dotenv won't unset a removed line, so drop it here
         _write_private_text(ENV_PATH, '\n'.join(lines) + '\n')
+        for name in names:
+            os.environ.pop(name, None)   # load_dotenv won't unset a removed line, so drop it here
         load_dotenv(ENV_PATH, override=True)
 
 _COMFY_DERIVED = {'output': ('output_dir', 'output'), 'input': ('input_dir', 'input'),
@@ -292,7 +395,13 @@ def secret_key() -> str:
         d = _data_dir()
         d.mkdir(parents=True, exist_ok=True)
         f = d / 'secret_key'
-        if not f.exists():
+        value = ''
+        if f.exists():
+            try:
+                value = f.read_text(encoding='utf-8').strip()
+            except OSError:
+                value = ''
+        if len(value) != 64 or any(character not in '0123456789abcdef' for character in value):
             _write_private_text(f, _secrets.token_hex(32))
         _restrict_private_file(f)
         return f.read_text(encoding='utf-8').strip()

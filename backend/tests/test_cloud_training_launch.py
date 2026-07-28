@@ -148,6 +148,20 @@ def test_monitor_start_failure_discards_unstarted_provenance(
         assert 'record_id' not in params and 'version' not in params
 
 
+def test_monitor_thread_start_failure_removes_registry_entry(ct, app, monkeypatch):
+    class BrokenThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError('thread unavailable')
+
+    monkeypatch.setattr(ct.threading, 'Thread', BrokenThread)
+    with pytest.raises(RuntimeError, match='thread unavailable'):
+        ct._start_monitor_for_app(app, 42)
+    assert 42 not in ct._monitor_threads
+
+
 def test_staging_records_mask_generation_fallback(
         ct, app, seeded_dataset, monkeypatch):
     _fake_export(monkeypatch, ct)
@@ -449,10 +463,16 @@ def test_reconcile_without_key_is_noop(app, monkeypatch):
 def test_reconcile_never_raises(ct, app, monkeypatch):
     """Boot must never be blocked: even an unexpected failure OUTSIDE the
     vast_client calls (db not ready, config error...) is swallowed and logged."""
-    monkeypatch.setattr(ct, 'get_active_run',
-                        lambda: (_ for _ in ()).throw(RuntimeError('db not ready')))
     monkeypatch.setattr(ct.vast_client, 'list_instances', lambda: [])
+    calls = []
+
+    def broken_config(*args, **kwargs):
+        calls.append(True)
+        raise RuntimeError('config unreadable')
+
+    monkeypatch.setattr(ct.cfg, 'get', broken_config)
     assert ct.reconcile_orphans(app) == 0      # swallowed, boot not blocked
+    assert calls
 
 
 def test_reconcile_spares_recent_error_pod_kept(ct, app, monkeypatch):
@@ -780,6 +800,46 @@ def test_month_spend_prorates_a_run_crossing_the_month_boundary(ct, app, monkeyp
         assert ct.month_spend_usd() == 6.0
 
 
+def test_old_finished_cleanup_pending_pod_counts_month_overlap_and_blocks_cap(
+        ct, app, seeded_dataset, monkeypatch):
+    _fake_export(monkeypatch, ct)
+    fixed_now = datetime(2026, 7, 1, 3, 0, 0)
+    month_start = fixed_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(ct, 'utcnow', lambda: fixed_now)
+    ct.cfg.save_config({'cloud': {'monthly_budget_usd': 2}})
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=999, status='error_pod_kept', job_name='still-billing',
+            vast_instance_id='123', price_per_hour=1.0,
+            created_at=month_start - timedelta(days=2),
+            billing_started_at=month_start - timedelta(hours=2),
+            finished_at=month_start - timedelta(days=1),
+            billing_ended_at=None)
+        ct.db.session.add(run)
+        ct.db.session.commit()
+
+        assert ct.month_spend_usd() == 3.0
+        with pytest.raises(RuntimeError, match='monthly cloud budget reached'):
+            ct.launch_cloud_training('local', seeded_dataset)
+
+
+def test_month_spend_query_excludes_old_terminal_history(ct, app, monkeypatch):
+    with app.app_context():
+        fixed_now = datetime(2026, 7, 10, 12, 0, 0)
+        monkeypatch.setattr(ct, 'utcnow', lambda: fixed_now)
+        old = ct.CloudTrainingRun(
+            dataset_id=1, status='done', job_name='old', vast_label='lds-old',
+            price_per_hour=1.0, created_at=datetime(2020, 1, 1),
+            finished_at=datetime(2020, 1, 2))
+        current = ct.CloudTrainingRun(
+            dataset_id=2, status='done', job_name='current', vast_label='lds-current',
+            price_per_hour=1.0, created_at=fixed_now - timedelta(hours=2),
+            finished_at=fixed_now - timedelta(hours=1))
+        ct.db.session.add_all([old, current])
+        ct.db.session.commit()
+        assert ct.month_spend_usd() == 1.0
+
+
 def test_cloud_status_reports_month_spend_budget_and_cap(ct, app, monkeypatch):
     ct.cfg.save_config({'cloud': {'monthly_budget_usd': 20}})
     with app.app_context():
@@ -964,6 +1024,103 @@ def test_all_runs_respects_limit(ct, app):
                 dataset_id=i, status='done', job_name='j', vast_label=f'lds-{i}'))
         ct.db.session.commit()
         assert len(ct.all_runs(limit=3)['recent']) == 3
+
+
+def test_all_runs_backfills_history_hidden_by_active_admissions(ct, app):
+    with app.app_context():
+        from app.models import TrainingRunRecord
+        terminals = []
+        for i in range(3):
+            run = ct.CloudTrainingRun(
+                dataset_id=100 + i, status='done', job_name=f'done-{i}',
+                vast_label=f'lds-done-{i}')
+            ct.db.session.add(run)
+            ct.db.session.flush()
+            terminals.append(run)
+            ct.db.session.add(TrainingRunRecord(
+                dataset_id=run.dataset_id, family='krea', source='cloud',
+                cloud_run_id=run.id, fingerprint=f'f{i}', version=1))
+        active = ct.CloudTrainingRun(
+            dataset_id=200, status='training', job_name='active',
+            vast_label='lds-active')
+        ct.db.session.add(active)
+        ct.db.session.flush()
+        ct.db.session.add(TrainingRunRecord(
+            dataset_id=active.dataset_id, family='krea', source='cloud',
+            cloud_run_id=active.id, fingerprint='active', version=1))
+        ct.db.session.commit()
+
+        out = ct.all_runs(limit=3)
+        assert [row['run_id'] for row in out['recent']] == [
+            run.id for run in reversed(terminals)]
+
+
+def test_all_runs_batch_loads_dataset_names(ct, app):
+    from sqlalchemy import event
+    from app.models import FaceDataset
+
+    with app.app_context():
+        datasets = [
+            FaceDataset(user_id='local', name=f'Dataset {i}', trigger_word=f'ds{i}')
+            for i in range(3)
+        ]
+        ct.db.session.add_all(datasets)
+        ct.db.session.flush()
+        ct.db.session.add_all([
+            ct.CloudTrainingRun(dataset_id=dataset.id, status='done',
+                                job_name=f'job-{i}', vast_label=f'lds-{i}')
+            for i, dataset in enumerate(datasets)
+        ])
+        ct.db.session.commit()
+        dataset_selects = []
+
+        def count_dataset_selects(_conn, _cursor, statement, *_args):
+            normalized = statement.lower()
+            if normalized.lstrip().startswith('select') and 'face_dataset' in normalized:
+                dataset_selects.append(statement)
+
+        event.listen(ct.db.engine, 'before_cursor_execute', count_dataset_selects)
+        try:
+            out = ct.all_runs(limit=3)
+        finally:
+            event.remove(ct.db.engine, 'before_cursor_execute', count_dataset_selects)
+
+        assert {row['dataset_name'] for row in out['recent']} == {
+            'Dataset 0', 'Dataset 1', 'Dataset 2'}
+        assert len(dataset_selects) == 1
+
+
+def test_recovery_required_is_not_lost_to_history_pagination(ct, app):
+    with app.app_context():
+        kept = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
+                                   job_name='kept', vast_label='lds-kept',
+                                   vast_instance_id='instance-123')
+        ct.db.session.add(kept)
+        ct.db.session.flush()
+        for i in range(20):
+            ct.db.session.add(ct.CloudTrainingRun(
+                dataset_id=i + 2, status='done', job_name=f'j-{i}',
+                vast_label=f'lds-{i}'))
+        ct.db.session.commit()
+        assert kept.id not in {row['run_id'] for row in ct.all_runs(limit=3)['recent']}
+        expected = [kept.id]
+        assert [row['run_id'] for row in ct.all_runs(limit=3)['recovery_required']] == expected
+        assert [row['run_id'] for row in ct.cloud_status()['recovery_required']] == expected
+
+
+def test_legacy_terminal_billing_ends_at_finished_time_with_provider_id(ct, app):
+    from datetime import timedelta
+    with app.app_context():
+        now = ct.utcnow()
+        run = ct.CloudTrainingRun(
+            dataset_id=1, status='done', job_name='legacy', vast_label='lds-old',
+            vast_instance_id='historical-id', price_per_hour=1.0,
+            created_at=now - timedelta(hours=5),
+            finished_at=now - timedelta(hours=1))
+        start, end, final = ct._billing_window(run)
+        assert start == run.created_at
+        assert end == run.finished_at
+        assert final is True
 
 
 # --- Offer quality layer: blacklist, price-bait exclusion, reliability pref ---
@@ -1194,6 +1351,31 @@ def test_gpu_tiers_groups_ranks_and_estimates(ct, app, seeded_dataset, monkeypat
         # faster GPU -> fewer estimated minutes; every tier priced & timed
         assert by_name['RTX 5090']['est_minutes'] < by_name['RTX 3090']['est_minutes']
         assert all(t['est_cost'] is not None and t['est_minutes'] > 0 for t in tiers)
+
+
+@pytest.mark.parametrize('requested', [-1, 0, 100, 499, 500])
+def test_gpu_tiers_uses_launch_step_floor(
+        ct, app, seeded_dataset, monkeypatch, requested):
+    monkeypatch.setattr(ct.vast_client, 'search_offers', lambda **kw: _offers_multi())
+    with app.app_context():
+        out = ct.gpu_tiers('local', seeded_dataset, train_type='krea',
+                           steps=requested)
+    assert out['steps'] == 500
+
+
+def test_gpu_tiers_uses_same_reliability_price_rule_as_provisioning(
+        ct, app, seeded_dataset, monkeypatch):
+    offers = [
+        {'offer_id': 1, 'gpu_name': 'RTX 5090', 'dph_total': 0.60,
+         'reliability': 0.98, 'gpu_ram_gb': 32.0},
+        {'offer_id': 2, 'gpu_name': 'RTX 5090', 'dph_total': 0.64,
+         'reliability': 0.999, 'gpu_ram_gb': 32.0},
+    ]
+    monkeypatch.setattr(ct.vast_client, 'search_offers', lambda **kw: offers)
+    with app.app_context():
+        tier = ct.gpu_tiers('local', seeded_dataset, train_type='krea')['tiers'][0]
+    assert tier['offer_id'] == 2
+    assert tier['dph_total'] == 0.64
 
 
 def test_gpu_tiers_flags_tiers_slower_than_the_runtime_cap(ct, app, seeded_dataset, monkeypatch):

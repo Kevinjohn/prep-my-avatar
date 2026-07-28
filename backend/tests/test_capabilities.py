@@ -1,5 +1,7 @@
 from unittest.mock import patch
 import pathlib
+import threading
+import time
 import pytest
 
 
@@ -325,6 +327,73 @@ def test_probe_force_bypasses_cache(app, monkeypatch):
     assert refreshed['engines']['chatgpt'] is True
 
 
+def test_probe_uses_one_subscription_snapshot(app, monkeypatch):
+    from app import capabilities
+    from app.services import chatgpt_oauth
+
+    statuses = iter((_sub(False), _sub(True, 'later@example.test')))
+    monkeypatch.setattr(chatgpt_oauth, 'status', lambda: next(statuses))
+    with app.app_context(), patch('app.capabilities._http_ok', return_value=False):
+        result = capabilities.probe(force=True)
+
+    assert result['engines']['chatgpt'] is False
+    assert result['chatgpt_subscription']['connected'] is False
+    # A second status read would have consumed the connected snapshot.
+    assert next(statuses)['connected'] is True
+
+
+def test_capability_ttls_use_monotonic_clock(app, monkeypatch):
+    from app import capabilities
+
+    current = [100.0]
+    monkeypatch.setattr(capabilities, '_clock', lambda: current[0])
+    with app.app_context(), patch('app.capabilities._http_ok', return_value=False):
+        first = capabilities.probe(force=True)
+        monkeypatch.setenv('OPENAI_API_KEY', 'sk-after-expiry')
+        current[0] = 131.0
+        second = capabilities.probe()
+
+    assert first['engines']['chatgpt'] is False
+    assert second['engines']['chatgpt'] is True
+
+
+def test_import_cache_ttl_uses_monotonic_clock(monkeypatch):
+    from app import capabilities
+
+    current = [50.0]
+    probes = []
+    monkeypatch.setattr(capabilities, '_clock', lambda: current[0])
+    monkeypatch.setattr(
+        capabilities, '_import_ok', lambda *_args: probes.append(current[0]) or True)
+
+    assert capabilities._cached_import('x', 'python', 'import x') is True
+    current[0] = 649.0
+    assert capabilities._cached_import('x', 'python', 'import x') is True
+    current[0] = 651.0
+    assert capabilities._cached_import('x', 'python', 'import x') is True
+    assert probes == [50.0, 651.0]
+
+
+def test_gpu_cache_ttl_uses_monotonic_clock(monkeypatch):
+    from types import SimpleNamespace
+    from app import capabilities
+
+    current = [10.0]
+    calls = []
+    monkeypatch.setattr(capabilities, '_clock', lambda: current[0])
+    monkeypatch.setattr(capabilities.subprocess, 'run', lambda *_args, **_kwargs:
+                        calls.append(current[0]) or
+                        SimpleNamespace(returncode=0, stdout='8192\n'))
+    capabilities._gpu_cache.update(ts=0.0, gb=None)
+
+    assert capabilities.gpu_vram_gb() == 8.0
+    current[0] = 609.0
+    assert capabilities.gpu_vram_gb() == 8.0
+    current[0] = 611.0
+    assert capabilities.gpu_vram_gb() == 8.0
+    assert calls == [10.0, 611.0]
+
+
 # --- ollama vision-model presence + import-cache clear --------------------
 
 def test_ollama_vision_model_ready_true(app, monkeypatch):
@@ -353,6 +422,46 @@ def test_ollama_vision_model_base_tag_match(app, monkeypatch):
         monkeypatch.setattr(capabilities, '_ollama_tags', lambda *a, **k: ['qwen3-vl:8b'])
         result = capabilities.probe_ollama_model()
     assert result['ok'] is True
+
+
+def test_ollama_tagged_model_does_not_match_different_tag():
+    from app.capabilities import _model_present
+
+    assert _model_present('qwen3-vl:8b-instruct', ['qwen3-vl:8b-thinking']) is False
+
+
+def test_concurrent_forced_probes_share_one_refresh(app, monkeypatch):
+    from app import capabilities
+
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def slow_import(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.05)
+        return False
+
+    monkeypatch.setattr(capabilities, '_import_ok', slow_import)
+    barrier = threading.Barrier(4)
+    results = []
+
+    def run_probe():
+        with app.app_context():
+            barrier.wait()
+            results.append(capabilities.probe(force=True))
+
+    workers = [threading.Thread(target=run_probe) for _ in range(3)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(results) == 3
+    assert calls == 3  # one refresh, one call for each independent import key
 
 def test_ollama_vision_model_false_when_unreachable(app, monkeypatch):
     with app.app_context():
@@ -551,3 +660,20 @@ def test_is_comfyui_dir_accepts_desktop_layout(tmp_path):
     not_comfy = tmp_path / 'other'
     (not_comfy / 'custom_nodes').mkdir(parents=True)   # no models/
     assert _is_comfyui_dir(not_comfy) is False
+def test_capabilities_expose_authoritative_pricing_and_resolution_matrix(client):
+    data = client.get('/api/capabilities?force=1').get_json()
+    pricing = data['generation_pricing']
+    assert pricing['version'] == 1
+    assert pricing['as_of']
+    assert pricing['per_image'] == {'nanobanana': 0.15, 'chatgpt_api': 0.17}
+
+    metadata = data['resolution_metadata']
+    assert metadata['version'] == 1
+    assert [tier['value'] for tier in metadata['tiers']] == [
+        'fast', 'standard', 'hq', 'max',
+    ]
+    for profile in ('default', 'sdxl'):
+        for by_tier in metadata['dimensions'][profile].values():
+            assert set(by_tier) == {'fast', 'standard', 'hq', 'max'}
+            assert all(width % 16 == height % 16 == 0
+                       for width, height in by_tier.values())

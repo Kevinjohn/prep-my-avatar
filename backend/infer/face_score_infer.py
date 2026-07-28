@@ -10,7 +10,9 @@ Gating 3-etats + padding rescue (valide empiriquement sur test3)."""
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 
 DET_MIN, BBOX_MIN, YAW_MAX = 0.50, 0.06, 40.0
 
@@ -27,23 +29,38 @@ def _repair_nested_antelopev2(models_root=None):
     touchee, et ca ne s'auto-repare jamais (le dossier externe existe, insightface
     ne re-telecharge pas). On aplatit une fois pour toutes ici."""
     import glob
-    import os
     import shutil
     root = models_root or os.path.join(os.path.expanduser('~'), '.insightface')
     outer = os.path.join(root, 'models', 'antelopev2')
     inner = os.path.join(outer, 'antelopev2')
-    if not os.path.isdir(inner) or glob.glob(os.path.join(outer, '*.onnx')):
+    if not os.path.isdir(inner):
+        return
+    inner_models = glob.glob(os.path.join(inner, '*.onnx'))
+    if not inner_models:
         return
     moved = 0
-    for f in glob.glob(os.path.join(inner, '*.onnx')):
-        shutil.move(f, outer)
+    for f in inner_models:
+        destination = os.path.join(outer, os.path.basename(f))
+        if os.path.isfile(destination):
+            continue
+        fd, temporary_path = tempfile.mkstemp(prefix='.antelopev2-', suffix='.onnx', dir=outer)
+        os.close(fd)
+        try:
+            try:
+                shutil.copy2(f, temporary_path)
+            except FileNotFoundError:
+                if os.path.isfile(destination):
+                    continue
+                raise
+            os.replace(temporary_path, destination)
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
         moved += 1
-    try:
-        os.rmdir(inner)
-    except OSError:
-        pass  # reliquats (zip...) — sans consequence
     if moved:
-        _log(f"[face] repaired nested antelopev2 layout ({moved} model(s) moved up)")
+        _log(f"[face] repaired nested antelopev2 layout ({moved} model(s) copied up)")
 
 
 def main() -> int:
@@ -54,8 +71,17 @@ def main() -> int:
         print(json.dumps({"ref_ok": False, "results": {}, "error": f"bad json: {e}"}))
         return 1
     ref = req.get("ref")
-    images = [str(p) for p in (req.get("images") or [])]
-    refs = [str(p) for p in (req.get("refs") or []) if p]
+    raw_images = req.get("images") or []
+    raw_refs = req.get("refs") or []
+    if (not isinstance(raw_images, list) or
+            not all(isinstance(p, str) and p for p in raw_images) or
+            not isinstance(raw_refs, list) or
+            not all(isinstance(p, str) and p for p in raw_refs)):
+        print(json.dumps({"ref_ok": False, "results": {},
+                          "error": "images and refs must be lists of paths"}))
+        return 1
+    images = raw_images
+    refs = raw_refs
     if ref and ref not in refs:
         refs.insert(0, str(ref))
     models_root = req.get("models_root") or None
@@ -77,11 +103,10 @@ def main() -> int:
     try:
         if models_root:
             app = FaceAnalysis(name='antelopev2', root=models_root,
-                               providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+                               providers=['CPUExecutionProvider'])
         else:  # pas de models_root configure -> auto-download vers ~/.insightface
-            app = FaceAnalysis(name='antelopev2',
-                               providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-        app.prepare(ctx_id=0, det_size=(640, 640))
+            app = FaceAnalysis(name='antelopev2', providers=['CPUExecutionProvider'])
+        app.prepare(ctx_id=-1, det_size=(640, 640))
     except Exception as e:
         # Un crash de chargement (modeles absents/corrompus) doit sortir en JSON
         # propre — pas en traceback muet que le parent resume en « pas de JSON ».
@@ -164,9 +189,13 @@ def main() -> int:
     ref_embeddings = []
     ref_states = []
     for ref_path in refs:
-        ref_res = analyze(ref_path)
+        try:
+            ref_res = analyze(ref_path)
+        except Exception as e:
+            ref_states.append(f'error: {type(e).__name__}: {e}')
+            continue
         emb = ref_res.pop("_emb", None)
-        if emb is not None:
+        if emb is not None and ref_res.get('state') == 'scorable':
             ref_embeddings.append(emb)
         else:
             ref_states.append(ref_res.get("state"))

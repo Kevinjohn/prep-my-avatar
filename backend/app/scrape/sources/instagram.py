@@ -203,7 +203,8 @@ def _items_from_post(post, original_url=None):
             except Exception:
                 continue
             items.append({
-                "url": page_url,
+                "url": page_url if is_video else thumbnail,
+                "page_url": page_url,
                 "title": f"Post {shortcode} (slide {idx + 1})",
                 "thumbnail": thumbnail,
                 "type": "video" if is_video else "image",
@@ -220,7 +221,8 @@ def _items_from_post(post, original_url=None):
         thumbnail = None
 
     items.append({
-        "url": page_url,
+        "url": page_url if is_video else thumbnail,
+        "page_url": page_url,
         "title": ("Reel " if is_video else "Post ") + str(shortcode),
         "thumbnail": thumbnail,
         "type": "video" if is_video else "image",
@@ -274,7 +276,8 @@ def _scan_profile(loader, username):
             # On a déjà des items utiles → on les retourne sans erreur.
             logger.warning("Itération profil %s interrompue après %d items : %s",
                            username, len(items), e)
-            return items[:SCAN_LIMIT], None
+            return items[:SCAN_LIMIT], (
+                f"Instagram : résultats partiels, l'itération a été interrompue ({e}).")
         logger.warning("Itération profil %s échouée : %s", username, e)
         return None, _AUTH_ERROR
 

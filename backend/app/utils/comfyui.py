@@ -29,6 +29,7 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 from urllib.parse import urlencode, urljoin
 
@@ -70,6 +71,10 @@ _COMFYUI_CIRCUIT_FAIL_THRESHOLD = 3
 _comfyui_consecutive_failures = 0
 _comfyui_circuit_open_until = 0
 _comfyui_circuit_next_window_s = _COMFYUI_CIRCUIT_INITIAL_S
+
+
+class ComfyUIHistoryUnavailable(RuntimeError):
+    """The history endpoint could not be contacted or returned an error."""
 
 
 def _check_comfyui_circuit():
@@ -310,11 +315,13 @@ def apply_optimal_sampler_params(workflow: dict, model_filename: str | None) -> 
                     inputs[key] = params[key]
             log.info(f"  node {node_id} ({ct}): sampler={inputs.get('sampler_name')}, scheduler={inputs.get('scheduler')}, cfg={inputs.get('cfg')} (steps={inputs.get('steps')} left as-is)")
         elif ct in _SAMPLER_SELECT_TYPES:
-            if "sampler_name" in inputs and "sampler_name" in _OVERRIDABLE_FIELDS:
+            if ("sampler_name" in inputs and "sampler_name" in params
+                    and "sampler_name" in _OVERRIDABLE_FIELDS):
                 inputs["sampler_name"] = params["sampler_name"]
                 log.info(f"  node {node_id} ({ct}): sampler={inputs['sampler_name']}")
         elif ct in _SCHEDULER_NODE_TYPES:
-            if "scheduler" in inputs and "scheduler" in _OVERRIDABLE_FIELDS:
+            if ("scheduler" in inputs and "scheduler" in params
+                    and "scheduler" in _OVERRIDABLE_FIELDS):
                 inputs["scheduler"] = params["scheduler"]
             log.info(f"  node {node_id} ({ct}): scheduler={inputs.get('scheduler')} (steps={inputs.get('steps')} left as-is)")
         elif ct == "LoraLoader" and dmd2_strength is not None:
@@ -409,7 +416,9 @@ def queue_prompt_to_comfyui(prompt_workflow, client_id, worker_url=None):
             )
             if uses_ollama:
                 logger.info("Ollama node detected in workflow. Ensuring Ollama is running...")
-                if not ensure_ollama_running():
+                from app.services.ollama_control import ensure_captioning_ready
+                ollama_result = ensure_captioning_ready()
+                if not ollama_result.get('ok'):
                     logger.warning("Failed to ensure Ollama is running. Workflow might fail.")
         except Exception as e:
             logger.error(f"Error checking for Ollama dependency: {e}")
@@ -473,24 +482,36 @@ def get_comfyui_history(prompt_id, worker_url=None):
         worker_url: URL optionnelle du worker distant. Si None, utilise api_address().
     """
     api_addr = worker_url or api_address()
+    if not _check_comfyui_circuit():
+        raise ComfyUIHistoryUnavailable(
+            f'ComfyUI history circuit is open for {api_addr}')
     try:
         response = requests.get(urljoin(api_addr, f"/history/{prompt_id}"), timeout=5)
         response.raise_for_status()
+        _record_comfyui_success()
         return response.json()
     except requests.exceptions.RequestException as e:
         if hasattr(e, 'response') and e.response is not None:
             if e.response.status_code == 404:
                 logger.debug(f"History for {prompt_id} not found yet (404).")
+                _record_comfyui_success()
                 return None
             else:
                 logger.error(f"Error getting history for {prompt_id} from {api_addr}: HTTP {e.response.status_code}")
-                return None
+                detail = f'HTTP {e.response.status_code}'
         else:
             logger.error(f"Error getting history for {prompt_id} from {api_addr}: {e}")
-            return None
+            detail = str(e)
+        _record_comfyui_failure()
+        raise ComfyUIHistoryUnavailable(
+            f'ComfyUI history unavailable at {api_addr}: {detail}') from e
     except Exception as e:
+        if isinstance(e, ComfyUIHistoryUnavailable):
+            raise
         logger.error(f"Unexpected error getting history from {api_addr}: {e}")
-        return None
+        _record_comfyui_failure()
+        raise ComfyUIHistoryUnavailable(
+            f'Invalid ComfyUI history response from {api_addr}: {e}') from e
 
 
 def download_image_from_worker(filename, worker_url, output_dir):
@@ -833,7 +854,9 @@ CIVITAI_LINKS = {
     "plantMilkModelSuite_walnut.safetensors": "https://civitai.com/models/1162518/plant-milk-model-suite",
 }
 
-_checkpoint_models_cache = {"data": None, "timestamp": 0, "key": None}
+_checkpoint_models_cache = {"data": None, "timestamp": 0}
+_model_cache_lock = threading.Lock()
+_model_cache_generation = 0
 _MODEL_CACHE_TTL = 300  # 5 minutes
 
 
@@ -841,8 +864,8 @@ def get_checkpoint_models(include_hidden=False):
     """List SDXL checkpoint files under models/checkpoints (+ its Biglove/
     subfolder and a few known variant subdirs).
 
-    `include_hidden=True` returns bare basenames (used by callers that just
-    need a filename whitelist, e.g. lora_training's base-model guard);
+    `include_hidden=True` returns checkpoint paths relative to
+    ``models/checkpoints`` (used by callers that need a filename whitelist);
     `include_hidden=False` (default) returns [{name, civitai_url}] for picker
     UIs. Single-user app: no hidden-model filtering — both shapes cover the
     same set of files, `include_hidden` only changes the wire format.
@@ -850,11 +873,18 @@ def get_checkpoint_models(include_hidden=False):
     Cached with the shared 5-minute TTL. Returns [] when ComfyUI's output dir
     isn't configured yet."""
     current_time = time.time()
-    cache_key = str(include_hidden)
-    if (_checkpoint_models_cache["data"] is not None
-            and _checkpoint_models_cache["key"] == cache_key
-            and (current_time - _checkpoint_models_cache["timestamp"] < _MODEL_CACHE_TTL)):
-        return _checkpoint_models_cache["data"]
+    with _model_cache_lock:
+        generation = _model_cache_generation
+        cached = _checkpoint_models_cache["data"]
+        cached_at = _checkpoint_models_cache["timestamp"]
+    if cached is not None and current_time - cached_at < _MODEL_CACHE_TTL:
+        sorted_models = cached
+        if include_hidden:
+            return sorted_models
+        return [
+            {"name": m, "civitai_url": CIVITAI_LINKS.get(os.path.basename(m))}
+            for m in sorted_models
+        ]
 
     out_dir = _out_dir()
     if not out_dir:
@@ -862,63 +892,65 @@ def get_checkpoint_models(include_hidden=False):
 
     try:
         checkpoints_dir = os.path.normpath(os.path.join(out_dir, "..", "models", "checkpoints"))
-        biglove_dir = os.path.join(checkpoints_dir, "Biglove")
-
-        search_dirs = [d for d in (biglove_dir, checkpoints_dir) if os.path.exists(d)]
-        for subdir in ("diffusers", "unet", "stable-diffusion", "xl", "sdxl"):
-            subdir_path = os.path.join(checkpoints_dir, subdir)
-            if os.path.exists(subdir_path):
-                search_dirs.append(subdir_path)
-
-        if not search_dirs:
-            logger.warning(f"Checkpoint model directories not found: {biglove_dir} (and parent {checkpoints_dir})")
+        if not os.path.isdir(checkpoints_dir):
+            logger.warning(f"Checkpoint model directory not found: {checkpoints_dir}")
             return []
 
+        # Preserve the loader's relative path as the model identity.  Flattening
+        # to basenames made two checkpoints in different folders collapse into
+        # one picker entry and made later resolution depend on os.walk order.
         all_model_files = set()
-        for s_dir in search_dirs:
-            found = glob.glob(os.path.join(s_dir, "*.safetensors"))
-            found += glob.glob(os.path.join(s_dir, "**", "*.safetensors"), recursive=True)
-            all_model_files.update(os.path.basename(f) for f in found)
+        for root, _dirs, files in os.walk(checkpoints_dir):
+            for filename in files:
+                if filename.lower().endswith(".safetensors"):
+                    path = os.path.join(root, filename)
+                    all_model_files.add(
+                        os.path.relpath(path, checkpoints_dir).replace(os.sep, "/")
+                    )
 
         sorted_models = sorted(all_model_files)
         logger.info(f"Total checkpoint models found: {len(sorted_models)}")
 
+        with _model_cache_lock:
+            if generation == _model_cache_generation:
+                _checkpoint_models_cache.update(
+                    data=sorted_models, timestamp=time.time())
         if include_hidden:
-            result = sorted_models
-        else:
-            result = [{"name": m, "civitai_url": CIVITAI_LINKS.get(m)} for m in sorted_models]
-
-        _checkpoint_models_cache["data"] = result
-        _checkpoint_models_cache["timestamp"] = time.time()
-        _checkpoint_models_cache["key"] = cache_key
-        return result
+            return sorted_models
+        return [
+            {"name": m, "civitai_url": CIVITAI_LINKS.get(os.path.basename(m))}
+            for m in sorted_models
+        ]
     except Exception as e:
         logger.error(f"Error listing checkpoint models: {e}", exc_info=True)
         return []
 
 
 def resolve_checkpoint_ckpt_name(name):
-    """Map a checkpoint BASENAME (as returned by get_checkpoint_models, which strips
-    the folder via os.path.basename) to the path RELATIVE to models/checkpoints that
-    ComfyUI's CheckpointLoaderSimple expects, e.g. 'bigLove_photo5.safetensors' ->
-    'Biglove\\bigLove_photo5.safetensors', but 'sam3.1_…' stays at the root.
+    """Return a canonical ComfyUI checkpoint-loader value.
 
-    Without this the loader rejects the prompt (400 'value_not_in_list'). Names that
-    already contain a separator (already a relative path) are returned unchanged;
-    unknown names — or an unconfigured ComfyUI output dir — fall back to themselves."""
+    Current callers pass the relative identity returned by
+    :func:`get_checkpoint_models`.  Bare basenames remain supported for old saved
+    settings, but are resolved only when exactly one matching file exists; an
+    ambiguous basename is never silently mapped to an arbitrary checkpoint.
+    Forward slashes are ComfyUI's platform-independent model separator.
+    """
     if not name:
         return name
     if "\\" in name or "/" in name:
-        return name.replace("/", "\\")
+        return name.replace("\\", "/")
     out_dir = _out_dir()
     if not out_dir:
         return name
     try:
         ck_dir = os.path.normpath(os.path.join(out_dir, "..", "models", "checkpoints"))
+        matches = []
         for root, _dirs, files in os.walk(ck_dir):
             if name in files:
                 rel = os.path.relpath(os.path.join(root, name), ck_dir)
-                return rel.replace("/", "\\")
+                matches.append(rel.replace(os.sep, "/"))
+        if len(matches) == 1:
+            return matches[0]
     except OSError:
         pass
     return name
@@ -934,9 +966,12 @@ def get_zimage_models():
     'z image\\bigLove_zt3.safetensors'. Cached with the shared TTL. Returns []
     when ComfyUI's output dir isn't configured yet."""
     current_time = time.time()
-    if (_zimage_models_cache["data"] is not None
-            and current_time - _zimage_models_cache["timestamp"] < _MODEL_CACHE_TTL):
-        return _zimage_models_cache["data"]
+    with _model_cache_lock:
+        generation = _model_cache_generation
+        cached = _zimage_models_cache["data"]
+        cached_at = _zimage_models_cache["timestamp"]
+    if cached is not None and current_time - cached_at < _MODEL_CACHE_TTL:
+        return cached
     out = []
     out_dir = _out_dir()
     if out_dir:
@@ -958,8 +993,9 @@ def get_zimage_models():
             out = sorted(set(out))
         except Exception as e:
             logger.error(f"get_zimage_models error: {e}")
-    _zimage_models_cache["data"] = out
-    _zimage_models_cache["timestamp"] = current_time
+    with _model_cache_lock:
+        if generation == _model_cache_generation:
+            _zimage_models_cache.update(data=out, timestamp=current_time)
     return out
 
 
@@ -973,9 +1009,12 @@ def get_krea_models():
     UNETLoader (relatifs au dossier de base, backslash). Cache TTL partagé. Vide si
     ComfyUI n'est pas encore configuré."""
     current_time = time.time()
-    if (_krea_models_cache["data"] is not None
-            and current_time - _krea_models_cache["timestamp"] < _MODEL_CACHE_TTL):
-        return _krea_models_cache["data"]
+    with _model_cache_lock:
+        generation = _model_cache_generation
+        cached = _krea_models_cache["data"]
+        cached_at = _krea_models_cache["timestamp"]
+    if cached is not None and current_time - cached_at < _MODEL_CACHE_TTL:
+        return cached
     out = []
     out_dir = _out_dir()
     if out_dir:
@@ -998,8 +1037,9 @@ def get_krea_models():
             out = sorted(set(out))
         except Exception as e:
             logger.error(f"get_krea_models error: {e}")
-    _krea_models_cache["data"] = out
-    _krea_models_cache["timestamp"] = current_time
+    with _model_cache_lock:
+        if generation == _model_cache_generation:
+            _krea_models_cache.update(data=out, timestamp=current_time)
     return out
 
 
@@ -1012,11 +1052,14 @@ def clear_model_caches() -> None:
     user as "models still not found" right after they pointed the app at ComfyUI).
     SRC exposed `invalidate_model_caches`; this app dropped that helper, so the
     caches were never invalidated on config change until now."""
-    for c in (_checkpoint_models_cache, _zimage_models_cache, _krea_models_cache):
-        c["data"] = None
-        c["timestamp"] = 0
-        if "key" in c:
-            c["key"] = None
+    global _model_cache_generation
+    with _model_cache_lock:
+        _model_cache_generation += 1
+        for c in (_checkpoint_models_cache, _zimage_models_cache, _krea_models_cache):
+            c["data"] = None
+            c["timestamp"] = 0
+            if "key" in c:
+                c["key"] = None
 
 
 def get_zimage_loras():
@@ -1228,7 +1271,13 @@ def inject_krea_loras(workflow, requested, allowed, unet_node="20", consumers=("
     filter-bypass qui n'agissent qu'à strength >10) est portée par le slider front.
     Returns the number of LoRAs injected; 0 leaves the workflow untouched.
     Independent of the conditioning rebalance (node 30), on the prompt path."""
-    if unet_node not in workflow or not isinstance(requested, list):
+    rewritable_consumers = [
+        workflow[cons] for cons in consumers
+        if cons in workflow
+        and isinstance(workflow[cons].get("inputs", {}).get("model"), list)
+    ]
+    if (unet_node not in workflow or not isinstance(requested, list)
+            or not rewritable_consumers):
         return 0
     prev = unet_node
     injected = 0
@@ -1251,10 +1300,8 @@ def inject_krea_loras(workflow, requested, allowed, unet_node="20", consumers=("
         prev = node_id
         injected += 1
     if injected:
-        for cons in consumers:
-            node = workflow.get(cons)
-            if node and isinstance(node.get("inputs", {}).get("model"), list):
-                node["inputs"]["model"] = [prev, 0]
+        for node in rewritable_consumers:
+            node["inputs"]["model"] = [prev, 0]
     return injected
 
 
@@ -1300,7 +1347,13 @@ def inject_zimage_loras(workflow, requested, allowed,
     `requested` = [{filename, strength}], `allowed` = whitelist of filenames
     (path-injection guard). Strength clamped to [-2.0, 6.0]. Returns the number
     of LoRAs injected; 0 leaves the workflow untouched."""
-    if unet_node not in workflow or not isinstance(requested, list):
+    rewritable_consumers = [
+        workflow[cons] for cons in consumers
+        if cons in workflow
+        and isinstance(workflow[cons].get("inputs", {}).get("model"), list)
+    ]
+    if (unet_node not in workflow or not isinstance(requested, list)
+            or not rewritable_consumers):
         return 0
     prev = unet_node
     injected = 0
@@ -1325,10 +1378,8 @@ def inject_zimage_loras(workflow, requested, allowed,
         prev = node_id
         injected += 1
     if injected:
-        for cons in consumers:
-            node = workflow.get(cons)
-            if node and isinstance(node.get("inputs", {}).get("model"), list):
-                node["inputs"]["model"] = [prev, 0]
+        for node in rewritable_consumers:
+            node["inputs"]["model"] = [prev, 0]
     return injected
 
 

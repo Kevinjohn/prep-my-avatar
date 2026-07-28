@@ -12,6 +12,27 @@ def _png(color=(255, 0, 0)):
     return buf.getvalue()
 
 
+def test_classification_parser_preserves_nested_confidence():
+    from app.services.face_dataset_service import _parse_classify
+
+    raw = '''Result:
+    {"framing":"bust","angle":"3/4","expression":"smile",
+     "lighting":"golden hour","confidence":{"framing":0.9,"angle":0.8}}
+    done'''
+    framing, label, coverage, confidence = _parse_classify(raw)
+    assert framing == 'bust'
+    assert label == '3/4, smile'
+    assert coverage['angle'] == 'three-quarter'
+    assert coverage['lighting'] == 'golden-hour'
+    assert confidence == {'framing': 0.9, 'angle': 0.8}
+
+
+def test_classification_parser_rejects_malformed_json():
+    from app.services.face_dataset_service import _parse_classify
+
+    assert _parse_classify('{"framing":"face"') is None
+
+
 def test_create_and_payload(app):
     from app.services import face_dataset_service as svc
     from app.config import LOCAL_USER
@@ -51,6 +72,52 @@ def test_api_fanout_creates_pending_rows(app, monkeypatch):
         assert calls  # background batch was dispatched
 
 
+def test_api_fanout_enforces_aggregate_in_flight_cap(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    from app import config as cfg
+    monkeypatch.setattr(svc, 'MAX_FANOUT', 2)
+    monkeypatch.setattr(svc.threading, 'Thread',
+                        lambda **kwargs: type('T', (), {'start': lambda self: None})())
+    with app.app_context():
+        cfg.save_config({'privacy': {'allow_remote_generation': True}})
+        ds = svc.create_dataset(LOCAL_USER, 'Capacity', 'capacity')
+        Path(svc._dataset_dir(ds.id), 'ref.webp').write_bytes(_png())
+        ds.ref_filename = 'ref.webp'
+        svc.db.session.add(FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='pending'))
+        svc.db.session.commit()
+        with pytest.raises(ValueError, match='too many generations in flight'):
+            svc.generate_variations_nanobanana(
+                app, LOCAL_USER, ds.id,
+                [{'label': 'a', 'framing': 'face', 'prompt': 'one'},
+                 {'label': 'b', 'framing': 'face', 'prompt': 'two'}], 1)
+        assert FaceDatasetImage.query.filter_by(dataset_id=ds.id).count() == 1
+
+
+def test_api_fanout_worker_start_failure_marks_reserved_rows_failed(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    from app import config as cfg
+    monkeypatch.setattr(svc.threading, 'Thread', lambda **kwargs: type(
+        'T', (), {'start': lambda self: (_ for _ in ()).throw(RuntimeError('no thread'))})())
+    with app.app_context():
+        cfg.save_config({'privacy': {'allow_remote_generation': True}})
+        ds = svc.create_dataset(LOCAL_USER, 'Start failure', 'start_failure')
+        Path(svc._dataset_dir(ds.id), 'ref.webp').write_bytes(_png())
+        ds.ref_filename = 'ref.webp'
+        svc.db.session.commit()
+        with pytest.raises(RuntimeError, match='no thread'):
+            svc.generate_variations_nanobanana(
+                app, LOCAL_USER, ds.id,
+                [{'label': 'a', 'framing': 'face', 'prompt': 'one'}], 1)
+        row = FaceDatasetImage.query.filter_by(dataset_id=ds.id).one()
+        assert row.status == 'failed'
+        assert 'could not start generation worker' in row.fail_reason
+
+
 def test_export_zip_layout(app):
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
@@ -75,6 +142,46 @@ def test_export_zip_layout(app):
         manifest = json.loads(z.read(manifest_name))
         assert manifest['format'] == 'prep-my-avatar-training-export'
         assert manifest['source_mix'] == {'reference': 0, 'imported': 0, 'generated': 1}
+
+
+def test_export_rejects_partial_missing_kept_files(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Partial export', 'subject')
+        Path(svc._dataset_dir(ds.id), 'present.webp').write_bytes(_png())
+        svc.db.session.add_all([
+            FaceDatasetImage(dataset_id=ds.id, filename='present.webp', status='keep'),
+            FaceDatasetImage(dataset_id=ds.id, filename='missing.webp', status='keep'),
+        ])
+        svc.db.session.commit()
+        with pytest.raises(ValueError, match='missing for rows'):
+            svc.build_export_zip(LOCAL_USER, ds.id)
+
+
+def test_import_rejects_per_image_size_before_analysis(app, monkeypatch):
+    from app.config import LOCAL_USER
+    from app.services import face_dataset_service as svc
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Bounded import', 'subject')
+        monkeypatch.setattr(svc, 'DATASET_IMAGE_MAX_BYTES', 3)
+        monkeypatch.setattr(
+            svc, 'analyse_image_bytes',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError('oversized bytes must not be decoded')))
+        ids, failed = svc.import_images(LOCAL_USER, ds.id, [b'1234'])
+        assert ids == []
+        assert failed == 1
+
+
+def test_watermark_preservation_failure_blocks_edit(tmp_path, monkeypatch):
+    from app.services import face_dataset_service as svc
+    image = tmp_path / 'image.webp'
+    image.write_bytes(_png())
+    monkeypatch.setattr(svc.shutil, 'copy2', lambda *_args: (_ for _ in ()).throw(OSError('full')))
+    assert svc._preserve_original(str(image)) is False
+    assert image.read_bytes() == _png()
 
 
 def test_status_validation(app):
@@ -125,6 +232,37 @@ def test_import_records_source_provenance_and_technical_analysis(app):
         image = svc.dataset_payload(LOCAL_USER, ds.id)['images'][0]
         assert image['source_name'] == 'portrait.jpg'
         assert image['analysis']['metrics']['resolution'] > 0
+
+
+def test_import_filename_collision_does_not_overwrite_existing_image(app, monkeypatch):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    class FixedUuid:
+        def __init__(self, value):
+            self.hex = value
+
+    values = iter([
+        FixedUuid('1' * 32), FixedUuid('a' * 32),
+        FixedUuid('2' * 32), FixedUuid('a' * 32), FixedUuid('b' * 32),
+    ])
+    monkeypatch.setattr(svc.uuid, 'uuid4', lambda: next(values))
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Collision', 'collision')
+        first_ids, first_failed = svc.import_images(
+            LOCAL_USER, ds.id, [_png((255, 0, 0))], crop=False, dedupe=False)
+        first = svc.db.session.get(FaceDatasetImage, first_ids[0])
+        first_bytes = Path(svc._dataset_dir(ds.id), first.filename).read_bytes()
+
+        second_ids, second_failed = svc.import_images(
+            LOCAL_USER, ds.id, [_png((0, 255, 0))], crop=False, dedupe=False)
+        second = svc.db.session.get(FaceDatasetImage, second_ids[0])
+
+        assert (first_failed, second_failed) == (0, 0)
+        assert first.filename != second.filename
+        assert Path(svc._dataset_dir(ds.id), first.filename).read_bytes() == first_bytes
+        assert Path(svc._dataset_dir(ds.id), second.filename).read_bytes() != first_bytes
 
 
 def test_import_zip_accepts_legacy_spooled_upload_without_seekable(app):
@@ -507,6 +645,30 @@ def test_crop_image_preserves_box_aspect(app):
         assert svc.crop_image(LOCAL_USER, img.id, 0, 0, 400, 400) is True
         with Image.open(os.path.join(d, 'w.webp')) as im:
             assert im.size == (1024, 1024)
+
+
+def test_crop_image_restores_pixels_when_metadata_commit_fails(app, monkeypatch):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Crop rollback', 'crop_rollback')
+        path = Path(svc._dataset_dir(ds.id), 'rollback.webp')
+        path.write_bytes(_patterned_png(91))
+        before = path.read_bytes()
+        image = FaceDatasetImage(
+            dataset_id=ds.id, filename=path.name, source='import', status='keep')
+        svc.db.session.add(image)
+        svc.db.session.commit()
+
+        def fail_commit():
+            raise RuntimeError('forced metadata failure')
+
+        monkeypatch.setattr(svc.db.session, 'commit', fail_commit)
+        with pytest.raises(RuntimeError, match='forced metadata failure'):
+            svc.crop_image(LOCAL_USER, image.id, 0, 0, 32, 32)
+        assert path.read_bytes() == before
 
 
 def test_manual_crop_clears_all_watermark_metadata_after_pixel_change(app):
@@ -1137,13 +1299,13 @@ def test_regenerate_switch_to_klein_uses_picker_model(app, monkeypatch):
     seen = {}
     def fake_enqueue(**kwargs):
         seen.update(kwargs)
-        return 'job-123'
+        return kwargs['job_id']
     monkeypatch.setattr(klein_edit_helper, 'enqueue_klein_edit', fake_enqueue)
     with app.app_context():
         ds, img = _ds_with_ref_and_generated(svc, FaceDatasetImage, LOCAL_USER)  # nanobanana-born
         job = svc.regenerate_image(LOCAL_USER, img.id, engine='klein',
                                    klein_model='flux-2-klein.safetensors')
-        assert job == 'job-123'
+        assert job == seen['job_id']
         assert seen['klein_model'] == 'flux-2-klein.safetensors'
         svc.db.session.expire_all()
         assert (svc.db.session.get(FaceDatasetImage, img.id).klein_model
@@ -1161,7 +1323,7 @@ def test_regenerate_nsfw_stays_local_despite_api_engine(app, monkeypatch):
     seen = {}
     def fake_enqueue(**kwargs):
         seen.update(kwargs)
-        return 'job-nsfw'
+        return kwargs['job_id']
     monkeypatch.setattr(klein_edit_helper, 'enqueue_klein_edit', fake_enqueue)
     monkeypatch.setattr(svc, '_api_generate_fn',
                         lambda engine: (_ for _ in ()).throw(AssertionError('API engine must not be called')))
@@ -1171,7 +1333,7 @@ def test_regenerate_nsfw_stays_local_despite_api_engine(app, monkeypatch):
         img.variation_label = '🔞 custom shot'    # is_nsfw_label() -> True
         svc.db.session.commit()
         job = svc.regenerate_image(LOCAL_USER, img.id, engine='nanobanana')
-        assert job == 'job-nsfw'                   # Klein path, not the API one
+        assert job == seen['job_id']                # Klein path, not the API one
         assert seen['klein_model'] == 'flux-2-klein.safetensors'
 
 
@@ -1710,7 +1872,6 @@ def test_klein_generate_activity_from_enqueue_to_last_completion(app, monkeypatc
     approximation); each job completion reconciles done; the LAST completion clears
     the indicator. The payload exposes it throughout the batch."""
     import os
-    import itertools
     from app.services import face_dataset_service as svc
     from app.services import dataset_activity as da
     from app.services import klein_edit_helper as keh
@@ -1718,8 +1879,7 @@ def test_klein_generate_activity_from_enqueue_to_last_completion(app, monkeypatc
     da.reset()
     # Bypass the model preflight and stub the enqueue with deterministic job ids.
     monkeypatch.setattr(keh, 'klein_missing_assets', lambda *a, **k: set())
-    counter = itertools.count(1)
-    monkeypatch.setattr(keh, 'enqueue_klein_edit', lambda **k: f'job-{next(counter)}')
+    monkeypatch.setattr(keh, 'enqueue_klein_edit', lambda **k: k['job_id'])
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'K', 'k')
         d = svc._dataset_dir(ds.id)
@@ -1735,11 +1895,13 @@ def test_klein_generate_activity_from_enqueue_to_last_completion(app, monkeypatc
         assert act and act['kind'] == 'generate' and act['total'] == 2 and act['done'] == 0
         assert act['engine'] == 'klein'
         # One job finishes (failed path is hermetic — no output file needed).
-        svc.link_completed_dataset_image('job-1', 'x.webp', failed=True)
+        jobs = [row.job_id for row in svc.FaceDatasetImage.query.order_by(
+            svc.FaceDatasetImage.id).all()]
+        svc.link_completed_dataset_image(jobs[0], 'x.webp', failed=True)
         act = da.get(ds.id)
         assert act and act['kind'] == 'generate' and act['total'] == 2 and act['done'] == 1
         # Last job finishes -> indicator clears (Generate re-enables).
-        svc.link_completed_dataset_image('job-2', 'y.webp', failed=True)
+        svc.link_completed_dataset_image(jobs[1], 'y.webp', failed=True)
         assert da.get(ds.id) is None
         assert svc.dataset_payload(LOCAL_USER, ds.id)['activity'] is None
 
@@ -1748,15 +1910,13 @@ def test_klein_generate_activity_cleared_on_cancel(app, monkeypatch):
     """Stop deletes the in-flight rows (their completion callbacks never fire), so
     cancel_pending must clear the 'generate' indicator itself."""
     import os
-    import itertools
     from app.services import face_dataset_service as svc
     from app.services import dataset_activity as da
     from app.services import klein_edit_helper as keh
     from app.config import LOCAL_USER
     da.reset()
     monkeypatch.setattr(keh, 'klein_missing_assets', lambda *a, **k: set())
-    counter = itertools.count(1)
-    monkeypatch.setattr(keh, 'enqueue_klein_edit', lambda **k: f'jc-{next(counter)}')
+    monkeypatch.setattr(keh, 'enqueue_klein_edit', lambda **k: k['job_id'])
     # cancel_pending tries to cancel the queued job — stub the queue away.
     with app.app_context():
         import app.job_queue as jq
@@ -1839,6 +1999,74 @@ def test_import_dataset_zip_dedupes_and_rejects_bad_zip(app):
             assert False, 'expected ValueError'
         except ValueError as e:
             assert 'zip' in str(e)
+
+
+def test_import_dataset_zip_closes_archive_on_limit_rejection(app, monkeypatch):
+    from app.config import LOCAL_USER
+    from app.services import face_dataset_service as svc
+
+    opened = []
+    real_zipfile = zipfile.ZipFile
+
+    class TrackingZipFile(real_zipfile):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened.append(self)
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Zip limit', 'ziplimit')
+        monkeypatch.setattr(svc.zipfile, 'ZipFile', TrackingZipFile)
+        monkeypatch.setattr(svc, 'DATASET_ZIP_MAX_FILES', 1)
+        archive = _training_zip([('a.png', _png((1, 2, 3))),
+                                 ('b.png', _png((4, 5, 6)))])
+        with pytest.raises(ValueError, match='too many files'):
+            svc.import_dataset_zip(LOCAL_USER, ds.id, archive)
+        assert opened and opened[-1].fp is None
+
+
+def test_style_and_uncaptioned_folder_captions_match_export(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Style captions', 'zsty_internal', kind='style')
+        filename = 'style.webp'
+        Path(svc._dataset_dir(ds.id), filename).write_bytes(_png((10, 20, 30)))
+        db_row = FaceDatasetImage(dataset_id=ds.id, source='import', status='keep',
+                                  filename=filename, caption=None)
+        svc.db.session.add(db_row)
+        svc.db.session.commit()
+
+        result = svc.write_caption_files(LOCAL_USER, ds.id)
+        assert result == {'ok': True, 'written': 1, 'skipped_uncaptioned': 1}
+        assert Path(svc._training_projection_dir(ds.id), 'style.txt').read_text() == ''
+        archive = svc.build_export_zip(LOCAL_USER, ds.id)
+        with zipfile.ZipFile(io.BytesIO(archive)) as z:
+            captions = [z.read(name).decode() for name in z.namelist()
+                        if name.endswith('.txt')]
+        assert captions == ['']
+
+
+def test_backup_roundtrip_preserves_watermark_original_sibling(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Watermark original', 'watermark_original')
+        filename = 'marked.webp'
+        current = _png((10, 20, 30))
+        original = _png((200, 100, 50))
+        Path(svc._dataset_dir(ds.id), filename).write_bytes(current)
+        Path(svc._dataset_dir(ds.id), 'marked.orig.webp').write_bytes(original)
+        svc.db.session.add(FaceDatasetImage(
+            dataset_id=ds.id, source='import', status='keep', filename=filename,
+            watermark_state='cleaned'))
+        svc.db.session.commit()
+
+        restored = svc.import_backup_zip(LOCAL_USER, svc.build_backup_zip(LOCAL_USER, ds.id))
+        assert Path(svc._dataset_dir(restored.id), 'marked.orig.webp').read_bytes() == original
 
 
 def test_import_zip_route(client, app):

@@ -4,8 +4,8 @@ from app.version import APP_VERSION, calver_key, is_newer_version
 
 
 def test_current_app_version_uses_release_calver():
-    assert APP_VERSION == '2026.07.21.1'
-    assert calver_key(APP_VERSION) == (2026, 7, 21, 1)
+    assert APP_VERSION == '2026.07.28.1'
+    assert calver_key(APP_VERSION) == (2026, 7, 28, 1)
 
 
 def test_calver_comparison_is_numeric_not_lexical():
@@ -19,3 +19,6 @@ def test_legacy_date_tags_and_invalid_release_tags_are_safe():
     assert is_newer_version('not-a-version', APP_VERSION) is False
     with pytest.raises(ValueError):
         calver_key('2026.02.30.1')
+    for invalid in ('vv2026.07.17.1', 'vV2026.07.17.1', '2026.07.17.0'):
+        with pytest.raises(ValueError):
+            calver_key(invalid)

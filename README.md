@@ -19,42 +19,36 @@ large photo corpus → analyse → plan coverage → generate missing combinatio
 Import preserves every original while the Corpus Workbench surfaces technical
 quality, duplicates, training admission, anchor choices, rights, and coverage.
 
-![Import and review the source corpus](docs/screenshots/readme/01-import-corpus.jpg)
 
 ### 2. Plan coverage
 
 See which framing and visual combinations are covered, weak, unknown, or missing
 before spending anything on generation.
 
-![Plan corpus coverage](docs/screenshots/readme/02-coverage-plan.jpg)
 
 ### 3. Generate only proven gaps
 
 Choose a local or API engine, then review the preselected shots that fill genuine
 coverage gaps.
 
-![Select gap-filling generation shots](docs/screenshots/readme/03-generate-gaps.jpg)
 
 ### 4. Curate the combined dataset
 
 Keep or reject imported and generated candidates together, with quality and
 provenance visible during review.
 
-![Curate imported and generated images](docs/screenshots/readme/04-curate-images.jpg)
 
 ### 5. Check training readiness
 
 The training workspace keeps the next blocker visible and shows whether a local
-or cloud trainer is configured before launch.
-
-![Check training readiness](docs/screenshots/readme/05-training-readiness.jpg)
+or cloud trainer is configured before launch. Blank captions produce a warning
+and an explicit **Start anyway** confirmation; they do not block training.
 
 ### 6. Export or back up
 
 Export ordinary training pairs, or create a portable backup that retains the
 full preparation history.
 
-![Export the training dataset or create a portable backup](docs/screenshots/readme/06-export-backup.jpg)
 
 ## Fork-specific workflow
 
@@ -106,14 +100,33 @@ The forked application lives in the upstream layout:
 See [`docs/specs/import-first-multi-reference-design.md`](docs/specs/import-first-multi-reference-design.md)
 for the fork-specific architecture and data contracts.
 
+## Installation and launch
+
+For the guided desktop launch, clone this repository and run `start.bat` on
+Windows. For a manual API-only launch, create a Python 3.10–3.12 virtual
+environment and install `backend/requirements.txt`. Install the private source
+launcher once with `python backend/source_launcher.py --install --root . --data-dir data`,
+then start with `python data/source-launcher.py --root . --data-dir data`.
+Docker users can copy `.env.example` to `.env`, set `LDS_ACCESS_TOKEN`, and run
+`docker compose up --build`. The in-app [Getting started guide](docs/guide/getting-started.md)
+describes these options and the optional GPU tools in more detail.
+
 ## Process and health model
 
-Run the application through `python backend/run.py` (or the bundled launcher).
+Run the application through the private `data/source-launcher.py` installed above
+(or the bundled launcher). It repairs an interrupted update before importing the
+mutable checkout.
 One server process owns a data directory at a time: the launcher enforces this
 with `data/server.lock` because the schedulers, provider monitors, and SQLite job
 dispatcher are intentionally in-process. Multi-worker WSGI deployment is not
 supported; scale expensive image work through the existing external engines and
 durable queue instead of starting additional web workers.
+
+SQLite uses WAL with `synchronous=NORMAL`. This preserves database consistency
+and committed work across application/process crashes, but it is not a promise
+that the most recent acknowledged commits survive sudden host power loss. Use
+storage with its own power-loss protection and regular backups when that failure
+boundary matters.
 
 `GET /api/health/live` reports process liveness. `GET /api/health/ready` also
 checks the database schema, writable data storage, and committed frontend build;
@@ -156,9 +169,9 @@ consent toggle.
 
 ## Versioning
 
-The current application release is **2026.07.21.1**. Application releases use
+The current application release is **2026.07.28.1**. Application releases use
 calendar versions in the form `YYYY.MM.DD.N`, with matching Git tags such as
-`v2026.07.21.1`; `N` increments when more than one release is cut on the same day.
+`v2026.07.28.1`; `N` increments when more than one release is cut on the same day.
 
 `backend/app/version.py` is the application version source of truth. The prototype
 `avatar_prep` Python package keeps its independent SemVer, and the frontend package

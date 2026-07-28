@@ -74,8 +74,15 @@ def score_dataset_faces(ref_path, image_paths, timeout: int = 900, ref_paths=Non
     except json.JSONDecodeError as e:
         logger.warning('face_similarity: JSON illisible : %s', e)
         return {}, {'kind': 'failed', 'detail': f'unreadable scorer output: {e}'}
+    if not isinstance(data, dict):
+        return {}, {'kind': 'failed', 'detail': 'invalid scorer response schema'}
     if not data.get('ref_ok'):
         logger.warning('face_similarity: ref inutilisable : %s', data.get('error'))
         return {}, {'kind': 'ref_unusable',
                     'detail': data.get('error') or 'no usable face in the reference photo'}
-    return data.get('results') or {}, None
+    results = data.get('results') or {}
+    if (not isinstance(results, dict)
+            or any(not isinstance(key, str) or not isinstance(value, dict)
+                   for key, value in results.items())):
+        return {}, {'kind': 'failed', 'detail': 'invalid scorer results schema'}
+    return results, None

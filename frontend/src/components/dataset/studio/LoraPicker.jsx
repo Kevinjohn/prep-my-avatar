@@ -17,7 +17,7 @@
  * LoRA d'une autre famille sont désactivés (grisés + infobulle). Désélectionner tout
  * réinitialise le verrou.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useToast } from '../../common/Toast';
 import { safeJson } from '../../../api/fetchClient';
 
@@ -34,41 +34,47 @@ const familyBadgeClass = (fam) => ({
   krea: 'border-amber-400/40 bg-amber-500/10 text-amber-300',
 }[fam] || 'border-border-strong bg-white/5 text-content-muted');
 
-export default function LoraPicker({ preselectDataset, onSelectionChange }) {
+export default function LoraPicker({ preselectDataset, onSelectionChange, onMaxImagesChange }) {
   const toast = useToast();
   const [loras, setLoras] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   // Map "datasetId:family" -> checkpoint filename choisi (présence de la clé = coché).
   const [picked, setPicked] = useState({});
-  // Pré-cocher une seule fois (sinon on re-coche à chaque re-fetch).
-  const preselectedRef = useRef(false);
+  const preselectedRef = useRef(null);
   // Restauration de la sélection persistée : une seule fois, après le 1er fetch.
   const restoredRef = useRef(false);
 
-  useEffect(() => {
+  const loadLoras = useCallback(() => {
     let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     safeJson('/api/studio/checkpoints')
       .then((d) => {
         if (cancelled) return;
         if (d.ok === false) throw new Error(d.error || 'Could not load checkpoints');
         setLoras(d.loras || []);
+        onMaxImagesChange?.(d.max_images);
         setLoading(false);
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) return;
         setLoading(false);
+        setLoadError(error?.message || 'Could not load the LoRA list');
         toast.error('Could not load the LoRA list');
       });
     return () => { cancelled = true; };
-  }, [toast]);
+  }, [onMaxImagesChange, toast]);
+  useEffect(() => loadLoras(), [loadLoras]);
 
   // Pré-coche la 1re ligne du dataset pré-sélectionné (depuis l'URL) une fois la liste
   // chargée : checkpoint par défaut = le 1er (= le final côté backend).
   useEffect(() => {
-    if (preselectedRef.current || !preselectDataset || !loras.length) return;
+    if (!preselectDataset || !loras.length
+      || String(preselectedRef.current) === String(preselectDataset)) return;
     const target = loras.find((l) => String(l.dataset_id) === String(preselectDataset));
     if (target && target.checkpoints?.length) {
-      preselectedRef.current = true;
+      preselectedRef.current = preselectDataset;
       setPicked({ [keyOf(target)]: target.checkpoints[0].filename });
     }
   }, [preselectDataset, loras]);
@@ -100,7 +106,7 @@ export default function LoraPicker({ preselectDataset, onSelectionChange }) {
   // Persiste la sélection à chaque changement (après restauration seulement,
   // sinon le {} initial écraserait la sauvegarde avant qu'on l'ait relue).
   useEffect(() => {
-    if (!restoredRef.current && !preselectedRef.current) return;
+    if (!restoredRef.current && preselectedRef.current == null) return;
     try { localStorage.setItem('studioPicked_v1', JSON.stringify(picked)); } catch { /* ignore */ }
   }, [picked]);
 
@@ -142,6 +148,7 @@ export default function LoraPicker({ preselectDataset, onSelectionChange }) {
     setPicked((cur) => ({ ...cur, [key]: filename }));
 
   const count = selection.length;
+  const lockHintId = 'studio-family-lock-hint';
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-3">
@@ -157,12 +164,23 @@ export default function LoraPicker({ preselectDataset, onSelectionChange }) {
 
       {loading ? (
         <p className="text-content-subtle text-sm">Loading LoRA…</p>
+      ) : loadError ? (
+        <div className="flex items-center gap-2 text-sm" role="alert">
+          <span className="text-red-300">{loadError}</span>
+          <button type="button" onClick={loadLoras}
+            className="rounded border border-border px-2 py-1 text-content">Retry</button>
+        </div>
       ) : loras.length === 0 ? (
         <p className="text-content-subtle text-sm">
           No trained LoRA available. Train a LoRA from the Dataset Maker first.
         </p>
       ) : (
         <div className="max-h-72 overflow-auto flex flex-col gap-1.5">
+          {runType && loras.some((l) => famOf(l) !== runType) && (
+            <p id={lockHintId} className="m-0 text-amber-200 text-[0.6875rem]">
+              One run uses one model family. Deselect all LoRAs to switch family.
+            </p>
+          )}
           {loras.map((l) => {
             const k = keyOf(l);
             const on = picked[k] != null;
@@ -178,6 +196,7 @@ export default function LoraPicker({ preselectDataset, onSelectionChange }) {
                 }`}>
                 <button type="button" onClick={() => toggle(l)} aria-pressed={on}
                   disabled={locked}
+                  aria-describedby={locked ? lockHintId : undefined}
                   title={locked ? 'One run = one family only (deselect all to switch family)' : undefined}
                   className={`flex items-center gap-2 text-left ${locked ? 'cursor-not-allowed' : ''}`}>
                   <span aria-hidden className={`inline-flex w-4 h-4 shrink-0 items-center justify-center rounded border text-[0.625rem] ${on ? 'border-primary bg-primary/30 text-white' : 'border-border text-transparent'}`}>

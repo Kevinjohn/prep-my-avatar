@@ -1,6 +1,12 @@
 .git
 node_modules
 .venv
+.python
+packaging/build
+packaging/dist
+frontend/dist
+.pytest_cache
+code-reviews
 data/
 data-docker/
 .env

@@ -30,11 +30,15 @@ function recipe(run) {
 }
 
 function admission(run) {
+  if (run.preflight == null && run.overrides == null) return 'Not recorded';
   const preflight = run.preflight || {};
   const verdict = preflight.verdict || preflight.status
-    || (preflight.blockers?.length ? 'blocked' : preflight.warnings?.length ? 'warning' : 'recorded');
-  const overrides = Object.entries(run.overrides || {}).filter(([, value]) => Boolean(value));
-  return `${verdict}${overrides.length ? ` · overrides: ${overrides.map(([key]) => key).join(', ')}` : ' · no overrides'}`;
+    || (preflight.blockers?.length ? 'blocked' : preflight.warnings?.length ? 'warning' : null);
+  const overrides = run.overrides == null ? null
+    : Object.entries(run.overrides).filter(([, value]) => Boolean(value));
+  const overrideLabel = overrides == null ? 'overrides not recorded'
+    : overrides.length ? `overrides: ${overrides.map(([key]) => key).join(', ')}` : 'no overrides';
+  return `${verdict || 'Admission not recorded'} · ${overrideLabel}`;
 }
 
 function evidence(run) {
@@ -59,7 +63,7 @@ const ROWS = [
   ['Run identity', (run) => `${FAMILY_LABEL[run.train_type] || run.train_type || 'LoRA'} · v${run.version || '?'} · ${run.source}`],
   ['Started', (run) => dateTime(run.created_at)],
   ['Outcome', (run) => `${run.status || 'recorded'}${run.error ? ` · ${run.error}` : ''}`],
-  ['Target', (run) => `${run.steps ?? '—'} steps${run.masked === false ? ' · unmasked' : ' · masked'}`],
+  ['Target', (run) => `${run.steps ?? '—'} steps${run.masked == null ? ' · mask not recorded' : run.masked ? ' · masked' : ' · unmasked'}`],
   ['Dataset fingerprint', (run) => run.fingerprint || 'Not recorded'],
   ['Effective recipe', recipe],
   ['Admission', admission],
@@ -120,7 +124,7 @@ export default function RunComparisonPanel({ runs, onRemove, onClear }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {ROWS.map(([label, render]) => (
+                {/** @type {Array<[string, (run: any) => any]>} */ (ROWS).map(([label, render]) => (
                   <tr key={label}>
                     <th scope="row" className="py-2 pr-3 align-top font-semibold text-content-subtle">{label}</th>
                     {runs.map((run) => (

@@ -41,7 +41,15 @@ def speed_factor(gpu_name: str) -> float:
     n = ''.join((gpu_name or '').lower().split())
     best_len, best_val = -1, 1.0
     for key, val in _SPEED.items():
-        if key in n and len(key) > best_len:
+        start = n.find(key)
+        # Numeric model names are prefixes of other real cards (A100/A1000).
+        # A following digit therefore means this is a different model, not a
+        # formatting variant of the tabulated one.
+        if (start >= 0
+                and not (key[-1].isdigit()
+                         and start + len(key) < len(n)
+                         and n[start + len(key)].isdigit())
+                and len(key) > best_len):
             best_len, best_val = len(key), val
     return best_val
 

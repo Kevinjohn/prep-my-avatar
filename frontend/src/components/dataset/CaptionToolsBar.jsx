@@ -27,8 +27,8 @@ export default function CaptionToolsBar({ images, kind = 'character', mode = 'bo
     () => images.filter((i) => i.status === 'keep' && (i.caption || '').trim()),
     [images]);
   const freq = useMemo(
-    () => captionFrequencyEntries(captioned.map((img) => img.caption), mode),
-    [captioned, mode]);
+    () => open ? captionFrequencyEntries(captioned.map((img) => img.caption), mode) : [],
+    [captioned, mode, open]);
   const categoryCopy = useMemo(() => captionCategoryCopy(kind, mode), [kind, mode]);
   if (!captioned.length) return null;
 
@@ -173,22 +173,20 @@ export default function CaptionToolsBar({ images, kind = 'character', mode = 'bo
               </div>
             </div>
           )}
-          {/* Sidecar caption files: some people train with external tools that
-              read <image>.txt next to each image (kohya / ai-toolkit convention)
-              straight from the dataset folder — no ZIP download needed. */}
+          {/* Materialize a kept-only folder for external training tools. */}
           {onWriteFiles && (
             <div className="flex flex-col gap-1">
               <span className="text-content-subtle text-[0.625rem] uppercase tracking-wide">Caption files on disk</span>
               <div className="flex items-center gap-2 flex-wrap">
                 <button type="button" onClick={onWriteFiles} disabled={busy}
-                  title="Writes <image>.txt next to each kept image in the dataset folder — same format as the ZIP export, for external tools"
+                  title="Builds a kept-only training folder with <image>.txt sidecars in the same format as the ZIP export"
                   className="px-3 py-1 rounded-lg bg-surface-raised border border-border text-content text-xs font-semibold disabled:opacity-40 hover:bg-surface">
                   💾 Write .txt files
                 </button>
                 {onOpenFolder && (
                   <button type="button" onClick={onOpenFolder}
-                    title="Open the dataset folder in the file explorer"
-                    aria-label="Open the dataset folder"
+                    title="Open the kept-only training folder in the file explorer"
+                    aria-label="Open the kept-only training folder"
                     className="px-2 py-1 rounded-lg bg-surface-raised border border-border text-content text-xs hover:bg-surface">
                     📂
                   </button>

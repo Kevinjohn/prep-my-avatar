@@ -2,8 +2,9 @@
 vers le format diffusers (dossier transformer/) attendu par ai-toolkit, en
 utilisant la table de mapping OFFICIELLE de ComfyUI.
 
-Le mapping `z_image_to_diffusers` est copié verbatim depuis ComfyUI
-(comfy/utils.py) — c'est la table autoritative que ComfyUI emploie pour charger
+Le mapping `z_image_to_diffusers` est copié verbatim depuis ComfyUI à la révision
+5151cff293607c2191981fd16c62c1b1a6939695 (`comfy/utils.py`, lignes 678-742) —
+c'est la table autoritative que cette révision emploie pour charger
 les modèles diffusers Z-Image. Aucune devinette : renommage des couches groupées
 (all_x_embedder.2-1, all_final_layer.2-1) + split de l'attention QKV fusionnée
 en to_q/to_k/to_v.
@@ -26,6 +27,16 @@ from safetensors.torch import load_file, save_file
 
 
 # ---- ComfyUI comfy/utils.py: z_image_to_diffusers (verbatim, attribution) -----
+# Upstream: https://github.com/Comfy-Org/ComfyUI/blob/5151cff293607c2191981fd16c62c1b1a6939695/comfy/utils.py#L678-L742
+# Copyright (C) 2024 Comfy contributors; GPL-3.0-or-later.
+# See COMFYUI_ZIMAGE_MAPPING.md beside this file for provenance and license scope.
+COMFYUI_MAPPING_REVISION = "5151cff293607c2191981fd16c62c1b1a6939695"
+COMFYUI_MAPPING_SOURCE = (
+    "https://github.com/Comfy-Org/ComfyUI/blob/"
+    f"{COMFYUI_MAPPING_REVISION}/comfy/utils.py#L678-L742"
+)
+
+
 def z_image_to_diffusers(mmdit_config, output_prefix=""):
     n_layers = mmdit_config.get("n_layers", 0)
     hidden_size = mmdit_config.get("dim", 0)
@@ -178,10 +189,17 @@ def gate(out_sd, cfg_path):
 
 
 def main():
+    if len(sys.argv) < 3:
+        print(f"usage: {sys.argv[0]} INPUT CONFIG [--save DIRECTORY]", file=sys.stderr)
+        return 2
     inp, cfg_path = sys.argv[1], sys.argv[2]
     save_dir = None
     if "--save" in sys.argv:
-        save_dir = sys.argv[sys.argv.index("--save") + 1]
+        save_index = sys.argv.index("--save")
+        if save_index + 1 >= len(sys.argv):
+            print("--save requires a directory", file=sys.stderr)
+            return 2
+        save_dir = sys.argv[save_index + 1]
     print(f"Loading {inp} ...")
     out_sd = build_diffusers_state_dict(inp)
     ok = gate(out_sd, cfg_path)
@@ -191,7 +209,8 @@ def main():
         save_file(out_sd, os.path.join(tdir, "diffusion_pytorch_model.safetensors"))
         shutil.copy2(cfg_path, os.path.join(tdir, "config.json"))
         print(f"\nsaved diffusers transformer -> {tdir}")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

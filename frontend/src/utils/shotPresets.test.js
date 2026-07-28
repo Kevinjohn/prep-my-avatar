@@ -2,10 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SHOT_PRESETS_STORAGE_KEY,
+  CUSTOM_SHOTS_STORAGE_KEY,
   ShotPresetValidationError,
   applyShotPreset,
   deleteShotPreset,
   loadShotPresets,
+  loadCustomShots,
+  persistCustomShots,
   renameShotPreset,
   saveShotPreset,
 } from './shotPresets.js';
@@ -19,6 +22,16 @@ test('malformed or unknown stored payloads are ignored', () => {
   assert.equal(SHOT_PRESETS_STORAGE_KEY, 'datasetCustomPresetsV1');
 });
 
+test('custom-shot storage migrates arrays and cleans malformed payloads', () => {
+  assert.deepEqual(loadCustomShots(storage('{broken')), []);
+  assert.deepEqual(loadCustomShots(storage('{}')), []);
+  assert.deepEqual(loadCustomShots(storage(JSON.stringify([custom, null, { id: 'bad' }]))), [custom]);
+  const writes = [];
+  persistCustomShots({ setItem: (...args) => writes.push(args) }, [custom, { id: 'bad' }]);
+  assert.equal(writes[0][0], CUSTOM_SHOTS_STORAGE_KEY);
+  assert.deepEqual(JSON.parse(writes[0][1]), { version: 1, shots: [custom] });
+});
+
 test('save validates name, selection and duplicate names', () => {
   assert.throws(() => saveShotPreset([], '', ['a'], []), ShotPresetValidationError);
   assert.throws(() => saveShotPreset([], 'Empty', [], []), /selection/i);
@@ -30,7 +43,14 @@ test('save snapshots selected custom shots and apply restores missing definition
   const [preset] = saveShotPreset([], 'Portrait set', ['builtin_1', custom.id], [custom]);
   assert.deepEqual(preset.customShots, [custom]);
   assert.deepEqual(applyShotPreset(preset, []), {
-    selectedIds: ['builtin_1', custom.id], customShots: [custom],
+    selectedIds: ['builtin_1', custom.id], customShots: [custom], droppedIds: [],
+  });
+});
+
+test('apply drops catalog ids that are no longer resolvable but restores custom definitions', () => {
+  const preset = { selectedIds: ['kept', 'removed', custom.id], customShots: [custom] };
+  assert.deepEqual(applyShotPreset(preset, [], new Set(['kept'])), {
+    selectedIds: ['kept', custom.id], customShots: [custom], droppedIds: ['removed'],
   });
 });
 

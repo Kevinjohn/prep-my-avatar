@@ -1,11 +1,14 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { childExitCode, E2E_PREFIX, markOwned, removeOwned, scavengeStaleOwned } from './e2e-temp.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const dataDir = mkdtempSync(join(tmpdir(), 'prep-my-avatar-e2e-'));
+scavengeStaleOwned(tmpdir());
+const dataDir = mkdtempSync(join(tmpdir(), E2E_PREFIX));
+markOwned(dataDir);
 const venvPython = process.platform === 'win32'
   ? join(root, '.venv', 'Scripts', 'python.exe')
   : join(root, '.venv', 'bin', 'python');
@@ -26,6 +29,7 @@ const child = spawn(python, [join(root, 'backend', 'run.py')], {
 });
 
 let stopping = false;
+let settled = false;
 function stop(signal = 'SIGTERM') {
   if (stopping) return;
   stopping = true;
@@ -33,8 +37,16 @@ function stop(signal = 'SIGTERM') {
 }
 process.on('SIGTERM', () => stop('SIGTERM'));
 process.on('SIGINT', () => stop('SIGINT'));
+child.on('error', (error) => {
+  if (settled) return;
+  settled = true;
+  removeOwned(dataDir);
+  console.error(`E2E server failed to start: ${error.message}`);
+  process.exitCode = 1;
+});
 child.on('exit', (code, signal) => {
-  rmSync(dataDir, { recursive: true, force: true });
-  if (signal) process.kill(process.pid, signal);
-  else process.exit(code ?? 1);
+  if (settled) return;
+  settled = true;
+  removeOwned(dataDir);
+  process.exitCode = childExitCode(code, signal);
 });

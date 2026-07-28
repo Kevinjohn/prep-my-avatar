@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { Link, Navigate, useParams } from 'react-router-dom'
 import { apiFetch, putJson, del } from '../api/fetchClient'
 import { useToast } from '../components/common/Toast'
 import { useConfirmDialog } from '../components/common/ConfirmDialog'
@@ -14,6 +14,9 @@ import CaptioningSection from '../components/settings/CaptioningSection'
 import TrainingSection from '../components/settings/TrainingSection'
 import ServerSection from '../components/settings/ServerSection'
 import MaintenanceSection from '../components/settings/MaintenanceSection'
+import { buildSettingsPatch } from '../utils/settingsPatch'
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard'
+import { reconcileServerSnapshot } from '../utils/serverSnapshot'
 
 const SECTION_COMPONENTS = {
   overview: OverviewSection,
@@ -49,7 +52,6 @@ export default function SettingsPage() {
   const confirm = useConfirmDialog()
   const { caps, refresh } = useCapabilities()
   const { section } = useParams()
-  const navigate = useNavigate()
   const [config, setConfig] = useState(null)
   // Snapshot of the last-persisted config: the floating save bar appears when
   // the edited config drifts from it (or a secret paste is pending).
@@ -59,8 +61,14 @@ export default function SettingsPage() {
   const [secretInputs, setSecretInputs] = useState({})
   const [testResults, setTestResults] = useState({})
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(null)
   const [saving, setSaving] = useState(false)
   const [query, setQuery] = useState('')
+  const configRef = useRef(config)
+  const secretInputsRef = useRef(secretInputs)
+  const headingRef = useRef(null)
+  useEffect(() => { configRef.current = config }, [config])
+  useEffect(() => { secretInputsRef.current = secretInputs }, [secretInputs])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -70,7 +78,9 @@ export default function SettingsPage() {
       setSavedConfig(data.config)
       setRuntime(data.runtime || { host: null, port: null })
       setSecretsPresence(data.secrets)
+      setLoadError(null)
     } catch (e) {
+      setLoadError(e)
       toast.error(`Failed to load settings: ${e.message}`)
     } finally {
       setLoading(false)
@@ -80,7 +90,13 @@ export default function SettingsPage() {
   useEffect(() => { load() }, [load])
 
   const setField = (section, key, value) => {
+    setTestResults({})
     setConfig((prev) => ({ ...prev, [section]: { ...prev[section], [key]: value } }))
+  }
+
+  const editSecretInputs = (update) => {
+    setTestResults({})
+    setSecretInputs(update)
   }
 
   const recordTestResult = (target, result) => {
@@ -90,8 +106,13 @@ export default function SettingsPage() {
   const toggleEngine = (id) => {
     setConfig((prev) => {
       const enabled = prev.engines.enabled || []
+      if (enabled.includes(id) && enabled.length === 1) {
+        toast.warning('At least one image engine must remain enabled.')
+        return prev
+      }
       const next = enabled.includes(id) ? enabled.filter((e) => e !== id) : [...enabled, id]
-      return { ...prev, engines: { ...prev.engines, enabled: next } }
+      const defaultEngine = next.includes(prev.engines.default) ? prev.engines.default : next[0]
+      return { ...prev, engines: { ...prev.engines, enabled: next, default: defaultEngine } }
     })
   }
 
@@ -125,7 +146,10 @@ export default function SettingsPage() {
     if (!pending) return
     const data = await putJson('/api/settings', { secrets: { [key]: pending } })
     setSecretsPresence(data.secrets)
-    setSecretInputs((prev) => { const next = { ...prev }; delete next[key]; return next })
+    setSecretInputs((prev) => {
+      if ((prev[key] || '').trim() !== pending) return prev
+      const next = { ...prev }; delete next[key]; return next
+    })
     await refresh(true)
   }
 
@@ -145,13 +169,31 @@ export default function SettingsPage() {
   const saveConfigSection = async (section) => {
     const current = config?.[section]
     if (!current || JSON.stringify(current) === JSON.stringify(savedConfig?.[section])) return
-    const data = await putJson('/api/settings', { config: { [section]: current } })
-    setConfig((prev) => ({ ...prev, [section]: data.config[section] }))
-    setSavedConfig(data.config)
+    const sectionPatch = buildSettingsPatch(savedConfig?.[section], current)
+    if (!sectionPatch) return
+    const data = await putJson('/api/settings', { config: { [section]: sectionPatch } })
+    setConfig((prev) => ({
+      ...prev,
+      [section]: reconcileServerSnapshot(prev[section], current, data.config[section]),
+    }))
+    // This scoped Test-save must not adopt a new server snapshot for sections
+    // we did not refresh locally. Keeping their prior baseline ensures a later
+    // Save omits unchanged stale fields instead of mistaking them for edits.
+    setSavedConfig((previous) => ({
+      ...previous,
+      [section]: data.config[section],
+    }))
     setRuntime(data.runtime || { host: null, port: null })
   }
 
   const handleSave = async () => {
+    const submittedConfig = configRef.current
+    const submittedSecrets = secretInputsRef.current
+    const face = submittedConfig?.face_scoring
+    if (face && (!(face.orange >= 0 && face.orange < face.green && face.green <= 1))) {
+      toast.error('Face thresholds must satisfy 0 ≤ orange < green ≤ 1.')
+      return false
+    }
     setSaving(true)
     try {
       // Only send secret fields the user actually typed into — the fields
@@ -159,16 +201,19 @@ export default function SettingsPage() {
       // already-saved key with an empty value. Trim: a pasted key with
       // trailing whitespace/newline would otherwise corrupt the Bearer header.
       const secrets = Object.fromEntries(
-        Object.entries(secretInputs)
+        Object.entries(submittedSecrets)
           .map(([k, v]) => [k, (v || '').trim()])
           .filter(([, v]) => v)
       )
-      const data = await putJson('/api/settings', { config, secrets })
-      setConfig(data.config)
+      const configPatch = buildSettingsPatch(savedConfig, submittedConfig) || {}
+      const data = await putJson('/api/settings', { config: configPatch, secrets })
+      setConfig((current) => reconcileServerSnapshot(current, submittedConfig, data.config))
       setSavedConfig(data.config)
       setRuntime(data.runtime || { host: null, port: null })
       setSecretsPresence(data.secrets)
-      setSecretInputs({})
+      setSecretInputs((current) => Object.fromEntries(
+        Object.entries(current).filter(([key, value]) => value !== submittedSecrets[key])
+      ))
       // force=true: /api/capabilities caches probes for 30s server-side, so a
       // plain refresh() could leave onboarding/studio_visible stale right
       // after the config that determines them just changed.
@@ -191,37 +236,55 @@ export default function SettingsPage() {
           || Object.values(secretInputs).some((v) => (v || '').trim()))),
     [config, savedConfig, secretInputs])
 
-  useEffect(() => {
-    if (!dirty) return undefined
-    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
-    window.addEventListener('beforeunload', warn)
-    return () => window.removeEventListener('beforeunload', warn)
-  }, [dirty])
+  useUnsavedChangesGuard(dirty, 'settings')
 
   const discard = () => {
     setConfig(savedConfig)
     setSecretInputs({})
+    setTestResults({})
   }
 
-  if (loading || !config) {
+  const requestedSection = section || 'overview'
+  const validSection = !!SECTION_COMPONENTS[requestedSection]
+  const activeId = validSection ? requestedSection : 'overview'
+  const readyToFocus = !loading && !loadError && !!config && validSection
+
+  useEffect(() => {
+    if (readyToFocus) headingRef.current?.focus()
+  }, [activeId, readyToFocus])
+
+  if (loading) {
     return <p className="text-content-muted">Loading settings…</p>
+  }
+  if (loadError || !config) {
+    return (
+      <div className="space-y-3" role="alert">
+        <p className="text-content-muted">Couldn’t load settings.</p>
+        <button type="button" onClick={load}
+          className="rounded-md border border-border-strong px-3 py-1.5 text-sm font-medium text-content hover:bg-surface-raised">
+          Retry
+        </button>
+      </div>
+    )
   }
 
   const sectionProps = {
-    config, setField, secretsPresence, secretInputs, setSecretInputs,
+    config, setField, secretsPresence, secretInputs, setSecretInputs: editSecretInputs,
     testResults, recordTestResult, saveSecretIfPending, saveConfigSection, handleDeleteSecret,
     toggleEngine, handleSave, saving, runtime, caps, refreshCaps: refresh, toast,
   }
 
-  const activeId = SECTION_COMPONENTS[section] ? section : 'overview'
   const active = SETTINGS_SECTIONS.find((s) => s.id === activeId)
   const ActiveSection = SECTION_COMPONENTS[activeId]
 
   // Search filters the rail by title/keywords; the active section always stays
   // listed so the visible content is never orphaned from its nav item.
-  const visibleSections = SETTINGS_SECTIONS.filter(
-    (s) => s.id === activeId || matchesQuery(s, query)
-  )
+  const matchingSections = SETTINGS_SECTIONS.filter((s) => matchesQuery(s, query))
+  const visibleSections = SETTINGS_SECTIONS.filter((s) => (
+    s.id === activeId || matchingSections.some((match) => match.id === s.id)
+  ))
+
+  if (!validSection) return <Navigate to="/settings/overview" replace />
 
   const navItem = (s, chip) => {
     const isActive = s.id === activeId
@@ -231,7 +294,7 @@ export default function SettingsPage() {
       : `relative flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm font-medium ${
           isActive ? 'bg-surface-raised text-content' : 'text-content-muted hover:bg-surface hover:text-content'}`
     return (
-      <button key={s.id} type="button" onClick={() => navigate(`/settings/${s.id}`)}
+      <Link key={s.id} to={`/settings/${s.id}`}
         aria-current={isActive ? 'page' : undefined} className={base}>
         {!chip && isActive && (
           <span aria-hidden className="absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded bg-gradient-primary" />
@@ -239,7 +302,7 @@ export default function SettingsPage() {
         <span aria-hidden>{s.icon}</span>
         <span>{s.title}</span>
         {!chip && <StatusLed status={sectionStatus(s.id, caps)} />}
-      </button>
+      </Link>
     )
   }
 
@@ -264,7 +327,7 @@ export default function SettingsPage() {
             />
             {query.trim() && (
               <p className="px-3 pb-1 text-[11px] text-content-subtle" role="status">
-                {visibleSections.length} section{visibleSections.length === 1 ? '' : 's'} match
+                {matchingSections.length} section{matchingSections.length === 1 ? '' : 's'} match
               </p>
             )}
             <div className="flex flex-col gap-0.5">
@@ -274,7 +337,7 @@ export default function SettingsPage() {
         </aside>
 
         <div className="mt-2 space-y-6 lg:mt-0">
-          <SectionHeader eyebrow={active.eyebrow} title={active.title} description={active.description} />
+          <SectionHeader headingRef={headingRef} eyebrow={active.eyebrow} title={active.title} description={active.description} />
           <ActiveSection {...sectionProps} />
         </div>
       </div>

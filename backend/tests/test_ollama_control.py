@@ -64,9 +64,9 @@ def test_start_success_after_poll(app, monkeypatch):
     assert r == {'ok': True, 'reachable': True}
 
 
-def test_start_timeout_returns_structured_error_with_stderr(app, tmp_path, monkeypatch):
-    """Spawned process dies without ever answering -> structured failure carrying
-    the stderr tail read from the launch log."""
+def test_start_timeout_returns_structured_error_without_unbounded_log(
+        app, tmp_path, monkeypatch):
+    """A detached failure stays structured without an unbounded lifetime log."""
     from app import capabilities
     from app.services import ollama_control
     log = tmp_path / 'ollama.log'
@@ -80,7 +80,7 @@ def test_start_timeout_returns_structured_error_with_stderr(app, tmp_path, monke
         r = ollama_control.start_ollama(wait_timeout=1, poll_interval=0)
     assert r['ok'] is False and r['reachable'] is False
     assert 'did not become reachable' in r['error']
-    assert 'address already in use' in r['stderr']
+    assert 'stderr' not in r
 
 
 def test_start_launch_oserror_is_structured(app, monkeypatch):
@@ -99,7 +99,7 @@ def test_start_launch_oserror_is_structured(app, monkeypatch):
 
 def test_spawn_detached_uses_detached_flags(monkeypatch, tmp_path):
     """The spawn must be DETACHED (survives the app) with no console window, and
-    write to a temp FILE (never a PIPE that a chatty server could stall on)."""
+    use a bounded sink (never a PIPE or unbounded lifetime temp log)."""
     from app.services import ollama_control
     seen = {}
     class _P:
@@ -109,14 +109,14 @@ def test_spawn_detached_uses_detached_flags(monkeypatch, tmp_path):
         seen['kw'] = kw
         return _P()
     monkeypatch.setattr(ollama_control.subprocess, 'Popen', fake_popen)
-    proc = ollama_control._spawn_detached(r'C:\bin\ollama.exe')
+    ollama_control._spawn_detached(r'C:\bin\ollama.exe')
     assert seen['cmd'] == [r'C:\bin\ollama.exe', 'serve']
     kw = seen['kw']
     assert kw['close_fds'] is True
     assert kw['stdin'] == subprocess.DEVNULL
-    assert kw['stderr'] == subprocess.STDOUT
-    # stdout is a real file object (temp log), not a PIPE
-    assert kw['stdout'] not in (subprocess.PIPE, subprocess.DEVNULL, None)
+    assert kw['stderr'] == subprocess.DEVNULL
+    assert kw['stdout'] == subprocess.DEVNULL
+    assert kw['env']['OLLAMA_HOST'] == '127.0.0.1:11434'
     if os.name == 'nt':
         flags = kw['creationflags']
         assert flags & 0x00000008    # DETACHED_PROCESS
@@ -124,8 +124,20 @@ def test_spawn_detached_uses_detached_flags(monkeypatch, tmp_path):
         assert flags & 0x08000000    # CREATE_NO_WINDOW
     else:
         assert kw['start_new_session'] is True
-    assert proc.stderr_path                      # log path recorded for a later tail read
-    os.path.isfile(proc.stderr_path) and os.remove(proc.stderr_path)
+
+
+def test_start_rejects_remote_url_without_spawning(app, monkeypatch):
+    from app.services import ollama_control
+
+    monkeypatch.setattr(ollama_control, '_url', lambda: 'https://remote.example:11434')
+    monkeypatch.setattr(ollama_control, '_reachable', lambda url: False)
+    monkeypatch.setattr(
+        ollama_control, '_spawn_detached',
+        lambda binary: (_ for _ in ()).throw(AssertionError('spawned')))
+    with app.app_context():
+        result = ollama_control.start_ollama()
+    assert result['ok'] is False
+    assert 'cannot be started locally' in result['error']
 
 
 def test_caption_ready_never_starts_local_process_for_remote_url(app, monkeypatch):

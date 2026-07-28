@@ -53,7 +53,7 @@ def generate_variation(ref_bytes: bytes | list[bytes], prompt: str, model: str |
         logger.warning("nanobanana: GEMINI_API_KEY missing in environment")
         return None
     mdl = model or NANOBANANA_MODEL
-    refs = ref_bytes if isinstance(ref_bytes, (list, tuple)) else [ref_bytes]
+    refs = list(ref_bytes)[:14] if isinstance(ref_bytes, (list, tuple)) else [ref_bytes]
     parts = [{"text": prompt}]
     for rb in refs:
         parts.append({"inlineData": {"mimeType": "image/webp",
@@ -78,7 +78,12 @@ def generate_variation(ref_bytes: bytes | list[bytes], prompt: str, model: str |
         if r.status_code != 200:
             logger.warning(f"nanobanana: HTTP {r.status_code}: {r.text[:300]}")
             return None
-        img = parse_image_response(r.json())
+        try:
+            response_data = r.json()
+        except ValueError as exc:
+            logger.warning("nanobanana: malformed JSON response: %s", exc)
+            return None
+        img = parse_image_response(response_data)
         if img is None:
             logger.warning("nanobanana: no image in response (safety block or text-only)")
         return img

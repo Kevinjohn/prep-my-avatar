@@ -20,6 +20,7 @@ const ROW_CLS = { ok: 'text-emerald-400', warn: 'text-amber-300', fail: 'text-re
 
 export default function TrainingReadiness({ datasetId, trainType, refreshKey, onJump }) {
   const [data, setData] = useState(null);
+  const [error, setError] = useState(false);
   const [open, setOpen] = useState(false);
   const timer = useRef(null);
   useEffect(() => {
@@ -29,12 +30,18 @@ export default function TrainingReadiness({ datasetId, trainType, refreshKey, on
     timer.current = setTimeout(async () => {
       const qs = trainType ? `?train_type=${encodeURIComponent(trainType)}` : '';
       const d = await safeJson(`/api/dataset/${datasetId}/train/preflight${qs}`);
-      if (d.ok === false) { if (alive) setData(null); return; }   // 409 ai-toolkit absent → rien
-      if (alive && d.ok) setData(d);
+      if (!alive) return;
+      if (d.ok === false) { setError(true); return; }
+      if (d.ok) { setData(d); setError(false); }
     }, 400);
     return () => { alive = false; clearTimeout(timer.current); };
   }, [datasetId, trainType, refreshKey]);
 
+  if (!data && error) return (
+    <p role="alert" className="m-0 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-red-200 text-sm">
+      Training readiness could not be refreshed. Launch controls remain unavailable until the check succeeds.
+    </p>
+  );
   if (!data || !(data.checks || []).length) return null;
   const v = VERDICT[data.verdict] || VERDICT.warnings;
   const warns = data.checks.filter((c) => c.status === 'warn').length;
@@ -45,6 +52,11 @@ export default function TrainingReadiness({ datasetId, trainType, refreshKey, on
 
   return (
     <div className={`rounded-lg border ${v.cls}`}>
+      {error && (
+        <p role="alert" className="m-0 border-b border-amber-400/30 px-3 py-2 text-amber-200 text-xs">
+          Refresh failed; showing the last successful readiness report. Launch controls remain unavailable.
+        </p>
+      )}
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
         className="w-full flex items-center gap-2 px-3 py-2 text-left">
         <span aria-hidden>{v.icon}</span>

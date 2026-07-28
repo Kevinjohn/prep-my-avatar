@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -411,6 +412,87 @@ def test_clean_inpaints_small_offcenter(app, monkeypatch):
         assert err is None and counts['inpainted'] == 1
         assert called['bbox'] == [0.35, 0.35, 0.45, 0.45]
         assert svc.db.session.get(FaceDatasetImage, img.id).watermark_state == 'cleaned'
+
+
+def test_clean_migrates_jpeg_to_lossless_png_without_unmasked_drift(
+        app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import watermark_lama
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+
+    monkeypatch.setattr(watermark_lama, 'is_available', lambda: True)
+
+    def _identity_inpaint(path, _bbox, timeout=300, output_path=None):
+        assert output_path and output_path.endswith('.png')
+        with Image.open(path) as source:
+            source.convert('RGB').save(output_path, 'PNG')
+        return True, None
+
+    monkeypatch.setattr(watermark_lama, 'inpaint_watermark', _identity_inpaint)
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'JPEG clean', 'jpeg-clean')
+        img = _kept_image(
+            svc, ds.id, 'watermarked.jpg',
+            bbox=[0.35, 0.35, 0.45, 0.45])
+        source_path = Path(svc._img_path(img))
+        source_path.write_bytes(_img_bytes(fmt='JPEG'))
+        with Image.open(source_path) as opened:
+            before = opened.convert('RGB').tobytes()
+
+        counts, error = svc.clean_watermarks(LOCAL_USER, ds.id)
+
+        assert error is None and counts['inpainted'] == 1
+        row = svc.db.session.get(FaceDatasetImage, img.id)
+        output_path = Path(svc._img_path(row))
+        assert row.filename.endswith('.png')
+        assert output_path.is_file() and not source_path.exists()
+        with Image.open(output_path) as opened:
+            assert opened.format == 'PNG'
+            assert opened.convert('RGB').tobytes() == before
+
+
+@pytest.mark.parametrize(('suffix', 'source_format', 'stored_suffix'), [
+    ('.png', 'PNG', '.png'),
+    ('.jpg', 'JPEG', '.png'),
+    ('.webp', 'WEBP', '.webp'),
+])
+def test_stub_worker_to_service_preserves_all_unmasked_pixels(
+        app, monkeypatch, suffix, source_format, stored_suffix):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    from app.services import watermark_lama
+    from infer import lama_infer
+
+    monkeypatch.setattr(watermark_lama, 'is_available', lambda: True)
+
+    def worker(command, **kwargs):
+        payload = json.loads(kwargs['input'])
+        staged = payload['image_path']
+        with Image.open(staged) as opened:
+            lama_infer._save_atomic(opened.convert('RGB'), staged)
+        return _Proc(json.dumps({'ok': True}))
+
+    monkeypatch.setattr(watermark_lama.subprocess, 'run', worker)
+    with app.app_context():
+        dataset = svc.create_dataset(
+            LOCAL_USER, f'Persisted {source_format}', f'persisted-{source_format.lower()}')
+        image = _kept_image(
+            svc, dataset.id, f'source{suffix}',
+            bbox=[0.35, 0.35, 0.45, 0.45])
+        source_path = Path(svc._img_path(image))
+        source_path.write_bytes(_img_bytes(fmt=source_format))
+        with Image.open(source_path) as opened:
+            before = opened.convert('RGB').tobytes()
+
+        counts, error = svc.clean_watermarks(LOCAL_USER, dataset.id)
+
+        assert error is None and counts['inpainted'] == 1
+        stored = svc.db.session.get(FaceDatasetImage, image.id)
+        assert Path(stored.filename).suffix == stored_suffix
+        with Image.open(svc._img_path(stored)) as opened:
+            assert opened.convert('RGB').tobytes() == before
 
 
 def test_clean_batches_multiple_lama_images_in_one_worker(app, monkeypatch):
@@ -1147,11 +1229,31 @@ def test_inpaint_watermarks_sends_one_composite_payload(app, monkeypatch, tmp_pa
 
     assert ok is True and err is None
     assert len(calls) == 1
-    assert json.loads(calls[0][1]['input']) == {
-        'image_path': str(image_path),
-        'bboxes': bboxes,
-        'device': 'cpu',
-    }
+    payload = json.loads(calls[0][1]['input'])
+    assert payload['bboxes'] == bboxes and payload['device'] == 'cpu'
+    assert payload['image_path'] != str(image_path)
+    assert Path(payload['image_path']).parent == image_path.parent
+
+
+def test_inpaint_failure_cannot_corrupt_original(app, monkeypatch, tmp_path):
+    from app.services import watermark_lama
+    monkeypatch.setattr(watermark_lama, 'is_available', lambda: True)
+    image_path = tmp_path / 'x.webp'
+    original = _img_bytes()
+    image_path.write_bytes(original)
+
+    def _run(*args, **kwargs):
+        staged = Path(json.loads(kwargs['input'])['image_path'])
+        staged.write_bytes(b'partial corrupt output')
+        return _Proc(json.dumps({'ok': False, 'error': 'inpaint failed'}), returncode=1)
+
+    monkeypatch.setattr(watermark_lama.subprocess, 'run', _run)
+    ok, err = watermark_lama.inpaint_watermarks(
+        image_path, [[0.1, 0.1, 0.2, 0.2]])
+
+    assert ok is False and err['kind'] == 'failed'
+    assert image_path.read_bytes() == original
+    assert not list(tmp_path.glob('.x.webp.lama-*'))
 
 
 def test_resolve_watermark_device_auto_and_explicit_cuda(app, monkeypatch):
@@ -1177,10 +1279,11 @@ def test_inpaint_batch_uses_one_worker_and_propagates_device(app, monkeypatch, t
     seen = []
 
     def _run(*args, **kwargs):
-        seen.append(json.loads(kwargs['input']))
+        payload = json.loads(kwargs['input'])
+        seen.append(payload)
         return _Proc(json.dumps({'ok': True, 'results': [
-            {'image_path': str(first), 'ok': True},
-            {'image_path': str(second), 'ok': True},
+            {'image_path': job['image_path'], 'ok': True}
+            for job in payload['jobs']
         ]}))
 
     monkeypatch.setattr(watermark_lama.subprocess, 'run', _run)
@@ -1191,8 +1294,36 @@ def test_inpaint_batch_uses_one_worker_and_propagates_device(app, monkeypatch, t
 
     assert len(seen) == 1
     assert seen[0]['device'] == 'cuda' and len(seen[0]['jobs']) == 2
+    assert {job['image_path'] for job in seen[0]['jobs']}.isdisjoint(
+        {str(first), str(second)})
     assert results[str(first)] == (True, None)
     assert results[str(second)] == (True, None)
+
+
+def test_inpaint_batch_reconciles_streamed_success_after_timeout(
+        app, monkeypatch, tmp_path):
+    from app.services import watermark_lama
+    monkeypatch.setattr(watermark_lama, 'is_available', lambda: True)
+    first = tmp_path / 'a.webp'
+    second = tmp_path / 'b.webp'
+    first.write_bytes(_img_bytes())
+    second.write_bytes(_img_bytes())
+    def _run(*_args, **kwargs):
+        staged_first = json.loads(kwargs['input'])['jobs'][0]['image_path']
+        acknowledged = json.dumps({
+            'type': 'result', 'image_path': staged_first, 'ok': True,
+        }) + '\n'
+        raise subprocess.TimeoutExpired('lama', 1, output=acknowledged)
+
+    monkeypatch.setattr(watermark_lama.subprocess, 'run', _run)
+    results = watermark_lama.inpaint_batch([
+        {'image_path': str(first), 'bboxes': [[0.1, 0.1, 0.2, 0.2]]},
+        {'image_path': str(second), 'bboxes': [[0.3, 0.3, 0.4, 0.4]]},
+    ], device='cpu', timeout=1)
+
+    assert results[str(first)] == (True, None)
+    assert results[str(second)][0] is False
+    assert results[str(second)][1]['kind'] == 'failed'
 
 
 def test_inpaint_watermark_legacy_wrapper_sends_one_item_list(app, monkeypatch, tmp_path):
@@ -1259,11 +1390,10 @@ def test_inpaint_watermark_legacy_wrapper_normalizes_coordinates(
     ok, err = watermark_lama.inpaint_watermark(image_path, bbox)
 
     assert ok is True and err is None
-    assert payloads == [{
-        'image_path': str(image_path),
-        'bboxes': [expected],
-        'device': 'cpu',
-    }]
+    assert len(payloads) == 1
+    assert payloads[0]['image_path'] != str(image_path)
+    assert payloads[0]['bboxes'] == [expected]
+    assert payloads[0]['device'] == 'cpu'
 
 
 @pytest.mark.parametrize(('bbox', 'detail'), [

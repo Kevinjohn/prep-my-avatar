@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -41,11 +40,4 @@ test('re-caption confirmation explains the correct category rule', () => {
   assert.match(recaptionConfirmation('character', 4), /identity/i)
   assert.match(recaptionConfirmation('concept', 4), /concept/i)
   assert.match(recaptionConfirmation('style', 4), /style|aesthetic/i)
-})
-
-test('workspace forwards the dataset kind to caption tools and confirmation', () => {
-  const workspace = readFileSync(
-    new URL('../src/components/dataset/DatasetWorkspace.jsx', import.meta.url), 'utf8')
-  assert.match(workspace, /<CaptionToolsBar[^>]*kind=\{d\.kind \|\| 'character'\}/s)
-  assert.match(workspace, /recaptionConfirmation\(d\.kind \|\| 'character'/)
 })

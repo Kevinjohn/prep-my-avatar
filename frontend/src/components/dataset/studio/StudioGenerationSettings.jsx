@@ -185,6 +185,7 @@ export default function StudioGenerationSettings({ family = 'zimage', storagePre
         )}
         <span className="text-content-muted text-[0.625rem] uppercase">Resolution</span>
         <ResolutionSelector value={resolutionTier} onChange={setResolutionTier}
+          showDimensions={aspectPicker}
           aspectRatio={aspectPicker
             ? (STUDIO_ASPECTS.find((a) => a.key === aspect)?.ratio || 'square')
             : 'square'}

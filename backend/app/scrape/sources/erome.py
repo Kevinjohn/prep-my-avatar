@@ -125,16 +125,23 @@ def download(url, dest_path):
         except Exception:
             content_type = ""
 
+        def finish(result):
+            try:
+                response.close()
+            except Exception:
+                pass
+            return result
+
         if status in (401, 404, 410):
-            return False, None, f"Erome : ressource indisponible (HTTP {status})."
+            return finish((False, None, f"Erome : ressource indisponible (HTTP {status})."))
         if status in (403, 429, 503):
-            return False, None, "Erome : accès bloqué."
+            return finish((False, None, "Erome : accès bloqué."))
         if status >= 400:
-            return False, None, f"Erome : réponse HTTP {status}."
+            return finish((False, None, f"Erome : réponse HTTP {status}."))
 
         # Une réponse HTML n'est PAS un média.
         if "text/html" in content_type.lower():
-            return False, None, "Erome : réponse HTML au lieu d'un média."
+            return finish((False, None, "Erome : réponse HTML au lieu d'un média."))
 
         final_ext = _ext_from_url(url)
         final_path = dest_path.with_name(dest_path.name + final_ext) \
@@ -156,15 +163,15 @@ def download(url, dest_path):
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return False, None, f"Erome : erreur d'écriture ({e})."
+            return finish((False, None, f"Erome : erreur d'écriture ({e})."))
 
         # Fichier vide = échec.
         try:
             if not tmp_path.exists() or tmp_path.stat().st_size == 0:
                 tmp_path.unlink(missing_ok=True)
-                return False, None, "Erome : fichier téléchargé vide."
+                return finish((False, None, "Erome : fichier téléchargé vide."))
         except OSError:
-            return False, None, "Erome : fichier téléchargé invalide."
+            return finish((False, None, "Erome : fichier téléchargé invalide."))
 
         # Renommage atomique .tmp -> final.
         try:
@@ -174,9 +181,9 @@ def download(url, dest_path):
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return False, None, f"Erome : erreur de finalisation ({e})."
+            return finish((False, None, f"Erome : erreur de finalisation ({e})."))
 
-        return True, final_path.name, None
+        return finish((True, final_path.name, None))
 
     except Exception as e:  # garde-fou ultime — ne jamais lever
         logger.exception("Erome download: erreur inattendue")

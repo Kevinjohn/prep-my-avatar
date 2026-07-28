@@ -52,6 +52,78 @@ def test_build_matrix_rejects_unbounded_gpu_fanout(app):
         )
 
 
+def test_studio_boundary_normalization_contracts(app):
+    from app.services import lora_test_studio as lts
+
+    assert lts._prompt_with_trigger('李明 portrait', '李') == '李, 李明 portrait'
+    assert lts._prompt_with_trigger('élan portrait', 'élan') == 'élan portrait'
+    assert lts._validated_seed(1) == 1
+    assert lts._validated_seed(2**31 - 1) == 2**31 - 1
+    for invalid in (0, -1, 2**31):
+        with pytest.raises(ValueError, match='seed out of range'):
+            lts._validated_seed(invalid)
+    entry = {'filename': 'krea2filterbypass3.safetensors', 'strength': 13}
+    assert lts._extra_lora_strength(entry, 'krea') == 13
+    with pytest.raises(ValueError, match='strength out of range'):
+        lts._extra_lora_strength({**entry, 'strength': 21}, 'krea')
+
+
+def test_cell_scores_keep_effective_configs_distinct_and_terminal(app):
+    from app.config import LOCAL_USER
+    from app.models import LoraTestImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_test_studio as lts
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Config identity', 'identity')
+        common = dict(dataset_id=ds.id, checkpoint='krea\\lora.safetensors',
+                      strength=1.0, aspect='9:16', rating=1)
+        svc.db.session.add(LoraTestImage(**common, status='done',
+                                        extra_loras=None))
+        svc.db.session.add(LoraTestImage(
+            **common, status='done',
+            extra_loras='[{"filename":"utility.safetensors","batch":true}]'))
+        svc.db.session.add(LoraTestImage(**common, status='cancelled'))
+        svc.db.session.commit()
+
+        scores = lts.cell_scores(ds.id, family='krea')
+
+        assert len(scores) == 2
+        assert sum(score['images'] for score in scores) == 2
+        assert {score['extra_loras'] for score in scores} == {
+            '[]', '[{"batch":true,"filename":"utility.safetensors"}]'}
+
+
+def test_completion_commit_failure_keeps_retriable_source(app, monkeypatch, tmp_path):
+    from app import config
+    from app.config import LOCAL_USER
+    from app.models import LoraTestImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_test_studio as lts
+
+    with app.app_context():
+        comfy = tmp_path / 'ComfyUI'
+        output = comfy / 'output'
+        output.mkdir(parents=True)
+        config.save_config({'comfyui': {'base_dir': str(comfy)}})
+        source = output / 'finished.webp'
+        source.write_bytes(b'pixels')
+        ds = svc.create_dataset(LOCAL_USER, 'Durable completion', 'durable')
+        row = LoraTestImage(dataset_id=ds.id, checkpoint='z image\\lora.safetensors',
+                            strength=1.0, status='pending', job_id='job-durable')
+        svc.db.session.add(row)
+        svc.db.session.commit()
+        monkeypatch.setattr(
+            svc.db.session, 'commit',
+            lambda: (_ for _ in ()).throw(RuntimeError('commit failed')))
+
+        with pytest.raises(RuntimeError, match='commit failed'):
+            lts.link_completed_test_image('job-durable', source.name)
+
+        assert source.read_bytes() == b'pixels'
+        assert not list(Path(svc._dataset_dir(ds.id)).glob('finished.webp'))
+
+
 def test_wilson_ranking_prefers_confident_likes(app):
     from app.services.lora_test_studio import _wilson_lower_bound
     assert _wilson_lower_bound(9, 10) > _wilson_lower_bound(1, 1)
@@ -83,12 +155,54 @@ def test_face_ranking_aggregates_by_checkpoint(app):
         ds = svc.create_dataset(LOCAL_USER, 'F', 'f')
         for ck, s1, s2 in (('z image\\lora_f_000002000.safetensors', 0.6, 0.7),
                            ('z image\\lora_f_000002500.safetensors', 0.4, 0.5)):
-            for s in (s1, s2):
+            for seed, s in enumerate((s1, s2), start=1):
                 svc.db.session.add(LoraTestImage(dataset_id=ds.id, checkpoint=ck, strength=1.0,
-                                                 status='done', face_score=s))
+                                                 status='done', filename=f'{seed}-{s}.webp',
+                                                 seed=seed, run_id='matched', face_score=s))
         svc.db.session.commit()
         rk = lts.face_ranking(ds.id, 'zimage')
         assert rk[0]['checkpoint'].endswith('000002000.safetensors') and rk[0]['n'] == 2
+
+
+def test_face_ranking_ignores_unmatched_historical_samples(app):
+    from app.config import LOCAL_USER
+    from app.models import LoraTestImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_test_studio as lts
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Matched faces', 'matched_faces')
+        rows = [
+            ('old', 'a', 1, 0.99),
+            ('new', 'a', 2, 0.60), ('new', 'b', 2, 0.80),
+        ]
+        for run_id, checkpoint, seed, score in rows:
+            svc.db.session.add(LoraTestImage(
+                dataset_id=ds.id, checkpoint=f'z image\\{checkpoint}.safetensors',
+                strength=1.0, seed=seed, run_id=run_id, status='done',
+                filename=f'{run_id}-{checkpoint}.webp', face_score=score))
+        svc.db.session.commit()
+
+        ranking = lts.face_ranking(ds.id, 'zimage')
+        assert [row['checkpoint'] for row in ranking] == ['z image\\b.safetensors',
+                                                         'z image\\a.safetensors']
+
+
+def test_studio_payload_exposes_launch_identity_for_legacy_run_grouping(app):
+    from app.config import LOCAL_USER
+    from app.models import LoraTestImage
+    from app.services import face_dataset_service as svc
+    from app.services import lora_test_studio as lts
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Run identity', 'run_identity')
+        svc.db.session.add(LoraTestImage(
+            dataset_id=ds.id, checkpoint='z image\\lora.safetensors',
+            strength=1.0, status='done', run_seed=7, run_id='launch-a'))
+        svc.db.session.commit()
+
+        payload = lts.studio_payload(LOCAL_USER, ds.id)
+        assert payload['cells'][0]['run_id'] == 'launch-a'
 
 
 def test_delete_prompt_moves_completed_images_to_recoverable_trash(app):
@@ -163,18 +277,23 @@ def test_create_run_commits_rows_before_enqueue(app, monkeypatch, tmp_path):
         monkeypatch.setattr(comfyui_utils, '_zimage_models_cache', {'data': None, 'timestamp': 0})
         ds = svc.create_dataset(LOCAL_USER, 'S2', 's')
         monkeypatch.setattr(lts, '_build_cell_workflow', lambda *a, **k: {'1': {}})
-        # create_run calls queue_manager.add_job through lts._enqueue_cell, which
-        # generates its own job_id and returns THAT (ignoring add_job's return value)
-        # -- patch _enqueue_cell itself so the assertion below can pin the job_id.
-        monkeypatch.setattr(lts, '_enqueue_cell', lambda *a, **k: 'job-xyz')
+        published = []
+
+        def fake_enqueue(*args, **kwargs):
+            row = LoraTestImage.query.filter_by(job_id=kwargs['job_id']).one()
+            published.append((kwargs['job_id'], row.status))
+            return kwargs['job_id']
+
+        monkeypatch.setattr(lts, '_enqueue_cell', fake_enqueue)
         monkeypatch.setattr(lts, 'gpu_busy_reason', lambda: None)
         monkeypatch.setattr(lts, 'training_record_for_checkpoint',
-                            lambda *a, **k: 42)
+                            lambda *a, **k: None)
         out = lts.create_run(LOCAL_USER, ds.id, [ck], [1.0], prompt='p', count=1)
         rows = LoraTestImage.query.filter_by(dataset_id=ds.id).all()
         assert out['created'] == len(rows) >= 1
-        assert all(r.job_id == 'job-xyz' and r.status == 'pending'
-                   and r.training_run_record_id == 42 for r in rows)
+        assert published == [(rows[0].job_id, 'pending')]
+        assert all(r.job_id and r.status == 'pending'
+                   and r.training_run_record_id is None for r in rows)
 
 
 def test_create_run_with_resolution_tier_resolves_dims_via_lifted_resolution_module(app, monkeypatch, tmp_path):
@@ -240,13 +359,21 @@ def test_create_comparison_run_commits_rows_before_enqueue(app, monkeypatch, tmp
         monkeypatch.setattr(comfyui_utils, '_zimage_models_cache', {'data': None, 'timestamp': 0})
         ds = svc.create_dataset(LOCAL_USER, 'C', 'c')
         monkeypatch.setattr(lts, '_build_cell_workflow', lambda *a, **k: {'1': {}})
-        monkeypatch.setattr(lts, '_enqueue_cell', lambda *a, **k: 'job-cmp')
+        published = []
+
+        def fake_enqueue(*args, **kwargs):
+            row = LoraTestImage.query.filter_by(job_id=kwargs['job_id']).one()
+            published.append((kwargs['job_id'], row.run_id))
+            return kwargs['job_id']
+
+        monkeypatch.setattr(lts, '_enqueue_cell', fake_enqueue)
         monkeypatch.setattr(lts, 'gpu_busy_reason', lambda: None)
         out = lts.create_comparison_run(LOCAL_USER, [{'dataset_id': ds.id, 'checkpoint': ck}],
                                         [1.0], prompt='p', count=1)
         rows = LoraTestImage.query.filter_by(dataset_id=ds.id).all()
         assert out['created'] == len(rows) >= 1
-        assert all(r.job_id == 'job-cmp' and r.status == 'pending' and r.run_id == out['run_id']
+        assert published == [(rows[0].job_id, out['run_id'])]
+        assert all(r.job_id and r.status == 'pending' and r.run_id == out['run_id']
                   for r in rows)
 
 
@@ -495,6 +622,34 @@ def test_studio_payload_unknown_dataset_returns_none(app):
         assert lts.studio_payload(LOCAL_USER, 999999) is None
 
 
+def test_studio_hot_poll_selects_one_run_and_history_is_paginated(app):
+    from app.config import LOCAL_USER
+    from app.models import LoraTestImage
+    from app.services import face_dataset_service as service
+    from app.services import lora_test_studio as studio
+
+    with app.app_context():
+        dataset = service.create_dataset(LOCAL_USER, 'Bounded Studio', 'bounded')
+        studio.db.session.add_all([
+            LoraTestImage(
+                dataset_id=dataset.id, checkpoint='zimage/model.safetensors',
+                strength=1.0, status='done', filename=f'{index}.webp',
+                run_id=f'run-{index}', prompt=f'prompt {index}', seed=index,
+                run_seed=index)
+            for index in range(240)
+        ])
+        studio.db.session.commit()
+
+        payload = studio.studio_payload(LOCAL_USER, dataset.id)
+        assert payload['selected_run_id'] == 'run-239'
+        assert [cell['run_id'] for cell in payload['cells']] == ['run-239']
+        history = studio.studio_run_history(
+            LOCAL_USER, dataset.id, limit=10)
+        assert len(history['runs']) == 10
+        assert history['runs'][0]['run_id'] == 'run-239'
+        assert history['next_cursor'] is not None
+
+
 def test_link_completed_test_image_failed_marks_cell_failed_without_move(app, tmp_path):
     from app.services import lora_test_studio as lts, face_dataset_service as svc
     from app.models import LoraTestImage
@@ -656,7 +811,7 @@ def test_build_cell_workflow_krea_honors_local_base(app, monkeypatch):
             user_id='local', checkpoint=lora, strength=0.9, prompt='a prompt',
             seed=42, z_model=None, allowed_loras={lora}, dataset_id=1,
             train_type='krea', trigger_word='kt')
-        assert wf2['20']['inputs']['unet_name'] == 'Krea\\krea2_turbo_fp8.safetensors'
+        assert wf2['20']['inputs']['unet_name'] == 'Krea/krea2_turbo_fp8.safetensors'
 
 
 def _configure_comfy(tmp_path, monkeypatch):
@@ -911,6 +1066,28 @@ def test_sdxl_workflow_has_saveimage_wired_to_decoded_image():
     src_node = data.get(src[0])
     assert src_node and src_node.get('class_type') == 'VAEDecode'
     assert save['inputs'].get('filename_prefix')  # non-empty, meaningful
+
+
+def test_active_workflows_use_portable_model_paths_and_symmetric_sdxl_clip():
+    """Committed loader values must match ComfyUI's slash-separated combo values."""
+    import json
+    from app.services import lora_test_studio as lts
+
+    paths = [lts.WORKFLOW_ZTURBO_PATH, lts.WORKFLOW_HQ_PATH, lts.WORKFLOW_KREA_TURBO_PATH]
+    workflows = []
+    for path in paths:
+        with open(str(path), encoding='utf-8') as f:
+            workflow = json.load(f)
+        workflows.append(workflow)
+        for node in workflow.values():
+            for value in node.get('inputs', {}).values():
+                if isinstance(value, str) and value.endswith(('.safetensors', '.gguf')):
+                    assert '\\' not in value, f'non-portable loader value in {path}: {value}'
+
+    sdxl = workflows[1]
+    assert sdxl['25']['inputs']['strength_clip'] == sdxl['25']['inputs']['strength_model']
+    assert sdxl['3']['inputs']['clip'] == ['10', 1]
+    assert sdxl['4']['inputs']['clip'] == ['10', 1]
 
 
 def test_sdxl_builder_filename_prefix_actually_reaches_saveimage(app):

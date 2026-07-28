@@ -34,7 +34,7 @@ SOCKET_TIMEOUT = 30  # secondes
 # Plancher de version yt-dlp (CVE-2024-38519). WARNING non bloquant — un assert
 # dur sur une version briquerait Flask au démarrage.
 YTDLP_VERSION_FLOOR = (2026, 6, 9)
-_version_checked = False
+_version_result = None
 
 _ffmpeg_checked = None
 
@@ -61,20 +61,21 @@ def _ytdlp_version_tuple():
 def _check_ytdlp_version():
     """Log un WARNING (une seule fois) si yt-dlp < plancher. Retourne ok:bool.
     Jamais fatal — ne bloque pas le téléchargement."""
-    global _version_checked
+    global _version_result
+    if _version_result is not None:
+        return _version_result
     ver = _ytdlp_version_tuple()
-    if ver is not None and ver >= YTDLP_VERSION_FLOOR:
+    _version_result = ver is not None and ver >= YTDLP_VERSION_FLOOR
+    if _version_result:
         return True
-    if not _version_checked:
-        _version_checked = True
-        try:
-            current_app.logger.warning(
-                "yt-dlp %s < plancher %s recommandé (CVE-2024-38519). "
-                "Mettre à jour : python -m pip install -U yt-dlp",
-                ver, YTDLP_VERSION_FLOOR,
-            )
-        except Exception:
-            pass
+    try:
+        current_app.logger.warning(
+            "yt-dlp %s < plancher %s recommandé (CVE-2024-38519). "
+            "Mettre à jour : python -m pip install -U yt-dlp",
+            ver, YTDLP_VERSION_FLOOR,
+        )
+    except Exception:
+        pass
     return False
 
 
@@ -371,6 +372,13 @@ def fetch_hardened_bytes(url, *, allowed_types, max_bytes, require_image_magic=F
                 except Exception:
                     pass
                 return False, None, None, 'toolarge'
+    except Exception as exc:
+        try:
+            current_app.logger.warning(
+                'fetch_hardened_bytes lecture interrompue %s: %s', url[:120], exc)
+        except Exception:
+            pass
+        return False, None, None, 'fetch'
     finally:
         try:
             r.close()

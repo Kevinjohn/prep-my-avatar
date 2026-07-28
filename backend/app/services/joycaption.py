@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 # joycaption_infer.py vit dans backend/infer/ (pas app/services/).
 _SCRIPT = cfg.BACKEND_DIR / 'infer' / 'joycaption_infer.py'
+MODEL_REVISION = 'ae2f01e137d62154dfa7192cc21d1c618023a2a2'
+
+
+class CaptionResults(dict):
+    """Caption mapping with per-image generation provenance."""
+
+    def __init__(self, captions, provenance=None):
+        super().__init__(captions)
+        self.provenance = provenance or {}
 
 
 def is_available() -> bool:
@@ -29,13 +38,16 @@ def is_available() -> bool:
 
 
 def caption_images_joycaption(paths, prompt: str | None = None,
-                              max_tokens: int = 300, timeout: int = 1800) -> dict:
+                              max_tokens: int = 300, timeout: int = 1800,
+                              seed: int | None = None,
+                              revision: str = MODEL_REVISION) -> dict:
     """Caption une LISTE d'images en un seul chargement de modèle.
     Retourne {chemin: caption}. Vide si indispo/échec (non-fatal)."""
     paths = [p for p in (paths or []) if p and os.path.isfile(p)]
     if not paths or not is_available():
         return {}
-    payload = json.dumps({'images': paths, 'prompt': prompt, 'max_tokens': max_tokens})
+    payload = json.dumps({'images': paths, 'prompt': prompt, 'max_tokens': max_tokens,
+                          'seed': seed, 'revision': revision})
     venv_python = str(cfg.aitoolkit_path('venv_python'))
     script = str(_SCRIPT)
     # HF_HOME = même cache que l'entraînement (modèle déjà téléchargé là).
@@ -68,10 +80,26 @@ def caption_images_joycaption(paths, prompt: str | None = None,
     except json.JSONDecodeError as e:
         logger.warning('joycaption: JSON illisible : %s', e)
         return {}
-    if data.get('errors'):
+    if not isinstance(data, dict):
+        logger.warning('joycaption: invalid response schema')
+        return {}
+    errors = data.get('errors') or {}
+    captions_data = data.get('captions') or {}
+    if not isinstance(errors, dict) or not isinstance(captions_data, dict):
+        logger.warning('joycaption: invalid captions/errors schema')
+        return {}
+    if errors:
         logger.info('joycaption: %d erreur(s) image : %s',
-                    len(data['errors']), list(data['errors'].values())[:3])
-    captions = {k: (v or '').strip() for k, v in (data.get('captions') or {}).items() if v}
+                    len(errors), list(errors.values())[:3])
+    if any(not isinstance(k, str) or not isinstance(v, str)
+           for k, v in captions_data.items()):
+        logger.warning('joycaption: invalid caption entry schema')
+        return {}
+    captions = {k: v.strip() for k, v in captions_data.items() if v}
+    provenance = data.get('provenance') or {}
+    if not isinstance(provenance, dict):
+        logger.warning('joycaption: invalid provenance schema')
+        return {}
     logger.info('joycaption: batch finished (%d/%d captioned, elapsed=%.1fs)',
                 len(captions), len(paths), time.monotonic() - started)
-    return captions
+    return CaptionResults(captions, provenance)

@@ -2,14 +2,14 @@
   "1": {
     "class_type": "UNETLoader",
     "inputs": {
-      "unet_name": "z image\\bigLove_zt3.safetensors",
+      "unet_name": "z image/bigLove_zt3.safetensors",
       "weight_dtype": "default"
     }
   },
   "2": {
     "class_type": "CLIPLoader",
     "inputs": {
-      "clip_name": "Z image\\qwen_3_4b.safetensors",
+      "clip_name": "Z image/qwen_3_4b.safetensors",
       "type": "lumina2"
     }
   },

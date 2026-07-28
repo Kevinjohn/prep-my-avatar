@@ -7,6 +7,8 @@ of the gate, since those are covered end-to-end by test_studio_service.py.
 """
 import json
 
+import pytest
+
 
 def _create(client, name='Nova', trigger='nova'):
     return client.post('/api/dataset/create', json={'name': name, 'trigger_word': trigger}).get_json()['id']
@@ -166,6 +168,54 @@ def test_dataset_lora_test_resume_unreachable_comfyui_returns_409(client, monkey
     assert resp.status_code == 409
 
 
+@pytest.mark.parametrize('payload', [None, [], 'bad', 3])
+def test_studio_run_rejects_non_object_json(client, monkeypatch, payload):
+    _comfy(monkeypatch, True)
+    response = client.post('/api/studio/run', json=payload)
+    assert response.status_code == 400
+    assert 'object' in response.get_json()['error']
+
+
+def test_studio_run_rejects_non_object_selection(client, monkeypatch):
+    _comfy(monkeypatch, True)
+    response = client.post('/api/studio/run', json={
+        'selections': [1], 'strengths': [1.0],
+    })
+    assert response.status_code == 400
+    assert 'array of objects' in response.get_json()['error']
+
+
+def test_studio_recent_prompt_delete_rejects_non_string(client):
+    response = client.post('/api/studio/recent-prompts/delete',
+                           json={'prompt': 3})
+    assert response.status_code == 400
+    assert 'string' in response.get_json()['error']
+
+
+def test_dataset_lora_test_resume_forwards_visible_family(client, monkeypatch):
+    _comfy(monkeypatch, True)
+    ds_id = _create(client)
+    captured = {}
+
+    def fake_resume(user_id, dataset_id, family=None):
+        captured.update(dataset_id=dataset_id, family=family)
+        return {'resumed': 2}
+
+    monkeypatch.setattr('app.services.lora_test_studio.resume_run', fake_resume)
+    resp = client.post(f'/api/dataset/{ds_id}/lora-test/resume',
+                       json={'family': 'krea'})
+    assert resp.status_code == 200
+    assert captured == {'dataset_id': ds_id, 'family': 'krea'}
+
+
+def test_dataset_lora_test_resume_rejects_unknown_family(client, monkeypatch):
+    _comfy(monkeypatch, True)
+    ds_id = _create(client)
+    resp = client.post(f'/api/dataset/{ds_id}/lora-test/resume',
+                       json={'family': 'unknown'})
+    assert resp.status_code == 400
+
+
 def test_dataset_lora_test_run_gpu_busy_returns_503(client, monkeypatch):
     _comfy(monkeypatch, True)
     ds_id = _create(client)  # default trigger_word='nova'
@@ -220,6 +270,18 @@ def test_studio_comparison_run_missing_assets_returns_structured_409(client, mon
     assert sm['nodes'] == ['Krea2RebalanceConditioning'] and sm['files'] == []
 
 
+def test_studio_missing_assets_empty_payload_has_valid_fallback(app):
+    from app.routes._common import _studio_missing_response
+    from app.services.lora_test_studio import StudioAssetsMissing
+
+    with app.app_context():
+        response, status = _studio_missing_response(StudioAssetsMissing('sdxl', [], []))
+
+    assert status == 409
+    assert 'missing .' not in response.get_json()['error']
+    assert 'could not be validated' in response.get_json()['error']
+
+
 # --- rate: valid ratings 1/-1/0 ok, invalid -> 400 ---------------------------
 
 def test_rate_valid_ratings_accepted(client):
@@ -271,7 +333,12 @@ def test_best_set_then_clear_roundtrips_through_facedataset_best_settings(client
 
     ds_id = _create(client)
     resp = client.post(f'/api/dataset/{ds_id}/lora-test/best',
-                       json={'checkpoint': ck, 'strength': 0.9})
+                       json={'generation_config': {
+                           'checkpoint': ck, 'strength': 0.9,
+                           'extra_loras': '[{"name":"detail.safetensors","strength":0.4}]',
+                           'sampler': 'euler', 'scheduler': 'simple',
+                           'resolution_tier': 'high',
+                       }})
     assert resp.status_code == 200
     body = resp.get_json()
     assert body['ok'] is True
@@ -284,6 +351,11 @@ def test_best_set_then_clear_roundtrips_through_facedataset_best_settings(client
         stored = json.loads(ds.best_settings)
         assert stored['zimage']['lora_filename'] == ck
         assert stored['zimage']['strength'] == 0.9
+        assert stored['zimage']['extra_loras'] == [
+            {'name': 'detail.safetensors', 'strength': 0.4}]
+        assert stored['zimage']['sampler'] == 'euler'
+        assert stored['zimage']['scheduler'] == 'simple'
+        assert stored['zimage']['resolution_tier'] == 'high'
 
     resp = client.delete(f'/api/dataset/{ds_id}/lora-test/best')
     assert resp.status_code == 200

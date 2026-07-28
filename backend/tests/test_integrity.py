@@ -48,6 +48,83 @@ def test_integrity_reports_untracked_file_as_warning(client, app):
                and item['filename'] == 'orphan.webp' for item in report['findings'])
 
 
+def test_integrity_orphan_identity_keeps_nested_directory(client, app):
+    dataset_id = _create(client)
+    with app.app_context():
+        from app import config as cfg
+        from app.models import FaceDatasetImage
+        folder = Path(cfg.dataset_images_root()) / str(dataset_id)
+        (folder / 'a').mkdir(parents=True)
+        (folder / 'b').mkdir()
+        (folder / 'a' / 'photo.webp').write_bytes(b'image')
+        (folder / 'a' / 'photo.txt').write_text('caption')
+        (folder / 'b' / 'photo.txt').write_text('orphan')
+        db.session.add(FaceDatasetImage(
+            dataset_id=dataset_id, source='import', status='keep',
+            filename='a/photo.webp'))
+        db.session.commit()
+
+    findings = client.get('/api/integrity').get_json()['findings']
+
+    orphans = [item['filename'] for item in findings
+               if item['code'] == 'untracked_dataset_file']
+    assert orphans == ['b/photo.txt']
+
+
+@pytest.mark.parametrize('failure', ['missing', 'wrong_kind', 'wrong_dataset', 'invalid'])
+def test_integrity_rejects_invalid_trashed_dataset_recovery_entry(
+        client, app, failure):
+    dataset_id = _create(client)
+    with app.app_context():
+        from app.models import FaceDataset
+        from app.services import trash
+        from app.utils.time import utcnow
+        metadata = {
+            'kind': 'dataset_backup', 'dataset_id': dataset_id,
+            'backup_name': 'backup.zip',
+        }
+        if failure == 'wrong_kind':
+            metadata['kind'] = 'files'
+        elif failure == 'wrong_dataset':
+            metadata['dataset_id'] = dataset_id + 1
+        entry = trash.store_bytes('backup.zip', b'backup', metadata=metadata)
+        dataset = db.session.get(FaceDataset, dataset_id)
+        dataset.trashed_at = utcnow()
+        dataset.trash_entry_id = ('20990101-000000_missing' if failure == 'missing'
+                                  else entry['id'])
+        db.session.commit()
+        if failure == 'invalid':
+            (Path(entry['path']) / '.trash.json').write_text('not-json')
+
+    report = client.get('/api/integrity').get_json()
+
+    assert report['ok'] is False
+    assert any(item['code'] == 'invalid_trashed_dataset_entry'
+               and item['dataset_id'] == dataset_id for item in report['findings'])
+
+
+def test_integrity_accepts_matching_trashed_dataset_recovery_entry(client, app):
+    dataset_id = _create(client)
+    with app.app_context():
+        from app.models import FaceDataset
+        from app.services import trash
+        from app.utils.time import utcnow
+        entry = trash.store_bytes('backup.zip', b'backup', metadata={
+            'kind': 'dataset_backup', 'dataset_id': dataset_id,
+            'backup_name': 'backup.zip',
+        })
+        dataset = db.session.get(FaceDataset, dataset_id)
+        dataset.trashed_at = utcnow()
+        dataset.trash_entry_id = entry['id']
+        db.session.commit()
+
+    report = client.get('/api/integrity').get_json()
+
+    assert report['ok'] is True, report
+    assert not any(item['code'] == 'invalid_trashed_dataset_entry'
+                   for item in report['findings'])
+
+
 def test_integrity_accepts_nested_originals_and_ignores_trashed_image_files(client, app):
     dataset_id = _create(client)
     with app.app_context():
@@ -188,3 +265,32 @@ def test_integrity_audits_other_structured_json_columns(client, app):
         'invalid_background_job_log', 'invalid_cloud_train_params',
         'invalid_training_manifest', 'invalid_training_preset_settings',
     } <= codes
+
+
+@pytest.mark.parametrize(
+    ('before', 'after'),
+    [
+        ('not-json', '{"status": "keep"}'),
+        ('[]', '{"status": "keep"}'),
+        ('{"unsupported": 1}', '{"unsupported": 2}'),
+        ('{"status": "pending"}', '{"caption": "changed"}'),
+    ],
+)
+def test_integrity_rejects_curation_snapshots_undo_cannot_apply(
+        client, app, before, after):
+    dataset_id = _create(client)
+    with app.app_context():
+        from app.models import CurationEvent, FaceDatasetImage
+        image = FaceDatasetImage(dataset_id=dataset_id, status='pending')
+        db.session.add(image)
+        db.session.flush()
+        db.session.add(CurationEvent(
+            dataset_id=dataset_id, image_id=image.id, batch_id='invalid',
+            actor_user_id='local', action='corrupt', before_state=before,
+            after_state=after))
+        db.session.commit()
+
+    report = client.get('/api/integrity').get_json()
+
+    assert any(item['code'] == 'invalid_curation_snapshot'
+               for item in report['findings'])

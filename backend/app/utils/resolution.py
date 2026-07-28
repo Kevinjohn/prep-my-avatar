@@ -1,7 +1,7 @@
 """Z-Image / SD3-family output resolution tiers.
 
 The format selector fixes the aspect RATIO; this maps (aspect_ratio, tier) -> a
-concrete W×H. The ratio is preserved, dimensions are rounded to a multiple of 16
+concrete W×H. The ratio is approximated while each axis is rounded to a multiple of 16
 (SD3/Z-Image latent granularity) and capped at 1536 px per side so generation
 stays in Z-Image's safe band — beyond that the base model duplicates/artefacts,
 so true high-res should go through the upscaler, not a bigger base resolution.
@@ -38,11 +38,12 @@ def _snap(v):
     return max(_FLOOR, int(round(v / _MULT)) * _MULT)
 
 
-def compute_tier_dims(aspect_ratio, resolution_tier=DEFAULT_TIER):
+def compute_tier_dims(aspect_ratio, resolution_tier=DEFAULT_TIER, max_long_side=None):
     """Return (width, height) for a format + resolution tier.
 
-    Ratio-preserving, divisible by 16, capped at 1536/side. Unknown aspect_ratio
-    falls back to square; unknown tier falls back to the default tier.
+    Divisible by 16 and capped at 1536/side. Independent latent-grid snapping
+    introduces a bounded aspect-ratio approximation (typically below 1% rather
+    than mathematically exact). Unknown values fall back to square/default.
     """
     rw, rh = _RATIOS.get(aspect_ratio, _RATIOS["square"])
     mp = _TIERS.get(resolution_tier, _TIERS[DEFAULT_TIER])
@@ -51,8 +52,33 @@ def compute_tier_dims(aspect_ratio, resolution_tier=DEFAULT_TIER):
     h = math.sqrt(px / r)
     w = r * h
     longest = max(w, h)
-    if longest > _CAP:
-        scale = _CAP / longest
+    cap = min(_CAP, max_long_side or _CAP)
+    if longest > cap:
+        scale = cap / longest
         w *= scale
         h *= scale
     return _snap(w), _snap(h)
+
+
+def resolution_metadata():
+    """Serializable canonical display/execution matrix for frontend controls."""
+    profiles = {'default': None, 'sdxl': 1024}
+    return {
+        'version': 1,
+        'default_tier': DEFAULT_TIER,
+        'tiers': [
+            {'value': value, 'label': {'fast': 'Fast', 'standard': 'Standard',
+                                      'hq': 'HQ', 'max': 'Max'}[value]}
+            for value in _TIERS
+        ],
+        'dimensions': {
+            profile: {
+                aspect: {
+                    tier: list(compute_tier_dims(aspect, tier, cap))
+                    for tier in _TIERS
+                }
+                for aspect in _RATIOS
+            }
+            for profile, cap in profiles.items()
+        },
+    }

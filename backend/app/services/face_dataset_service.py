@@ -25,9 +25,11 @@ from datetime import datetime, timezone
 from PIL import Image
 
 from ..extensions import db
+from ..domain_errors import DomainConflictError, DomainValidationError
 from ..models import FaceDataset, FaceDatasetImage
 from .. import config as cfg
 from . import dataset_activity
+from . import curation_history
 from . import image_processing
 from . import trash
 from .import_analysis import analyse_image_bytes, analysis_json, parse_analysis
@@ -149,6 +151,8 @@ _EXCLUSIVE_DERIVATIONS = (*_SMALL_IMAGE_DERIVATIONS, KLEIN_IMAGE_IMPROVE)
 # section.  In particular, a second simultaneous lightbox click waits until the
 # first row has its job_id, then takes the idempotent return path below.
 _IMAGE_IMPROVE_LOCKS = tuple(threading.Lock() for _ in range(64))
+_IMAGE_REGENERATE_LOCKS = tuple(threading.Lock() for _ in range(64))
+_DATASET_GENERATION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
 class KleinNodesMissing(Exception):
@@ -413,7 +417,8 @@ def _planned_anchor_rows(rows, *, preferred_ids=None, limit=MAX_GENERATION_REFER
 
 def build_anchor_plan(ds, images, *, max_images=MAX_GENERATION_REFERENCES) -> dict:
     """Payload-safe preview of the exact imported anchors a new API request uses."""
-    explicit = (1 if ds.ref_filename else 0) + len(extra_ref_filenames(ds))
+    explicit_names = [ds.ref_filename, *extra_ref_filenames(ds)]
+    explicit = sum(1 for name in explicit_names if _reference_file_readable(ds.id, name))
     remaining = max(0, int(max_images) - explicit)
     imported = [row for row in images if row.source == 'import']
     planned = _planned_anchor_rows(imported, limit=remaining)
@@ -434,6 +439,17 @@ def build_anchor_plan(ds, images, *, max_images=MAX_GENERATION_REFERENCES) -> di
             for row, reason in planned
         ],
     }
+
+
+def _reference_file_readable(dataset_id, filename) -> bool:
+    if not isinstance(filename, str) or not filename:
+        return False
+    path = os.path.join(_dataset_dir(dataset_id), filename)
+    try:
+        with open(path, 'rb') as handle:
+            return bool(handle.read(1))
+    except OSError:
+        return False
 
 
 def select_generation_references(ds, *, preferred_ids=None,
@@ -692,6 +708,7 @@ def _variation_gap_ids_json(variation) -> str:
     return json.dumps([str(value)[:120]]) if value else '[]'
 
 
+@trash.serialized_transaction
 def add_extra_ref(user_id, dataset_id, image_bytes) -> str:
     """Ajoute une référence additionnelle. Normalisée WEBP ratio conservé, SANS
     head-crop GPU : un plan buste/corps est une bonne réf d'identité pour Nano
@@ -699,12 +716,12 @@ def add_extra_ref(user_id, dataset_id, image_bytes) -> str:
     de fichier ; ValueError si dataset absent, réf principale manquante ou cap."""
     ds = get_dataset(user_id, dataset_id)
     if not ds:
-        raise ValueError('dataset not found')
+        raise DomainValidationError('dataset not found')
     if not ds.ref_filename:
-        raise ValueError('set the primary reference first')
+        raise DomainValidationError('set the primary reference first')
     extras = extra_ref_filenames(ds)
     if len(extras) >= MAX_EXTRA_REFS:
-        raise ValueError(f'{MAX_EXTRA_REFS} extra references max')
+        raise DomainValidationError(f'{MAX_EXTRA_REFS} extra references max')
     normalized = normalize_to_webp(image_bytes)
     fn = f"{user_id}_datasetrefx_{uuid.uuid4().hex[:8]}.webp"
     path = Path(_dataset_dir(dataset_id)) / fn
@@ -1338,9 +1355,10 @@ def _clear_watermark_metadata(img):
     img.watermark_regions = None
 
 
+@curation_history.serialized
 def set_image_status(user_id, image_id, status):
     if status not in _VALID_STATUS:
-        raise ValueError('invalid status')
+        raise DomainValidationError('invalid status')
     img = _owned_image(user_id, image_id)
     if not img:
         return False
@@ -1730,6 +1748,7 @@ def resolve_image_improvement(user_id, dataset_id, candidate_id, choice):
             'candidate': {'id': candidate.id, 'status': candidate.status}}
 
 
+@curation_history.serialized
 def set_image_caption(user_id, image_id, caption):
     img = _owned_image(user_id, image_id)
     if not img:
@@ -1770,11 +1789,11 @@ def _crop_resize_file(path, x, y, w, h, size=1024, dst=None):
         out = io.BytesIO()
         with src.crop(box) as cropped, cropped.resize((out_w, out_h), Image.LANCZOS) as resized:
             resized.save(out, 'WEBP', quality=92)
-    with open(dst or path, 'wb') as fh:
-        fh.write(out.getvalue())
+    _atomic_write_bytes(dst or path, out.getvalue())
     return True, scale
 
 
+@curation_history.serialized
 def crop_image(user_id, image_id, x, y, w, h):
     """Crop a dataset image to (x,y,w,h), resized to 1024 (no pad). Returns bool."""
     img = _owned_image(user_id, image_id)
@@ -1782,11 +1801,22 @@ def crop_image(user_id, image_id, x, y, w, h):
         return False
     if _is_unresolved_image_improvement_row(img):
         raise ValueError('resolve the reconstruction comparison before cropping either version')
-    ok, scale = _crop_resize_file(_img_path(img), x, y, w, h)
+    path = _img_path(img)
+    try:
+        with open(path, 'rb') as handle:
+            previous = handle.read()
+    except OSError:
+        return False
+    ok, scale = _crop_resize_file(path, x, y, w, h)
     if ok:
         _clear_watermark_metadata(img)
         img.upscale_ratio = scale
-        db.session.commit()
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            _atomic_write_bytes(path, previous)
+            raise
     return ok
 
 
@@ -2226,6 +2256,7 @@ _BACKUP_IMG_FIELDS = ('filename', 'source', 'framing', 'variation_label', 'statu
                       'generation_gap_ids', 'generation_provenance')
 
 
+@trash.serialized_transaction
 def build_backup_zip(user_id, dataset_id, *, destination=None):
     """Self-contained backup of one dataset: manifest.json (settings) +
     images.json (rows) + ref/ + images/ files. Ordinary rows without a file are
@@ -2241,6 +2272,8 @@ def build_backup_zip(user_id, dataset_id, *, destination=None):
             .filter(or_(FaceDatasetImage.filename.isnot(None),
                         FaceDatasetImage.derivation_kind.in_(_EXCLUSIVE_DERIVATIONS)))
             .all())
+    if len(rows) > _BACKUP_MAX_ROWS:
+        raise ValueError(f'too many image rows to back up (max {_BACKUP_MAX_ROWS})')
     manifest = {
         'format': BACKUP_FORMAT, 'version': BACKUP_VERSION,
         'name': ds.name, 'trigger_word': ds.trigger_word,
@@ -2281,8 +2314,9 @@ def build_backup_zip(user_id, dataset_id, *, destination=None):
                            relative)
             return
         normalized_relative = candidate.resolve()
-        if (candidate.is_symlink() or not candidate.is_file()
-                or arcname in written_arcnames
+        if candidate.is_symlink() or not candidate.is_file():
+            raise FileNotFoundError(f'backup source is missing or unsafe: {relative}')
+        if (arcname in written_arcnames
                 or normalized_relative in written_relatives):
             return
         z.write(candidate, arcname)
@@ -2303,6 +2337,13 @@ def build_backup_zip(user_id, dataset_id, *, destination=None):
             if not img.filename:
                 continue   # metadata-only small-rescue candidate
             add_file(z, img.filename, f'images/{img.filename}')
+            stem, ext = os.path.splitext(img.filename)
+            watermark_original = f'{stem}.orig{ext or ".webp"}'
+            if os.path.isfile(os.path.join(dsdir, watermark_original)):
+                # Watermark cleanup keeps the sole pre-edit pixels in this
+                # deterministic sibling. Preserve it in the normal image root
+                # so restore recreates the recovery relationship unchanged.
+                add_file(z, watermark_original, f'images/{watermark_original}')
         for img in rows:
             if not img.original_filename:
                 continue
@@ -2638,6 +2679,7 @@ def _import_backup_archive(user_id, z, state):
     return ds
 
 
+@curation_history.serialized
 def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
     """Bulk-edit the captions of KEPT images (the ones that train). Two modes:
 
@@ -2696,6 +2738,7 @@ def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
 BATCH_ACTIONS = ('keep', 'reject', 'pending', 'delete', 'clear_caption')
 
 
+@curation_history.serialized
 def batch_image_action(user_id, dataset_id, image_ids, action):
     """Apply one whitelisted action to a set of this dataset's images in one call
     (the grid's multi-select). Ownership is checked once on the dataset; ids that
@@ -2758,6 +2801,7 @@ def _ref_crop_source_path(ds) -> str:
     return os.path.join(_dataset_dir(ds.id), name)
 
 
+@trash.serialized_transaction
 def crop_reference(user_id, dataset_id, x, y, w, h):
     """Manually crop the dataset reference to (x,y,w,h), resized to 1024. The box is
     in the ORIGINAL's pixel space (the editor shows the original), and we write the
@@ -2767,9 +2811,13 @@ def crop_reference(user_id, dataset_id, x, y, w, h):
     if not ds or not ds.ref_filename:
         return False
     ok, _scale = _crop_resize_file(_ref_crop_source_path(ds), x, y, w, h, dst=_ref_path(ds))
+    if ok:
+        ds.revision = int(ds.revision or 0) + 1
+        db.session.commit()
     return ok
 
 
+@trash.serialized_transaction
 def recrop_reference_auto(user_id, dataset_id):
     """Re-run the automatic head-crop on the ORIGINAL, overwriting ref_filename.
     Returns (ok, head_detected). CALLER holds the GPU vision window. Lets the user
@@ -2783,8 +2831,9 @@ def recrop_reference_auto(user_id, dataset_id):
     except OSError:
         return False, False
     webp, detected = face_crop_to_square_webp(raw, pad=REF_CROP_PAD, return_detected=True)
-    with open(_ref_path(ds), 'wb') as fh:
-        fh.write(webp)
+    _atomic_write_bytes(_ref_path(ds), webp)
+    ds.revision = int(ds.revision or 0) + 1
+    db.session.commit()
     return True, detected
 
 
@@ -3019,6 +3068,11 @@ def _compute_dataset_aggregates(ds, imgs):
             exclusive_ids.add(image.id)
             if image.parent_image_id:
                 exclusive_ids.add(image.parent_image_id)
+    variation_label_counts = {}
+    for image in imgs:
+        if image.variation_label and image.status not in {'failed', 'reject', 'trashed'}:
+            variation_label_counts[image.variation_label] = (
+                variation_label_counts.get(image.variation_label, 0) + 1)
     image_summary = {
         'total': len(imgs),
         'kept': sum(1 for i in imgs if i.status == 'keep'),
@@ -3034,6 +3088,7 @@ def _compute_dataset_aggregates(ds, imgs):
                       and i.status in {'reject', 'failed'}),
         'watermark_detected': sum(
             1 for i in imgs if i.watermark_state == 'detected'),
+        'variation_label_counts': variation_label_counts,
         **_dataset_navigation_counts(imgs),
     }
     return {
@@ -3225,6 +3280,17 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
         if not isinstance(raw, (bytes, bytearray)):
             failed += 1
             continue
+        if len(raw) > DATASET_IMAGE_MAX_BYTES:
+            failed += 1
+            continue
+        try:
+            with Image.open(io.BytesIO(raw)) as probe:
+                if probe.width * probe.height > DATASET_IMAGE_MAX_PIXELS:
+                    failed += 1
+                    continue
+        except (OSError, ValueError):
+            failed += 1
+            continue
         try:
             analysis = analyse_image_bytes(raw, source_name=source_name)
         except (OSError, ValueError, TypeError) as e:
@@ -3276,11 +3342,24 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
             failed += 1
             logger.warning(f"dataset import: original preservation failed ({source_name or index}): {e}")
             continue
-        fn = f"{user_id}_dataset_{uuid.uuid4().hex[:8]}.webp"
-        normalized_path = os.path.join(_dataset_dir(dataset_id), fn)
+        normalized_path = None
         try:
-            _atomic_write_bytes(normalized_path, webp)
-            created_paths.append(normalized_path)
+            for _attempt in range(100):
+                fn = f"{user_id}_dataset_{uuid.uuid4().hex}.webp"
+                candidate = os.path.join(_dataset_dir(dataset_id), fn)
+                try:
+                    descriptor = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    continue
+                with os.fdopen(descriptor, 'wb') as handle:
+                    handle.write(webp)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                normalized_path = candidate
+                created_paths.append(candidate)
+                break
+            if normalized_path is None:
+                raise OSError('could not allocate a unique normalized image filename')
         except OSError as e:
             failed += 1
             original_path = os.path.join(_dataset_dir(dataset_id), original_filename)
@@ -3350,6 +3429,8 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
 # est parcouru récursivement pour rester aligné).
 DATASET_ZIP_MAX_FILES = 400
 DATASET_ZIP_MAX_BYTES = 2 * 1024 * 1024 * 1024
+DATASET_IMAGE_MAX_BYTES = 128 * 1024 * 1024
+DATASET_IMAGE_MAX_PIXELS = 64 * 1024 * 1024
 _DATASET_ZIP_IMG_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
 
 
@@ -3370,6 +3451,17 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
         try:
             raw = getter()
         except (OSError, zipfile.BadZipFile):
+            failed += 1
+            continue
+        if len(raw) > DATASET_IMAGE_MAX_BYTES:
+            failed += 1
+            continue
+        try:
+            with Image.open(io.BytesIO(raw)) as probe:
+                if probe.width * probe.height > DATASET_IMAGE_MAX_PIXELS:
+                    failed += 1
+                    continue
+        except (OSError, ValueError):
             failed += 1
             continue
         if stats is not None:   # même garde qualité que l'import de photos
@@ -3513,22 +3605,25 @@ def import_dataset_zip(user_id, dataset_id, zip_source, stats=None):
         z = zipfile.ZipFile(source)
     except (AttributeError, zipfile.BadZipFile, OSError, TypeError):
         raise ValueError('not a zip file')
-    infos = [i for i in z.infolist() if not i.is_dir()]
-    if len(infos) > DATASET_ZIP_MAX_FILES:
-        raise ValueError(f'too many files in the zip (max {DATASET_ZIP_MAX_FILES})')
-    if sum(i.file_size for i in infos) > DATASET_ZIP_MAX_BYTES:
-        raise ValueError('zip too large (max 2 GB uncompressed)')
-    captions = {}
-    for i in infos:
-        if i.filename.lower().endswith('.txt') and i.file_size <= 64 * 1024:
-            try:
-                captions[os.path.splitext(i.filename)[0]] = \
-                    z.read(i).decode('utf-8', 'replace').strip()
-            except (OSError, zipfile.BadZipFile):
-                pass
-    entries = [(os.path.splitext(i.filename)[0], i.filename, lambda i=i: z.read(i))
-               for i in infos if i.filename.lower().endswith(_DATASET_ZIP_IMG_EXTS)]
     try:
+        infos = [i for i in z.infolist() if not i.is_dir()]
+        if len(infos) > DATASET_ZIP_MAX_FILES:
+            raise ValueError(f'too many files in the zip (max {DATASET_ZIP_MAX_FILES})')
+        if sum(i.file_size for i in infos) > DATASET_ZIP_MAX_BYTES:
+            raise ValueError('zip too large (max 2 GB uncompressed)')
+        if any(i.filename.lower().endswith(_DATASET_ZIP_IMG_EXTS)
+               and i.file_size > DATASET_IMAGE_MAX_BYTES for i in infos):
+            raise ValueError('image in zip is too large (max 128 MB)')
+        captions = {}
+        for i in infos:
+            if i.filename.lower().endswith('.txt') and i.file_size <= 64 * 1024:
+                try:
+                    captions[os.path.splitext(i.filename)[0]] = \
+                        z.read(i).decode('utf-8', 'replace').strip()
+                except (OSError, zipfile.BadZipFile):
+                    pass
+        entries = [(os.path.splitext(i.filename)[0], i.filename, lambda i=i: z.read(i))
+                   for i in infos if i.filename.lower().endswith(_DATASET_ZIP_IMG_EXTS)]
         return _merge_training_images(user_id, dataset_id, entries, captions, stats=stats)
     finally:
         z.close()
@@ -3561,6 +3656,9 @@ def import_dataset_folder(user_id, dataset_id, folder, stats=None):
             sizes[p] = 0
     if sum(sizes.values()) > DATASET_ZIP_MAX_BYTES:
         raise ValueError('folder too large (max 2 GB)')
+    if any(p.lower().endswith(_DATASET_ZIP_IMG_EXTS)
+           and size > DATASET_IMAGE_MAX_BYTES for p, size in sizes.items()):
+        raise ValueError('image in folder is too large (max 128 MB)')
     captions = {}
     for p in paths:
         if p.lower().endswith('.txt') and sizes.get(p, 0) <= 64 * 1024:
@@ -3599,17 +3697,7 @@ _SCRAPE_DL_WORKERS = 6
 def _existing_dhashes(dataset_id) -> _DHashIndex:
     """Indexed dHashes of existing keep/pending images, with legacy backfill."""
     out = _DHashIndex()
-    rows = FaceDatasetImage.query.filter(
-        FaceDatasetImage.dataset_id == dataset_id,
-        FaceDatasetImage.status.in_(('keep', 'pending'))).all()
-    for r in rows:
-        if not r.filename:
-            continue
-        try:
-            with Image.open(os.path.join(_dataset_dir(dataset_id), r.filename)) as im:
-                value = _dhash(im)
-        except (OSError, ValueError):
-            continue
+    for _row, value in _existing_dhash_rows(dataset_id):
         out.add(None, value)
     return out
 
@@ -3699,6 +3787,7 @@ def analyze_corpus(user_id, dataset_id) -> dict:
             'near_duplicates': duplicate_pairs}
 
 
+@curation_history.serialized
 def set_anchor_decision(user_id, image_id, decision) -> bool:
     img = _owned_image(user_id, image_id)
     if not img or img.source != 'import':
@@ -3716,6 +3805,7 @@ def set_anchor_decision(user_id, image_id, decision) -> bool:
     return True
 
 
+@curation_history.serialized
 def set_image_coverage(user_id, image_id, values) -> bool:
     img = _owned_image(user_id, image_id)
     if not img or img.source != 'import':
@@ -3753,6 +3843,7 @@ def set_image_coverage(user_id, image_id, values) -> bool:
 SOURCE_RIGHTS_BASES = ('owned', 'licensed', 'consented', 'public-domain', 'unknown')
 
 
+@curation_history.serialized
 def set_image_rights(user_id, image_id, values) -> bool:
     img = _owned_image(user_id, image_id)
     if not img or not isinstance(values, dict):
@@ -3813,7 +3904,7 @@ def _accept_scrape_bytes(raw, seen_hashes, skipped, rescue_small=False):
 
 def _scrape_resolution_key(downloaded):
     """Sort key for rescue batches: the best-resolution duplicate must win."""
-    reason, raw = downloaded
+    reason, raw, *_metadata = downloaded
     if reason != 'ok' or not raw:
         return (0, 0)
     try:
@@ -3852,7 +3943,7 @@ def _save_small_scrape_pair(user_id, dataset_id, raw, prompt):
     candidate = FaceDatasetImage(
         dataset_id=dataset_id, source='generated', status='pending',
         parent_image_id=source.id, derivation_kind=KLEIN_SMALL_IMAGE,
-        variation_label=label, variation_prompt=prompt,
+        variation_label=label, variation_prompt=prompt, job_id=str(uuid.uuid4()),
     )
     db.session.add(candidate)
     db.session.commit()
@@ -3861,6 +3952,7 @@ def _save_small_scrape_pair(user_id, dataset_id, raw, prompt):
         job_id = enqueue_klein_edit(
             user_id=str(user_id), source_filename=filename, source_path=source_path,
             edit_prompt=prompt,
+            job_id=candidate.job_id,
             extra_metadata={'is_dataset': True, 'dataset_id': dataset_id,
                             'variation_label': label,
                             'derivation_kind': KLEIN_SMALL_IMAGE,
@@ -3873,8 +3965,8 @@ def _save_small_scrape_pair(user_id, dataset_id, raw, prompt):
         logger.exception('small-image rescue enqueue failed for dataset %s source %s',
                          dataset_id, source.id)
         return False
-    candidate.job_id = job_id
-    db.session.commit()
+    if job_id != candidate.job_id:
+        raise RuntimeError('queue returned an unexpected job identifier')
     return True
 
 
@@ -3895,7 +3987,9 @@ def _download_scrape_item(item):
     if not ok:
         # 'type'/'noimage' = pas une vraie image raster ; le reste = erreur réseau.
         return ('not_image' if reason in ('type', 'noimage') else 'errors', None)
-    return ('ok', data)
+    title = str((item or {}).get('title') or '').strip()
+    source_name = (title[:300] + ' — ' if title else '') + str(url)[:1000]
+    return ('ok', data, source_name[:1300])
 
 
 def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
@@ -3923,7 +4017,9 @@ def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
 
     seen_hashes = _existing_dhashes(dataset_id)
     accepted, rescue_candidates = [], []
-    for reason, data in downloaded:
+    for downloaded_item in downloaded:
+        reason, data, *metadata = downloaded_item
+        source_name = metadata[0] if metadata else None
         if reason != 'ok':
             skipped[reason] = skipped.get(reason, 0) + 1
             continue
@@ -3937,9 +4033,10 @@ def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
                 except (OSError, ValueError):
                     skipped['errors'] += 1
                     continue
-                (rescue_candidates if is_small else accepted).append(ok_bytes)
+                target = rescue_candidates if is_small else accepted
+                target.append((source_name, ok_bytes))
             else:
-                accepted.append(ok_bytes)
+                accepted.append((source_name, ok_bytes))
 
     # Capacity and model preflight happen once, after every quality/dedup filter,
     # but before creating a source/result pair. No small candidate => no Klein scan.
@@ -3956,11 +4053,19 @@ def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
             raise KleinModelsMissing(missing)
 
     ids, failed = import_images(user_id, dataset_id, accepted, crop=False)
+    if ids:
+        rows = FaceDatasetImage.query.filter(FaceDatasetImage.id.in_(ids)).all()
+        for row in rows:
+            row.source_rights = json.dumps({
+                'basis': 'unknown',
+                'notes': 'Imported from a scraped source; verify usage rights.',
+            }, ensure_ascii=False, sort_keys=True)
+        db.session.commit()
     skipped['errors'] += failed
     raw_prompt = cfg.get('klein.small_image_prompt', '')
     prompt = '' if raw_prompt is None else str(raw_prompt)
     rescue_queued = rescue_failed = 0
-    for raw in rescue_candidates:
+    for _source_name, raw in rescue_candidates:
         try:
             queued = _save_small_scrape_pair(user_id, dataset_id, raw, prompt)
         except Exception:
@@ -3980,9 +4085,11 @@ def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
 def _parse_classify(raw):
     try:
         start = raw.index('{')
-        obj = json.loads(raw[start:raw.index('}', start) + 1])
-    except (ValueError, AttributeError):
-        return 'unknown', None, {}, {}
+        obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+        if not isinstance(obj, dict):
+            return None
+    except (ValueError, AttributeError, TypeError):
+        return None
     fr = obj.get('framing')
     fr = fr if fr in ('face', 'bust', 'body', 'back') else 'unknown'
     coverage = {}
@@ -4038,7 +4145,11 @@ def classify_images(user_id, dataset_id):
                 # on laisse framing=None (retry possible) au lieu d'écrire 'unknown'
                 # définitivement, qui bloquerait toute reclassification.
                 continue
-            framing, label, coverage, confidence = _parse_classify(raw)
+            parsed = _parse_classify(raw)
+            if parsed is None:
+                logger.warning('classification returned malformed JSON for image %s', img.id)
+                continue
+            framing, label, coverage, confidence = parsed
             img.framing = framing
             img.variation_label = label
             img.coverage_json = json.dumps(coverage, ensure_ascii=False, sort_keys=True)
@@ -4319,12 +4430,14 @@ def _caption_concept(ds, force, backend, token=None):
     # 1) JoyCaption batch (draft) when the backend allows it.
     if backend in ('auto', 'joycaption'):
         jc = {}
+        jc_provenance = {}
         try:
             from .joycaption import caption_images_joycaption, is_available
             if is_available():
                 dataset_activity.progress(
                     token, detail=f'Loading JoyCaption model and captioning {len(todo)} images…')
                 jc = caption_images_joycaption([p for _, p in todo], prompt=cap_prompt)
+                jc_provenance = getattr(jc, 'provenance', {})
             elif backend == 'joycaption':
                 raise RuntimeError('JoyCaption backend is not available - check the ai-toolkit folder in Settings')
         except RuntimeError:
@@ -4350,10 +4463,16 @@ def _caption_concept(ds, force, backend, token=None):
                     data = fh.read()
             except OSError:
                 data = b''
-            final = _enforce_concept_omission(joycap, leak_re, data, concept_desc) or joycap
-            img.caption = final[:CAPTION_MAX_CHARS]
-            db.session.commit()
-            n += 1
+            final = _enforce_concept_omission(joycap, leak_re, data, concept_desc)
+            if _usable_caption(final):
+                img.caption = final[:CAPTION_MAX_CHARS]
+                img.caption_provenance = json.dumps(jc_provenance.get(p)) \
+                    if jc_provenance.get(p) else None
+                db.session.commit()
+                n += 1
+            elif force and (img.caption or ''):
+                img.caption = ''
+                db.session.commit()
         return n
     # 2b) Qwen passes ('auto'/'ollama'): refine Joy drafts, direct-caption the rest, all
     #     enforced. One model load -> unload once at the end.
@@ -4398,12 +4517,12 @@ def _caption_concept(ds, force, backend, token=None):
                     alt = (alt or '').strip().strip('"').strip()
                     final = alt or joycap
                 final = _enforce_concept_omission(final, leak_re, data, concept_desc,
-                                                  describe=describe_image_ollama) or final
+                                                  describe=describe_image_ollama)
                 if not _usable_caption(final):
                     # Refine AND direct both unusable → fall back to the Joy draft (clean
                     # prose), scrubbed of any leak; leave blank if even that fails.
                     final = _enforce_concept_omission(joycap, leak_re, data, concept_desc,
-                                                      describe=describe_image_ollama) or joycap
+                                                      describe=describe_image_ollama)
                     if not _usable_caption(final):
                         # force=re-do-all: overwrite any stale pre-fix caption with blank
                         # (trigger-only is valid for a concept LoRA) rather than retain it.
@@ -4527,6 +4646,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
         # sauté entièrement quand le backend force 'ollama'.
         if backend in ('auto', 'joycaption'):
             jc = {}
+            jc_provenance = {}
             try:
                 from .joycaption import caption_images_joycaption, is_available
                 if is_available():
@@ -4536,6 +4656,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
                     # Consigne « ne décris pas le visage » → les traits se lient au trigger,
                     # pas aux mots de la caption (deep-research 2026-06-14).
                     jc = caption_images_joycaption([p for _, p in todo], prompt=cap_prompt)
+                    jc_provenance = getattr(jc, 'provenance', {})
                 elif backend == 'joycaption':
                     # Explicit choice, explicit failure: a user who forced 'joycaption' in
                     # Settings must be told it's unavailable, not get a silent 0 (only
@@ -4549,11 +4670,17 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
             for img, p in remaining:
                 cap = (jc.get(p) or '').strip().strip('"').strip()
                 if cap:
-                    cleaned = cleaner(cap) or cap
-                    img.caption = cleaned[:CAPTION_MAX_CHARS]
-                    db.session.commit()
-                    n += 1
-                    dataset_activity.bump(token)   # this image is captioned (done)
+                    cleaned = cleaner(cap)
+                    if _usable_caption(cleaned):
+                        img.caption = cleaned[:CAPTION_MAX_CHARS]
+                        img.caption_provenance = json.dumps(jc_provenance.get(p)) \
+                            if jc_provenance.get(p) else None
+                        db.session.commit()
+                        n += 1
+                    elif force and (img.caption or ''):
+                        img.caption = ''
+                        db.session.commit()
+                    dataset_activity.bump(token)   # this image is handled
                 else:
                     still.append((img, p))
             remaining = still
@@ -4582,10 +4709,14 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
                             auto_start_local=(index == 1), timeout=(10, 300))
                     cap = (cap or '').strip().strip('"').strip()
                     if cap:
-                        cleaned = cleaner(cap) or cap
-                        img.caption = cleaned[:CAPTION_MAX_CHARS]
-                        db.session.commit()
-                        n += 1
+                        cleaned = cleaner(cap)
+                        if _usable_caption(cleaned):
+                            img.caption = cleaned[:CAPTION_MAX_CHARS]
+                            db.session.commit()
+                            n += 1
+                        elif force and (img.caption or ''):
+                            img.caption = ''
+                            db.session.commit()
                     dataset_activity.bump(token)   # image handled (captioned or not)
             finally:
                 unload_vision_model()  # libère la VRAM pour ComfyUI en fin de batch
@@ -4721,13 +4852,13 @@ def normalize_watermark_regions(value, *, allow_null=True) -> list[list[float]] 
     if value is None:
         if allow_null:
             return None
-        raise ValueError('regions must be a list')
+        raise DomainValidationError('regions must be a list')
     if not isinstance(value, list) or len(value) > WATERMARK_REGION_LIMIT:
-        raise ValueError('regions must contain at most 32 boxes')
+        raise DomainValidationError('regions must contain at most 32 boxes')
     out = []
     for box in value:
         if not isinstance(box, list) or len(box) != 4:
-            raise ValueError('each region must be [x1,y1,x2,y2]')
+            raise DomainValidationError('each region must be [x1,y1,x2,y2]')
         try:
             invalid_number = any(
                 isinstance(v, bool) or not isinstance(v, (int, float))
@@ -4736,18 +4867,19 @@ def normalize_watermark_regions(value, *, allow_null=True) -> list[list[float]] 
         except OverflowError:
             invalid_number = True
         if invalid_number:
-            raise ValueError('region coordinates must be finite numbers')
+            raise DomainValidationError('region coordinates must be finite numbers')
         x1, y1, x2, y2 = map(float, box)
         if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-            raise ValueError('region coordinates must be ordered within [0,1]')
+            raise DomainValidationError('region coordinates must be ordered within [0,1]')
         min_side = Decimal(str(WATERMARK_REGION_MIN_SIDE))
         if (Decimal(str(x2)) - Decimal(str(x1)) < min_side
                 or Decimal(str(y2)) - Decimal(str(y1)) < min_side):
-            raise ValueError('region is too small')
+            raise DomainValidationError('region is too small')
         out.append([round(v, 4) for v in (x1, y1, x2, y2)])
     return out
 
 
+@curation_history.serialized
 def set_watermark_regions(user_id, dataset_id, image_id, regions) -> dict | None:
     """Atomically replace a detected image's manual watermark-region override."""
     owned_query = (FaceDatasetImage.query
@@ -4759,7 +4891,7 @@ def set_watermark_regions(user_id, dataset_id, image_id, regions) -> dict | None
     if not img:
         return None
     if img.watermark_state != 'detected':
-        raise RuntimeError('image is no longer detected')
+        raise DomainConflictError('image is no longer detected')
     normalized = normalize_watermark_regions(regions)
     stored = json.dumps(normalized) if normalized is not None else None
     from . import curation_history
@@ -4810,20 +4942,44 @@ def _route_watermark(bbox, W, H, *, min_side=WATERMARK_MIN_SIDE):
     return 'review', None
 
 
-def _preserve_original(path) -> None:
+def _preserve_original(path) -> bool:
     """Copy `path` to a sibling `<stem>.orig<suffix>` before a destructive edit, so the
     watermarked original stays recoverable. The app trash util (send_to_trash) MOVES a
     file -- unusable here since the cleaned image must keep serving from the SAME path
     (and LaMa overwrites it in place) -- so we keep a sibling copy instead. Only written
     ONCE (a re-clean must not clobber the true original with an already-modified one).
-    These .orig files carry no DB row, so export/backup (which iterate rows) ignore them."""
+    Returns whether a non-empty preserved original is available."""
     stem, ext = os.path.splitext(path)
     backup = f'{stem}.orig{ext or ".webp"}'
-    if not os.path.exists(backup):
-        try:
-            shutil.copy2(path, backup)
-        except OSError as e:
-            logger.warning('watermark: could not preserve original %s: %s', path, e)
+    if os.path.isfile(backup) and os.path.getsize(backup) > 0:
+        return True
+    try:
+        shutil.copy2(path, backup)
+        return os.path.isfile(backup) and os.path.getsize(backup) > 0
+    except OSError as e:
+        logger.warning('watermark: could not preserve original %s: %s', path, e)
+        return False
+
+
+def _restore_preserved_original(path) -> None:
+    stem, ext = os.path.splitext(path)
+    backup = f'{stem}.orig{ext or ".webp"}'
+    with open(backup, 'rb') as handle:
+        _atomic_write_bytes(path, handle.read())
+
+
+def _lossless_inpaint_target(img, path: str) -> str:
+    """Return the durable output path for a LaMa edit.
+
+    Re-encoding JPEG cannot preserve decoded pixels outside the mask exactly,
+    so edited JPEGs migrate to a uniquely named PNG. Other supported formats
+    retain their existing storage identity and are encoded losslessly.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix not in ('.jpg', '.jpeg'):
+        return path
+    source = Path(path)
+    return str(source.with_name(f'{source.stem}.lama-{img.id}.png'))
 
 
 def _apply_watermark_crop(path, box) -> bool:
@@ -4841,9 +4997,11 @@ def _apply_watermark_crop(path, box) -> bool:
                 cropped.save(out, 'WEBP', quality=92)
     except (OSError, ValueError):
         return False
-    with open(path, 'wb') as fh:
-        fh.write(out.getvalue())
-    return True
+    try:
+        _atomic_write_bytes(path, out.getvalue())
+        return True
+    except OSError:
+        return False
 
 
 def detect_watermarks(user_id, dataset_id, *, include_dismissed=False):
@@ -4906,6 +5064,7 @@ def detect_watermarks(user_id, dataset_id, *, include_dismissed=False):
     return counts
 
 
+@curation_history.serialized
 def dismiss_watermarks(user_id, dataset_id, image_ids):
     """Mark 'detected' images as 'dismissed' -- the user ruled, in the review lightbox,
     that the flag is a FALSE positive. Dismissed images drop the 🚩 badge, leave the
@@ -4970,7 +5129,7 @@ def clean_watermarks(user_id, dataset_id, image_ids=None, device='cpu'):
     out = {'cropped': 0, 'inpainted': 0, 'needs_review': 0, 'failed': 0, 'skipped': 0}
     error = None
     lama_ok = watermark_lama.is_available()
-    lama_pending = []  # (img, path, bboxes, manual_regions)
+    lama_pending = []  # (img, source_path, output_path, bboxes, manual_regions)
     # Persistent progress indicator (survives a page reload). The device is included
     # so the UI can honestly state whether ComfyUI is paused for the GPU pass.
     device_label = 'GPU' if device == 'cuda' else 'CPU'
@@ -5004,8 +5163,13 @@ def clean_watermarks(user_id, dataset_id, image_ids=None, device='cpu'):
                     out['skipped'] += 1
                     db.session.commit()
                     continue
-                _preserve_original(path)
-                lama_pending.append((img, path, regions, True))
+                if not _preserve_original(path):
+                    out['failed'] += 1
+                    error = {'kind': 'failed', 'detail': 'could not preserve original image'}
+                    db.session.commit()
+                    continue
+                lama_pending.append(
+                    (img, path, _lossless_inpaint_target(img, path), regions, True))
                 continue
             bbox = _safe_json(img.watermark_bbox)
             if not os.path.exists(path) or not (isinstance(bbox, list) and len(bbox) == 4):
@@ -5022,9 +5186,16 @@ def clean_watermarks(user_id, dataset_id, image_ids=None, device='cpu'):
                 db.session.commit()
                 continue
             route, box = _route_watermark(tuple(bbox), W, H)
+            pixels_changed = False
             if route == 'crop':
-                _preserve_original(path)
+                if not _preserve_original(path):
+                    img.watermark_state = 'failed'
+                    out['failed'] += 1
+                    error = {'kind': 'failed', 'detail': 'could not preserve original image'}
+                    db.session.commit()
+                    continue
                 if _apply_watermark_crop(path, box):
+                    pixels_changed = True
                     # NOTE dHash: the perceptual hash used for import-dedupe is recomputed
                     # ON THE FLY from the file (_existing_dhashes / _dhash), NOT stored in a
                     # column -- there is no stored dHash to leave untouched. So after a crop
@@ -5041,30 +5212,49 @@ def clean_watermarks(user_id, dataset_id, image_ids=None, device='cpu'):
                 if not lama_ok:
                     out['skipped'] += 1          # leave state='detected' (crop-only mode)
                 else:
-                    _preserve_original(path)
-                    lama_pending.append((img, path, [bbox], False))
+                    if not _preserve_original(path):
+                        img.watermark_state = 'failed'
+                        out['failed'] += 1
+                        error = {'kind': 'failed', 'detail': 'could not preserve original image'}
+                        db.session.commit()
+                        continue
+                    lama_pending.append(
+                        (img, path, _lossless_inpaint_target(img, path), [bbox], False))
             else:  # 'review' -> stays 'detected' so the badge/count keep flagging it
                 out['needs_review'] += 1
-            db.session.commit()
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                if pixels_changed:
+                    _restore_preserved_original(path)
+                raise
         if lama_pending:
             if len(lama_pending) == 1:
-                img, path, boxes, manual = lama_pending[0]
+                img, path, output_path, boxes, manual = lama_pending[0]
+                output_kwargs = ({'output_path': output_path}
+                                 if output_path != path else {})
                 if manual:
                     ok, err = watermark_lama.inpaint_watermarks(
-                        path, boxes, **({'device': device} if device != 'cpu' else {}))
+                        path, boxes, **output_kwargs,
+                        **({'device': device} if device != 'cpu' else {}))
                 else:
                     ok, err = watermark_lama.inpaint_watermark(
-                        path, boxes[0], **({'device': device} if device != 'cpu' else {}))
+                        path, boxes[0], **output_kwargs,
+                        **({'device': device} if device != 'cpu' else {}))
                 results = {path: (ok, err)}
             else:
                 results = watermark_lama.inpaint_batch(
-                    [{'image_path': path, 'bboxes': boxes}
-                     for _img, path, boxes, _manual in lama_pending],
+                    [{'image_path': path, 'bboxes': boxes,
+                      **({'output_path': output_path} if output_path != path else {})}
+                     for _img, path, output_path, boxes, _manual in lama_pending],
                     device=device,
                 )
-            for img, path, _boxes, manual in lama_pending:
+            for img, path, output_path, _boxes, manual in lama_pending:
                 ok, err = results.get(path, (False, {'kind': 'failed', 'detail': 'missing inpaint result'}))
                 if ok:
+                    if output_path != path:
+                        img.filename = Path(output_path).name
                     img.watermark_state = 'cleaned'
                     if manual:
                         img.watermark_regions = None
@@ -5079,7 +5269,23 @@ def clean_watermarks(user_id, dataset_id, image_ids=None, device='cpu'):
                     out['failed'] += 1
                     if err:
                         error = err
-                db.session.commit()
+                try:
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+                    if ok:
+                        if output_path != path:
+                            Path(output_path).unlink(missing_ok=True)
+                        else:
+                            _restore_preserved_original(path)
+                    raise
+                if ok and output_path != path:
+                    try:
+                        Path(path).unlink()
+                    except OSError:
+                        logger.warning(
+                            'watermark: cleaned JPEG retained after PNG migration: %s',
+                            path)
         return out, error
     finally:
         dataset_activity.end(token)
@@ -5113,12 +5319,18 @@ def generate_variations(user_id, dataset_id, variations, multiplier, klein_model
     try:
         from .klein_edit_helper import enqueue_klein_edit
     except ImportError:
-        raise RuntimeError('ComfyUI is not configured')
+        raise DomainConflictError('ComfyUI is not configured')
     ds = get_dataset(user_id, dataset_id)
     if not ds:
-        raise ValueError('dataset not found')
+        raise DomainValidationError('dataset not found')
     if not ds.ref_filename:
-        raise ValueError('reference image required')
+        raise DomainValidationError('reference image required')
+    mult = max(1, int(multiplier))
+    total = len(variations) * mult
+    if total == 0:
+        raise DomainValidationError('no variations selected')
+    if total > MAX_FANOUT:
+        raise DomainValidationError(f'fan-out too large ({total} > {MAX_FANOUT})')
     # Preflight the Klein model files BEFORE creating any rows: a missing model
     # then surfaces as one actionable "downloading, retry" 409 (route handler) —
     # not a dataset full of failed tiles, each doomed by a ComfyUI validation
@@ -5127,10 +5339,6 @@ def generate_variations(user_id, dataset_id, variations, multiplier, klein_model
     _missing = klein_missing_assets()
     if any(a in _missing for a in KLEIN_REQUIRED):
         raise KleinModelsMissing(_missing)
-    mult = max(1, int(multiplier))
-    total = len(variations) * mult
-    if total > MAX_FANOUT:
-        raise ValueError(f'fan-out too large ({total} > {MAX_FANOUT})')
     # Anti-DoS: the fan-out is free (never debited) → cap pending in-flight
     # generations per dataset so one user can't monopolize the single GPU.
     in_flight = (FaceDatasetImage.query
@@ -5152,6 +5360,7 @@ def generate_variations(user_id, dataset_id, variations, multiplier, klein_model
                 img = FaceDatasetImage(dataset_id=dataset_id, source='generated', status='pending',
                                        variation_label=v.get('label'), framing=v.get('framing'),
                                        variation_prompt=v['prompt'], klein_model=klein_model,
+                                       job_id=str(uuid.uuid4()),
                                        generation_engine='klein',
                                        generation_anchor_ids='[]',
                                        generation_anchor_metadata=_explicit_reference_metadata_json(ds),
@@ -5170,14 +5379,15 @@ def generate_variations(user_id, dataset_id, variations, multiplier, klein_model
                                                          framing=v.get('framing')),
                         klein_model=klein_model,
                         lora_strength=lora_strength, extra_ref_paths=extra_paths,
+                        job_id=img.job_id,
                         extra_metadata={'is_dataset': True, 'dataset_id': dataset_id,
                                         'variation_label': v.get('label')})
                 except Exception:
                     img.status = 'failed'
                     db.session.commit()
                     raise
-                img.job_id = job_id
-                db.session.commit()
+                if job_id != img.job_id:
+                    raise RuntimeError('queue returned an unexpected job identifier')
                 ids.append(img.id)
     finally:
         _sync_generate_activity(dataset_id)
@@ -5286,6 +5496,7 @@ def _improve_existing_image_locked(user_id, image_id):
         generation_anchor_ids=_generation_anchor_ids_json(anchors),
         generation_anchor_metadata=_generation_anchor_metadata_json(anchors),
         generation_gap_ids=json.dumps(['klein_image_improve']),
+        job_id=str(uuid.uuid4()),
     )
     previous_source_status = img.status
     db.session.add(candidate)
@@ -5300,6 +5511,7 @@ def _improve_existing_image_locked(user_id, image_id):
             source_path=source_path, edit_prompt=prompt,
             lora_strength=None, sampler_steps=4, base_lora_strength=0.0,
             extra_ref_paths=extra_paths,
+            job_id=candidate.job_id,
             extra_metadata={
                 'is_dataset': True,
                 'dataset_id': img.dataset_id,
@@ -5318,8 +5530,8 @@ def _improve_existing_image_locked(user_id, image_id):
         db.session.commit()
         raise
 
-    candidate.job_id = job_id
-    db.session.commit()
+    if job_id != candidate.job_id:
+        raise RuntimeError('queue returned an unexpected job identifier')
     _sync_generate_activity(img.dataset_id)
     return {'candidate_id': candidate.id, 'job_id': job_id}
 
@@ -5449,6 +5661,17 @@ def _commit_generated_replacement(img, filename, data, *, provenance_updates=Non
 
 def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=None,
                      engine=None, klein_model=None):
+    """Serialize regeneration of one row across request threads."""
+    lock = _IMAGE_REGENERATE_LOCKS[hash((str(user_id), image_id))
+                                   % len(_IMAGE_REGENERATE_LOCKS)]
+    with lock:
+        return _regenerate_image_locked(
+            user_id, image_id, lora_strength=lora_strength, prompt=prompt,
+            app=app, engine=engine, klein_model=klein_model)
+
+
+def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None, app=None,
+                             engine=None, klein_model=None):
     """Re-enqueue a single generated variation IN PLACE (same row id): cancel any
     in-flight job, drop the old file, reset the row to pending with the new
     job_id. Returns the new job_id, or None if the image is not owned / not a
@@ -5606,15 +5829,7 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
              else ((klein_model or '').strip() or None))
     previous_state = _replacement_state(img) if img.filename else None
     extra_paths = [os.path.join(_dataset_dir(ds.id), fn) for fn in extra_ref_filenames(ds)]
-    job_id = enqueue_klein_edit(
-        user_id=str(user_id), source_filename=ds.ref_filename,
-        source_path=_ref_path(ds),
-        edit_prompt=wrap_variation_klein(prompt, nsfw=is_nsfw_label(img.variation_label),
-                                         framing=img.framing),
-        klein_model=model,
-        lora_strength=lora_strength, extra_ref_paths=extra_paths,
-        extra_metadata={'is_dataset': True, 'dataset_id': img.dataset_id,
-                        'variation_label': img.variation_label})
+    job_id = str(uuid.uuid4())
     local_provenance = json.dumps({
         'schema_version': 1,
         'provider': 'local',
@@ -5636,6 +5851,25 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
     img.job_id = job_id
     img.fail_reason = None   # fresh attempt: drop the previous failure message
     db.session.commit()
+    try:
+        queued_job_id = enqueue_klein_edit(
+            user_id=str(user_id), source_filename=ds.ref_filename,
+            source_path=_ref_path(ds),
+            edit_prompt=wrap_variation_klein(prompt, nsfw=is_nsfw_label(img.variation_label),
+                                             framing=img.framing),
+            klein_model=model, job_id=job_id,
+            lora_strength=lora_strength, extra_ref_paths=extra_paths,
+            extra_metadata={'is_dataset': True, 'dataset_id': img.dataset_id,
+                            'variation_label': img.variation_label})
+        if queued_job_id != job_id:
+            raise RuntimeError('queue returned an unexpected job identifier')
+    except Exception as exc:
+        db.session.rollback()
+        img = db.session.get(FaceDatasetImage, image_id)
+        if img is not None:
+            _restore_replacement_after_failure(img, f'Klein enqueue failed: {str(exc)[:400]}')
+            db.session.commit()
+        raise
     # Advertise the in-flight Klein job so a single regenerate takes the same lock
     # as a batch; link_completed_dataset_image clears it on completion.
     _sync_generate_activity(img.dataset_id)
@@ -5847,8 +6081,29 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
     rows (job_id stays None - that is the marker for API-generated rows), then
     fill them from a background thread. The existing polling/banner/cancel UI
     works unchanged (pending + no file = in flight). Returns the created ids."""
+    lock = _DATASET_GENERATION_LOCKS[hash((str(user_id), dataset_id))
+                                     % len(_DATASET_GENERATION_LOCKS)]
+    with lock:
+        return _generate_variations_nanobanana_locked(
+            app, user_id, dataset_id, variations, multiplier, engine=engine)
+
+
+def _generate_variations_nanobanana_locked(app, user_id, dataset_id, variations,
+                                            multiplier, engine='nanobanana'):
+    """Reserve one remote batch while holding the dataset generation lock."""
     if engine not in API_ENGINES:
         raise ValueError(f'unknown API engine: {engine}')
+    if not isinstance(variations, (list, tuple)):
+        raise ValueError('variations must be a list')
+    normalized_variations = []
+    for variation in variations:
+        if not isinstance(variation, dict):
+            raise ValueError('each variation must be an object')
+        prompt = variation.get('prompt')
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError('each variation requires a prompt')
+        normalized_variations.append({**variation, 'prompt': prompt.strip()})
+    variations = normalized_variations
     # Fail-closed : les variations NSFW ne partent JAMAIS vers un moteur API
     # (comptes/API tiers) — elles n'existent que sur le chemin Klein local.
     if any(v.get('nsfw') or is_nsfw_label(v.get('label')) for v in variations):
@@ -5864,6 +6119,12 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
         raise ValueError('no variations selected')
     if total > MAX_FANOUT:
         raise ValueError(f'fan-out too large ({total} > {MAX_FANOUT})')
+    in_flight = (FaceDatasetImage.query
+                 .filter_by(dataset_id=dataset_id, status='pending')
+                 .filter(FaceDatasetImage.filename.is_(None)).count())
+    if in_flight + total > MAX_FANOUT:
+        raise ValueError(
+            f'too many generations in flight ({in_flight}), wait or cancel')
     # The full imported corpus stays on the dataset; only a bounded, diverse
     # anchor set is sent to the provider for this request.
     anchors = select_generation_references(ds)
@@ -5887,13 +6148,24 @@ def generate_variations_nanobanana(app, user_id, dataset_id, variations, multipl
                                    generation_provenance=_remote_generation_provenance(
                                        engine, anchors))
             db.session.add(img)
-            db.session.commit()
+            db.session.flush()
             ids.append(img.id)
             items.append((img.id, v['prompt'], aspect_for_label(v.get('label'), v.get('framing'))))
+    db.session.commit()
 
-    threading.Thread(target=_run_nanobanana_batch,
-                     args=(app, items, ref_bytes, engine, dataset_id),
-                     daemon=True).start()
+    worker = threading.Thread(target=_run_nanobanana_batch,
+                              args=(app, items, ref_bytes, engine, dataset_id),
+                              daemon=True)
+    try:
+        worker.start()
+    except Exception as exc:
+        db.session.rollback()
+        (FaceDatasetImage.query.filter(FaceDatasetImage.id.in_(ids))
+         .update({'status': 'failed',
+                  'fail_reason': f'could not start generation worker: {str(exc)[:300]}'},
+                 synchronize_session=False))
+        db.session.commit()
+        raise
     return ids
 
 
@@ -5983,7 +6255,16 @@ def _prepare_completed_improvement(img) -> bool:
     img.source_sha256 = candidate_analysis.get('source_sha256')
     img.coverage_value = img.coverage_value or 'unknown'
     source = db.session.get(FaceDatasetImage, img.parent_image_id)
-    source_analysis = parse_analysis(source.analysis_json) if source else {}
+    source_analysis = {}
+    source_path = _image_improvement_source_path(source) if source else None
+    if source_path and os.path.isfile(source_path):
+        try:
+            with open(source_path, 'rb') as fh:
+                source_analysis = analyse_image_bytes(
+                    fh.read(), source_name=os.path.basename(source_path))
+        except Exception:
+            logger.exception(
+                'reconstruction source technical QA failed for image %s', img.id)
     source_technical = _technical_metric_score(source_analysis)
     candidate_technical = _technical_metric_score(candidate_analysis)
     technical_delta = (round(candidate_technical - source_technical, 1)
@@ -5993,6 +6274,8 @@ def _prepare_completed_improvement(img) -> bool:
         'phase': 'analyzing',
         'source_image_id': source.id if source else img.parent_image_id,
         'source_filename': _improvement_source_filename(source),
+        'source_metrics': source_analysis.get('metrics'),
+        'source_training_usefulness': source_analysis.get('training_usefulness'),
         'source_face': None,
         'source_identity_score': None,
         'technical_delta': technical_delta,
@@ -6273,6 +6556,8 @@ def _export_caption(ds, caption) -> str:
     Single source of truth shared by the ZIP export and write_caption_files, so
     on-disk .txt sidecars always match what the ZIP would contain."""
     cap = (caption or '').strip()
+    if is_style(ds):
+        return cap
     return f"{ds.trigger_word}, {cap}" if cap else ds.trigger_word
 
 
@@ -6290,11 +6575,15 @@ def build_export_zip(user_id, dataset_id, *, destination=None):
     kept = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
             .order_by(FaceDatasetImage.id.asc()).all())
     if not kept:
-        raise ValueError('no kept images to export')
+        raise DomainValidationError('no kept images to export')
     available = [img for img in kept
                  if img.filename and os.path.exists(_img_path(img))]
-    if not available:
-        raise ValueError('kept image files are missing; run the integrity check')
+    if len(available) != len(kept):
+        available_ids = {img.id for img in available}
+        missing = [str(img.id) for img in kept if img.id not in available_ids]
+        raise ValueError(
+            f'kept image files are missing for rows {", ".join(missing[:20])}; '
+            'run the integrity check')
     safe = ''.join(c for c in ds.name if c.isalnum() or c in ('-', '_')) or 'dataset'
     safe_trigger = ''.join(c for c in ds.trigger_word if c.isalnum() or c in ('-', '_')) or 'lora'
     folder = f"10_{safe_trigger}"
@@ -6368,29 +6657,55 @@ def build_export_zip(user_id, dataset_id, *, destination=None):
     return buf if destination is not None else buf.getvalue()
 
 
+@trash.serialized_transaction
 def write_caption_files(user_id, dataset_id) -> dict:
-    """Write a kohya/ai-toolkit-style `<image>.txt` sidecar NEXT TO each kept
-    captioned image in the dataset folder (data/datasets/<id>/) — same caption
-    text as the ZIP export (trigger prepended), for tools that read the folder
-    directly instead of downloading the ZIP. Overwrites existing .txt files
-    (it's a resync after re-captioning/edits); kept images without a caption are
-    counted, not written — they'd only get the bare trigger, better captioned
-    first. Returns {'ok', 'written', 'skipped_uncaptioned'}."""
+    """Atomically materialize a kept-only direct-training folder.
+
+    Images and kohya/ai-toolkit-style `<image>.txt` sidecars are copied into a
+    dedicated sibling projection, so rejected/pending files in the application's
+    source corpus can never be consumed by an external trainer. A completed sync
+    replaces the prior projection as one directory transition; a failed sync
+    leaves the previous projection intact.
+
+    Kept images without a caption receive the same bare-trigger (or empty style)
+    sidecar as ZIP export.
+    Returns {'ok', 'written', 'skipped_uncaptioned'}."""
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
     kept = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
             .order_by(FaceDatasetImage.id.asc()).all())
+    projection = Path(_training_projection_dir(dataset_id))
+    projection.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(
+        prefix=f'.{projection.name}.staging-', dir=projection.parent))
+    previous = projection.with_name(f'.{projection.name}.previous-{uuid.uuid4().hex}')
     written = skipped_uncaptioned = 0
-    for img in kept:
-        if not img.filename or not os.path.exists(_img_path(img)):
-            continue                       # nothing on disk to sit next to
-        if not (img.caption or '').strip():
-            skipped_uncaptioned += 1
-            continue
-        stem = os.path.splitext(img.filename)[0]
-        with open(os.path.join(_dataset_dir(dataset_id), f'{stem}.txt'), 'w',
-                  encoding='utf-8') as fh:
-            fh.write(_export_caption(ds, img.caption))
-        written += 1
+    try:
+        for img in kept:
+            if not img.filename or not os.path.exists(_img_path(img)):
+                continue
+            if not (img.caption or '').strip():
+                skipped_uncaptioned += 1
+            destination = staging / img.filename
+            shutil.copy2(_img_path(img), destination)
+            _atomic_write_bytes(
+                staging / f'{Path(img.filename).stem}.txt',
+                _export_caption(ds, img.caption).encode('utf-8'))
+            written += 1
+        if projection.exists():
+            os.replace(projection, previous)
+        try:
+            os.replace(staging, projection)
+        except Exception:
+            if previous.exists():
+                os.replace(previous, projection)
+            raise
+        shutil.rmtree(previous, ignore_errors=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return {'ok': True, 'written': written, 'skipped_uncaptioned': skipped_uncaptioned}
+
+
+def _training_projection_dir(dataset_id) -> str:
+    return str(Path(_dataset_dir(dataset_id)).parent / f'{int(dataset_id)}-training')

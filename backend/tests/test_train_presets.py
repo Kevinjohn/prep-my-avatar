@@ -4,6 +4,8 @@ version applies with unknown keys ignored and invalid values reported, never
 a hard failure.
 """
 
+import pytest
+
 
 def _create_ds(client, name='Preset', trigger='pres', train_type='krea'):
     return client.post('/api/dataset/create',
@@ -71,6 +73,34 @@ def test_apply_replaces_previous_settings(client, app):
     with app.app_context():
         from app.services import lora_training as lt
         assert lt.snapshot_train_settings('local', ds_id) == {'rank': 16}
+
+
+def test_apply_rolls_back_complete_replacement_on_abrupt_interruption(
+        client, app, monkeypatch):
+    ds_id = _create_ds(client)
+    with app.app_context():
+        from app.services import lora_training as lt
+        from app.services import face_dataset_service as fds
+        lt.update_train_settings(
+            'local', ds_id, {'rank': 64, 'dropout': 0.3})
+        original = lt.update_train_settings
+        calls = 0
+
+        def interrupt_on_second_key(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise SystemExit('simulated process interruption')
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(lt, 'update_train_settings', interrupt_on_second_key)
+        with pytest.raises(SystemExit, match='simulated process interruption'):
+            lt.apply_train_settings_dict(
+                'local', ds_id, {'rank': 16, 'resolution': '768'})
+
+        fds.db.session.expire_all()
+        assert lt.snapshot_train_settings('local', ds_id) == {
+            'rank': 64, 'dropout': 0.3}
 
 
 def test_builtin_presets_listed_first_and_undeletable(client):

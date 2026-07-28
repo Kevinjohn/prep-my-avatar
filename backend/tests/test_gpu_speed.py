@@ -31,6 +31,11 @@ def test_matching_ignores_spacing():
     assert gs.speed_factor('RTX 6000 Ada') == 1.9
 
 
+def test_numeric_model_prefix_is_not_misclassified():
+    assert gs.speed_factor('RTX A1000 Laptop GPU') == 1.0
+    assert gs.speed_factor('NVIDIA A100 PCIe') == 2.1
+
+
 def test_blackwell_pro_cards_are_tabulated():
     """'RTX PRO 5000/6000' rows showed 3090-class times in the launch dialog
     (fallback 1.0) with inflated total costs — they must be tabulated."""

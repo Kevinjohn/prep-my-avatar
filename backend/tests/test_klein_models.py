@@ -278,6 +278,31 @@ def test_extra_refs_chain_native_reference_latents(app, tmp_path, monkeypatch):
         assert captured['workflow_data']['77']['inputs']['positive'] == ['92', 0]
 
 
+def test_enqueue_failure_removes_all_klein_staging_files(app, tmp_path, monkeypatch):
+    from app import config as cfg
+    from app.job_queue import queue_manager
+    from app.services import klein_edit_helper as keh
+
+    with app.app_context():
+        _comfy(tmp_path, cfg, lora=True)
+        source = tmp_path / 'source.png'
+        extra = tmp_path / 'extra.png'
+        source.write_bytes(_png())
+        extra.write_bytes(_png((10, 20, 30)))
+        monkeypatch.setattr(
+            queue_manager, 'add_job',
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError('queue unavailable')))
+
+        with pytest.raises(RuntimeError, match='queue unavailable'):
+            keh.enqueue_klein_edit(
+                user_id='local', source_filename='source.png', edit_prompt='p',
+                source_path=str(source), extra_ref_paths=[str(extra)])
+
+        input_dir = tmp_path / 'comfyui' / 'input'
+        assert not list(input_dir.glob('edit_source_*'))
+        assert not list(input_dir.glob('edit_ref*'))
+
+
 def test_klein_fanout_passes_dataset_extra_refs(app, tmp_path, monkeypatch):
     """The fan-out forwards the dataset's extra refs (same files as the Nano
     Banana multi-ref path) into the Klein workflow."""

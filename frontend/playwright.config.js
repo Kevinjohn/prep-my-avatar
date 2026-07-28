@@ -18,7 +18,8 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: 'chromium',
-    channel: process.env.CI ? undefined : 'chrome',
+    // Use the browser installed with Playwright everywhere. Branded Chrome is
+    // deliberately not a local prerequisite for the documented E2E command.
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },

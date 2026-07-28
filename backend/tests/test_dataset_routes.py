@@ -2,6 +2,7 @@ import io
 import zipfile
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 
@@ -74,6 +75,45 @@ def test_remote_generation_requires_explicit_privacy_consent(client):
     assert response.get_json()['code'] == 'remote_generation_consent_required'
 
 
+def test_unknown_generator_is_rejected_before_dispatch(client, monkeypatch):
+    from app.services import face_dataset_service as svc
+
+    called = False
+
+    def generate(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(svc, 'generate_variations', generate)
+    response = client.post('/api/dataset/999/generate', json={
+        'generator': 'kleim', 'variations': [{'label': 'x', 'prompt': 'x'}],
+    })
+    assert response.status_code == 400
+    assert called is False
+
+
+def test_json_boolean_fields_reject_strings(client, monkeypatch):
+    from app.services import face_dataset_service as svc
+
+    dataset_id = _create(client).get_json()['id']
+    monkeypatch.setattr(svc, 'caption_images', lambda *args, **kwargs: 0)
+    response = client.post(
+        f'/api/dataset/{dataset_id}/caption', json={'force': 'false'})
+    assert response.status_code == 400
+    assert 'boolean' in response.get_json()['error']
+
+
+@pytest.mark.parametrize('value', ['false', 0, 1, [], {}])
+def test_json_boolean_parser_rejects_non_booleans(value):
+    from app.routes.datasets import _json_bool
+
+    with pytest.raises(ValueError, match='boolean'):
+        _json_bool({'field': value}, 'field')
+    assert _json_bool({'field': False}, 'field', True) is False
+    assert _json_bool({}, 'field', True) is True
+
+
 def test_remote_regeneration_requires_explicit_privacy_consent(client, app):
     client.put('/api/settings', json={
         'config': {
@@ -99,6 +139,36 @@ def test_remote_regeneration_requires_explicit_privacy_consent(client, app):
 
     assert response.status_code == 403
     assert response.get_json()['code'] == 'remote_generation_consent_required'
+
+
+def test_omitted_regeneration_engine_uses_stored_api_origin(
+        client, app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.services import klein_edit_helper
+
+    client.put('/api/settings', json={
+        'config': {
+            'engines': {'enabled': ['klein', 'nanobanana']},
+            'privacy': {'allow_remote_generation': True},
+        },
+    })
+    created = _create(client, 'API row', 'apirow').get_json()
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        row = FaceDatasetImage(
+            dataset_id=created['id'], source='generated', status='keep',
+            klein_model='nanobanana', variation_label='portrait')
+        db.session.add(row)
+        db.session.commit()
+        image_id = row.id
+    monkeypatch.setattr(klein_edit_helper, 'klein_missing_nodes', lambda: ['missing'])
+    monkeypatch.setattr(svc, 'regenerate_image', lambda *args, **kwargs: 'api-job')
+
+    response = client.post(f'/api/dataset/image/{image_id}/regenerate', json={})
+
+    assert response.status_code == 200
+    assert response.get_json()['job_id'] == 'api-job'
 
 
 def test_images_endpoint_is_cursor_paginated(client, app):
@@ -145,6 +215,7 @@ def test_dataset_metadata_can_omit_images_and_keeps_global_summary(client, app):
         'pending_generation': 1, 'awaiting_triage': 0,
         'unused': 0, 'watermark_detected': 0,
         'selectable': 1, 'small_image_rescue': 0,
+        'variation_label_counts': {},
     }
 
     # The aggregate cache is revision-keyed by DB triggers, so a child update
@@ -156,6 +227,44 @@ def test_dataset_metadata_can_omit_images_and_keeps_global_summary(client, app):
     updated = client.get(f'/api/dataset/{ds_id}?include_images=0').get_json()
     assert updated['image_summary']['pending_generation'] == 0
     assert updated['image_summary']['unused'] == 1
+
+
+def test_dataset_summary_counts_variation_labels_beyond_loaded_page(client, app):
+    ds_id = _create(client).get_json()['id']
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        db.session.add_all([
+            FaceDatasetImage(dataset_id=ds_id, source='generated', status='keep',
+                             filename=f'kept-{index}.webp', variation_label='Close-up')
+            for index in range(105)
+        ] + [
+            FaceDatasetImage(dataset_id=ds_id, source='generated', status='failed',
+                             variation_label='Close-up'),
+        ])
+        db.session.commit()
+
+    body = client.get(f'/api/dataset/{ds_id}?include_images=0').get_json()
+    assert body['images'] == []
+    assert body['image_summary']['variation_label_counts'] == {'Close-up': 105}
+
+def test_dataset_metadata_defaults_to_bounded_image_projection(client, app):
+    ds_id = _create(client).get_json()['id']
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        db.session.add_all([
+            FaceDatasetImage(dataset_id=ds_id, source='import', status='pending')
+            for _ in range(3)
+        ])
+        db.session.commit()
+
+    body = client.get(f'/api/dataset/{ds_id}').get_json()
+
+    assert body['images'] == []
+    assert body['image_summary']['total'] == 3
+    expanded = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()
+    assert len(expanded['images']) == 3
 
 
 def test_dataset_event_stream_exposes_revision_and_activity(client):
@@ -175,7 +284,8 @@ def test_corpus_workbench_routes(client):
     imported = client.post(f'/api/dataset/{ds_id}/import', data=files,
                            content_type='multipart/form-data').get_json()
     assert imported['imported'] == 1
-    image_id = client.get(f'/api/dataset/{ds_id}').get_json()['images'][0]['id']
+    image_id = client.get(
+        f'/api/dataset/{ds_id}?include_images=1').get_json()['images'][0]['id']
 
     assert client.post(f'/api/dataset/image/{image_id}/anchor',
                        json={'decision': 'pinned'}).status_code == 200
@@ -194,7 +304,7 @@ def test_corpus_workbench_routes(client):
     }).status_code == 200
     analyzed = client.post(f'/api/dataset/{ds_id}/corpus/analyze', json={})
     assert analyzed.status_code == 200 and analyzed.get_json()['analyzed'] == 1
-    payload = client.get(f'/api/dataset/{ds_id}').get_json()
+    payload = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()
     assert payload['anchor_plan']['pinned'] == 1
     assert payload['images'][0]['coverage']['lighting'] == 'studio'
     assert payload['images'][0]['coverage_provenance']['source'] == 'manual'
@@ -251,7 +361,7 @@ def test_images_batch_route_validates_and_applies(client, app):
     ok = client.post(f'/api/dataset/{ds_id}/images/batch',
                      json={'ids': [img_id], 'action': 'keep'})
     assert ok.status_code == 200 and ok.get_json() == {'ok': True, 'affected': 1}
-    payload = client.get(f'/api/dataset/{ds_id}').get_json()
+    payload = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()
     assert payload['images'][0]['status'] == 'keep'
 
 
@@ -276,6 +386,38 @@ def test_import_route_crop_0_skips_gpu_window(client, monkeypatch):
                        content_type='multipart/form-data')
     assert resp.status_code == 200
     assert captured['crop'] is False
+
+
+def test_import_route_generic_value_error_is_safe_legacy_400(client, monkeypatch):
+    import app.routes.datasets as dr
+    ds_id = _create(client).get_json()['id']
+
+    def fail_import(*_args, **_kwargs):
+        raise ValueError('invalid import')
+
+    monkeypatch.setattr(dr.svc, 'import_images', fail_import)
+    response = client.post(
+        f'/api/dataset/{ds_id}/import',
+        data={'files': (io.BytesIO(_png_bytes()), 'a.png'), 'crop': '0'},
+        content_type='multipart/form-data')
+
+    assert response.status_code == 400
+    assert response.is_json
+    assert response.get_json()['error'] == 'invalid request'
+    assert 'invalid import' not in response.get_data(as_text=True)
+
+
+def test_add_extra_reference_before_primary_is_actionable_400(client):
+    dataset_id = _create(client).get_json()['id']
+
+    response = client.post(
+        f'/api/dataset/{dataset_id}/ref/extra',
+        data={'file': (io.BytesIO(_png_bytes()), 'extra.png')},
+        content_type='multipart/form-data')
+
+    assert response.status_code == 400
+    assert response.get_json()['error'] == 'set the primary reference first'
+    assert response.get_json()['code'] == 'validation_error'
 
 
 def test_import_route_reports_duplicates(client):
@@ -320,15 +462,12 @@ def test_captions_replace_route(client, app):
     ok = client.post(f'/api/dataset/{ds_id}/captions/replace',
                      json={'find': 'red', 'replace': 'blue'})
     assert ok.status_code == 200 and ok.get_json() == {'ok': True, 'changed': 1}
-    payload = client.get(f'/api/dataset/{ds_id}').get_json()
+    payload = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()
     assert payload['images'][0]['caption'] == 'a blue dress'
 
 
 def test_captions_write_files_route(client, app):
-    """💾 Write .txt files: kohya-style same-stem sidecars next to the KEPT
-    captioned images only, trigger prepended like the export ZIP. Uncaptioned
-    kept images are counted as skipped (not written), rejects are ignored,
-    and a re-call after a caption edit overwrites the file (resync)."""
+    """The direct-training projection contains only kept images and captions."""
     import os
     ds_id = _create(client, 'Sidecar', 'sidetrig').get_json()['id']
     with app.app_context():
@@ -337,6 +476,7 @@ def test_captions_write_files_route(client, app):
         d = svc._dataset_dir(ds_id)
         for name in ('a.webp', 'b.webp', 'c.webp'):
             Path(d, name).write_bytes(_png_bytes())
+        Path(d, 'c.txt').write_text('sidetrig, stale rejected caption')
         rows = [FaceDatasetImage(dataset_id=ds_id, filename='a.webp', status='keep',
                                  caption='a red dress'),
                 FaceDatasetImage(dataset_id=ds_id, filename='b.webp', status='keep',
@@ -349,21 +489,25 @@ def test_captions_write_files_route(client, app):
     assert client.post('/api/dataset/999999/captions/write-files').status_code == 404
     resp = client.post(f'/api/dataset/{ds_id}/captions/write-files')
     assert resp.status_code == 200
-    assert resp.get_json() == {'ok': True, 'written': 1, 'skipped_uncaptioned': 1}
+    assert resp.get_json() == {'ok': True, 'written': 2, 'skipped_uncaptioned': 1}
     with app.app_context():
         from app.services import face_dataset_service as svc
-        d = svc._dataset_dir(ds_id)
+        d = svc._training_projection_dir(ds_id)
         with open(os.path.join(d, 'a.txt'), encoding='utf-8') as fh:
             assert fh.read() == 'sidetrig, a red dress'
-        assert not os.path.exists(os.path.join(d, 'b.txt'))   # uncaptioned -> skipped
-        assert not os.path.exists(os.path.join(d, 'c.txt'))   # reject -> ignored
+        with open(os.path.join(d, 'b.txt'), encoding='utf-8') as fh:
+            assert fh.read() == 'sidetrig'
+        assert os.path.exists(os.path.join(d, 'a.webp'))
+        assert os.path.exists(os.path.join(d, 'b.webp'))
+        assert not os.path.exists(os.path.join(d, 'c.webp'))
+        assert not os.path.exists(os.path.join(d, 'c.txt'))
     # Resync: edit the caption, call again -> same envelope, file overwritten.
     client.post(f'/api/dataset/image/{captioned_id}/caption', json={'caption': 'a blue dress'})
     resp2 = client.post(f'/api/dataset/{ds_id}/captions/write-files')
-    assert resp2.get_json() == {'ok': True, 'written': 1, 'skipped_uncaptioned': 1}
+    assert resp2.get_json() == {'ok': True, 'written': 2, 'skipped_uncaptioned': 1}
     with app.app_context():
         from app.services import face_dataset_service as svc
-        with open(os.path.join(svc._dataset_dir(ds_id), 'a.txt'), encoding='utf-8') as fh:
+        with open(os.path.join(svc._training_projection_dir(ds_id), 'a.txt'), encoding='utf-8') as fh:
             assert fh.read() == 'sidetrig, a blue dress'
 
 
@@ -398,7 +542,7 @@ def test_export_zip_content_type(client):
     client.post(f'/api/dataset/{ds_id}/ref', data=data, content_type='multipart/form-data')
     files = {'files': (io.BytesIO(_png_bytes((0, 255, 0))), 'img1.png')}
     client.post(f'/api/dataset/{ds_id}/import', data=files, content_type='multipart/form-data')
-    imgs = client.get(f'/api/dataset/{ds_id}').get_json()['images']
+    imgs = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()['images']
     assert imgs, 'import should have produced at least one image row'
     assert imgs[0]['status'] == 'pending'
     accepted = client.post(
@@ -447,7 +591,7 @@ def test_generate_chatgpt_no_key_accepts_and_creates_pending_rows(client, monkey
     body = resp.get_json()
     assert body['ok'] is True and body['created'] == 1
     assert calls  # background batch was dispatched (never actually run)
-    payload = client.get(f'/api/dataset/{ds_id}').get_json()
+    payload = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()
     assert len(payload['images']) == 1
 
 

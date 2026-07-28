@@ -158,9 +158,8 @@ class SexcomSource(Source):
         dest_dir = os.path.dirname(dest_base)
         filename = os.path.basename(dest_base) + ext
         try:
-            os.makedirs(dest_dir, exist_ok=True)
-            with open(os.path.join(dest_dir, filename), 'wb') as f:
-                f.write(data)
+            from .base import atomic_write_bytes
+            atomic_write_bytes(os.path.join(dest_dir, filename), data)
         except OSError as e:
             return False, None, f"Sex.com : erreur d'écriture ({e})."
         return True, filename, None

@@ -96,6 +96,14 @@ def model_path() -> Path:
     path = _model_cache_path()
     if os.environ.get('LAMA_MODEL'):
         return path
+    # A worker may be killed by its parent timeout before its finally block can
+    # unlink the unique temporary download. Reclaim those abandoned files on
+    # the next invocation so retries cannot grow the cache without bound.
+    for partial in path.parent.glob('big-lama-*.part'):
+        try:
+            partial.unlink()
+        except OSError:
+            pass
     if not _verified(path):
         try:
             path.unlink()

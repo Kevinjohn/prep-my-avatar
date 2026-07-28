@@ -12,12 +12,20 @@ never goes dark.
 from flask import Blueprint, jsonify, request
 
 from ..config import LOCAL_USER
+from ..domain_errors import DomainValidationError
 from ..services import lora_test_studio as lts
 from ..utils.comfyui import get_zimage_models
 from ._common import (_map_error, _require_comfyui, _studio_arch_mismatch_response,
                       _studio_missing_response)
 
 bp = Blueprint('studio', __name__, url_prefix='/api/studio')
+
+
+def _json_object():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise DomainValidationError('JSON body must be an object')
+    return data
 
 
 @bp.get('/base-models')
@@ -55,9 +63,20 @@ def studio_recent_prompts():
 @bp.post('/recent-prompts/delete')
 def studio_recent_prompts_delete():
     """Supprime un prompt récent (+ cellules/images) sur TOUS les datasets."""
-    d = request.get_json(silent=True) or {}
-    return jsonify({'ok': True,
-                    'deleted': lts.delete_prompt_everywhere(LOCAL_USER, d.get('prompt'))})
+    try:
+        d = _json_object()
+        prompt = d.get('prompt')
+        if not isinstance(prompt, str):
+            raise DomainValidationError('prompt must be a string')
+        return jsonify({'ok': True,
+                        'deleted': lts.delete_prompt_everywhere(LOCAL_USER, prompt)})
+    except lts.StudioPartialPromptDelete as exc:
+        return jsonify({'ok': False, 'partial': True, 'error': exc.reason,
+                        'deleted': exc.deleted,
+                        'completed_dataset_ids': exc.completed_dataset_ids,
+                        'failed_dataset_id': exc.failed_dataset_id}), 503
+    except ValueError as exc:
+        return _map_error(exc)
 
 
 @bp.post('/run')
@@ -65,10 +84,14 @@ def studio_run():
     gate = _require_comfyui()
     if gate:
         return gate
-    d = request.get_json(silent=True) or {}
     try:
+        d = _json_object()
+        selections = d.get('selections') or []
+        if not isinstance(selections, list) or any(
+                not isinstance(selection, dict) for selection in selections):
+            raise DomainValidationError('selections must be an array of objects')
         res = lts.create_comparison_run(
-            LOCAL_USER, d.get('selections') or [], d.get('strengths') or [],
+            LOCAL_USER, selections, d.get('strengths') or [],
             seed=d.get('seed'), prompt=d.get('prompt'), z_model=d.get('z_model'),
             aspects=d.get('aspects'), cfgs=d.get('cfgs'), steps_list=d.get('steps'),
             steps2_list=d.get('steps2'), count=d.get('count'),
@@ -82,11 +105,16 @@ def studio_run():
             resolution_tier=d.get('resolution_tier'), init_image=d.get('init_image'),
             denoise=d.get('denoise'))
     except Exception as e:
-        from ..services.lora_test_studio import StudioArchMismatch, StudioAssetsMissing
+        from ..services.lora_test_studio import (StudioArchMismatch,
+                                                 StudioAssetsMissing,
+                                                 StudioPartialLaunch)
         if isinstance(e, StudioArchMismatch):   # wrong-arch checkpoint → actionable 409
             return _studio_arch_mismatch_response(e)
         if isinstance(e, StudioAssetsMissing):  # models/nodes absent → actionable 409
             return _studio_missing_response(e)
+        if isinstance(e, StudioPartialLaunch):
+            return jsonify({'ok': False, 'error': e.reason, 'partial': True,
+                            'created': e.created, 'run_id': e.run_id}), 503
         return _map_error(e)
     return jsonify({'ok': True, **{k: res[k] for k in ('created', 'seed', 'count', 'run_id')}})
 

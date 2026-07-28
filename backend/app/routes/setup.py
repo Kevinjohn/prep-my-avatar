@@ -33,3 +33,13 @@ def install_status(action):
     if action not in setup_installer.INSTALL_ACTIONS:
         return jsonify({'error': f'unknown action: {action}'}), 404
     return jsonify(setup_installer.status(action))
+
+
+@bp.post('/install/<action>/cancel')
+def cancel_install(action):
+    if action not in setup_installer.INSTALL_ACTIONS:
+        return jsonify({'error': f'unknown action: {action}'}), 404
+    try:
+        return jsonify(setup_installer.cancel(action))
+    except setup_installer.Precondition as exc:
+        return jsonify({'error': str(exc)}), 409

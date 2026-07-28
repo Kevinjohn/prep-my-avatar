@@ -10,6 +10,7 @@
  */
 
 // First matching entry wins — keep the most specific words first.
+/** @type {Array<[RegExp, string]>} */
 const CONTEXT_EMOJI = [
   [/fenetre|fenêtre/i, '🪟'],
   [/studio/i, '💡'],
@@ -33,7 +34,7 @@ const CONTEXT_EMOJI = [
 ];
 
 export function contextEmoji(label = '') {
-  const hit = CONTEXT_EMOJI.find(([re]) => re.test(label));
+  const hit = CONTEXT_EMOJI.find(([re]) => re instanceof RegExp && re.test(label));
   return hit ? hit[1] : null;
 }
 

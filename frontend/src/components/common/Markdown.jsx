@@ -1,3 +1,5 @@
+import { markdownHeadingIds } from '../../utils/markdownHeadings';
+
 /* Renderer markdown minimal, SANS dépendance — couvre exactement ce que
    docs/DATASET_GUIDE.md utilise (h1-h3, paragraphes, listes ± cases à cocher,
    tables, blockquotes, code fences, hr, gras/italique/code/liens inline).
@@ -58,14 +60,19 @@ function parseBlocks(md) {
       blocks.push({ t: 'quote', body: buf.join(' ') });
       continue;
     }
-    if (/^\|/.test(line)) {                             // table
+    if (/^\|/.test(line)) {                             // table, with a real delimiter row
       const rows = [];
       while (i < lines.length && /^\|/.test(lines[i])) rows.push(lines[i++]);
       const cells = (r) => r.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
       const header = cells(rows[0]);
-      // ligne 2 = séparateur |---|--- ; le corps commence après
-      const body = rows.slice(2).map(cells);
-      blocks.push({ t: 'table', header, body });
+      const delimiter = rows[1] ? cells(rows[1]) : [];
+      const valid = delimiter.length === header.length
+        && delimiter.every((cell) => /^:?-{3,}:?$/.test(cell));
+      if (valid) {
+        blocks.push({ t: 'table', header, body: rows.slice(2).map(cells) });
+      } else {
+        rows.forEach((body) => blocks.push({ t: 'p', body }));
+      }
       continue;
     }
     if (/^(\s*)([-*]|\d+\.)\s+/.test(line)) {           // liste (± cases [ ]/[x], ± ordonnée)
@@ -93,17 +100,11 @@ function parseBlocks(md) {
   return blocks;
 }
 
-export const markdownHeadingId = (text) => String(text || '')
-  .replace(/[`*_]/g, '')
-  .toLocaleLowerCase()
-  .replace(/[^a-z0-9]+/g, '-')
-  .replace(/^-|-$/g, '');
-
 function renderBlock(b, idx, guide = false) {
   const key = `b${idx}`;
   switch (b.t) {
           case 'h1': return <h1 key={key} className="m-0 mt-2 text-content font-bold text-2xl">{renderInline(b.body, key)}</h1>;
-          case 'h2': return <h2 key={key} id={guide ? undefined : markdownHeadingId(b.body)} className={`${guide ? 'text-xl' : 'mt-4 border-b border-border pb-1.5 text-lg'} m-0 scroll-mt-24 text-content font-bold`}>{renderInline(b.body, key)}</h2>;
+          case 'h2': return <h2 key={key} id={guide ? undefined : b.headingId} className={`${guide ? 'text-xl' : 'mt-4 border-b border-border pb-1.5 text-lg'} m-0 scroll-mt-24 text-content font-bold`}>{renderInline(b.body, key)}</h2>;
           case 'h3': return <h3 key={key} className="m-0 mt-2 text-content font-semibold text-base">{renderInline(b.body, key)}</h3>;
           case 'hr': return <hr key={key} className="border-border my-2" />;
           case 'quote': return (
@@ -168,7 +169,11 @@ function renderBlock(b, idx, guide = false) {
 }
 
 export default function Markdown({ source, variant = 'default' }) {
+  /** @type {any[]} */
   const blocks = parseBlocks(source || '');
+  const headingBlocks = blocks.filter((block) => block.t === 'h2');
+  const headingIds = markdownHeadingIds(headingBlocks.map((block) => block.body));
+  headingBlocks.forEach((block, index) => { block.headingId = headingIds[index]; });
   if (variant === 'guide') {
     const visible = blocks.filter((block, index) => !(index === 0 && block.t === 'h1'));
     const intro = [];
@@ -189,7 +194,7 @@ export default function Markdown({ source, variant = 'default' }) {
           </div>
         )}
         {sections.map(({ heading, blocks: sectionBlocks, index }) => (
-          <section key={`section-${index}`} id={markdownHeadingId(heading.body)}
+          <section key={heading.headingId} id={heading.headingId}
             className="scroll-mt-24 rounded-xl border border-border bg-surface px-4 py-4 shadow-sm shadow-black/10 sm:px-5 sm:py-5">
             <div className="mb-4 flex items-start gap-3 border-b border-border pb-3">
               <span aria-hidden className="mt-1 h-5 w-1 shrink-0 rounded-full bg-gradient-primary" />

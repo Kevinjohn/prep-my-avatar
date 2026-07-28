@@ -144,11 +144,12 @@ def register_launch(user_id, dataset_id, family, source, base_model='',
         db.session.refresh(rec)
         return rec
     except Exception as exc:
-        logger.exception('training run registration failed (launch continues)')
         db.session.rollback()
         if required:
+            logger.exception('required training run registration failed; aborting launch')
             raise RuntimeError(
                 'could not record the immutable training launch provenance') from exc
+        logger.exception('best-effort training run registration failed; launch continues')
         return None
 
 
@@ -216,11 +217,11 @@ def backfill_legacy_baselines(user_id) -> int:
     return created
 
 
-def start_legacy_backfill(app) -> None:
+def start_legacy_backfill(app):
     """Start one best-effort provenance backfill thread for this app."""
     marker = 'checkpoint_registry_legacy_backfill_started'
     if app.extensions.get(marker):
-        return
+        return app.extensions.get(f'{marker}_thread')
     app.extensions[marker] = True
 
     def _run():
@@ -233,8 +234,20 @@ def start_legacy_backfill(app) -> None:
         except Exception:
             logger.exception('legacy training baseline backfill failed (non-fatal)')
 
-    threading.Thread(
-        target=_run, daemon=True, name='checkpoint-baseline-backfill').start()
+    thread = threading.Thread(
+        target=_run, daemon=True, name='checkpoint-baseline-backfill')
+    app.extensions[f'{marker}_thread'] = thread
+    thread.start()
+    return thread
+
+
+def stop_legacy_backfill(app, timeout=5) -> None:
+    """Join the one-shot backfill and clear its ownership marker."""
+    marker = 'checkpoint_registry_legacy_backfill_started'
+    thread = app.extensions.pop(f'{marker}_thread', None)
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
+    app.extensions.pop(marker, None)
 
 
 def record_for_mtime(dataset_id, family, mtime_ts):

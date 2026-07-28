@@ -38,7 +38,9 @@ export default function BestPresetCard({ preset, onMemorize, fmt }) {
         {preset.cfg != null && (<><span className="text-content-subtle">CFG</span>
           <span className="text-content tabular-nums">{fmt(preset.cfg)}</span></>)}
         {preset.steps != null && (<><span className="text-content-subtle">Steps</span>
-          <span className="text-content tabular-nums">{preset.steps}</span></>)}
+          <span className="text-content tabular-nums">
+            {preset.steps2 != null ? `Pass 1: ${preset.steps} · Pass 2: ${preset.steps2}` : preset.steps}
+          </span></>)}
         {preset.seed != null && (<><span className="text-content-subtle">Seed</span>
           <span className="text-content tabular-nums">{preset.seed}</span></>)}
         {preset.prompt && (<><span className="text-content-subtle">Prompt</span>

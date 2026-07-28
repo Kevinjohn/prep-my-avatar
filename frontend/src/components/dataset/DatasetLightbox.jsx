@@ -102,9 +102,11 @@ export default function DatasetLightbox({
             ◆ {img.generation_anchor_metadata.length} generation anchor(s)
           </span>
         )}
-        <span className="text-white/50 text-[11px]">
-          {full ? '100 % — click image to fit' : 'fitted — click image for 100 %'}
-        </span>
+        <button type="button" onClick={() => setFull((value) => !value)} aria-pressed={full}
+          aria-label={full ? 'Fit image to screen' : 'Zoom image to 100 percent'}
+          className="rounded-lg bg-white/10 px-3 py-1 text-[11px] text-white/80 hover:bg-white/20">
+          {full ? 'Fit to screen' : 'Zoom to 100 %'}
+        </button>
         {onCrop && (
           <button type="button" onClick={() => onCrop(img)}
             title="Open the crop editor for this image (stretchable box, any ratio)"

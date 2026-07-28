@@ -3,7 +3,7 @@
 import io
 import json
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .face_variations import HEAD_BBOX_PROMPT, WATERMARK_BBOX_PROMPT
 
@@ -13,7 +13,8 @@ WATERMARK_BBOX_MARGIN = 0.025
 
 def normalize_to_webp(image_bytes: bytes, size: int = 1024) -> bytes:
     """Downscale to a bounded longest side while preserving aspect ratio."""
-    with Image.open(io.BytesIO(image_bytes)) as opened, opened.convert('RGB') as image:
+    with Image.open(io.BytesIO(image_bytes)) as opened, \
+            ImageOps.exif_transpose(opened).convert('RGB') as image:
         image.thumbnail((size, size), Image.Resampling.LANCZOS)
         output = io.BytesIO()
         image.save(output, 'WEBP', quality=92)
@@ -100,7 +101,8 @@ def face_crop_to_square_webp(
     detector=detect_head_bbox,
 ):
     """Crop around a detected head, or fall back to the largest centered square."""
-    with Image.open(io.BytesIO(image_bytes)) as opened, opened.convert('RGB') as image:
+    with Image.open(io.BytesIO(image_bytes)) as opened, \
+            ImageOps.exif_transpose(opened).convert('RGB') as image:
         width, height = image.size
         normalized = detector(image_bytes) if use_vision else None
         half = 0

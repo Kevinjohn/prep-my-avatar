@@ -54,7 +54,7 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
     monkeypatch.setattr(keh, 'klein_missing_nodes', lambda: [])
     monkeypatch.setattr(
         keh, 'enqueue_klein_edit',
-        lambda **kwargs: (queued.append(kwargs) or 'improve-job-1'))
+        lambda **kwargs: (queued.append(kwargs) or kwargs['job_id']))
     monkeypatch.setattr(
         svc.cfg, 'get',
         lambda key, default=None: configured_prompt
@@ -86,7 +86,8 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
         assert source.status == 'pending'  # suspended until the exclusive review resolves
         with open(svc._img_path(source), 'rb') as fh:
             assert fh.read() == raw
-        assert result == {'candidate_id': candidate.id, 'job_id': 'improve-job-1'}
+        assert result == {'candidate_id': candidate.id, 'job_id': candidate.job_id}
+        assert result['job_id'] == queued[0]['job_id']
         assert candidate.dataset_id == ds.id
         assert candidate.source == 'generated'
         assert candidate.status == 'pending'
@@ -98,7 +99,7 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
         assert candidate.caption == source.caption
         assert candidate.variation_prompt == svc.KLEIN_IMAGE_IMPROVE_PROMPT
         assert candidate.variation_label.startswith('Klein reconstruction')
-        assert candidate.job_id == 'improve-job-1'
+        assert candidate.job_id == queued[0]['job_id']
         assert queued[0]['source_filename'] == 'source-original.png'
         assert queued[0]['source_path'] == os.path.join(
             svc._dataset_dir(ds.id), source.original_filename)
@@ -251,7 +252,7 @@ def test_concurrent_improve_requests_enqueue_only_once(app, monkeypatch):
         calls.append(kwargs)
         entered.set()
         assert release.wait(3), 'test did not release the fake enqueue'
-        return 'one-concurrent-job'
+        return kwargs['job_id']
 
     monkeypatch.setattr(keh, 'klein_missing_assets', lambda: [])
     monkeypatch.setattr(keh, 'klein_missing_nodes', lambda: [])
@@ -276,7 +277,7 @@ def test_concurrent_improve_requests_enqueue_only_once(app, monkeypatch):
         second_result = second.result(timeout=3)
 
     assert first_result == second_result
-    assert first_result['job_id'] == 'one-concurrent-job'
+    assert first_result['job_id'] == calls[0]['job_id']
     assert len(calls) == 1
     with app.app_context():
         assert FaceDatasetImage.query.filter_by(
@@ -564,9 +565,15 @@ def test_reconstruction_qa_scores_exact_input_without_overwriting_source(app, mo
         svc._analyze_completed_improvement(candidate)
         comparison = svc.parse_analysis(candidate.analysis_json)['repair_comparison']
 
+        with open(os.path.join(svc._dataset_dir(ds.id), source.original_filename), 'rb') as fh:
+            exact_source_analysis = svc.analyse_image_bytes(fh.read(), source_name='exact.png')
+
         assert captured['paths'][1] == os.path.join(
             svc._dataset_dir(ds.id), source.original_filename)
         assert comparison['source_filename'] == source.original_filename
+        assert comparison['source_metrics'] == exact_source_analysis['metrics']
+        assert comparison['source_training_usefulness'] == exact_source_analysis['training_usefulness']
+        assert comparison['source_metrics'] != {'sharpness': 50, 'exposure': 50, 'resolution': 50}
         assert comparison['source_identity_score'] == 0.70
         assert comparison['recommendation'] == 'identity_risk'
         assert comparison['phase'] == 'ready'

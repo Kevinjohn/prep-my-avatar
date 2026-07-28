@@ -7,7 +7,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getJson, safePostJson as postJson, putJson } from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
-import { useJobs } from '../context/JobsContext';
 import { serializeWatermarkRegions } from '../utils/watermarkRegions';
 import { summarizeScrapeImport } from '../utils/smallImageRescue';
 
@@ -100,6 +99,16 @@ export function useDataset() {
   const imageRequestSequenceRef = useRef(0);
   const busyRef = useRef(false); // re-entrancy guard for GPU-bound actions (I2)
 
+  // Invalidate every payload-producing request on unmount. React no longer
+  // warns for all post-unmount updates, so this explicit lifecycle boundary is
+  // required and is exercised by the mounted hook interleaving suite.
+  useEffect(() => () => {
+    dataRequestSequenceRef.current += 1;
+    imageRequestSequenceRef.current += 1;
+    currentIdRef.current = null;
+    loadingMoreImagesRef.current = false;
+  }, []);
+
   const fetchList = useCallback(async () => {
     try {
       const result = await getJson('/api/dataset/list');
@@ -186,32 +195,6 @@ export function useDataset() {
     window.addEventListener('lds:home', goHome);
     return () => window.removeEventListener('lds:home', goHome);
   }, [close]);
-
-  // Mirror in-flight dataset generations into the global JobsContext so the
-  // floating jobs dock shows (and can cancel) them like other generations.
-  // Depend on the STABLE upsert/remove callbacks (not the whole context value).
-  const { upsert: gUpsert, remove: gRemove } = useJobs();
-  const syncedRef = useRef(new Set());
-  useEffect(() => {
-    const inflight = (data?.images || []).filter(
-      (i) => i.status === 'pending' && !i.filename && i.job_id);
-    const ids = new Set();
-    for (const img of inflight) {
-      ids.add(img.job_id);
-      gUpsert({
-        jobId: img.job_id, type: 'image', status: 'processing',
-        label: `Dataset · ${img.variation_label || 'face'}`,
-        prompt: img.variation_label || '',
-      });
-    }
-    for (const old of syncedRef.current) if (!ids.has(old)) gRemove(old);
-    syncedRef.current = ids;
-  }, [data, gUpsert, gRemove]);
-  // Retract on unmount (leaving the page) — polling stops, so don't strand them.
-  useEffect(() => () => {
-    for (const id of syncedRef.current) gRemove(id);
-    syncedRef.current = new Set();
-  }, [gRemove]);
 
   // One dataset event stream replaces the former generation, caption, and
   // activity timers. The server emits only when the DB child revision or the
@@ -304,6 +287,7 @@ export function useDataset() {
       const accumulated = [...(data?.images || [])];
       const seen = new Set(accumulated.map((image) => image.id));
       let cursor = imagePage.nextCursor;
+      /** @type {boolean} */
       let hasMore = imagePage.hasMore;
       while (hasMore && cursor != null) {
         const result = await getJson(
@@ -320,9 +304,18 @@ export function useDataset() {
       if (currentIdRef.current !== currentId
           || imageRequestSequenceRef.current !== requestSequence) return;
       loadedTargetRef.current = accumulated.length;
-      setData((previous) => (
-        previous?.id === currentId ? { ...previous, images: accumulated } : previous
-      ));
+      setData((previous) => {
+        if (previous?.id !== currentId) return previous;
+        // Hydration starts from a first-page snapshot, but routine refreshes may
+        // publish newer versions of those rows while later pages are loading.
+        // Preserve the latest in-state row and use hydration only to append IDs
+        // that are not present yet.
+        const latestById = new Map((previous.images || []).map((image) => [image.id, image]));
+        return {
+          ...previous,
+          images: accumulated.map((image) => latestById.get(image.id) || image),
+        };
+      });
       setImagePage({ hasMore, nextCursor: cursor });
     } catch (error) {
       if (currentIdRef.current === currentId
@@ -365,9 +358,10 @@ export function useDataset() {
   // Change the target model family later (from the TrainingPanel selector) so the
   // grouped menu re-sorts. Refreshes the list; silent on failure (non-critical).
   const setDatasetTrainType = useCallback(async (trainType) => {
-    if (!currentId) return;
+    if (!currentId) return { ok: false };
     const d = await postJson(`/api/dataset/${currentId}/train-type`, { train_type: trainType });
     if (d.ok) fetchList();
+    return d;
   }, [currentId, fetchList]);
 
   // Edit name / trigger / (concept) description after creation. Trigger change is
@@ -757,26 +751,29 @@ export function useDataset() {
 
   const crop = useCallback(async (imageId, box) => {
     const d = await postJson(`/api/dataset/image/${imageId}/crop`, box);
-    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
+    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return false; }
     await refresh();
     // Bump only this image's version — the rest of the grid keeps its cache (M1).
     setNonces((m) => ({ ...m, [imageId]: (m[imageId] || 0) + 1 }));
+    return true;
   }, [refresh, toast]);
 
   const cropRef = useCallback(async (box) => {
     const d = await postJson(`/api/dataset/${currentId}/ref/crop`, box);
-    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
+    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return false; }
     await refresh();
     setRefNonce((n) => n + 1);
+    return true;
   }, [currentId, refresh, toast]);
 
   // Reset to the automatic head-crop (re-run on the kept original, no re-upload).
   const recropRefAuto = useCallback(async () => {
     const d = await postJson(`/api/dataset/${currentId}/ref/recrop-auto`, {});
-    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
+    if (!d.ok) { toast.error(d.error || 'Unexpected error'); return false; }
     if (d.warning) toast.warning(d.warning); else toast.success('Reset to auto crop');
     await refresh();
     setRefNonce((n) => n + 1);
+    return true;
   }, [currentId, refresh, toast]);
 
   const deleteImage = useCallback(async (imageId) => {
@@ -796,9 +793,7 @@ export function useDataset() {
     return d.changed;
   }, [currentId, refresh, toast]);
 
-  // Write kohya-style same-stem .txt captions next to the kept images in the
-  // dataset folder (same text as the export ZIP) — for external tools that read
-  // the folder directly instead of downloading the ZIP.
+  // Build a kept-only folder with kohya-style same-stem .txt captions.
   const writeCaptionFiles = useCallback(async () => {
     const d = await postJson(`/api/dataset/${currentId}/captions/write-files`);
     if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
@@ -806,7 +801,7 @@ export function useDataset() {
       + (d.skipped_uncaptioned ? ` · ${d.skipped_uncaptioned} uncaptioned skipped` : ''));
   }, [currentId, toast]);
 
-  // Open the dataset folder (images + .txt sidecars) in the OS file explorer —
+  // Open the kept-only training projection in the OS file explorer —
   // same server-resolved open-folder route as the training panel's 📂 buttons.
   const openDatasetFolder = useCallback(async () => {
     const d = await postJson(`/api/dataset/${currentId}/train/open-folder`, { target: 'dataset' });
@@ -904,7 +899,8 @@ export function useDataset() {
     // Les refus confirmables (mismatch caption↔type, images sans caption) sont
     // gérés par un confirm dans TrainingPanel — pas un toast d'erreur.
     else if (!String(d.error || '').includes('MISMATCH_CAPTION')
-             && !String(d.error || '').includes('UNCAPTIONED')) {
+             && !String(d.error || '').includes('UNCAPTIONED')
+             && !String(d.error || '').includes('CUSTOM_WEIGHTS_UNVERIFIED')) {
       toast.error(d.error || 'Unexpected error');
     }
     return d;
@@ -933,18 +929,21 @@ export function useDataset() {
     return d;
   }, [currentId, toast]);
 
-  const stopTraining = useCallback(async () => {
-    const d = await postJson('/api/dataset/train/stop');
-    if (d.ok) toast.success('ComfyUI re-enabled'); else toast.error(d.error || 'Unexpected error');
+  const stopTraining = useCallback(async ({ clearQueue = false } = {}) => {
+    const d = await postJson('/api/dataset/train/stop', { clear_queue: clearQueue });
+    if (d.ok) toast.success(clearQueue ? 'Training stopped and deferred jobs cancelled' : 'Training stopped; deferred jobs kept');
+    else toast.error(d.error || 'Unexpected error');
+    return d;
   }, [toast]);
 
   // baseModel/variant ciblent le run de la base SÉLECTIONNÉE (undefined → base
   // persistée). Pas de window.open : l'entraînement est headless (CLI), l'ancien
   // lien localhost:8675 était mort (« Ce site est inaccessible »).
-  const continueTraining = useCallback(async (extraSteps = 1000, baseModel, variant) => {
+  const continueTraining = useCallback(async (extraSteps = 1000, baseModel, variant, trainType) => {
     const body = { extra_steps: extraSteps };
     if (baseModel !== undefined && baseModel !== null) body.base_model = baseModel;
     if (variant) body.variant = variant;
+    if (trainType) body.train_type = trainType;
     const d = await postJson(`/api/dataset/${currentId}/train/continue`, body);
     if (d.ok) toast.success(`Resumed from step ${d.resumed_from} → ${d.target_steps} — ComfyUI paused`);
     else toast.error(d.error || 'Unexpected error');
@@ -959,8 +958,7 @@ export function useDataset() {
     if (baseModel !== undefined && baseModel !== null) p.set('base_model', baseModel);
     if (trainType) p.set('train_type', trainType);
     const qs = p.toString() ? `?${p.toString()}` : '';
-    try { return await getJson(`/api/dataset/${currentId}/train/checkpoints${qs}`); }
-    catch { return { checkpoints: [], imported: [] }; }
+    return getJson(`/api/dataset/${currentId}/train/checkpoints${qs}`);
   }, [currentId]);
 
   const importCheckpoint = useCallback(async (filename, baseModel, trainType) => {

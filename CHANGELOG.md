@@ -7,7 +7,26 @@ under **Unreleased** until a release is tagged.
 
 ## Unreleased
 
-## 2026.07.21.1
+No unreleased changes.
+
+## 2026.07.28.1
+
+### Release highlights
+
+- Completed a repository-wide correctness and reliability hardening pass across
+  dataset preparation, local and cloud training, Studio, installers, updates,
+  recovery, packaging, and the responsive frontend.
+- Made destructive filesystem and database operations transactional or
+  recoverable, including contained exports, dataset Trash, immutable training
+  snapshots, durable queue ownership, update rollback, and verified
+  pre-migration database restoration.
+- Added exact restart handoff and recovery contracts, deterministic inference
+  provenance, cloud billing safeguards, typed and redacted API failures, and
+  durable installer cancellation and environment repair.
+- Expanded automated coverage to include historical database upgrades,
+  concurrency and crash windows, every scraper adapter, mounted frontend
+  workflows, accessibility, desktop/mobile E2E behavior, packaging, and release
+  publication fault recovery.
 
 ### Cross-platform reliability and CI
 
@@ -154,14 +173,13 @@ under **Unreleased** until a release is tagged.
 
 ### Verification
 
-- Backend: 1,355 tests passed and 1 skipped on each of Python 3.10, 3.11, and
-  3.12; all 4 independent package tests passed on every interpreter.
-- Cross-platform regressions: all 11 focused tests passed on Python 3.10, 3.11,
-  and 3.12, and the concurrent cloud-admission test passed 20 additional stress
-  runs.
-- Frontend: ESLint, typecheck, 78 contract tests, and production build passed.
-- End to end: all 4 Playwright scenarios passed across desktop and mobile.
-- Static checks: Ruff and `git diff --check` passed.
+- Backend: 1,740 tests passed and 1 skipped.
+- Prototype package: 45 tests and 8 parameterized subtests passed.
+- Frontend: ESLint, full JSX/checkJs type coverage, 201 tests, production build,
+  and gzip bundle budgets passed.
+- End to end: all 10 Playwright scenarios passed across desktop and mobile.
+- Static and repository checks: Ruff, workflow parsing, repository contract
+  validation, release/publication fault tests, and `git diff --check` passed.
 
 ## 2026.07.17.1
 

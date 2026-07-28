@@ -62,7 +62,7 @@ const WATERMARK_BADGE = {
 export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete,
                                           onRegenerate, onView, nonce = 0, faceThresholds,
                                           selected = false, onToggleSelect, tileSize = 'M',
-                                          exclusiveLocked = false }) {
+                                          exclusiveLocked = false, busy = false }) {
   const confirm = useConfirmDialog();
   const [cap, setCap] = useState(img.caption || '');
   const [captionEditorOpen, setCaptionEditorOpen] = useState(false);
@@ -71,6 +71,14 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
   // While the textarea has focus, a poll-driven refresh must never overwrite
   // the draft (C1) — the server value only syncs in when nobody is typing.
   const editingRef = useRef(false);
+  const captionSaveRef = useRef(0);
+  const saveCaption = async (nextCaption) => {
+    const request = ++captionSaveRef.current;
+    setCap(nextCaption);
+    const saved = await onCaption(img.id, nextCaption);
+    if (!saved && request === captionSaveRef.current) setCap(img.caption || '');
+    return saved;
+  };
   // Sync the textarea when the server fills/updates the caption (e.g. after the
   // Qwen3-VL captioning pass) — useState's initial value alone would stay stale.
   useEffect(() => { if (!editingRef.current) setCap(img.caption || ''); }, [img.caption]);
@@ -86,7 +94,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
   // that source and silently make an unrelated variation instead.
   const isImageImproveCandidate = img.derivation_kind === 'klein_image_improve';
   const canRegenerate = !isRescueDerived && !isImageImproveCandidate && img.source === 'generated'
-    && !(img.status === 'pending' && !img.filename);
+    && !busy && !(img.status === 'pending' && !img.filename);
 
   const fb = faceBadge(img, faceThresholds);
   const wb = WATERMARK_BADGE[img.watermark_state];
@@ -263,7 +271,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
             </button>
             {cap && (
               <button type="button"
-                onClick={() => { editingRef.current = false; setCap(''); onCaption(img.id, ''); }}
+                onClick={() => { editingRef.current = false; saveCaption(''); }}
                 title="Delete this image's caption (then “Caption” regenerates it via JoyCaption)"
                 aria-label="Delete this image's caption"
                 className="rounded border border-red-500/40 bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/25">
@@ -275,7 +283,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
             onFocus={() => { editingRef.current = true; }}
             onBlur={() => {
               editingRef.current = false;
-              if (cap !== (img.caption || '')) onCaption(img.id, cap);
+              if (cap !== (img.caption || '')) saveCaption(cap);
             }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.blur(); } }}
             rows={2} placeholder="caption (without the face)…" aria-label="Image caption"
@@ -288,8 +296,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
           onClose={() => setCaptionEditorOpen(false)}
           onSave={(nextCaption) => {
             editingRef.current = false;
-            setCap(nextCaption);
-            if (nextCaption !== (img.caption || '')) onCaption(img.id, nextCaption);
+            if (nextCaption !== (img.caption || '')) saveCaption(nextCaption);
             setCaptionEditorOpen(false);
           }} />
       )}

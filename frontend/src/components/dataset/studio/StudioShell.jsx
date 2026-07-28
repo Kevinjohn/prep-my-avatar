@@ -27,6 +27,7 @@ import LoraPicker from './LoraPicker';
 import LegacyDatasetStudio from './LegacyDatasetStudio';
 import ComparisonStudio from './ComparisonStudio';
 import { getJson } from '../../../api/fetchClient';
+import { MAX_TEST_IMAGES } from './constants';
 
 export default function StudioShell({ preselectDataset = null, datasetId = null }) {
   // `datasetId` legacy est un alias de preselectDataset.
@@ -34,6 +35,10 @@ export default function StudioShell({ preselectDataset = null, datasetId = null 
 
   const [selection, setSelection] = useState([]);
   const onSelectionChange = useCallback((sel) => setSelection(sel), []);
+  const [maxImages, setMaxImages] = useState(MAX_TEST_IMAGES);
+  const onMaxImagesChange = useCallback((value) => {
+    if (Number.isInteger(value) && value > 0) setMaxImages(value);
+  }, []);
 
   // train_type du run = celui du 1er LoRA coché (null si rien coché).
   const runType = selection.length > 0 ? (selection[0].train_type || 'zimage') : null;
@@ -41,14 +46,17 @@ export default function StudioShell({ preselectDataset = null, datasetId = null 
   // Liste des bases correspondant au train_type courant.
   // Fetch à chaque changement de runType via /api/studio/base-models?type=…
   const [baseModels, setBaseModels] = useState([]);
+  const [baseModelsState, setBaseModelsState] = useState('idle');
+  const [baseModelsRetry, setBaseModelsRetry] = useState(0);
   useEffect(() => {
-    if (!runType) { setBaseModels([]); return; }
+    if (!runType) { setBaseModels([]); setBaseModelsState('idle'); return; }
     let cancelled = false;
+    setBaseModelsState('loading');
     getJson(`/api/studio/base-models?type=${encodeURIComponent(runType)}`)
-      .then((d) => { if (!cancelled) setBaseModels(d.models || []); })
-      .catch(() => { if (!cancelled) setBaseModels([]); });
+      .then((d) => { if (!cancelled) { setBaseModels(d.models || []); setBaseModelsState('ready'); } })
+      .catch(() => { if (!cancelled) { setBaseModels([]); setBaseModelsState('error'); } });
     return () => { cancelled = true; };
-  }, [runType]);
+  }, [runType, baseModelsRetry]);
 
   const comparison = selection.length >= 2;
   // Branche 1-LoRA : le dataset = le LoRA coché ; à 0 coché on retombe sur le
@@ -71,11 +79,15 @@ export default function StudioShell({ preselectDataset = null, datasetId = null 
 
       {/* Ancre de la barre de raccourcis du bas (StudioActionBar → 🧬 LoRAs). */}
       <div id="st-loras" className="scroll-mt-16">
-        <LoraPicker preselectDataset={preselect} onSelectionChange={onSelectionChange} />
+        <LoraPicker preselectDataset={preselect} onSelectionChange={onSelectionChange}
+          onMaxImagesChange={onMaxImagesChange} />
       </div>
 
       {comparison ? (
-        <ComparisonStudio selection={selection} baseModels={baseModels} runType={runType} />
+        <ComparisonStudio key={`${runType}:${selection.map((item) => item.dataset_id).sort().join('-')}`}
+          selection={selection} baseModels={baseModels} runType={runType}
+          baseModelsState={baseModelsState} onRetryBaseModels={() => setBaseModelsRetry((n) => n + 1)}
+          maxImages={maxImages} />
       ) : soloDatasetId ? (
         // `key` force un remontage propre quand on change de LoRA solo OU de famille
         // (reset des hooks/état du studio riche — sinon on garderait la grille du précédent).

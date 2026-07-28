@@ -7,11 +7,11 @@ export const INPUT_CLASS =
 
 /* Section heading: a small mono "rack tag" eyebrow above the title keeps every
    settings/guide section labeled the same way without shouting. */
-export function SectionHeader({ eyebrow, title, description }) {
+export function SectionHeader({ eyebrow, title, description, headingRef }) {
   return (
     <div>
       <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle">{eyebrow}</p>
-      <h1 className="mt-1 text-xl font-semibold text-content">{title}</h1>
+      <h1 ref={headingRef} tabIndex={-1} className="mt-1 text-xl font-semibold text-content focus:outline-none">{title}</h1>
       {description && <p className="mt-1 text-sm text-content-muted">{description}</p>}
     </div>
   )
@@ -31,7 +31,7 @@ export function StatusBadge({ ok, okLabel = 'Configured', missingLabel = 'Not se
 export function TestResult({ result }) {
   if (!result) return null
   return (
-    <p className={`text-xs ${result.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+    <p role={result.ok ? 'status' : 'alert'} className={`text-xs ${result.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
       <span aria-hidden="true">{result.ok ? '✓' : '✗'}</span> {result.detail}
     </p>
   )
@@ -75,7 +75,7 @@ export function Card({ title, help, children }) {
   )
 }
 
-export function TextField({ id, label, value, onChange, placeholder, help }) {
+export function TextField({ id, label, value, onChange, placeholder, help = null }) {
   return (
     <div>
       <label htmlFor={id} className="block text-sm font-medium text-content">{label}</label>

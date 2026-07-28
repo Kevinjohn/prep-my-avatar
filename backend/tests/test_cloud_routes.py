@@ -86,10 +86,11 @@ def test_cloud_offers_route_gated_when_unconfigured(client):
 
 
 def test_cloud_train_value_error_maps_400(client, monkeypatch):
+    from app.domain_errors import DomainValidationError
     monkeypatch.setenv('VAST_API_KEY', 'k-test')
     ds = _mkds(client)
     monkeypatch.setattr('app.services.cloud_training.launch_cloud_training',
-                        lambda *a, **k: (_ for _ in ()).throw(ValueError('SDXL nope')))
+                        lambda *a, **k: (_ for _ in ()).throw(DomainValidationError('SDXL nope')))
     r = client.post(f'/api/dataset/{ds}/train/cloud', json={'train_type': 'sdxl'})
     assert r.status_code == 400
 
@@ -157,6 +158,13 @@ def test_cloud_stop_forwards_run_id(client, monkeypatch):
     r = client.post('/api/dataset/train/cloud/stop')
     assert r.status_code == 200 and r.get_json()['ok'] is True
     assert seen['run_id'] is None
+
+
+def test_cloud_stop_rejects_malformed_run_id(client, monkeypatch):
+    monkeypatch.setenv('VAST_API_KEY', 'k-test')
+    r = client.post('/api/dataset/train/cloud/stop', json={'run_id': 'abc'})
+    assert r.status_code == 400
+    assert r.get_json()['error'] == 'run_id must be an integer'
 
 
 def test_cloud_sample_served_from_staging(client, app, monkeypatch, tmp_path):

@@ -326,8 +326,10 @@ def test_continue_bypasses_confirmable_preflight(app, tmp_path, monkeypatch):
         monkeypatch.setattr(lt, 'launch_training', fake_launch)
         lt.continue_training(LOCAL_USER, ds.id, extra_steps=500)
     assert captured['allow_unverified_weights'] is True
-    # vae/te not forwarded → launch_training keeps its _PERSISTED default (the run's triplet).
-    assert 'vae_path' not in captured and 'te_path' not in captured
+    # The sentinel is forwarded explicitly so launch_training keeps the run's
+    # persisted VAE/TE triplet without confusing omission with a reset.
+    assert captured['vae_path'] is lt._PERSISTED
+    assert captured['te_path'] is lt._PERSISTED
 
 
 # --- guardrail (e): provenance snapshot + redacted share ------------------------

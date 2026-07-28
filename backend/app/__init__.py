@@ -1,5 +1,7 @@
 import os
 import re
+import secrets
+import logging
 import sqlite3
 import tempfile
 import uuid
@@ -87,6 +89,18 @@ _MIGRATIONS = (
         ('lora_test_image', 'training_run_record_id', 'INTEGER'),
     )),
     (12, 'enforce dataset coverage policy integrity', ()),
+    (13, 'enforce non-null cloud training lifecycle', ()),
+    (14, 'durable image completion delivery', (
+        ('image_generation_queue', 'completion_pending',
+         'BOOLEAN NOT NULL DEFAULT 0'),
+    )),
+    (15, 'caption generation provenance', (
+        ('face_dataset_image', 'caption_provenance', 'TEXT'),
+    )),
+    (16, 'studio training provenance foreign key parity', ()),
+    (17, 'durable cloud remote submission phase', (
+        ('cloud_training_run', 'remote_submission_phase', 'VARCHAR(16)'),
+    )),
 )
 
 
@@ -152,7 +166,7 @@ _MIGRATION_SQL = {
             "'cancelled', 'interrupted') AND NEW.attempts >= 1")
         + _guard_triggers(
             'cloud_training_run',
-            "NEW.dataset_id IS NOT NULL AND NEW.status IN "
+            "NEW.dataset_id IS NOT NULL AND NEW.status IS NOT NULL AND NEW.status IN "
             "('preparing', 'provisioning', 'uploading', "
             "'training', 'downloading', 'terminating', 'done', 'stopped', "
             "'error', 'error_pod_kept') "
@@ -204,7 +218,88 @@ _MIGRATION_SQL = {
         "SELECT RAISE(ABORT, 'integrity constraint failed: face_dataset coverage policy'); END"
         for operation in ('INSERT', 'UPDATE')
     ),
+    13: (
+        # A historical NULL has no trustworthy lifecycle evidence. Mark it as
+        # an error so reconciliation and billing surfaces cannot silently skip
+        # the row, then replace the v6 guards with the stricter expression.
+        "UPDATE cloud_training_run SET status = 'error', "
+        "error = COALESCE(error, 'Recovered invalid null lifecycle status') "
+        'WHERE status IS NULL',
+        'DROP TRIGGER IF EXISTS trg_cloud_training_run_integrity_insert',
+        'DROP TRIGGER IF EXISTS trg_cloud_training_run_integrity_update',
+        *_guard_triggers(
+            'cloud_training_run',
+            "NEW.dataset_id IS NOT NULL AND NEW.status IS NOT NULL AND NEW.status IN "
+            "('preparing', 'provisioning', 'uploading', 'training', "
+            "'downloading', 'terminating', 'done', 'stopped', 'error', "
+            "'error_pod_kept') AND "
+            '(NEW.price_per_hour IS NULL OR NEW.price_per_hour >= 0)'),
+    ),
+    16: (
+        'CREATE TRIGGER IF NOT EXISTS trg_lora_test_training_run_insert '
+        'BEFORE INSERT ON lora_test_image WHEN '
+        'NEW.training_run_record_id IS NOT NULL AND '
+        '(NEW.training_run_record_id <= 0 OR NOT EXISTS ('
+        'SELECT 1 FROM training_run_record '
+        'WHERE id = NEW.training_run_record_id)) BEGIN '
+        "SELECT RAISE(ABORT, 'invalid training run provenance'); END",
+        'CREATE TRIGGER IF NOT EXISTS trg_lora_test_training_run_update '
+        'BEFORE UPDATE OF training_run_record_id ON lora_test_image WHEN '
+        'NEW.training_run_record_id IS NOT NULL AND '
+        '(NEW.training_run_record_id <= 0 OR NOT EXISTS ('
+        'SELECT 1 FROM training_run_record '
+        'WHERE id = NEW.training_run_record_id)) BEGIN '
+        "SELECT RAISE(ABORT, 'invalid training run provenance'); END",
+        'CREATE TRIGGER IF NOT EXISTS trg_training_run_evidence_set_null '
+        'BEFORE DELETE ON training_run_record BEGIN '
+        'UPDATE lora_test_image SET training_run_record_id = NULL '
+        'WHERE training_run_record_id = OLD.id; END',
+    ),
 }
+
+
+def _configure_file_logging(log_path: Path) -> None:
+    """Install the one process-owned application file handler.
+
+    Repeated factories can point at a new data directory. In that case replace
+    and close the old handler so records and descriptors do not leak into every
+    directory previously used by this interpreter.
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    root = logging.getLogger()
+    absolute_path = os.path.abspath(log_path)
+    owned_handlers = [
+        handler for handler in root.handlers
+        if getattr(handler, '_prep_my_avatar_factory_handler', False)
+    ]
+    current = next((
+        handler for handler in owned_handlers
+        if isinstance(handler, RotatingFileHandler)
+        and getattr(handler, 'baseFilename', '') == absolute_path
+    ), None)
+    for handler in owned_handlers:
+        if handler is not current:
+            root.removeHandler(handler)
+            handler.close()
+    if current is not None:
+        return
+
+    handler = RotatingFileHandler(log_path, maxBytes=2 * 1024 * 1024,
+                                  backupCount=2, encoding='utf-8')
+    handler._prep_my_avatar_factory_handler = True
+    if os.name != 'nt':
+        try:
+            log_path.chmod(0o600)
+        except OSError:
+            pass
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s %(name)s: %(message)s'))
+    handler.setLevel(logging.INFO)
+    root.addHandler(handler)
+    if root.level > logging.INFO or root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
 
 
 def _backup_database_before_migration() -> Path | None:
@@ -221,16 +316,64 @@ def _backup_database_before_migration() -> Path | None:
             os.chmod(backup_dir, 0o700)
         except OSError:
             pass
+    # A hard process termination cannot execute the exception cleanup below.
+    # Such artifacts are deliberately hidden and explicitly suffixed; remove
+    # them before publishing the next trustworthy backup.
+    for stale in backup_dir.glob(f'.{source.stem}-pre-migration-*.db.*.incomplete'):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     target = backup_dir / (
         f'{source.stem}-pre-migration-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")}.db')
-    with sqlite3.connect(source) as src, sqlite3.connect(target) as dst:
-        src.backup(dst)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{target.name}.', suffix='.incomplete', dir=backup_dir)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with sqlite3.connect(source) as src, sqlite3.connect(temporary) as dst:
+            src.backup(dst)
+            result = dst.execute('PRAGMA integrity_check').fetchone()
+            if result != ('ok',):
+                raise RuntimeError('pre-migration backup failed SQLite integrity check')
+        with temporary.open('rb') as handle:
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+        if os.name != 'nt':
+            directory_fd = os.open(backup_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     if os.name != 'nt':
         try:
             os.chmod(target, 0o600)
         except OSError:
             pass
     return target
+
+
+def _prune_migration_backups(database_path, keep=5) -> None:
+    """Keep the newest verified pre-migration snapshots under a count cap.
+
+    Pruning runs only after all migrations succeed. The just-created snapshot
+    is therefore retained, along with four prior rollback points by default.
+    """
+    source = Path(database_path or '')
+    if not source.name or keep < 1:
+        return
+    backup_dir = source.parent / 'backups'
+    backups = sorted(
+        backup_dir.glob(f'{source.stem}-pre-migration-*.db'), reverse=True)
+    for old in backups[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            logging.getLogger(__name__).warning(
+                'could not prune old migration backup %s', old)
 
 
 def _database_has_pending_migrations() -> bool:
@@ -249,6 +392,31 @@ def _database_has_pending_migrations() -> bool:
         # A legacy database has no ledger yet; it needs the full pre-change backup.
         return True
     return not expected.issubset(present)
+
+
+def _reject_unknown_migrations() -> None:
+    """Stop an older binary before it mutates a newer database."""
+    database = db.engine.url.database
+    if not database or database == ':memory:' or not Path(database).is_file():
+        return
+    expected = {version for version, _name, _additions in _MIGRATIONS}
+    try:
+        with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as connection:
+            present = {
+                int(row[0]) for row in connection.execute(
+                    'SELECT version FROM schema_migration').fetchall()
+            }
+    except sqlite3.OperationalError as exc:
+        if 'no such table' in str(exc).lower():
+            return
+        raise
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError('database migration ledger contains an invalid version') from exc
+    unexpected = sorted(present - expected)
+    if unexpected:
+        raise RuntimeError(
+            'database was created by a newer or incompatible application; '
+            f'unknown migration versions: {unexpected}')
 
 
 def _storage_is_writable(directory: Path) -> bool:
@@ -314,6 +482,16 @@ def _apply_schema_migrations(backup_path=None):
 def create_app(config_object=None):
     app = Flask(__name__, static_folder=None)
     data_dir = Path(os.environ.get('LDS_DATA_DIR', str(cfg.REPO_ROOT / 'data')))
+    supplied_lock = (config_object or {}).get('PROCESS_LOCK_HANDLE')
+    if not (config_object or {}).get('TESTING') and supplied_lock is None:
+        # The public factory is a supported production entry point. It must own
+        # the data directory before logging, SQLite migrations, or recovery can
+        # mutate shared state. Multi-worker WSGI therefore fails closed.
+        from .process_lock import acquire
+        supplied_lock = acquire(data_dir)
+    if supplied_lock is not None:
+        # Keep the OS handle alive for the full Flask application lifetime.
+        app.extensions['process_lock'] = supplied_lock
     data_dir.mkdir(parents=True, exist_ok=True)
     if os.name != 'nt':
         try:
@@ -342,26 +520,7 @@ def create_app(config_object=None):
     # reporting a bug — always has something to read, launcher or not (the
     # portable launcher additionally captures raw stdout into data/server.log).
     if not app.config.get('TESTING'):
-        import logging
-        from logging.handlers import RotatingFileHandler
-        root = logging.getLogger()
-        log_path = str(data_dir / 'app.log')
-        if not any(isinstance(h, RotatingFileHandler)
-                   and getattr(h, 'baseFilename', '') == os.path.abspath(log_path)
-                   for h in root.handlers):
-            fh = RotatingFileHandler(log_path, maxBytes=2 * 1024 * 1024,
-                                     backupCount=2, encoding='utf-8')
-            if os.name != 'nt':
-                try:
-                    Path(log_path).chmod(0o600)
-                except OSError:
-                    pass
-            fh.setFormatter(logging.Formatter(
-                '%(asctime)s %(levelname)s %(name)s: %(message)s'))
-            fh.setLevel(logging.INFO)
-            root.addHandler(fh)
-            if root.level > logging.INFO or root.level == logging.NOTSET:
-                root.setLevel(logging.INFO)
+        _configure_file_logging(data_dir / 'app.log')
 
     db.init_app(app)
     csrf.init_app(app)
@@ -376,13 +535,20 @@ def create_app(config_object=None):
             cur.execute('PRAGMA foreign_keys=ON')
             cur.close()
         from . import models  # noqa: F401
+        _reject_unknown_migrations()
         # ``create_all`` itself creates tables introduced by migrations whose
         # SQL body is intentionally empty. Back up an existing, behind schema
         # before that call so "pre-migration" genuinely means pre-mutation.
         migration_backup = (_backup_database_before_migration()
                             if _database_has_pending_migrations() else None)
+        if migration_backup is not None:
+            from .services.updater import record_migration_snapshot
+            record_migration_snapshot(
+                Path(db.engine.url.database), migration_backup, root=cfg.REPO_ROOT)
         db.create_all()
         _apply_schema_migrations(backup_path=migration_backup)
+        if migration_backup is not None:
+            _prune_migration_backups(db.engine.url.database)
         if os.name != 'nt':
             # The database carries local image metadata, provider auth tokens,
             # job paths, and run history. Existing databases and SQLite's WAL
@@ -411,6 +577,8 @@ def create_app(config_object=None):
         # Request-owned daemon threads do not survive a process restart. Close
         # their durable ledger rows and provider-generation placeholders before
         # the SPA can mistake them for work that is still running.
+        from . import setup_installer
+        setup_installer.recover_interrupted_installers()
         from .services.background_jobs import recover_interrupted
         from .services.face_dataset_service import recover_interrupted_api_generations
         recover_interrupted()
@@ -459,6 +627,12 @@ def create_app(config_object=None):
             expected_versions = {version for version, _, _ in _MIGRATIONS}
             missing_versions = sorted(expected_versions - applied_versions)
             unexpected_versions = sorted(applied_versions - expected_versions)
+            # Exercise a real main-database write without persisting data.  A
+            # SELECT alone stays green for query-only/read-only connections.
+            db.session.execute(text(
+                'UPDATE schema_migration SET name = name '
+                'WHERE version = (SELECT MIN(version) FROM schema_migration)'))
+            db.session.rollback()
             components['database'] = {
                 'ok': not missing_versions and not unexpected_versions,
                 'schema_version': max(applied_versions, default=0),
@@ -470,8 +644,32 @@ def create_app(config_object=None):
             db.session.rollback()
             app.logger.exception('readiness database check failed request_id=%s', g.request_id)
         ready = all(component['ok'] for component in components.values())
+        restart_acknowledged = False
+        restart_nonce = os.environ.get('LDS_RESTART_NONCE')
+        if ready and restart_nonce:
+            from .services.updater import acknowledge_restart_readiness
+            restart_acknowledged = acknowledge_restart_readiness(restart_nonce)
         return jsonify({'ok': ready, 'status': 'ready' if ready else 'not_ready',
-                        'components': components}), 200 if ready else 503
+                        'components': components,
+                        'restart_nonce': restart_nonce,
+                        'restart_acknowledged': restart_acknowledged,
+                        }), 200 if ready else 503
+
+    @app.get('/api/health/restart/<nonce>.gif')
+    def health_restart_probe(nonce):
+        """CORS-free image probe for a browser moving to a newly bound port."""
+        expected = os.environ.get('LDS_RESTART_NONCE')
+        if not expected or not secrets.compare_digest(nonce, expected):
+            return '', 404
+        # A valid 1x1 transparent GIF. Image loading is intentionally usable
+        # cross-origin, unlike fetch(), while the unguessable nonce identifies
+        # the exact replacement process rather than any listener on the port.
+        gif = (b'GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!'
+               b'\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00'
+               b'\x00\x02\x02D\x01\x00;')
+        return app.response_class(gif, mimetype='image/gif', headers={
+            'Cache-Control': 'no-store',
+        })
 
     @app.errorhandler(CSRFError)
     def _csrf_error(exc):
@@ -489,12 +687,15 @@ def create_app(config_object=None):
     def _http_error(exc):
         if not request.path.startswith('/api'):
             return exc
-        return jsonify({
+        response = exc.get_response()
+        response.set_data(app.json.dumps({
             'ok': False,
             'error': exc.description or exc.name,
             'error_code': f'http_{exc.code}',
             'request_id': g.get('request_id'),
-        }), exc.code
+        }))
+        response.content_type = 'application/json'
+        return response
 
     @app.errorhandler(Exception)
     def _unhandled_error(exc):
@@ -585,22 +786,62 @@ def create_app(config_object=None):
         _start_workers(app)
     return app
 
+class _WorkerOwner:
+    """Own process workers so partial startup can unwind in reverse order."""
+
+    def __init__(self):
+        self._stoppers = []
+        self._stopped = False
+
+    def own(self, stopper):
+        self._stoppers.append(stopper)
+
+    def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
+        for stopper in reversed(self._stoppers):
+            try:
+                stopper()
+            except Exception:
+                logging.getLogger(__name__).exception('background worker stop failed')
+        self._stoppers.clear()
+
+
 def _start_workers(app):
-    """Boot background machinery. Idempotent; nothing GPU-ish is required."""
-    from .job_queue import queue_manager
-    queue_manager.init_app(app)
-    queue_manager.start()
+    """Atomically boot background machinery and return its explicit owner."""
+    existing = app.extensions.get('background_worker_owner')
+    if existing is not None:
+        return existing
+    owner = _WorkerOwner()
     try:
-        from .services.lora_training import start_training_scheduler
-        start_training_scheduler(app)
-    except ImportError:
-        pass  # phase(<3): training service not lifted yet
+        from .job_queue import queue_manager
+        queue_manager.init_app(app)
+        queue_manager.start()
+        owner.own(queue_manager.stop)
 
-    from .services.checkpoint_registry import start_legacy_backfill
-    start_legacy_backfill(app)
+        from .services import lora_training
+        lora_training.start_training_scheduler(app)
+        owner.own(lora_training.stop_training_scheduler)
 
-    import threading
-    from .services import cloud_training
-    cloud_training.start_reconciler(app)
-    threading.Thread(target=cloud_training.boot_recover, args=(app,),
-                     daemon=True, name='cloud-boot-recover').start()
+        from .services import checkpoint_registry
+        checkpoint_registry.start_legacy_backfill(app)
+        owner.own(lambda: checkpoint_registry.stop_legacy_backfill(app))
+
+        from .services import cloud_training
+        cloud_training.start_reconciler(app)
+        owner.own(cloud_training.stop_reconciler)
+
+        import threading
+        boot_thread = threading.Thread(
+            target=cloud_training.boot_recover, args=(app,), daemon=True,
+            name='cloud-boot-recover')
+        boot_thread.start()
+        owner.own(lambda: boot_thread.join(5))
+    except Exception:
+        owner.stop()
+        raise
+    app.extensions['background_worker_owner'] = owner
+    import atexit
+    atexit.register(owner.stop)
+    return owner

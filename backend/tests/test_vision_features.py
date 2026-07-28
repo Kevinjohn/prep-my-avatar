@@ -1,4 +1,6 @@
 import io
+import threading
+import time
 
 import pytest
 from PIL import Image
@@ -93,6 +95,59 @@ def test_boot_recovery_clears_persisted_vision_lock(app):
         assert recover_stale_vision_window() is True
         assert queue_manager._get_system_state('vision_in_progress') is None
         assert recover_stale_vision_window() is False
+
+
+def test_boot_recovery_preserves_non_vision_gpu_lease(app):
+    from app.gpu_window import recover_stale_vision_window
+    from app.job_queue import GPU_LEASE_KEY, queue_manager
+
+    with app.app_context():
+        token = queue_manager._acquire_gpu_lease('training', 300)
+        assert token
+        assert recover_stale_vision_window() is False
+        lease = queue_manager._get_system_state(GPU_LEASE_KEY)
+        assert lease['token'] == token
+        assert lease['owner'] == 'training'
+        queue_manager._release_gpu_lease(token)
+
+
+def test_gpu_lease_acquisition_is_atomic_between_threads(app, monkeypatch):
+    from app.gpu_window import GpuBusyError, gpu_exclusive_vision_window
+
+    monkeypatch.setattr('app.utils.comfyui.free_comfyui_vram', lambda: True)
+    barrier = threading.Barrier(2)
+    entered = []
+    errors = []
+
+    def contender():
+        with app.app_context():
+            barrier.wait()
+            try:
+                with gpu_exclusive_vision_window():
+                    entered.append(threading.get_ident())
+                    time.sleep(0.1)
+            except GpuBusyError:
+                errors.append(threading.get_ident())
+
+    threads = [threading.Thread(target=contender) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(entered) == 1
+    assert len(errors) == 1
+
+
+def test_gpu_lease_is_renewed_past_initial_ttl(app, monkeypatch):
+    from app.gpu_window import GpuBusyError, gpu_exclusive_vision_window
+
+    monkeypatch.setattr('app.utils.comfyui.free_comfyui_vram', lambda: True)
+    with app.app_context():
+        with gpu_exclusive_vision_window(flag_ttl=0.15):
+            time.sleep(0.3)
+            with pytest.raises(GpuBusyError):
+                with gpu_exclusive_vision_window(flag_ttl=0.15):
+                    pass
 
 
 # --- import_images(crop=True) head-crop ---------------------------------

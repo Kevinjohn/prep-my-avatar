@@ -4,7 +4,7 @@ import { useToast } from '../common/Toast'
 import CopyCommand from './CopyCommand'
 
 const POLL_MS = 1200
-const MAX_POLL_FAILURES = 5
+const MAX_RETRY_MS = 30000
 
 function fmtSize(b) {
   if (b >= 1e9) return `${(b / 1e9).toFixed(2)} GB`
@@ -12,9 +12,9 @@ function fmtSize(b) {
   return `${Math.max(0, Math.round(b / 1e3))} KB`
 }
 
-export default function InstallRunner({ action, buttonLabel, manualCommand, onDone }) {
+export default function InstallRunner({ action, buttonLabel, manualCommand = '', onDone }) {
   const toast = useToast()
-  const [state, setState] = useState('idle')  // idle|running|success|error
+  const [state, setState] = useState('idle')  // idle|running|disconnected|success|error
   const [log, setLog] = useState([])
   const [returncode, setReturncode] = useState(null)
   const [progress, setProgress] = useState(null)  // {done,total,pct} for streaming downloads
@@ -25,6 +25,7 @@ export default function InstallRunner({ action, buttonLabel, manualCommand, onDo
   const timer = useRef(null)
   const mountedRef = useRef(true)
   const fails = useRef(0)
+  const terminalState = useRef(null)
 
   const apply = (s) => {
     setState(s.state); setLog(s.log || []); setReturncode(s.returncode)
@@ -32,29 +33,34 @@ export default function InstallRunner({ action, buttonLabel, manualCommand, onDo
     if (s.manual_command) setManualCmd(s.manual_command)
   }
 
+  const handleStatus = (s) => {
+    apply(s)
+    if (s.state === 'running') {
+      terminalState.current = null
+      timer.current = setTimeout(poll, POLL_MS)
+    } else if (s.state === 'success' && terminalState.current !== 'success') {
+      terminalState.current = 'success'
+      toast.success('Installed.')
+      onDone?.()
+    } else if (s.state === 'error' && terminalState.current !== 'error') {
+      terminalState.current = 'error'
+      toast.error('Install failed — see the log or run the command manually.')
+    }
+  }
+
   const poll = async () => {
     try {
       const s = await apiFetch(`/api/setup/install/${action}/status`)
       if (!mountedRef.current) return
       fails.current = 0
-      apply(s)
-      if (s.state === 'running') {
-        timer.current = setTimeout(poll, POLL_MS)
-      } else if (s.state === 'success') {
-        toast.success('Installed.'); onDone?.()
-      } else if (s.state === 'error') {
-        toast.error('Install failed — see the log or run the command manually.')
-      }
+      handleStatus(s)
     } catch {
       if (!mountedRef.current) return
       fails.current += 1
-      if (fails.current >= MAX_POLL_FAILURES) {
-        // Stop hammering a down backend; tell the user and fall back to manual.
-        setState('error')
-        toast.error('Lost contact with the installer — check the server, then run the command manually.')
-      } else {
-        timer.current = setTimeout(poll, POLL_MS)   // transient poll error — retry
-      }
+      // The backend owns the durable install. Keep reconnecting and never expose
+      // start/manual actions while its authoritative state is unknown.
+      setState('disconnected')
+      timer.current = setTimeout(poll, Math.min(POLL_MS * (2 ** (fails.current - 1)), MAX_RETRY_MS))
     }
   }
 
@@ -66,14 +72,19 @@ export default function InstallRunner({ action, buttonLabel, manualCommand, onDo
       if (!mountedRef.current) return
       if (s.manual_command) setManualCmd(s.manual_command)   // even when idle
       if (s.state === 'idle') return
-      apply(s)
-      if (s.state === 'running') timer.current = setTimeout(poll, POLL_MS)
-    }).catch(() => { /* not attached; leave the button idle */ })
+      handleStatus(s)
+    }).catch(() => {
+      if (!mountedRef.current) return
+      setState('disconnected')
+      fails.current = 1
+      timer.current = setTimeout(poll, POLL_MS)
+    })
     return () => { mountedRef.current = false; clearTimeout(timer.current) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action])
 
   const start = async () => {
+    terminalState.current = null
     setLog([]); setReturncode(null); setProgress(null); setState('running'); fails.current = 0
     try {
       await postJson(`/api/setup/install/${action}`, {})
@@ -85,12 +96,19 @@ export default function InstallRunner({ action, buttonLabel, manualCommand, onDo
   }
 
   const running = state === 'running'
+  const disconnected = state === 'disconnected'
+  const launchDisabled = running || disconnected
   return (
     <div className="space-y-2">
-      <button type="button" onClick={start} disabled={running}
+      <button type="button" onClick={start} disabled={launchDisabled}
         className="rounded-md bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50">
-        {running ? 'Installing…' : buttonLabel}
+        {running ? 'Installing…' : disconnected ? 'Reconnecting to installer…' : buttonLabel}
       </button>
+      {disconnected && (
+        <p role="status" className="text-xs text-amber-400">
+          Connection lost. The install may still be running; reconnecting automatically…
+        </p>
+      )}
       {running && progress && (
         <div className="space-y-1">
           <div className="flex items-center justify-between text-[11px] text-content-muted tabular-nums">
@@ -117,7 +135,7 @@ export default function InstallRunner({ action, buttonLabel, manualCommand, onDo
             : 'Could not start the install. Run this manually instead:'}
         </p>
       )}
-      <CopyCommand command={manualCmd} />
+      {!disconnected && state !== 'success' && <CopyCommand command={manualCmd} />}
     </div>
   )
 }

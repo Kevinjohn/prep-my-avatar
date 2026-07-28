@@ -56,7 +56,7 @@ export default function TrainingFeedbackPanel({ feedback, compact = false }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border text-content-muted">
-                {runs.slice(0, compact ? 4 : 8).map((run) => (
+                {runs.map((run) => (
                   <tr key={run.record_id}>
                     <th scope="row" className="py-1 pr-3 font-semibold text-content">
                       v{run.version} · {run.source}

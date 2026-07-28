@@ -57,3 +57,10 @@ test('orphaned legacy reconstruction remains available for ordinary cleanup', ()
   assert.deepEqual(buildImageImprovementPairs([orphan]), []);
   assert.deepEqual(filterImageImprovementGrid([orphan]), [orphan]);
 });
+
+test('malformed non-array image payloads degrade to an empty grid', () => {
+  for (const value of [undefined, null, {}, 'images']) {
+    assert.deepEqual(buildImageImprovementPairs(value), []);
+    assert.deepEqual(filterImageImprovementGrid(value), []);
+  }
+});

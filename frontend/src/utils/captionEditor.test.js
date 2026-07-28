@@ -13,4 +13,8 @@ test('expanded caption editor exposes a readable character count', () => {
   assert.equal(captionCharacterLabel(''), '0 characters');
   assert.equal(captionCharacterLabel('x'), '1 character');
   assert.equal(captionCharacterLabel('a caption'), '9 characters');
+  assert.equal(captionCharacterLabel('😀'), '1 character');
+  assert.equal(captionCharacterLabel('🇬🇧'), '1 character');
+  assert.equal(captionCharacterLabel('👩‍💻'), '1 character');
+  assert.equal(captionCharacterLabel('e\u0301'), '1 character');
 });

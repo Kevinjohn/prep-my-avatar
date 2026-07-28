@@ -206,6 +206,7 @@ function NewDatasetForm({ onCreate, onRestore, onClose }) {
   // Character only : fidélité visage seul (défaut) ou visage + corps (les marques
   // corporelles sont bannies des captions et la composition cible plus de corps).
   const [fidelity, setFidelity] = useState('face');
+  const [submitting, setSubmitting] = useState(false);
   const concept = kind === 'concept';
   // Style : esthétique globale absorbée par le LoRA — captions de contenu pur,
   // PAS de trigger dans la config d'entraînement (champ facultatif ici, il ne sert
@@ -232,12 +233,13 @@ function NewDatasetForm({ onCreate, onRestore, onClose }) {
       {/* Nature : personnage (défaut) vs concept. Choisir « Concept » adapte tout le
           reste — import brut aspect conservé, captions qui gardent l'identité, pas de
           photo de référence ni de générateur de variations. */}
-      <div className="flex gap-1.5">
+      <div className="flex gap-1.5" role="group" aria-label="Dataset kind">
         {[['character', '🧑 Character', 'A person/face — identity binds to the trigger'],
           ['concept', '💡 Concept', 'A recurring act/effect — the concept binds to the trigger'],
           ['style', '🎨 Style', 'A global aesthetic — no trigger: the LoRA tints every image it is loaded on']].map(
           ([val, label, hint]) => (
             <button key={val} type="button" onClick={() => setKind(val)} title={hint}
+              aria-pressed={kind === val}
               className={`flex-1 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
                 kind === val
                   ? 'border-primary/60 bg-primary/15 text-content'
@@ -288,11 +290,12 @@ function NewDatasetForm({ onCreate, onRestore, onClose }) {
       {!concept && !style && (
         <div className="flex flex-col gap-1 text-[0.6875rem] text-content-muted">
           <span>Fidelity <span className="text-content-subtle normal-case">— what the LoRA must reproduce (changeable later)</span></span>
-          <div className="flex gap-1.5">
+          <div className="flex gap-1.5" role="group" aria-label="Character fidelity">
             {[['face', '🙂 Face', 'Identity = the face. Body shape may vary with the prompt.'],
               ['body', '🧍 Face + body', 'Total fidelity: body shape, tattoos and marks bind to the trigger too. Prefers full-frame imports and more bust/body shots.']].map(
               ([val, label, hint]) => (
                 <button key={val} type="button" onClick={() => setFidelity(val)} title={hint}
+                  aria-pressed={fidelity === val}
                   className={`flex-1 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
                     fidelity === val
                       ? 'border-primary/60 bg-primary/15 text-content'
@@ -322,11 +325,17 @@ function NewDatasetForm({ onCreate, onRestore, onClose }) {
               : 'The trigger word is the unique token you will type in prompts to summon this character.'}
         </p>
         <button type="button"
-          onClick={() => canCreate && onCreate(name.trim(), trigger.trim(), kind, conceptDesc.trim(), trainType,
-            (concept || style) ? undefined : fidelity)}
-          disabled={!canCreate}
+          onClick={async () => {
+            if (!canCreate || submitting) return;
+            setSubmitting(true);
+            try {
+              await onCreate(name.trim(), trigger.trim(), kind, conceptDesc.trim(), trainType,
+                (concept || style) ? undefined : fidelity);
+            } finally { setSubmitting(false); }
+          }}
+          disabled={!canCreate || submitting}
           className="ml-auto px-4 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
-          Create
+          {submitting ? 'Creating…' : 'Create'}
         </button>
         {onRestore && (
           <>

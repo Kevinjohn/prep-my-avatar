@@ -73,6 +73,7 @@ function AutoTriageBar({ images, datasetId, faceThresholds, onBatch, busy }) {
   // by hand since, its status diverges and it drops out (manual decision wins).
   const [owned, setOwned] = useState({});
   const [lastRun, setLastRun] = useState(null); // {kept, rejected, t} of the last Apply
+  const [applyError, setApplyError] = useState('');
   const [showHelp, setShowHelp] = useState(false);
 
   // A different dataset = a fresh session (the component isn't remounted on a
@@ -110,8 +111,15 @@ function AutoTriageBar({ images, datasetId, faceThresholds, onBatch, busy }) {
   const nothingToDo = !keepIds.length && !rejectIds.length;
 
   const apply = async () => {
-    if (keepIds.length) await onBatch(keepIds, 'keep', { silent: true });
-    if (rejectIds.length) await onBatch(rejectIds, 'reject', { silent: true });
+    setApplyError('');
+    const kept = !keepIds.length
+      || await onBatch(keepIds, 'keep', { silent: true }) === keepIds.length;
+    const rejected = !rejectIds.length
+      || await onBatch(rejectIds, 'reject', { silent: true }) === rejectIds.length;
+    if (!kept || !rejected) {
+      setApplyError('Auto-triage could not apply every decision. Refresh and try again.');
+      return;
+    }
     // Re-own the WHOLE replay scope at this threshold (incl. images left unchanged)
     // and forget any previously-owned image no longer in scope (manual override).
     const next = {};
@@ -165,6 +173,7 @@ function AutoTriageBar({ images, datasetId, faceThresholds, onBatch, busy }) {
           ✓ applied: kept {lastRun.kept} · rejected {lastRun.rejected} at ≥ {lastRun.t.toFixed(2)}
         </span>
       )}
+      {applyError && <span role="alert" className="text-xs text-red-300">{applyError}</span>}
     </div>
   );
 }
@@ -179,6 +188,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
     [exclusiveImageIds],
   );
   const [selected, setSelected] = useState(() => new Set());
+  const [batchError, setBatchError] = useState('');
   const [visibleCount, setVisibleCount] = useState(GRID_PAGE_SIZE);
   const moreRef = useRef(null);
   // Prune ids that vanished (deleted / poll refresh) so stale selections can't act.
@@ -249,8 +259,15 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
           confirmLabel: 'Move to Trash',
           tone: 'danger',
         }))) return;
-    await onBatch(ids, action);
-    setSelected(new Set());
+    setBatchError('');
+    const affected = await onBatch(ids, action);
+    if (affected === ids.length) {
+      setSelected(new Set());
+    } else {
+      setBatchError(affected > 0
+        ? `Only ${affected} of ${ids.length} selected images were updated. The selection was kept so you can refresh and retry.`
+        : 'The bulk action failed. Your selection was kept so you can retry.');
+    }
   };
   const batchBtn = 'px-2.5 py-1 rounded-lg text-xs font-semibold disabled:opacity-40';
 
@@ -297,6 +314,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
         )}
         <TileSizeControl size={tileSize} onChange={setTileSize} className="ml-auto" />
       </div>
+      {batchError && <p role="alert" className="m-0 text-xs text-red-300">{batchError}</p>}
       <div className={`grid ${TILE_SIZE_COLS[tileSize]} gap-2`}>
         {renderedImages.map((img) => (
           <DatasetGridItem key={img.id} img={img} datasetId={datasetId} onStatus={onStatus} onCaption={onCaption}
@@ -304,6 +322,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
             selected={selected.has(img.id)}
             onToggleSelect={onBatch && !isSmallImageRescueRow(img) && !isExclusive(img) ? toggle : undefined}
             exclusiveLocked={isExclusive(img)}
+            busy={busy}
             nonce={(nonces && nonces[img.id]) || 0} faceThresholds={faceThresholds} tileSize={tileSize} />
         ))}
       </div>

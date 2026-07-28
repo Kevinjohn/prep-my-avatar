@@ -115,5 +115,8 @@ machine.
 
 Open the **Cloud** tab: every run shows its live phase, and the stall watchdog
 (Settings → Training → stall timeout) rescues logs and kills the pod if no step
-progress happens for too long. Orphaned pods are also destroyed automatically
-at every app start — you never pay for a forgotten GPU.
+progress happens for too long. At startup the app also retries cleanup of cloud
+runs it still knows about, but local cleanup success is not a billing guarantee:
+provider requests can fail and a run created outside this app is not tracked.
+Until the provider console confirms the instance is terminated, assume it may
+still be billable and terminate it there manually if necessary.

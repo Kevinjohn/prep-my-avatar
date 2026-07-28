@@ -10,12 +10,16 @@ import os
 import subprocess
 import sys
 import logging
+import shutil
+import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 GDL_TIMEOUT = 60
+SCAN_TIMEOUT = 60
 DOWNLOAD_TIMEOUT = 300
 DEFAULT_MAX_ITEMS = 120
 DEFAULT_MAX_ALBUMS = 8
@@ -84,7 +88,7 @@ def _media_item(entry, platform):
     }
 
 
-def _run_simulate(url, max_items, cookies, extra_opts, image_range=None):
+def _run_simulate(url, max_items, cookies, extra_opts, image_range=None, timeout=None):
     """`gallery-dl --ignore-config --simulate -j` → (entries|None, error|None). Ne lève jamais.
 
     `image_range` (ex. '101-200') borne la FENÊTRE d'images du listing (image-range) ;
@@ -105,10 +109,11 @@ def _run_simulate(url, max_items, cookies, extra_opts, image_range=None):
         cmd += list(extra_opts)
     cmd += ['--', url]
     try:
+        effective_timeout = GDL_TIMEOUT if timeout is None else max(0.1, min(GDL_TIMEOUT, timeout))
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=GDL_TIMEOUT, shell=False)
+                              timeout=effective_timeout, shell=False)
     except subprocess.TimeoutExpired:
-        return None, f"gallery-dl : délai dépassé ({GDL_TIMEOUT}s)."
+        return None, f"gallery-dl : délai dépassé ({effective_timeout:.1f}s)."
     except Exception as e:
         logger.warning("gallery-dl: échec %s: %s", url, e)
         return None, f"gallery-dl : échec ({e})."
@@ -124,6 +129,10 @@ def _run_simulate(url, max_items, cookies, extra_opts, image_range=None):
         return None, f"gallery-dl : réponse illisible ({e})."
     if not isinstance(data, list):
         return None, "gallery-dl : format inattendu."
+    kind = classify_exit(proc.returncode)
+    if kind:
+        last = ((proc.stderr or '').strip().splitlines() or ['échec extracteur'])[-1]
+        return data, f"gallery-dl : résultats partiels, {kind} ({last[:200]})."
     return data, None
 
 
@@ -152,44 +161,60 @@ def enumerate(url, *, platform='generic', max_items=DEFAULT_MAX_ITEMS,
     (per_album=1 → la cover de chaque album, pas son contenu). Ne touche PAS les
     médias top-level : scanner l'URL d'un album précis rend toujours tout l'album."""
     try:
+        deadline = time.monotonic() + SCAN_TIMEOUT
         entries, err = _run_simulate(url, max_items, cookies, extra_opts,
-                                     image_range=image_range)
-        if err:
+                                     image_range=image_range, timeout=SCAN_TIMEOUT)
+        if err and not entries:
             return None, err
+        top_error = err
         # CORRECTION clé : remonter le sentinel d'erreur type -1 (auth/429/DDoS-Guard)
         # AVANT de conclure « aucun média » (le bug d'origine d'erome).
         sentinel = _error_sentinel(entries)
         if sentinel:
-            return None, sentinel
+            top_error = sentinel
 
         items = []
+        seen_media = set()
         for entry in entries:
             if isinstance(entry, (list, tuple)) and entry and entry[0] == 3:
                 item = _media_item(entry, platform)
-                if item:
+                if item and item['url'] not in seen_media:
+                    seen_media.add(item['url'])
                     items.append(item)
                     if len(items) >= max_items:
-                        return items[:max_items], None
+                        return items[:max_items], top_error
         if items:
-            return items[:max_items], None
+            return items[:max_items], top_error
+        if sentinel:
+            return None, sentinel
 
         # Aucun média direct → récurser les albums (type 6).
         album_urls = []
+        seen_albums = set()
         for entry in entries:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2 and entry[0] == 6:
-                if isinstance(entry[1], str) and entry[1]:
+                if isinstance(entry[1], str) and entry[1] and entry[1] not in seen_albums:
+                    seen_albums.add(entry[1])
                     album_urls.append(entry[1])
                     if len(album_urls) >= max_albums:
                         break
         album_errors = []
         for album_url in album_urls:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                album_errors.append('gallery-dl : délai global du scan dépassé.')
+                break
             # per_album posé → borner la simulation elle-même (--range 1-N) : gallery-dl
             # s'arrête après N images au lieu d'énumérer tout l'album pour rien.
-            sub, sub_err = _run_simulate(album_url, max_items, cookies, extra_opts,
-                                         image_range=f'1-{per_album}' if per_album else None)
-            if sub_err:
+            sub, sub_err = _run_simulate(
+                album_url, max_items, cookies, extra_opts,
+                image_range=f'1-{per_album}' if per_album else None,
+                timeout=remaining)
+            if sub_err and not sub:
                 album_errors.append(sub_err)
                 continue
+            if sub_err:
+                album_errors.append(sub_err)
             if not sub:
                 continue
             sent = _error_sentinel(sub)
@@ -200,15 +225,16 @@ def enumerate(url, *, platform='generic', max_items=DEFAULT_MAX_ITEMS,
             for entry in sub:
                 if isinstance(entry, (list, tuple)) and entry and entry[0] == 3:
                     item = _media_item(entry, platform)
-                    if item:
+                    if item and item['url'] not in seen_media:
+                        seen_media.add(item['url'])
                         items.append(item)
                         taken += 1
                         if len(items) >= max_items:
-                            return items[:max_items], None
+                            return items[:max_items], (album_errors[0] if album_errors else top_error)
                         if per_album and taken >= per_album:
                             break
         if items:
-            return items[:max_items], None
+            return items[:max_items], (album_errors[0] if album_errors else top_error)
         # Tous les albums ont échoué → remonter la 1ère erreur (auth/429) plutôt
         # qu'un faux « aucun média » (cas coomer/kemono derrière DDoS-Guard).
         if album_errors:
@@ -229,49 +255,40 @@ def download(url, dest_dir, filename, *, cookies=None, extra_opts=None):
         return False, None, validation_error or 'gallery-dl : URL réseau refusée.'
     if not _subprocess_url_allowed(url):
         return False, None, 'gallery-dl : hôte non autorisé pour un extracteur externe.'
+    os.makedirs(dest_dir, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix='.gallery-dl-', dir=dest_dir)
     cmd = [sys.executable, '-m', 'gallery_dl', '--ignore-config',
-           '-D', dest_dir, '-o', f'filename={filename}_{{num}}.{{extension}}',
+           '-D', staging, '-o', f'filename={filename}_{{num}}.{{extension}}',
            '--no-part', '--no-mtime']
     if cookies:
         cmd += ['--cookies', cookies]
     if extra_opts:
         cmd += list(extra_opts)
     cmd += ['--', url]
-    os.makedirs(dest_dir, exist_ok=True)
-    before = set(os.listdir(dest_dir))
 
-    def cleanup_new_outputs():
-        for name in set(os.listdir(dest_dir)) - before:
-            path = Path(dest_dir) / name
-            try:
-                if path.is_dir() and not path.is_symlink():
-                    import shutil
-                    shutil.rmtree(path)
-                else:
-                    path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning('gallery-dl cleanup failed for %s', path)
+    def cleanup_outputs():
+        shutil.rmtree(staging, ignore_errors=True)
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=DOWNLOAD_TIMEOUT, shell=False)
     except subprocess.TimeoutExpired:
-        cleanup_new_outputs()
+        cleanup_outputs()
         return False, None, "gallery-dl : téléchargement trop long (timeout)."
     except Exception as e:
-        cleanup_new_outputs()
+        cleanup_outputs()
         logger.warning("gallery-dl download: échec %s: %s", url, e)
         return False, None, f"gallery-dl : échec ({e})."
 
     if proc.returncode:
-        cleanup_new_outputs()
+        cleanup_outputs()
         kind = classify_exit(proc.returncode)
         last = ((proc.stderr or '').strip().splitlines() or [''])[-1]
         return False, None, f"gallery-dl : {kind or 'échec'} ({last[:200]})."
 
     # Chemin produit : 1) parser le stdout (gallery-dl imprime les chemins écrits) ;
     # 2) repli = le fichier le plus récent apparu dans dest_dir.
-    root = Path(dest_dir).resolve()
+    root = Path(staging).resolve()
 
     def safe_output(candidate):
         path = Path(candidate)
@@ -290,11 +307,17 @@ def download(url, dest_dir, filename, *, cookies=None, extra_opts=None):
         line = line.strip()
         produced = safe_output(line) if line else None
         if produced is not None:
-            return True, str(produced), None
-    after = set(os.listdir(dest_dir)) - before
-    produced = [safe_output(Path(dest_dir) / name) for name in after]
+            final = Path(dest_dir).resolve() / produced.name
+            os.replace(produced, final)
+            cleanup_outputs()
+            return True, str(final), None
+    produced = [safe_output(path) for path in Path(staging).iterdir()]
     produced = [path for path in produced if path is not None]
     if produced:
         newest = max(produced, key=lambda path: path.stat().st_mtime)
-        return True, str(newest), None
+        final = Path(dest_dir).resolve() / newest.name
+        os.replace(newest, final)
+        cleanup_outputs()
+        return True, str(final), None
+    cleanup_outputs()
     return False, None, "gallery-dl : aucun fichier produit."

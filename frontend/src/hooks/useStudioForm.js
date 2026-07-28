@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { DEFAULT_STRENGTHS } from '../components/dataset/studio/constants';
+import { DEFAULT_STRENGTHS, STRENGTH_CHOICES } from '../components/dataset/studio/constants';
+import { decodeStudioForm } from '../utils/studioState';
 
 const rollSeed = () => Math.floor(Math.random() * 2 ** 31);
 
@@ -21,7 +22,7 @@ export function useStudioForm(d, datasetId, family = null) {
   const [persistKey] = useState(() => `studioForm_v1_${datasetId || 'x'}_${family || 'default'}`);
   // Lecture unique au montage (lazy) — restaure les derniers paramètres.
   const [initial] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(`studioForm_v1_${datasetId || 'x'}_${family || 'default'}`)) || {}; }
+    try { return decodeStudioForm(JSON.parse(localStorage.getItem(`studioForm_v1_${datasetId || 'x'}_${family || 'default'}`))); }
     catch { return {}; }
   });
 
@@ -49,18 +50,39 @@ export function useStudioForm(d, datasetId, family = null) {
   const checkpoints = d?.checkpoints || [];
   const allFns = checkpoints.map((c) => c.filename);
   // Filtre les checkpoints persistés qui n'existent plus (dataset modifié depuis).
-  const chosenCps = (selCps ?? allFns).filter((fn) => allFns.includes(fn));
+  const chosenCps = (selCps ?? allFns).filter((fn) => typeof fn === 'string' && allFns.includes(fn));
+  const safeStrengths = selSts.filter((value) => STRENGTH_CHOICES.includes(value));
+  const restoredOr = (restored, fallback) => {
+    const valid = restored?.filter((value) => fallback.choices.includes(value));
+    return valid?.length ? valid : fallback.values;
+  };
   const effectivePrompt = promptText ?? (d?.prompt || '');
   // Défaut = 1re entrée de la liste — y compris « Official » (value '' , Krea) pour
   // que la puce par défaut apparaisse pressée ; le backend mappe '' → défaut câblé.
-  const effectiveModels = selModels ?? (d?.z_models?.length ? [d.z_models[0].value] : []);
-  const effectiveAspects = selAspects ?? (d?.default_aspect ? [d.default_aspect] : ['9:16']);
-  const effectiveCfgs = selCfgs ?? (d?.default_cfg != null ? [d.default_cfg] : [1.0]);
-  const effectiveSteps = selSteps ?? (d?.default_steps != null ? [d.default_steps] : [8]);
+  const modelChoices = (d?.z_models || []).map((model) => model.value);
+  const effectiveModels = restoredOr(selModels, {
+    choices: modelChoices, values: d?.z_models?.length ? [d.z_models[0].value] : [],
+  });
+  const aspectChoices = d?.aspects || [];
+  const effectiveAspects = restoredOr(selAspects, {
+    choices: aspectChoices, values: d?.default_aspect ? [d.default_aspect] : ['9:16'],
+  });
+  const cfgChoices = d?.cfg_choices || [];
+  const effectiveCfgs = restoredOr(selCfgs, {
+    choices: cfgChoices, values: d?.default_cfg != null ? [d.default_cfg] : [1.0],
+  });
+  const stepChoices = d?.steps_choices || [];
+  const effectiveSteps = restoredOr(selSteps, {
+    choices: stepChoices, values: d?.default_steps != null ? [d.default_steps] : [8],
+  });
   // Pass 2 (detail daemon) : SDXL uniquement. Z-Image → default_steps2 null → axe vide
   // (×1 dans le compteur, pas envoyé au backend).
-  const effectiveSteps2 = selSteps2 ?? (d?.default_steps2 != null ? [d.default_steps2] : []);
-  const total = chosenCps.length * selSts.length * effectiveAspects.length
+  const step2Choices = d?.steps2_choices || [];
+  const effectiveSteps2 = restoredOr(selSteps2, {
+    choices: step2Choices, values: d?.default_steps2 != null ? [d.default_steps2] : [],
+  });
+  const effectiveStrengths = safeStrengths.length ? safeStrengths : DEFAULT_STRENGTHS;
+  const total = chosenCps.length * effectiveStrengths.length * effectiveAspects.length
     * effectiveCfgs.length * effectiveSteps.length * Math.max(1, effectiveSteps2.length)
     * Math.max(1, effectiveModels.length);
 
@@ -103,7 +125,7 @@ export function useStudioForm(d, datasetId, family = null) {
   };
 
   return {
-    selSts, seed, seedLocked, genCount, promptText, selModels,
+    selSts: effectiveStrengths, seed, seedLocked, genCount, promptText, selModels,
     chosenCps, effectivePrompt, effectiveModels, effectiveAspects, effectiveCfgs, effectiveSteps, effectiveSteps2, total,
     setSelSts, setSeed, setSeedLocked, setGenCount, setPromptText,
     toggleCp, toggleSt, toggleAspect, toggleCfg, toggleStep, toggleStep2, toggleModel, rollSeed, nextSeed,

@@ -3,8 +3,26 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .core import DEFAULT_TARGETS, export_packs, ingest, load_records
+from .core import DEFAULT_TARGETS, export_packs, ingest, load_records, validate_export_target
 from .viewer import serve, write_viewer
+
+
+def concept_token(value: str) -> str:
+    if not value or value != value.strip() or not value.replace("_", "").isalnum() or value[0].isdigit():
+        raise argparse.ArgumentTypeError("token must start with a letter and contain only letters, numbers, and underscores")
+    return value
+
+
+def export_targets(value: str) -> list[str]:
+    targets = [target.strip() for target in value.split(",") if target.strip()]
+    if not targets:
+        raise argparse.ArgumentTypeError("at least one export target is required")
+    try:
+        for target in targets:
+            validate_export_target(target)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return targets
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="ingest, score, crop and build a review run")
     run.add_argument("input", type=Path, help="folder containing source images")
     run.add_argument("--out", type=Path, required=True, help="output run directory")
-    run.add_argument("--token", default="pm_subject", help="unique training concept token")
+    run.add_argument("--token", type=concept_token, default="pm_subject", help="unique training concept token")
     run.add_argument("--annotations", type=Path, help="optional VLM annotation JSON")
     run.add_argument("--vision", choices=("auto", "local"), default="auto", help="vision mode reserved for local provider selection")
 
@@ -27,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = subparsers.add_parser("export", help="export captioned model-training packs")
     export.add_argument("run", type=Path, help="output run directory created by run")
-    export.add_argument("--targets", default=",".join(DEFAULT_TARGETS), help="comma-separated target names")
+    export.add_argument("--targets", type=export_targets, default=list(DEFAULT_TARGETS), help="comma-separated target names")
     export.add_argument("--include-amber", action="store_true", help="include amber images after human review")
 
     status = subparsers.add_parser("status", help="print the current run summary")
@@ -47,11 +65,11 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Coverage report: {args.out / 'reports' / 'coverage-report.md'}")
         return
     if args.command == "review":
+        load_records(args.run)
         serve(args.run, args.port)
         return
     if args.command == "export":
-        targets = [target.strip() for target in args.targets.split(",") if target.strip()]
-        created = export_packs(args.run, targets, args.include_amber)
+        created = export_packs(args.run, args.targets, args.include_amber)
         for path in created:
             print(f"Exported {path}")
         return

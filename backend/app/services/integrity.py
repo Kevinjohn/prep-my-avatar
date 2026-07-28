@@ -14,6 +14,7 @@ from ..models import (BackgroundJob, CloudTrainingRun, CurationEvent,
                       FaceDataset, FaceDatasetImage, ImageGenerationQueue,
                       LoraTestImage, TrainingPreset, TrainingRunRecord)
 from ..utils.time import utcnow
+from . import curation_history, trash
 
 _HASH_RE = re.compile(r'^[0-9a-f]{64}$')
 _IMAGE_STATUSES = {'pending', 'keep', 'reject', 'failed', 'trashed'}
@@ -228,9 +229,30 @@ def run(*, include_orphans=True) -> dict:
             if not isinstance(parsed_targets, dict):
                 add('warning', 'invalid_coverage_targets',
                     'Coverage targets are not a JSON object.', dataset_id=ds.id)
-        if ds.trashed_at and not ds.trash_entry_id:
-            add('error', 'trashed_dataset_without_entry',
-                'Dataset is marked trashed but has no restore entry.', dataset_id=ds.id)
+        if ds.trashed_at:
+            if not ds.trash_entry_id:
+                add('error', 'trashed_dataset_without_entry',
+                    'Dataset is marked trashed but has no restore entry.', dataset_id=ds.id)
+            else:
+                try:
+                    metadata = trash.entry_metadata(ds.trash_entry_id)
+                    backup_name = metadata.get('backup_name')
+                    stored_names = {
+                        item.get('stored_name') for item in metadata.get('files', [])
+                        if isinstance(item, dict)
+                    }
+                    if (metadata.get('kind') != 'dataset_backup'
+                            or metadata.get('dataset_id') != ds.id
+                            or not isinstance(backup_name, str)
+                            or Path(backup_name).name != backup_name
+                            or backup_name not in stored_names):
+                        raise ValueError('entry metadata does not match dataset backup')
+                    with trash.open_entry_file(ds.trash_entry_id, backup_name):
+                        pass
+                except (OSError, TypeError, ValueError):
+                    add('error', 'invalid_trashed_dataset_entry',
+                        'Dataset restore entry is missing or does not match its backup.',
+                        dataset_id=ds.id, trash_entry_id=ds.trash_entry_id)
         if ds.trashed_at:
             continue
         candidates = [('ref_filename', ds.ref_filename),
@@ -281,7 +303,12 @@ def run(*, include_orphans=True) -> dict:
                     filename=filename)
 
         if include_orphans:
-            stems = {Path(name).stem for name in referenced}
+            sidecars = set()
+            referenced_stems = set()
+            for name in referenced:
+                path = Path(name)
+                sidecars.add(path.with_suffix('.txt').as_posix())
+                referenced_stems.add((path.parent.as_posix(), path.stem))
             for child in folder.rglob('*'):
                 if child.is_symlink():
                     add('error', 'dataset_symlink',
@@ -295,13 +322,16 @@ def run(*, include_orphans=True) -> dict:
                     continue
                 # Same-stem caption files are intentionally materialized for local
                 # trainers; they are derived and safe to regenerate.
-                if child.suffix.lower() == '.txt' and child.stem in stems:
+                if child.suffix.lower() == '.txt' and relative in sidecars:
                     continue
-                if child.stem.endswith('.orig') and child.stem[:-5] in stems:
+                relative_path = Path(relative)
+                if (relative_path.stem.endswith('.orig')
+                        and (relative_path.parent.as_posix(),
+                             relative_path.stem[:-5]) in referenced_stems):
                     continue
                 add('warning', 'untracked_dataset_file',
                     'File is not referenced by the dataset database.', dataset_id=ds.id,
-                    filename=child.name)
+                    filename=relative)
 
     for model, label in ((LoraTestImage, 'lora_test_image'),):
         for row in model.query.all():
@@ -316,10 +346,10 @@ def run(*, include_orphans=True) -> dict:
                     row_id=row.id, dataset_id=row.dataset_id)
 
     for row in CurationEvent.query.all():
-        for field in ('before_state', 'after_state'):
-            structured_json(
-                getattr(row, field), dict, f'invalid_curation_{field}',
-                f'Curation {field} is not a JSON object.',
+        if curation_history.decode_snapshot_pair(
+                row.before_state, row.after_state) is None:
+            add('warning', 'invalid_curation_snapshot',
+                'Curation snapshots are not compatible with undo.',
                 table='curation_event', row_id=row.id, dataset_id=row.dataset_id)
 
     for row in ImageGenerationQueue.query.all():

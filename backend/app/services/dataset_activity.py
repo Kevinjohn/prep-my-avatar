@@ -49,16 +49,28 @@ _active: dict = {}
 _counter = itertools.count(1)
 
 
+def _purge_stale(now):
+    """Globally discard stale buckets using the monotonic activity clock."""
+    for dataset_id, bucket in list(_active.items()):
+        for token, entry in list(bucket.items()):
+            if now - entry['_touched'] > _TTL_SECONDS:
+                bucket.pop(token, None)
+        if not bucket:
+            _active.pop(dataset_id, None)
+
+
 def begin(dataset_id, kind, total=0, detail=None, engine=None):
     """Register a new in-progress batch on ``dataset_id`` and return an opaque token
     to pass to ``progress``/``bump``/``end``. ``total`` is the number of items the
     batch will process (0 when not enumerable up front)."""
-    now = time.time()
+    wall_now = time.time()
+    now = time.monotonic()
     with _lock:
+        _purge_stale(now)
         token = f'{dataset_id}:{kind}:{next(_counter)}'
         _active.setdefault(dataset_id, {})[token] = {
             'kind': kind, 'done': 0, 'total': int(total or 0),
-            'started_at': now, '_touched': now,
+            'started_at': wall_now, '_started_order': now, '_touched': now,
         }
         if detail:
             _active[dataset_id][token]['detail'] = str(detail)
@@ -70,8 +82,9 @@ def begin(dataset_id, kind, total=0, detail=None, engine=None):
 def progress(token, done=None, total=None, detail=None):
     """Set the item counter (and optionally the total) for a running batch.
     No-op on an unknown/None token (already ended or purged)."""
-    now = time.time()
+    now = time.monotonic()
     with _lock:
+        _purge_stale(now)
         entry = _entry(token)
         if entry is None:
             return
@@ -87,8 +100,9 @@ def progress(token, done=None, total=None, detail=None):
 def bump(token, n=1):
     """Increment the item counter by ``n`` — convenience for per-image loops.
     No-op on an unknown/None token."""
-    now = time.time()
+    now = time.monotonic()
     with _lock:
+        _purge_stale(now)
         entry = _entry(token)
         if entry is None:
             return
@@ -127,8 +141,10 @@ def sync_pending(dataset_id, kind, pending, engine=None):
     without corrupting it. Idempotent — safe to call on every enqueue and every
     completion. TTL purge (via ``get``) is the final safety net if a completion is
     lost and ``pending`` never reaches 0."""
-    now = time.time()
+    wall_now = time.time()
+    now = time.monotonic()
     with _lock:
+        _purge_stale(now)
         bucket = _active.get(dataset_id) or {}
         tok = next((t for t, e in bucket.items()
                     if e['kind'] == kind and e.get('_synced')), None)
@@ -142,7 +158,8 @@ def sync_pending(dataset_id, kind, pending, engine=None):
             bucket = _active.setdefault(dataset_id, {})
             tok = f'{dataset_id}:{kind}:{next(_counter)}'
             bucket[tok] = {'kind': kind, 'done': 0, 'total': int(pending),
-                           'started_at': now, '_touched': now,
+                           'started_at': wall_now, '_started_order': now,
+                           '_touched': now,
                            '_peak': int(pending), '_synced': True}
         entry = bucket[tok]
         if engine:
@@ -158,18 +175,13 @@ def get(dataset_id):
     ``{kind, done, total, started_at}`` or ``None``. Purges TTL-expired entries
     first, so a leaked entry can never strand a phantom indicator. When several
     batches overlap, the most recently STARTED one is returned (see module note)."""
-    now = time.time()
+    now = time.monotonic()
     with _lock:
+        _purge_stale(now)
         bucket = _active.get(dataset_id)
         if not bucket:
             return None
-        stale = [t for t, e in bucket.items() if now - e['_touched'] > _TTL_SECONDS]
-        for t in stale:
-            bucket.pop(t, None)
-        if not bucket:
-            _active.pop(dataset_id, None)
-            return None
-        entry = max(bucket.values(), key=lambda e: e['started_at'])
+        entry = max(bucket.values(), key=lambda e: e['_started_order'])
         result = {'kind': entry['kind'], 'done': entry['done'],
                   'total': entry['total'], 'started_at': entry['started_at']}
         if entry.get('detail'):

@@ -42,6 +42,28 @@ def test_manual_command_ollama_model(app):
         config.save_config({'ollama': {'vision_model': 'qwen3-vl:8b'}})
         assert setup_installer.manual_command('ollama_model') == 'ollama pull qwen3-vl:8b'
 
+
+def test_ollama_install_uses_connect_and_read_deadlines(app, monkeypatch):
+    from app import setup_installer, config
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def iter_lines():
+            return []
+
+    with app.app_context():
+        config.save_config({'ollama': {'url': 'http://127.0.0.1:11434',
+                                       'vision_model': 'qwen3-vl:8b'}})
+        monkeypatch.setattr(
+            setup_installer.requests, 'post',
+            lambda *args, **kwargs: captured.update(kwargs) or Response())
+        setup_installer._runs['ollama_model'] = setup_installer._new_run()
+        assert setup_installer._run_ollama_model('ollama_model') == 0
+    assert captured['timeout'] == (10, 120)
+
 def test_status_includes_manual_command_while_running():
     from app import setup_installer
     setup_installer._runs['ml_extras'] = {'state': 'running', 'returncode': None, 'log': ['x']}
@@ -84,6 +106,177 @@ def test_start_rejects_second_run():
     setup_installer._runs['ml_extras'] = {'state': 'running', 'returncode': None, 'log': []}
     with pytest.raises(setup_installer.AlreadyRunning):
         setup_installer.start('ml_extras')
+
+
+def test_start_rejects_concurrent_pip_action_for_same_interpreter(monkeypatch):
+    from app import setup_installer
+    monkeypatch.setattr(
+        setup_installer.capabilities, 'python_ml_status',
+        lambda: {'version': '3.12.0', 'ml_supported': True,
+                 'ml_range': '3.11–3.12'})
+    setup_installer._runs['scrape_extras'] = setup_installer._new_run()
+    with pytest.raises(setup_installer.AlreadyRunning, match='scrape_extras'):
+        setup_installer.start('ml_extras')
+
+
+def test_cancel_terminates_owned_installer_child():
+    from app import setup_installer
+
+    class Child:
+        terminated = False
+
+        @staticmethod
+        def poll():
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    child = Child()
+    run = setup_installer._new_run()
+    run['process'] = child
+    setup_installer._runs['ml_extras'] = run
+
+    result = setup_installer.cancel('ml_extras')
+
+    assert child.terminated is True
+    assert run['cancel_requested'] is True
+    assert result['state'] == 'running'
+
+
+def test_cancel_persists_intent_before_process_publication(monkeypatch):
+    from app import setup_installer
+
+    persisted = []
+    spawned = []
+    run = setup_installer._new_run()
+    setup_installer._runs['ml_extras'] = run
+    monkeypatch.setattr(
+        setup_installer, '_persist',
+        lambda _action, **changes: persisted.append(changes))
+    monkeypatch.setattr(
+        setup_installer.subprocess, 'Popen',
+        lambda *_args, **_kwargs: spawned.append(True))
+
+    setup_installer.cancel('ml_extras')
+
+    assert persisted[-1]['result']['cancel_requested'] is True
+    with pytest.raises(setup_installer.InstallerCancelled):
+        setup_installer._spawn_owned('ml_extras', ['/venv/python', '-m', 'pip'])
+    assert spawned == []
+
+
+def test_cancelled_mutation_restores_before_durable_terminal_state(app, monkeypatch):
+    from app import setup_installer
+    from app.services import background_jobs
+
+    snapshot = {'interpreter': '/venv/python', 'packages': ['example==1.0']}
+    events = []
+    run = setup_installer._new_run()
+    run['environment_before'] = snapshot
+
+    def worker(_action):
+        events.append('mutated')
+        setup_installer.cancel('ml_extras')
+        return -15
+
+    monkeypatch.setattr(setup_installer, '_WORKERS', {'ml_extras': worker})
+
+    with app.app_context():
+        job = background_jobs.create('setup', 'ml_extras', {'action': 'ml_extras'})
+        run['job_id'] = job.id
+        setup_installer._runs['ml_extras'] = run
+
+        def restore(value):
+            durable = background_jobs.snapshot(background_jobs.get(job.id))
+            events.append(('restored', value, durable['cancel_requested'], durable['state']))
+            return True, ''
+
+        monkeypatch.setattr(setup_installer, '_restore_environment', restore)
+        setup_installer._execute('ml_extras')
+        durable = background_jobs.snapshot(background_jobs.get(job.id))
+
+    assert run['state'] == 'cancelled'
+    assert run['environment_restored'] is True
+    assert events == ['mutated', ('restored', snapshot, True, 'running')]
+    assert durable['state'] == 'cancelled'
+    assert durable['environment_restored'] is True
+    assert durable['cancel_requested'] is True
+
+
+def test_cancelled_mutation_restore_failure_is_not_cancelled(monkeypatch):
+    from app import setup_installer
+
+    run = setup_installer._new_run()
+    run['environment_before'] = {
+        'interpreter': '/venv/python', 'packages': ['example==1.0']}
+    setup_installer._runs['ml_extras'] = run
+
+    def worker(_action):
+        run['cancel_requested'] = True
+        return -15
+
+    persisted = []
+    monkeypatch.setattr(setup_installer, '_WORKERS', {'ml_extras': worker})
+    monkeypatch.setattr(
+        setup_installer, '_restore_environment',
+        lambda _snapshot: (False, 'verification mismatch'))
+    monkeypatch.setattr(
+        setup_installer, '_persist',
+        lambda _action, **changes: persisted.append(changes))
+
+    setup_installer._execute('ml_extras')
+
+    assert run['state'] == 'error'
+    assert persisted[-1]['state'] == 'error'
+    assert persisted[-1]['error_code'] == 'installer_recovery_failed'
+
+
+def test_pip_target_preserves_symlinked_venv_executable(tmp_path, monkeypatch):
+    from app import setup_installer
+
+    base_python = tmp_path / 'base-python'
+    base_python.touch()
+    venv_python = tmp_path / 'venv' / 'bin' / 'python'
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(base_python)
+    monkeypatch.setattr(setup_installer.sys, 'executable', str(venv_python))
+
+    target = setup_installer._pip_target('ml_extras')
+
+    assert target == os.path.normcase(os.path.abspath(venv_python))
+    assert target != os.path.normcase(os.path.realpath(venv_python))
+
+
+def test_active_pip_mutations_excludes_download_workers():
+    from app import setup_installer
+    setup_installer._runs['ml_extras'] = setup_installer._new_run()
+    setup_installer._runs['klein_model'] = setup_installer._new_run()
+    assert setup_installer.active_pip_mutations() == ['ml_extras']
+
+
+def test_restart_recovery_restores_interrupted_pip_environment(app, monkeypatch):
+    from app import setup_installer
+    from app.services import background_jobs
+
+    snapshot = {'interpreter': '/python', 'packages': ['example==1.0']}
+    restored = []
+    monkeypatch.setattr(
+        setup_installer, '_restore_environment',
+        lambda value: (restored.append(value) or True, ''))
+    with app.app_context():
+        job = background_jobs.create('setup', 'ml_extras', {'action': 'ml_extras'})
+        background_jobs.touch(job.id, result={
+            'environment_before': snapshot,
+            'child_identity': {'pid': None, 'created_at': None},
+        })
+
+        assert setup_installer.recover_interrupted_installers() == 1
+        state = background_jobs.snapshot(background_jobs.get(job.id))
+        assert state['state'] == 'interrupted'
+        assert state['environment_restored'] is True
+        assert state['error_code'] == 'environment_restored'
+        assert restored == [snapshot]
 
 
 def test_start_rejects_durable_duplicate_without_launching_worker(
@@ -384,7 +577,8 @@ def test_run_klein_download_gated_401_logs_recovery_steps(app, tmp_path, monkeyp
 def test_run_klein_download_streams_to_part_then_renames(app, tmp_path, monkeypatch):
     from app import setup_installer, config
     base = _make_comfyui(tmp_path)
-    payload = b'x' * (10 * 1024 * 1024)
+    header = b'{"__metadata__":{}}'
+    payload = len(header).to_bytes(8, 'little') + header + b'x' * (10 * 1024 * 1024)
     with app.app_context():
         config.save_config({'comfyui': {'base_dir': str(base)}})
         monkeypatch.setattr(setup_installer.requests, 'get', _FakeGet(payload=payload))
@@ -403,8 +597,10 @@ def test_run_klein_download_sends_bearer_when_token_set(app, tmp_path, monkeypat
     with app.app_context():
         config.save_config({'comfyui': {'base_dir': str(base)}})
         monkeypatch.setenv('HF_TOKEN', 'hf_secret')
+        header = b'{"__metadata__":{}}'
         monkeypatch.setattr(setup_installer.requests, 'get',
-                            _FakeGet(payload=b'z' * 1024, capture=cap))
+                            _FakeGet(payload=len(header).to_bytes(8, 'little') + header,
+                                     capture=cap))
         setup_installer._runs['klein_model'] = setup_installer._new_run()
         setup_installer._run_klein_download('klein_model')
     assert cap['headers'].get('Authorization') == 'Bearer hf_secret'
@@ -420,13 +616,27 @@ def test_run_klein_download_skips_when_already_present(app, tmp_path, monkeypatc
         dest = setup_installer._klein_dest_path('klein_lora')
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         with open(dest, 'wb') as f:
-            f.write(b'already downloaded')
+            header = b'{"__metadata__":{}}'
+            f.write(len(header).to_bytes(8, 'little') + header)
         monkeypatch.setattr(setup_installer.requests, 'get', boom)
         setup_installer._runs['klein_lora'] = setup_installer._new_run()
         rc = setup_installer._run_klein_download('klein_lora')
     assert rc == 0
     assert any('already present' in line
                for line in setup_installer._runs['klein_lora']['log'])
+
+
+def test_run_klein_download_rejects_invalid_safetensors(app, tmp_path, monkeypatch):
+    from app import setup_installer, config
+    base = _make_comfyui(tmp_path)
+    with app.app_context():
+        config.save_config({'comfyui': {'base_dir': str(base)}})
+        monkeypatch.setattr(setup_installer.requests, 'get', _FakeGet(payload=b'not-a-model'))
+        setup_installer._runs['klein_vae'] = setup_installer._new_run()
+        assert setup_installer._run_klein_download('klein_vae') == 1
+        dest = setup_installer._klein_dest_path('klein_vae')
+    assert not os.path.exists(dest)
+    assert not os.path.exists(dest + '.part')
 
 
 def test_start_klein_blocks_on_low_disk(app, tmp_path, monkeypatch):

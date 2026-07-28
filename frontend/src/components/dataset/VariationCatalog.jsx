@@ -1,43 +1,14 @@
 /** Variation catalog: presets + per-entry toggles + multiplier + Klein picker. */
-import { useEffect, useMemo, useRef, useState } from 'react';
 import Flux2KleinModelPicker from '../shared/Flux2KleinModelPicker';
-import { useToast } from '../common/Toast';
-import { useConfirmDialog, usePromptDialog } from '../common/ConfirmDialog';
-import { useCapabilities } from '../../context/CapabilitiesContext';
-import { apiFetch } from '../../api/fetchClient';
 import ShotIllustration, { contextEmoji } from './ShotIllustration';
 import { displayLabel } from '../../utils/labels';
-import {
-  applyShotPreset,
-  deleteShotPreset,
-  loadShotPresets,
-  persistShotPresets,
-  renameShotPreset,
-  saveShotPreset,
-} from '../../utils/shotPresets';
+import { useVariationCatalogController } from '../../hooks/useVariationCatalogController';
+import { DEFAULT_COVERAGE_TARGET as TARGET, FRAMING_COLOR, FRAMING_LABEL, PRESET_META } from './variationCatalogModel';
 
-const FRAMING_LABEL = { face: 'Face', bust: 'Bust', body: 'Body', back: 'Back' };
 // Framing accent colors — shared by the section headers, the preset composition
 // bars and the legend so the same hue always means the same framing.
-const FRAMING_COLOR = {
-  face: 'bg-indigo-400',
-  bust: 'bg-violet-400',
-  body: 'bg-sky-400',
-  back: 'bg-slate-400',
-};
 // Training composition target (mirrors CompositionBar): used to highlight the
 // variation cards of the framings that are still missing — a visual quota.
-const TARGET = { face: 12, bust: 6, body: 6, back: 1 };
-
-const PRESET_META = [
-  { key: 'balanced_25', name: 'Balanced', hint: 'The all-round default: every framing covered in training proportions.' },
-  { key: 'zimage_12', name: 'Z-Image 12', hint: 'Compact 12-shot set tuned for Z-Image LoRA training.' },
-  { key: 'balanced_multiformat', name: 'Multi-format', hint: 'Balanced set with landscape / vertical / cinema frames mixed in.' },
-  { key: 'face_focused', name: 'Face-focused', hint: 'Face only (close-ups + busts, varied formats, no body shots) — body stays generic.' },
-  { key: 'fullbody_focused', name: 'Full-body', hint: 'Reliable full-body: ~50/50 identity (face+bust) and full-body + back, varied formats. For a character that must hold up full-length without losing the face.' },
-  { key: 'body_emphasis', name: 'Body emphasis', hint: 'Body-fidelity pick: figure-revealing but API-safe outfits (fitted tops, swimwear at the beach/pool, sportswear, bodycon, backlit silhouette) so the body shape is actually visible in the training shots. For explicit content, generate with the local Klein engine instead.' },
-];
-
 /** Mini stacked bar showing a preset's framing mix (face/bust/body/back). */
 function CompositionMiniBar({ counts, total }) {
   if (!total) return null;
@@ -84,337 +55,21 @@ function GpuIcon({ className }) {
 
 export default function VariationCatalog({ onGenerate, busy, generating = null, hasRef,
   hasPrimaryRef = hasRef, composition, images = [], bodyFidelity = false,
-  recommendedIds = [], anchorPlan = null }) {
-  const toast = useToast();
-  const confirm = useConfirmDialog();
-  const promptDialog = usePromptDialog();
-  const { caps } = useCapabilities();
-  const [catalog, setCatalog] = useState([]);
-  const appliedRecommendationKey = useRef('');
-  const [nsfwCatalog, setNsfwCatalog] = useState([]);
-  const [presets, setPresets] = useState({});
-  const [selected, setSelected] = useState(new Set());
-  const [multiplier, setMultiplier] = useState(1);
-  const [klein, setKlein] = useState(null);
-  // 🔞 NSFW mode — local Klein ONLY (the backend refuses NSFW on API engines).
-  // Unlocks the uncensored body catalog + a free-prompt custom variation.
-  const [nsfwMode, setNsfwMode] = useState(() => {
-    try { return localStorage.getItem('datasetNsfwMode') === '1'; } catch { return false; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('datasetNsfwMode', nsfwMode ? '1' : '0'); } catch { /* ignore */ }
-  }, [nsfwMode]);
-  const [customPrompt, setCustomPrompt] = useState('');
-  const [customFraming, setCustomFraming] = useState('body');
-  // User-authored shot cards ("Add" under the free prompt): they live in their
-  // own Custom group after BACK, are selectable like catalog cards and are the
-  // only DELETABLE ones (catalog cards stay fixed). Persisted across sessions.
-  const [customShots, setCustomShots] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('datasetCustomShots') || '[]'); }
-    catch { return []; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('datasetCustomShots', JSON.stringify(customShots)); }
-    catch { /* ignore */ }
-  }, [customShots]);
-  const [customPresets, setCustomPresets] = useState(() => loadShotPresets());
-  useEffect(() => {
-    try { persistShotPresets(localStorage, customPresets); }
-    catch { /* private browsing / full storage: keep the in-memory preset usable */ }
-  }, [customPresets]);
-
-  const addCustomShot = () => {
-    const p = customPrompt.trim();
-    if (!p) return;
-    const hot = nsfwMode && isKlein;
-    const shot = { id: `custom_${Date.now()}`, label: `${hot ? '🔞' : '✨'} ${p.slice(0, 40)}`,
-                   prompt: p, framing: customFraming, nsfw: hot };
-    setCustomShots((s) => [...s, shot]);
-    setSelected((s) => new Set(s).add(shot.id));   // freshly added = selected
-    setCustomPrompt('');
-  };
-
-  const removeCustomShot = (id) => {
-    setCustomShots((s) => s.filter((c) => c.id !== id));
-    setSelected((s) => { const n = new Set(s); n.delete(id); return n; });
-  };
-  // Identity LoRA strength (F1): higher = closer to the reference face,
-  // lower = more variety in the generated variations.
-  // dx8152 consistency LoRA: anchors STRUCTURE, its guide recommends ~0.5 and
-  // warns 0.8-1.0 can stop edits from applying (0.9 made variations near-copies).
-  const [loraStrength, setLoraStrength] = useState(0.5);
-  // Generator backend defaults to local-only Klein. API engines become usable
-  // only after the explicit privacy consent in Settings.
-  const [generator, setGenerator] = useState(() => {
-    try { return localStorage.getItem('datasetGenerator') || 'klein'; } catch { return 'klein'; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('datasetGenerator', generator); } catch { /* ignore */ }
-  }, [generator]);
-  const isNB = generator === 'nanobanana';
-  const isGPT = generator === 'chatgpt';
-  const isKlein = !isNB && !isGPT;
-
-  // Which engines the user actually enabled in Settings (config.engines.enabled),
-  // on top of the live reachability probe in `caps.engines`.
-  const [enabledEngines, setEnabledEngines] = useState(['klein']);
-  const [remoteAllowed, setRemoteAllowed] = useState(false);
-  // ChatGPT auth lane (auto|api|subscription) — decides whether the card shows a
-  // per-image API price or "uses your ChatGPT subscription quota".
-  const [chatgptAuth, setChatgptAuth] = useState('auto');
-  useEffect(() => {
-    let cancelled = false;
-    apiFetch('/api/settings')
-      .then((d) => {
-        if (cancelled) return;
-        setEnabledEngines(d.config?.engines?.enabled || []);
-        setChatgptAuth(d.config?.engines?.chatgpt_auth || 'auto');
-        setRemoteAllowed(!!d.config?.privacy?.allow_remote_generation);
-      })
-      .catch(() => { /* keep the permissive default on a transient failure */ });
-    return () => { cancelled = true; };
-  }, []);
-  const nbAvailable = remoteAllowed && enabledEngines.includes('nanobanana') && caps.engines.nanobanana;
-  const gptAvailable = remoteAllowed && enabledEngines.includes('chatgpt') && caps.engines.chatgpt;
-  const klAvailable = enabledEngines.includes('klein') && caps.engines.klein;
-  const currentAvailable = isKlein ? klAvailable : isNB ? nbAvailable : gptAvailable;
-
-  // The persisted generator can point at an engine that has since been
-  // disabled in Settings (or lost its key/backend): auto-switch to the first
-  // usable card instead of staying stuck on a dead one. This also feeds
-  // regenerate, which follows the persisted selection.
-  useEffect(() => {
-    if (currentAvailable) return;
-    const first = nbAvailable ? 'nanobanana' : gptAvailable ? 'chatgpt' : klAvailable ? 'klein' : null;
-    if (first && first !== generator) setGenerator(first);
-  }, [currentAvailable, nbAvailable, gptAvailable, klAvailable, generator]);
-  // Effective ChatGPT lane: the subscription (ChatGPT Plus/Pro image quota) vs the
-  // pay-per-use API key. Mirrors the backend "auto = subscription when connected".
-  const gptSub = caps.chatgpt_subscription || {};
-  const gptViaSub = chatgptAuth === 'subscription'
-    || (chatgptAuth === 'auto' && !!gptSub.connected);
-  const gptPlanLabel = gptSub.plan && gptSub.plan !== 'free'
-    ? gptSub.plan.charAt(0).toUpperCase() + gptSub.plan.slice(1)
-    : 'Plus/Pro';
-  // Klein unavailable has THREE distinct causes — the hint must name the right
-  // one (a reachable ComfyUI with no Klein model used to show "Configure
-  // ComfyUI", sending the user to re-check a step that was already green).
-  const kleinHint = klAvailable ? null
-    : !enabledEngines.includes('klein') ? '⚠ Klein is disabled in Settings (engines)'
-    : !caps.comfyui?.reachable ? '⚠ Configure ComfyUI in Settings'
-    : '⚠ Klein model missing — download it in the Setup step (models/unet/klein/)';
-
-  useEffect(() => {
-    let cancelled = false;
-    apiFetch('/api/dataset/variations')
-      .then((d) => {
-        if (cancelled) return;
-        setCatalog(d.catalog || []);
-        setNsfwCatalog(d.nsfw_catalog || []);
-        setPresets(d.presets || {});
-        // Body-fidelity datasets start on the body-emphasis preset (figure-visible
-        // outfits); everyone else keeps the balanced default.
-        const def = bodyFidelity ? (d.presets?.body_emphasis || d.presets?.balanced_25)
-          : d.presets?.balanced_25;
-        setSelected(new Set(def || []));
-      })
-      .catch(() => {
-        // Loud failure (M6): an empty catalog otherwise looks like a UI bug.
-        if (!cancelled) toast.error('Could not load the variation catalog');
-      });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [toast]);
-
-  // An import-first dataset gets a deliberately small first selection: the
-  // backend coverage plan's empty combinations. This is a one-time default,
-  // not a lock — the user can still choose a preset or toggle any shot.
-  useEffect(() => {
-    const ids = (recommendedIds || []).filter((id) => catalog.some((entry) => entry.id === id));
-    const key = ids.join('|');
-    if (!key || appliedRecommendationKey.current === key) return;
-    setSelected(new Set(ids));
-    appliedRecommendationKey.current = key;
-  }, [catalog, recommendedIds]);
-
-  const byFraming = useMemo(() => {
-    const g = { face: [], bust: [], body: [], back: [] };
-    catalog.forEach((e) => g[e.framing]?.push(e));
-    return g;
-  }, [catalog]);
-
-  // Switching to an API engine drops any selected NSFW shots (Klein-only) —
-  // catalog nsfw_ entries AND 🔞 custom cards alike.
-  useEffect(() => {
-    if (isKlein) return;
-    const hotCustom = new Set(customShots.filter((c) => c.nsfw).map((c) => c.id));
-    setSelected((s) => {
-      const n = new Set([...s].filter((id) => !id.startsWith('nsfw_') && !hotCustom.has(id)));
-      return n.size === s.size ? s : n;
-    });
-  }, [isKlein, customShots]);
-
-  // "Already in the dataset" per variation label: live images (kept, pending or
-  // still generating — not failed/rejected) → the green ✓×N state on the cards.
-  const doneByLabel = useMemo(() => {
-    const m = new Map();
-    for (const img of images) {
-      if (!img.variation_label || img.status === 'failed' || img.status === 'reject') continue;
-      m.set(img.variation_label, (m.get(img.variation_label) || 0) + 1);
-    }
-    return m;
-  }, [images]);
-
-  // Framing mix of each preset — feeds the mini composition bar on its card.
-  const presetStats = useMemo(() => {
-    const framingById = new Map(catalog.map((e) => [e.id, e.framing]));
-    const stats = {};
-    Object.entries(presets).forEach(([key, ids]) => {
-      const counts = { face: 0, bust: 0, body: 0, back: 0 };
-      (ids || []).forEach((id) => { const fr = framingById.get(id); if (fr) counts[fr] += 1; });
-      stats[key] = { counts, total: (ids || []).length };
-    });
-    return stats;
-  }, [catalog, presets]);
-
-  // Which preset (if any) matches the current selection exactly → highlighted card.
-  const activePreset = useMemo(() => {
-    const entry = Object.entries(presets).find(([, ids]) =>
-      ids && ids.length === selected.size && ids.every((id) => selected.has(id)));
-    return entry ? entry[0] : null;
-  }, [presets, selected]);
-
-  const activeCustomPreset = useMemo(() => customPresets.find((preset) =>
-    preset.selectedIds.length === selected.size
-      && preset.selectedIds.every((id) => selected.has(id)))?.id || null,
-  [customPresets, selected]);
-
-  const customPresetStats = useMemo(() => {
-    const framingById = new Map([
-      ...catalog, ...nsfwCatalog, ...customShots,
-      ...customPresets.flatMap((preset) => preset.customShots || []),
-    ].map((shot) => [shot.id, shot.framing]));
-    return Object.fromEntries(customPresets.map((preset) => {
-      const counts = { face: 0, bust: 0, body: 0, back: 0 };
-      preset.selectedIds.forEach((id) => { const fr = framingById.get(id); if (fr) counts[fr] += 1; });
-      return [preset.id, { counts, total: preset.selectedIds.length }];
-    }));
-  }, [catalog, nsfwCatalog, customShots, customPresets]);
-
-  const toggle = (id) => setSelected((s) => {
-    const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n;
-  });
-
-  // Never wipe the current selection when the preset is unavailable (M6).
-  // Toggle: re-clicking the ACTIVE preset (exact selection match) clears the
-  // whole selection instead of re-applying it.
-  const applyPreset = (key) => {
-    const ids = presets[key];
-    if (!ids?.length) return;
-    setSelected(activePreset === key ? new Set() : new Set(ids));
-  };
-
-  const saveCurrentPreset = async () => {
-    const name = await promptDialog({
-      title: 'Save shot preset',
-      inputLabel: 'Preset name',
-      confirmLabel: 'Save preset',
-    });
-    if (name == null) return;
-    try {
-      const next = saveShotPreset(customPresets, name, selected, customShots);
-      setCustomPresets(next);
-      toast.success(`Preset saved: ${next.at(-1).name}`);
-    } catch (error) { toast.error(error.message || 'Could not save preset'); }
-  };
-
-  const applyCustomPreset = (preset) => {
-    if (activeCustomPreset === preset.id) {
-      setSelected(new Set());
-      return;
-    }
-    const restored = applyShotPreset(preset, customShots);
-    setCustomShots(restored.customShots);
-    setSelected(new Set(restored.selectedIds));
-  };
-
-  const renameCustomPreset = async (preset) => {
-    const name = await promptDialog({
-      title: 'Rename shot preset',
-      inputLabel: 'Preset name',
-      defaultValue: preset.name,
-      confirmLabel: 'Rename preset',
-    });
-    if (name == null) return;
-    try { setCustomPresets((items) => renameShotPreset(items, preset.id, name)); }
-    catch (error) { toast.error(error.message || 'Could not rename preset'); }
-  };
-
-  const removeCustomPreset = async (preset) => {
-    if (!(await confirm({
-      title: `Delete preset “${preset.name}”?`,
-      message: 'The saved shot selection will be removed. Generated images are unaffected.',
-      confirmLabel: 'Delete preset',
-      tone: 'danger',
-    }))) return;
-    setCustomPresets((items) => deleteShotPreset(items, preset.id));
-  };
-
-  const go = async () => {
-    const variations = catalog.filter((e) => selected.has(e.id))
-      .map((e) => ({ id: e.id, label: e.label, prompt: e.prompt, framing: e.framing }));
-    // NSFW shots: local Klein only (the toggle is gated on the Klein engine,
-    // and the backend refuses them on API engines).
-    if (nsfwMode && isKlein) {
-      variations.push(...nsfwCatalog.filter((e) => selected.has(e.id))
-        .map((e) => ({ id: e.id, label: e.label, prompt: e.prompt, framing: e.framing, nsfw: true })));
-    }
-    // Custom cards: selectable like catalog shots; 🔞 ones only ride with Klein
-    // (the label prefix is what regenerate uses to re-pick the uncensored wrapper).
-    variations.push(...customShots
-      .filter((c) => selected.has(c.id) && (isKlein || !c.nsfw))
-      .map((c) => ({ id: c.id, label: c.label, prompt: c.prompt, framing: c.framing,
-                     ...(c.nsfw ? { nsfw: true } : {}) })));
-    if (!variations.length) return;
-    // Guard-rail: the selection survives a previous Generate, so a re-click would
-    // re-generate (and re-bill) shots that already exist. Ask — OK = duplicates
-    // on purpose, Cancel = only the newly added shots.
-    const dupes = variations.filter((v) => doneByLabel.get(v.label));
-    let toGen = variations;
-    if (dupes.length === variations.length) {
-      if (!(await confirm({
-        title: 'Generate duplicate shots?',
-        message: `All ${dupes.length} selected shots already exist in the dataset. Generate every selected shot again anyway?`,
-        confirmLabel: 'Generate duplicates',
-        tone: 'warning',
-      }))) return;
-    } else if (dupes.length > 0) {
-      const fresh = variations.length - dupes.length;
-      if (!(await confirm({
-        title: 'Include existing shots?',
-        message: `${dupes.length} of ${variations.length} selected shots already exist. Generate all shots, including duplicates, or only the ${fresh} new shots?`,
-        confirmLabel: 'Generate all',
-        cancelLabel: 'Only new shots',
-        tone: 'warning',
-      }))) {
-        toGen = variations.filter((v) => !doneByLabel.get(v.label));
-      }
-    }
-    if (!toGen.length) return;
-    // Guard-rail: pay-per-use API engines bill per image — above $5 estimated,
-    // confirm with the amount (silent for the free local Klein AND for the
-    // ChatGPT subscription lane, which spends plan quota, not dollars).
-    const rate = isNB ? 0.15 : (isGPT && !gptViaSub) ? 0.17 : 0;
-    const cost = toGen.length * multiplier * rate;
-    if (cost > 5 && !(await confirm({
-      title: `Spend about $${cost.toFixed(2)}?`,
-      message: `This will launch ${toGen.length * multiplier} paid API generations with ${isNB ? 'Nano Banana' : 'ChatGPT'}. The final charge may vary by provider.`,
-      confirmLabel: 'Launch paid generation',
-      tone: 'warning',
-    }))) return;
-    onGenerate(toGen, multiplier, klein, loraStrength, generator);
-  };
-
+  recommendedIds, anchorPlan = null, coverageTargets = TARGET,
+  variationLabelCounts = {} }) {
+  const {
+    nanoBananaRate, chatGptApiRate, pricingAsOf, nsfwCatalog,
+    catalogLoadError, setCatalogAttempt, selected, setSelected, multiplier,
+    setMultiplier, setKlein, nsfwMode, setNsfwMode, customPrompt,
+    setCustomPrompt, customFraming, setCustomFraming, customShots, customPresets,
+    storageWarning, addCustomShot, removeCustomShot, loraStrength, setLoraStrength,
+    setGenerator, settingsError, remoteAllowed, isNB, isGPT, isKlein,
+    nbAvailable, gptAvailable, klAvailable, currentAvailable, gptViaSub, gptPlanLabel,
+    kleinHint, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
+    customPresetStats, toggle, applyPreset, saveCurrentPreset, applyCustomPreset,
+    renameCustomPreset, removeCustomPreset, go,
+  } = useVariationCatalogController({ onGenerate, bodyFidelity, recommendedIds,
+    images, variationLabelCounts })
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-3">
       <div className="flex items-center gap-2">
@@ -440,14 +95,15 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
         </span>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <button type="button" onClick={() => setGenerator('klein')} aria-pressed={isKlein}
-          disabled={!klAvailable || !!generating}
-          title={generating ? 'A generation batch is running — wait for it to finish before switching engine' : undefined}
-          className={`flex items-start gap-3 rounded-xl border p-3 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${isKlein
-            ? 'border-primary/60 bg-primary/15 ring-1 ring-primary/40'
-            : 'border-border bg-app/40 hover:enabled:bg-surface-raised'}`}>
-          <GpuIcon className={`w-9 h-9 shrink-0 ${isKlein ? 'text-indigo-300' : 'text-content-subtle'}`} />
-          <span className="flex flex-col gap-1 min-w-0">
+        <div className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${isKlein
+          ? 'border-primary/60 bg-primary/15 ring-1 ring-primary/40'
+          : 'border-border bg-app/40'}`}>
+          <button type="button" onClick={() => setGenerator('klein')} aria-pressed={isKlein}
+            disabled={!klAvailable || !!generating}
+            title={generating ? 'A generation batch is running — wait for it to finish before switching engine' : undefined}
+            className="flex min-w-0 flex-1 items-start gap-3 text-left disabled:cursor-not-allowed disabled:opacity-50">
+            <GpuIcon className={`w-9 h-9 shrink-0 ${isKlein ? 'text-indigo-300' : 'text-content-subtle'}`} />
+            <span className="flex flex-col gap-1 min-w-0">
             <span className={`text-[0.8125rem] font-semibold ${isKlein ? 'text-white' : 'text-content-muted'}`}>
               Klein <span className="font-normal text-content-subtle">· local</span>
             </span>
@@ -456,16 +112,18 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">Your GPU</span>
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">NSFW OK</span>
             </span>
-            {klAvailable ? (
+            {klAvailable && (
               <span className="text-content-subtle text-[0.625rem]">Runs on this machine — slower, tunable face fidelity.</span>
-            ) : (
-              <a href="#/setup" onClick={(e) => e.stopPropagation()}
-                className="text-amber-300 text-[0.625rem] underline decoration-amber-300/50">
-                {kleinHint}
-              </a>
             )}
-          </span>
-        </button>
+            </span>
+          </button>
+          {!klAvailable && (
+            <a href="#/setup"
+              className="text-amber-300 text-[0.625rem] underline decoration-amber-300/50">
+              {kleinHint}
+            </a>
+          )}
+        </div>
         <button type="button" onClick={() => setGenerator('nanobanana')} aria-pressed={isNB}
           disabled={!nbAvailable || !!generating}
           title={generating ? 'A generation batch is running — wait for it to finish before switching engine' : undefined}
@@ -479,12 +137,14 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
             </span>
             <span className="flex flex-wrap gap-1">
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">No GPU</span>
-              <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">~$0.15/image</span>
+              <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">
+                ~${nanoBananaRate.toFixed(2)}/image estimate{pricingAsOf ? ` · ${pricingAsOf}` : ''}
+              </span>
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">SFW</span>
             </span>
             {nbAvailable ? (
               <span className={`text-[0.625rem] ${isNB ? 'text-amber-300' : 'text-content-subtle'}`}>
-                Best face fidelity · estimated cost ≈ ${(selected.size * multiplier * 0.15).toFixed(2)}
+                Best face fidelity · estimated cost ≈ ${(selected.size * multiplier * nanoBananaRate).toFixed(2)}
               </span>
             ) : (
               <span className="text-amber-300 text-[0.625rem]">
@@ -506,14 +166,16 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
             </span>
             <span className="flex flex-wrap gap-1">
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">No GPU</span>
-              <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">{gptViaSub ? 'Plan quota' : '~$0.17/image'}</span>
+              <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">
+                {gptViaSub ? 'Plan quota' : `~$${chatGptApiRate.toFixed(2)}/image estimate${pricingAsOf ? ` · ${pricingAsOf}` : ''}`}
+              </span>
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">SFW</span>
             </span>
             {gptAvailable ? (
               <span className={`text-[0.625rem] ${isGPT ? 'text-emerald-300' : 'text-content-subtle'}`}>
                 {gptViaSub
                   ? `gpt-image-2 · uses your ChatGPT ${gptPlanLabel} quota`
-                  : `gpt-image-2 · estimated cost ≈ $${(selected.size * multiplier * 0.17).toFixed(2)}`}
+                  : `gpt-image-2 · estimated cost ≈ $${(selected.size * multiplier * chatGptApiRate).toFixed(2)}`}
               </span>
             ) : (
               <span className="text-amber-300 text-[0.625rem]">
@@ -525,6 +187,20 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
       </div>
 
       {/* Preset cards with their framing-mix bar. */}
+      {catalogLoadError && (
+        <div role="alert" className="flex items-center gap-2 rounded border border-red-400/40 bg-red-500/10 px-2 py-1.5 text-xs text-red-200">
+          <span>Variation catalog could not be loaded.</span>
+          <button type="button" onClick={() => setCatalogAttempt((attempt) => attempt + 1)}
+            className="ml-auto rounded border border-red-300/40 px-2 py-0.5 font-semibold hover:bg-red-500/20">
+            Retry
+          </button>
+        </div>
+      )}
+      {storageWarning && (
+        <p role="alert" className="m-0 rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200">
+          Custom shots and presets are session-only. Free browser storage and save again before reloading.
+        </p>
+      )}
       <div>
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
           <span className="text-content-muted text-[0.6875rem] uppercase">Presets</span>
@@ -598,11 +274,16 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
       <div className="flex items-center gap-2 pt-1">
         <span className="text-content-muted text-[0.6875rem] uppercase">Shots</span>
         <span className="text-content-subtle text-[0.625rem]">
-          {recommendedIds.length > 0
+          {(recommendedIds?.length || 0) > 0
             ? 'the coverage plan pre-selected missing combinations — click any card to add or remove it'
             : 'a preset pre-selects a balanced mix — click any card to add or remove it'}
         </span>
       </div>
+      {settingsError && (
+        <p role="alert" className="m-0 rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200">
+          Engine settings could not be loaded. Generation is disabled; reopen this panel to retry.
+        </p>
+      )}
       <div className="flex items-center gap-3 flex-wrap text-[0.625rem] text-content-subtle" aria-hidden="true">
         <span className="flex items-center gap-1">
           <span className="w-3 h-3 rounded border border-primary/50 bg-primary/20 ring-1 ring-primary/30" />
@@ -622,13 +303,14 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
       <div className="max-h-80 overflow-auto flex flex-col gap-2 pr-1">
         {['face', 'bust', 'body', 'back'].map((fr) => {
           const have = (composition && composition[fr]) || 0;
-          const missing = Math.max(0, TARGET[fr] - have);
-          const pct = Math.min(100, (have / TARGET[fr]) * 100);
+          const target = Number(coverageTargets?.[fr] ?? TARGET[fr]);
+          const missing = Math.max(0, target - have);
+          const pct = Math.min(100, (have / Math.max(1, target)) * 100);
           const selCount = byFraming[fr].filter((e) => selected.has(e.id)).length;
           return (
             <div key={fr}>
               <div className="flex items-center gap-2 mb-1"
-                title={`Your dataset contains ${have} "${FRAMING_LABEL[fr]}" image(s). Target for balanced training: ${TARGET[fr]} (this quota does NOT affect the generation selection).`}>
+                title={`Your dataset contains ${have} "${FRAMING_LABEL[fr]}" image(s). This dataset's coverage target is ${target} (this quota does NOT affect the generation selection).`}>
                 <ShotIllustration framing={fr} label=""
                   className={`w-5 h-5 ${missing ? 'text-amber-300' : 'text-content-subtle'}`} />
                 <span className={`text-[0.6875rem] uppercase font-semibold ${missing ? 'text-amber-300' : 'text-content-muted'}`}>
@@ -640,10 +322,10 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
                 </span>
                 {missing > 0 ? (
                   <span className="px-1.5 py-px rounded-full bg-amber-400/15 border border-amber-400/40 text-amber-300 text-[0.625rem]">
-                    {have}/{TARGET[fr]} in the dataset · {missing} missing
+                    {have}/{target} in the dataset · {missing} missing
                   </span>
                 ) : (
-                  <span className="text-emerald-400/90 text-[0.625rem]">✓ {have}/{TARGET[fr]}</span>
+                  <span className="text-emerald-400/90 text-[0.625rem]">✓ {have}/{target}</span>
                 )}
                 {selCount > 0 && (
                   <span className="ml-auto text-content-subtle text-[0.625rem]">{selCount} selected</span>

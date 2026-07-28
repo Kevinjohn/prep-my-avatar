@@ -25,11 +25,13 @@ thread and expose their live state for polling. Actions:
 No shell, no client-supplied arguments: each action's command/URL/destination is fixed.
 """
 import logging
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -117,9 +119,193 @@ class Precondition(Exception):
     pass
 
 
+class InstallerCancelled(Exception):
+    """Internal control flow for cancellation before child publication."""
+
+
 def _new_run():
     return {'state': 'running', 'returncode': None, 'log': [], 'progress': None,
-            'job_id': None}
+            'job_id': None, 'process': None, 'cancel_requested': False,
+            'environment_before': None}
+
+
+def _environment_snapshot(interpreter: str) -> dict:
+    """Record enough ownership/recovery evidence before pip mutates an env."""
+    code = (
+        "import importlib.metadata,json; "
+        "print(json.dumps(sorted(f'{d.metadata[\"Name\"]}=={d.version}' "
+        "for d in importlib.metadata.distributions() if d.metadata.get('Name'))))"
+    )
+    result = subprocess.run(
+        [interpreter, '-c', code], capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise Precondition(
+            f'could not snapshot target interpreter before installation: '
+            f'{(result.stderr or result.stdout).strip()[-1000:]}')
+    try:
+        packages = json.loads(result.stdout)
+    except ValueError as exc:
+        raise Precondition('target interpreter returned an invalid package snapshot') from exc
+    if not isinstance(packages, list) or not all(isinstance(item, str) for item in packages):
+        raise Precondition('target interpreter returned an invalid package snapshot')
+    return {'interpreter': interpreter, 'packages': packages}
+
+
+def _spawn_owned(action, command):
+    with _lock:
+        run = _runs[action]
+        if run.get('cancel_requested'):
+            raise InstallerCancelled('installer cancelled before process spawn')
+        # Keep the cancellation check, spawn, and publication under one lock.
+        # A concurrent cancel either wins before Popen or observes and terminates
+        # the published child; it can never land in an unowned spawn gap.
+        proc = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1)
+        run['process'] = proc
+    child_identity = None
+    try:
+        import psutil
+        child_identity = {
+            'pid': proc.pid,
+            'created_at': psutil.Process(proc.pid).create_time(),
+        }
+    except Exception:
+        child_identity = {'pid': getattr(proc, 'pid', None), 'created_at': None}
+    run['child_identity'] = child_identity
+    _persist(action, result={
+        'child_pid': getattr(proc, 'pid', None),
+        'child_identity': child_identity,
+        'environment_before': run.get('environment_before'),
+    })
+    return proc
+
+
+def active_pip_mutations() -> list[str]:
+    with _lock:
+        return sorted(action for action, run in _runs.items()
+                      if run.get('state') == 'running' and _pip_target(action) is not None)
+
+
+def _restore_environment(snapshot: dict) -> tuple[bool, str]:
+    interpreter = snapshot.get('interpreter') if isinstance(snapshot, dict) else None
+    packages = snapshot.get('packages') if isinstance(snapshot, dict) else None
+    if not interpreter or not isinstance(packages, list):
+        return False, 'pre-install environment snapshot is incomplete'
+    fd, raw_path = tempfile.mkstemp(prefix='pma-setup-recovery-', suffix='.txt')
+    requirements = raw_path
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write('\n'.join(packages) + '\n')
+        result = subprocess.run(
+            [interpreter, '-m', 'pip', 'install', '-r', requirements],
+            capture_output=True, text=True, timeout=1800)
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout)[-2000:]
+        current = _environment_snapshot(interpreter)['packages']
+        expected_names = {_canon(item.split('==', 1)[0]) for item in packages}
+        extras = [item.split('==', 1)[0] for item in current
+                  if _canon(item.split('==', 1)[0]) not in expected_names]
+        if extras:
+            removed = subprocess.run(
+                [interpreter, '-m', 'pip', 'uninstall', '-y', *extras],
+                capture_output=True, text=True, timeout=1800)
+            if removed.returncode != 0:
+                return False, (removed.stderr or removed.stdout)[-2000:]
+        if _environment_snapshot(interpreter)['packages'] != packages:
+            return False, 'package verification did not match the pre-install snapshot'
+        return True, ''
+    except (OSError, subprocess.SubprocessError, Precondition) as exc:
+        return False, str(exc)
+    finally:
+        try:
+            os.unlink(requirements)
+        except OSError:
+            pass
+
+
+def recover_interrupted_installers() -> int:
+    """Stop an owned pip child and restore its exact pre-install inventory."""
+    from .models import BackgroundJob
+    from .services import background_jobs
+
+    rows = (BackgroundJob.query.filter_by(kind='setup')
+            .filter(BackgroundJob.state.in_(background_jobs.ACTIVE_STATES)).all())
+    recovered = 0
+    for row in rows:
+        saved = background_jobs.snapshot(row)
+        snapshot = saved.get('environment_before')
+        if not snapshot:
+            continue
+        identity = saved.get('child_identity') or {}
+        pid = identity.get('pid')
+        if pid:
+            try:
+                import psutil
+                process = psutil.Process(int(pid))
+                created = identity.get('created_at')
+                if created is None or abs(process.create_time() - float(created)) < 0.01:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except psutil.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=10)
+            except Exception:
+                # A missing child is the normal restart case. Any other failure
+                # is logged, but environment restoration remains possible.
+                try:
+                    missing = isinstance(
+                        sys.exc_info()[1], (psutil.NoSuchProcess, psutil.ZombieProcess))
+                except (NameError, AttributeError):
+                    missing = False
+                if not missing:
+                    logger.exception('could not stop interrupted installer child %s', pid)
+        ok, detail = _restore_environment(snapshot)
+        background_jobs.touch(
+            row.id,
+            state='interrupted' if ok else 'error',
+            result={
+                'returncode': None,
+                'environment_before': snapshot,
+                'environment_restored': ok,
+            },
+            error=('The app restarted during installation; the pre-install '
+                   'environment was restored.' if ok else
+                   f'Interrupted installer recovery failed: {detail}'),
+            error_code='environment_restored' if ok else 'installer_recovery_failed')
+        recovered += 1
+    return recovered
+
+
+def cancel(action) -> dict:
+    with _lock:
+        run = _runs.get(action)
+        if not run or run.get('state') != 'running':
+            raise Precondition('installer is not running')
+        run['cancel_requested'] = True
+        proc = run.get('process')
+        result = {
+            'cancel_requested': True,
+            'child_pid': getattr(proc, 'pid', None),
+            'child_identity': run.get('child_identity'),
+            'environment_before': run.get('environment_before'),
+        }
+    _persist(action, result=result)
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+    return status(action)
+
+
+def _pip_target(action):
+    """Canonical interpreter mutated by a setup action, or None for non-pip work."""
+    if action in _PIP_REQUIREMENTS:
+        return os.path.normcase(os.path.abspath(sys.executable))
+    if action in _CAPABILITY_ML_ACTIONS:
+        return os.path.normcase(os.path.abspath(_capability_python(action)))
+    if action == 'watermark_inpaint':
+        return os.path.normcase(os.path.abspath(_watermark_python()))
+    return None
 
 
 def _persist(action, **changes):
@@ -292,6 +478,8 @@ def status(action) -> dict:
                         'error': saved.get('error'),
                         'error_code': saved.get('error_code'),
                         'job_id': saved.get('job_id'),
+                        'child_pid': saved.get('child_pid'),
+                        'environment_before': saved.get('environment_before'),
                         'manual_command': cmd,
                     }
             except Exception:
@@ -301,6 +489,8 @@ def status(action) -> dict:
     return {'state': run['state'], 'returncode': run['returncode'],
             'log': list(run['log']), 'progress': run.get('progress'),
             'job_id': run.get('job_id'),
+            'child_pid': getattr(run.get('process'), 'pid', None),
+            'environment_before': run.get('environment_before'),
             'manual_command': cmd}
 
 
@@ -311,6 +501,13 @@ def start(action) -> dict:
         run = _runs.get(action)
         if run and run['state'] == 'running':
             raise AlreadyRunning(action)
+        target = _pip_target(action)
+        if target is not None:
+            for other_action, other_run in _runs.items():
+                if (other_action != action and other_run.get('state') == 'running'
+                        and _pip_target(other_action) == target):
+                    raise AlreadyRunning(
+                        f'{other_action} is already modifying interpreter {target}')
         if action == 'ml_extras' and not capabilities.python_ml_status()['ml_supported']:
             ml_status = capabilities.python_ml_status()
             raise Precondition(
@@ -328,6 +525,8 @@ def start(action) -> dict:
         if action in _KLEIN_DOWNLOADS:
             _check_klein_precondition(action)
         run = _new_run()
+        if target is not None:
+            run['environment_before'] = _environment_snapshot(target)
         app = current_app._get_current_object() if has_app_context() else None
         if app is not None:
             try:
@@ -340,8 +539,10 @@ def start(action) -> dict:
                     run['job_id'] = job.id
             except AlreadyRunning:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception('could not create durable setup job %s', action)
+                raise Precondition(
+                    'could not create a durable setup job; no installer was started') from exc
         _runs[action] = run
     threading.Thread(target=_execute_with_app, args=(app, action), daemon=True).start()
     return status(action)
@@ -387,11 +588,42 @@ def _check_klein_precondition(action):
 
 def _execute(action):
     try:
+        if _runs[action].get('cancel_requested'):
+            raise InstallerCancelled('installer cancelled before worker start')
         rc = _WORKERS[action](action)
+        cancelled = bool(_runs[action].get('cancel_requested'))
+        if cancelled:
+            snapshot = _runs[action].get('environment_before')
+            restored, detail = ((True, '') if snapshot is None
+                                else _restore_environment(snapshot))
+            _runs[action]['returncode'] = rc
+            _runs[action]['environment_restored'] = restored
+            _runs[action]['state'] = 'cancelled' if restored else 'error'
+            _persist(
+                action,
+                state='cancelled' if restored else 'error',
+                result={
+                    'returncode': rc,
+                    'cancel_requested': True,
+                    'child_pid': getattr(_runs[action].get('process'), 'pid', None),
+                    'child_identity': _runs[action].get('child_identity'),
+                    'environment_before': snapshot,
+                    'environment_restored': restored,
+                },
+                error=('installer cancelled; the pre-install environment was restored'
+                       if restored else f'installer cancellation recovery failed: {detail}'),
+                error_code=('cancelled' if restored else 'installer_recovery_failed'))
+            _persisted_progress.pop(action, None)
+            return
         _runs[action]['returncode'] = rc
         _runs[action]['state'] = 'success' if rc == 0 else 'error'
         _persist(action, state='done' if rc == 0 else 'error',
-                 result={'returncode': rc},
+                 result={
+                     'returncode': rc,
+                     'child_pid': getattr(_runs[action].get('process'), 'pid', None),
+                     'child_identity': _runs[action].get('child_identity'),
+                     'environment_before': _runs[action].get('environment_before'),
+                 },
                  error=None if rc == 0 else f'installer exited with status {rc}',
                  error_code=None if rc == 0 else 'nonzero_exit')
         _persisted_progress.pop(action, None)
@@ -409,6 +641,23 @@ def _execute(action):
                 comfyui.clear_model_caches()
             except Exception:
                 logger.debug('clear_model_caches failed after %s', action, exc_info=True)
+    except InstallerCancelled:
+        snapshot = _runs[action].get('environment_before')
+        restored, detail = ((True, '') if snapshot is None
+                            else _restore_environment(snapshot))
+        _runs[action]['returncode'] = None
+        _runs[action]['environment_restored'] = restored
+        _runs[action]['state'] = 'cancelled' if restored else 'error'
+        _persist(
+            action,
+            state='cancelled' if restored else 'error',
+            result={'returncode': None, 'cancel_requested': True,
+                    'environment_before': snapshot,
+                    'environment_restored': restored},
+            error=('installer cancelled; the pre-install environment was restored'
+                   if restored else f'installer cancellation recovery failed: {detail}'),
+            error_code='cancelled' if restored else 'installer_recovery_failed')
+        _persisted_progress.pop(action, None)
     except Exception as e:  # never let a worker thread die silently
         _append(action, f'error: {e}')
         _runs[action]['returncode'] = -1
@@ -444,11 +693,9 @@ def _run_ml_extras(action) -> int:
                 '=' * 64,
             ):
                 _append(action, line)
-    proc = subprocess.Popen(
+    proc = _spawn_owned(action,
         [sys.executable, '-m', 'pip', 'install', '-r',
-         str(_PIP_REQUIREMENTS.get(action, _ML_REQUIREMENTS))],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-    )
+         str(_PIP_REQUIREMENTS.get(action, _ML_REQUIREMENTS))])
     for line in proc.stdout:
         _append(action, line)
     proc.wait()
@@ -466,9 +713,8 @@ def _run_watermark_inpaint(action) -> int:
              for p in _CAPABILITY_PACKAGES['watermark_inpaint']]
     _append(action, f'target interpreter: {python}')
     _append(action, f"installing {', '.join(specs)}  (constraints: requirements-ml.txt)")
-    proc = subprocess.Popen(
+    proc = _spawn_owned(action,
         [python, '-m', 'pip', 'install', *specs, '-c', str(_ML_REQUIREMENTS)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     for line in proc.stdout:
         _append(action, line)
@@ -499,9 +745,8 @@ def _run_ml_capability(action) -> int:
                             "separate 3.11/3.12 env and set face_scoring.python instead.")
     _append(action, f'target interpreter: {python}')
     _append(action, f"installing {', '.join(specs)}  (constraints: requirements-ml.txt)")
-    proc = subprocess.Popen(
+    proc = _spawn_owned(action,
         [python, '-m', 'pip', 'install', *specs, '-c', str(_ML_REQUIREMENTS)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     for line in proc.stdout:
         _append(action, line)
@@ -517,8 +762,11 @@ def _run_klein_download(action) -> int:
     spec = _KLEIN_DOWNLOADS[action]
     dest = _klein_dest_path(action)
     if os.path.isfile(dest):
-        _append(action, f'already present: {dest}')
-        return 0
+        if _valid_safetensors(dest):
+            _append(action, f'already present: {dest}')
+            return 0
+        _append(action, f'removing invalid existing model: {dest}')
+        os.remove(dest)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     headers = {}
     token = cfg.secret('HF_TOKEN')
@@ -558,11 +806,25 @@ def _run_klein_download(action) -> int:
                         pct = f' ({done * 100 // total}%)' if total else ''
                         _append(action, f'{done / 1e9:.2f} / {total / 1e9:.2f} GB{pct}')
                         next_mark = done + 512 * 1024 * 1024
-        if total and done < total:
-            _append(action, f'incomplete download ({done}/{total} bytes) - retry')
+                fh.flush()
+                os.fsync(fh.fileno())
+        if total and done != total:
+            _append(action, f'download length mismatch ({done}/{total} bytes) - retry')
+            os.remove(part)
+            return 1
+        if not _valid_safetensors(part):
+            _append(action, 'download is not a valid safetensors file - retry')
             os.remove(part)
             return 1
         os.replace(part, dest)
+        try:
+            directory = os.open(os.path.dirname(dest), os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            pass
         _append(action, f'done -> {dest}')
         return 0
     except requests.RequestException as e:
@@ -574,11 +836,27 @@ def _run_klein_download(action) -> int:
         return 1
 
 
+def _valid_safetensors(path) -> bool:
+    """Perform bounded structural validation before model bytes become visible."""
+    try:
+        size = os.path.getsize(path)
+        if size < 10:
+            return False
+        with open(path, 'rb') as handle:
+            header_size = int.from_bytes(handle.read(8), 'little')
+            if header_size <= 1 or header_size > min(16 * 1024 * 1024, size - 8):
+                return False
+            header = json.loads(handle.read(header_size).decode('utf-8'))
+        return isinstance(header, dict)
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
 def _run_ollama_model(action) -> int:
     url = (cfg.get('ollama.url') or '').rstrip('/')
     model = cfg.get('ollama.vision_model') or ''
     resp = requests.post(f'{url}/api/pull', json={'name': model, 'stream': True},
-                         stream=True, timeout=None)
+                         stream=True, timeout=(10, 120))
     if resp.status_code >= 400:
         _append(action, f'HTTP {resp.status_code}')
         return 1

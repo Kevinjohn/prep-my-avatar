@@ -12,8 +12,21 @@ def _recover_interrupted_update():
     repo_root = Path(__file__).resolve().parent.parent
     data_dir = Path(os.environ.get('LDS_DATA_DIR', str(repo_root / 'data')))
     try:
-        from update_recovery import recover
-        recover(repo_root, data_dir, python=sys.executable)
+        private_bootstrap = data_dir / 'update-recovery.py'
+        if private_bootstrap.is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                '_lds_private_update_recovery', private_bootstrap)
+            if spec is None or spec.loader is None:
+                raise ImportError('private recovery bootstrap cannot be loaded')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            recover = module.recover
+        else:
+            from update_recovery import recover
+        recover(
+            repo_root, data_dir, python=sys.executable,
+            restart_nonce=os.environ.get('LDS_RESTART_NONCE'))
     except Exception as exc:
         print(f'[LDS] interrupted update recovery failed: {exc}', file=sys.stderr, flush=True)
         raise SystemExit(70) from exc
@@ -83,7 +96,36 @@ except ImportError:
         return {'server.host': '127.0.0.1', 'server.port': 5050}.get(
             key, default)
 
-app = create_app()
+app = create_app({'PROCESS_LOCK_HANDLE': _server_instance_lock})
+
+
+def _arm_update_readiness_deadline(timeout=90):
+    """Fail the replacement process if its exact update handoff is never ready."""
+    nonce = os.environ.get('LDS_RESTART_NONCE')
+    if not nonce:
+        return
+    import json
+    import threading
+    import time
+
+    def watchdog():
+        time.sleep(timeout)
+        journal = _data_dir / 'update-transaction.json'
+        try:
+            payload = json.loads(journal.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return
+        if (payload.get('state') == 'awaiting_restart'
+                and payload.get('restart_nonce') == nonce):
+            print('[LDS] updated process did not acknowledge readiness; rolling back',
+                  file=sys.stderr, flush=True)
+            os._exit(70)
+
+    threading.Thread(
+        target=watchdog, name='update-readiness-deadline', daemon=True).start()
+
+
+_arm_update_readiness_deadline()
 
 if __name__ == '__main__':
     host = os.environ.get('LDS_HOST') or cfg_get('server.host')

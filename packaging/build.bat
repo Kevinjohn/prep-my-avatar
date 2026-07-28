@@ -11,7 +11,7 @@ REM  only to run PyInstaller. The end user of the resulting bundle needs nothing
 REM
 REM  Output: packaging\dist\LoRA-Dataset-Studio-win64.zip
 REM  Any arguments you pass are forwarded to the PowerShell script, e.g.
-REM      build.bat -PyVersion 3.12
+REM      build.bat -OutName My-Studio
 REM ============================================================================
 
 cd /d "%~dp0"

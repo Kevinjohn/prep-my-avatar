@@ -1,0 +1,17 @@
+{
+  "upstream": "https://github.com/ostris/ai-toolkit",
+  "revision": "0e1784176708e351ae664002a53baa585b5949fb",
+  "sources": {
+    "jobs": "ui/src/app/api/jobs/route.ts",
+    "job_start": "ui/src/app/api/jobs/[jobID]/start/route.ts",
+    "queue_start": "ui/src/app/api/queue/[queueID]/start/route.ts",
+    "schema": "ui/prisma/schema.prisma"
+  },
+  "contract": {
+    "list_jobs": "GET /api/jobs returns {jobs: Job[]}",
+    "unique_identity": "Job.name is unique",
+    "queue_job": "GET /api/jobs/{jobID}/start sets status queued",
+    "start_queue": "GET /api/queue/{gpuIDs}/start sets is_running true",
+    "job_config": "Job.job_config is a JSON string"
+  }
+}

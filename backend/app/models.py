@@ -1,8 +1,25 @@
 import json
+import logging
 from datetime import timedelta
 from .extensions import db
 from .utils.time import utcnow
 from sqlalchemy import Integer, String, Text, DateTime, Float
+
+logger = logging.getLogger(__name__)
+
+
+def _json_object(value, field_name):
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        logger.warning('invalid JSON in %s; returning an empty object', field_name)
+        return {}
+    if not isinstance(decoded, dict):
+        logger.warning('non-object JSON in %s; returning an empty object', field_name)
+        return {}
+    return decoded
 
 class FaceDataset(db.Model):
     """A named face-dataset for LoRA character training (one per character)."""
@@ -38,7 +55,8 @@ class FaceDataset(db.Model):
     # Réglages ai-toolkit avancés éditables par dataset (JSON) : rank, resolution,
     # save_every. NULL = défauts family-aware. Cf. lora_training._train_settings.
     train_settings = db.Column(Text, nullable=True)
-    # Famille de modèle entraînée : 'zimage' (défaut/None) ou 'sdxl'. Pilote la
+    # Famille de modèle entraînée : zimage (défaut/None), krea, sdxl, flux ou
+    # flux2klein. Pilote la
     # branche de build_job_config (arch/scheduler/base) et le dossier loras d'import.
     train_type = db.Column(String(16), nullable=True)
     # Nature du dataset : NULL/'character' (défaut historique) ou 'concept'. Orthogonale
@@ -70,7 +88,9 @@ class FaceDataset(db.Model):
     # Monotonic child-change revision. SQLite triggers increment it for every
     # image insert/update/delete so metadata aggregates can be cached without
     # risking stale counts after an image mutation.
-    revision = db.Column(Integer, nullable=False, default=0)
+    # Keep raw-SQL/fresh-schema behavior equal to migration 8's additive
+    # ``DEFAULT 0``; a Python-only default does not exist in SQLite DDL.
+    revision = db.Column(Integer, nullable=False, default=0, server_default='0')
     created_at = db.Column(DateTime, default=db.func.current_timestamp())
     updated_at = db.Column(DateTime, default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
 
@@ -96,12 +116,12 @@ class FaceDataset(db.Model):
 
 
 class FaceDatasetImage(db.Model):
-    """One image of a face-dataset: a generated Klein variation or an imported real photo."""
+    """One dataset image: generated, uploaded/imported, or recoverably trashed."""
     __tablename__ = 'face_dataset_image'
     id = db.Column(Integer, primary_key=True)
     dataset_id = db.Column(Integer, db.ForeignKey('face_dataset.id'), nullable=False, index=True)
     filename = db.Column(String(255), nullable=True)            # null until the job completes
-    source = db.Column(String(12), nullable=False, default='generated')  # generated|import
+    source = db.Column(String(12), nullable=False, default='generated')  # generated|import|upload
     # Import-first provenance and cheap local technical analysis. These fields
     # stay independent from optional face scoring and vision classification.
     source_name = db.Column(String(255), nullable=True)
@@ -131,8 +151,9 @@ class FaceDatasetImage(db.Model):
     source_rights = db.Column(Text, nullable=True)
     framing = db.Column(String(12), nullable=True)              # face|bust|body|back|unknown
     variation_label = db.Column(String(120), nullable=True)
-    status = db.Column(String(10), nullable=False, default='pending')    # pending|keep|reject|failed
+    status = db.Column(String(10), nullable=False, default='pending')  # pending|keep|reject|failed|trashed
     caption = db.Column(Text, nullable=True)                    # WITHOUT the trigger word
+    caption_provenance = db.Column(Text, nullable=True)         # JSON model/revision/seed
     job_id = db.Column(String(36), nullable=True, index=True)
     variation_prompt = db.Column(String(500), nullable=True)    # RAW catalog prompt (regenerate)
     klein_model = db.Column(String(255), nullable=True)         # UNET used (regenerate)
@@ -244,7 +265,12 @@ class LoraTestImage(db.Model):
     # useful only when it closes the loop back to the recipe/dataset version
     # that was tested.  Nullable for historical rows; the service performs an
     # mtime/version-based honest fallback when old evidence can be linked.
-    training_run_record_id = db.Column(Integer, nullable=True, index=True)
+    training_run_record_id = db.Column(
+        Integer,
+        db.ForeignKey('training_run_record.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
     status = db.Column(String(10), nullable=False, default='pending')  # pending|done|failed|cancelled
     # Pourquoi status='failed' : raison réelle remontée du chemin de génération
     # ComfyUI (validation 400 « modèle/node introuvable », node error, timeout,
@@ -336,6 +362,14 @@ class JobQueueMixin:
         """Update status with automatic timestamp + heartbeat management."""
         self.status = new_status
 
+        if new_status == 'processing':
+            # A processing transition starts a new attempt.  Terminal output
+            # from the previous attempt must not remain visible to pollers.
+            self.error_message = None
+            self.result_filename = None
+            self.comfyui_prompt_id = None
+            self.completed_at = None
+
         if error_message is not None:
             self.error_message = error_message
 
@@ -382,6 +416,10 @@ class ImageGenerationQueue(JobQueueMixin, db.Model):
     comfyui_prompt_id = db.Column(String(100), nullable=True)
     worker_id = db.Column(String(36), nullable=True)  # Worker GPU qui traite ce job
     job_metadata = db.Column(Text, nullable=True)
+    # Durable completion outbox.  The terminal queue transition and this flag
+    # are committed together; the owner callback clears it only after it
+    # returns, so startup can replay a completion interrupted by process death.
+    completion_pending = db.Column(db.Boolean, nullable=False, default=False)
 
     __table_args__ = (
         db.CheckConstraint(
@@ -397,19 +435,8 @@ class ImageGenerationQueue(JobQueueMixin, db.Model):
 
     def to_dict(self):
         """Convertit le job en dictionnaire pour l'API"""
-        metadata = {}
-        if self.job_metadata:
-            try:
-                metadata = json.loads(self.job_metadata)
-            except json.JSONDecodeError:
-                metadata = {}
-
-        workflow_data = {}
-        if self.workflow_data:
-            try:
-                workflow_data = json.loads(self.workflow_data)
-            except json.JSONDecodeError:
-                workflow_data = {}
+        metadata = _json_object(self.job_metadata, 'image_generation_queue.job_metadata')
+        workflow_data = _json_object(self.workflow_data, 'image_generation_queue.workflow_data')
 
         return {
             'job_id': self.job_id,
@@ -428,12 +455,7 @@ class ImageGenerationQueue(JobQueueMixin, db.Model):
 
     def to_status_dict(self):
         """Version allégée de to_dict() pour le polling /status (sans workflow_data)"""
-        metadata = {}
-        if self.job_metadata:
-            try:
-                metadata = json.loads(self.job_metadata)
-            except json.JSONDecodeError:
-                metadata = {}
+        metadata = _json_object(self.job_metadata, 'image_generation_queue.job_metadata')
 
         return {
             'job_id': self.job_id,
@@ -506,7 +528,7 @@ class CloudTrainingRun(db.Model):
     dataset_id = db.Column(db.Integer, nullable=False, index=True)
     run_name = db.Column(db.String(255))          # local run identity (lt._run_name)
     job_name = db.Column(db.String(255))          # unique remote job/dataset name
-    status = db.Column(db.String(32), default='preparing')
+    status = db.Column(db.String(32), nullable=False, default='preparing')
     phase_detail = db.Column(db.Text, default='')
     vast_instance_id = db.Column(db.String(32))
     vast_label = db.Column(db.String(64))
@@ -518,6 +540,7 @@ class CloudTrainingRun(db.Model):
     estimated_minutes = db.Column(db.Float)
     estimated_cost_usd = db.Column(db.Float)
     remote_job_id = db.Column(db.String(64))
+    remote_submission_phase = db.Column(db.String(16))
     base_url = db.Column(db.String(255))
     auth_token = db.Column(db.String(128))
     staging_dir = db.Column(db.Text)

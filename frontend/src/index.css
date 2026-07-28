@@ -101,37 +101,6 @@
   animation: slideIn 0.25s ease-out;
 }
 
-/* Login/Register page floating blob animations */
-@keyframes float1 {
-  0%, 100% { transform: translate(0, 0); }
-  50%      { transform: translate(30px, 20px); }
-}
-@keyframes float2 {
-  0%, 100% { transform: translate(0, 0); }
-  50%      { transform: translate(-20px, 30px); }
-}
-@keyframes float-blob {
-  0%, 100% { transform: translateY(0px) translateX(0px); }
-  25%      { transform: translateY(-20px) translateX(10px); }
-  50%      { transform: translateY(-40px) translateX(-10px); }
-  75%      { transform: translateY(-20px) translateX(10px); }
-}
-.animate-float1 {
-  animation: float1 8s ease-in-out infinite;
-}
-.animate-float2 {
-  animation: float2 10s ease-in-out infinite;
-}
-.animate-float-blob {
-  animation: float-blob 20s ease-in-out infinite;
-}
-.animate-float-blob-reverse {
-  animation: float-blob 25s ease-in-out infinite reverse;
-}
-.animate-float-blob-slow {
-  animation: float-blob 30s ease-in-out infinite;
-}
-
 /* Respect users who request reduced motion. Global reset (industry-standard
    pattern) instead of an opt-in allow-list: neutralizes ALL animations and
    transitions — the float orbs, plus the ~94 transition-all / ~32 animate-*
@@ -148,69 +117,6 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* Gallery skeleton animations */
-@keyframes skelPulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.45; }
-}
-@keyframes skelShimmer {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(200%); }
-}
-
-/* Vote bounce animation */
-@keyframes voteBounce {
-  0%   { transform: scale(1); }
-  35%  { transform: scale(1.45); }
-  65%  { transform: scale(0.88); }
-  100% { transform: scale(1); }
-}
-
-/* MessagesPage animations */
-.msg-animated-bg {
-  background:
-    radial-gradient(circle at 20% 50%, rgba(85, 103, 213, 0.1) 0%, transparent 50%),
-    radial-gradient(circle at 80% 80%, rgba(118, 75, 162, 0.1) 0%, transparent 50%);
-  animation: msgFloat 15s ease-in-out infinite;
-}
-@keyframes msgFloat {
-  0%, 100% { transform: translateY(0px); }
-  50%      { transform: translateY(20px); }
-}
-@keyframes msgSlideIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes msgSlideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.animate-msg-slideIn {
-  animation: msgSlideIn 0.3s ease;
-}
-.animate-msg-slideUp {
-  animation: msgSlideUp 0.3s ease;
-}
-
-/* ProfilePage animations */
-.profile-bg {
-  background:
-    linear-gradient(135deg, rgba(85, 103, 213, 0.1) 0%, rgba(118, 75, 162, 0.1) 50%, rgba(85, 103, 213, 0.05) 100%),
-    radial-gradient(circle at 20% 50%, rgba(240, 147, 251, 0.08) 0%, transparent 50%),
-    radial-gradient(circle at 80% 80%, rgba(85, 103, 213, 0.08) 0%, transparent 50%);
-  animation: gradientShift 15s ease infinite;
-}
-@keyframes gradientShift {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.8; }
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-.profile-spinner {
-  animation: spin 1s linear infinite;
 }
 
 /* Guided-checklist jump: flash the targeted section so the eye lands on it.

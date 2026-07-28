@@ -1,6 +1,7 @@
-import { useEffect } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import Markdown, { markdownHeadingId } from '../components/common/Markdown'
+import { useEffect, useRef } from 'react'
+import { Link, Navigate, useParams } from 'react-router-dom'
+import Markdown from '../components/common/Markdown'
+import { markdownHeadingModel } from '../utils/markdownHeadings'
 import DiagnosticReport from '../components/common/DiagnosticReport'
 // Vite inlines every chapter as a string at build time (?raw) → the guide
 // lives in the bundle, no fetch, nothing extra to ship in the portable build.
@@ -15,33 +16,46 @@ import gettingHelp from '../../../docs/guide/getting-help.md?raw'
 /* The guide is a true reading sequence — the mono chapter numbers encode the
    intended order, not decoration. `extra` mounts a live component under the
    markdown (the diagnostic button on the help chapter). */
-const CHAPTERS = [
+export const CHAPTERS = [
   { id: 'getting-started', num: '01', title: 'Getting started', description: 'Install the app, connect the tools you need, and understand the workspace.', source: gettingStarted },
   { id: 'using-the-app', num: '02', title: 'Using the app', description: 'Follow the complete workflow for character, concept, and style datasets.', source: usingTheApp },
   { id: 'dataset-guide', num: '03', title: 'Building a good dataset', description: 'Make stronger choices about images, captions, settings, and checkpoints.', source: datasetGuide },
   { id: 'troubleshooting', num: '04', title: 'Troubleshooting', description: 'Find a symptom, understand the cause, and apply the shortest reliable fix.', source: troubleshooting },
 ]
-const HELP_CHAPTER = { id: 'getting-help', num: '05', title: 'Getting help', description: 'Create a useful report and share the details needed to solve a problem.', source: gettingHelp, extra: 'diagnostic' }
-
-const cleanHeading = (heading) => heading.replace(/[`*_]/g, '')
+export const HELP_CHAPTER = { id: 'getting-help', num: '05', title: 'Getting help', description: 'Create a useful report and share the details needed to solve a problem.', source: gettingHelp, extra: 'diagnostic' }
+export const ALL_GUIDE_CHAPTERS = [...CHAPTERS, HELP_CHAPTER]
 
 export default function GuidePage({ helpOnly = false }) {
   const { section } = useParams()
-  const navigate = useNavigate()
   const chapters = helpOnly ? [HELP_CHAPTER] : CHAPTERS
-  const idx = helpOnly ? 0 : Math.max(0, chapters.findIndex((c) => c.id === section))
-  const chapter = chapters[idx]
+  const requestedSection = section || 'getting-started'
+  const idx = helpOnly ? 0 : chapters.findIndex((c) => c.id === requestedSection)
+  const validSection = helpOnly || idx >= 0
+  const headingRef = useRef(null)
+  const chapter = validSection ? chapters[idx] : chapters[0]
   const prev = idx > 0 ? chapters[idx - 1] : null
   const next = idx < chapters.length - 1 ? chapters[idx + 1] : null
-  const headings = [...chapter.source.matchAll(/^##\s+(.+)$/gm)].map((match) => ({
-    title: cleanHeading(match[1]), id: markdownHeadingId(match[1]),
-  }))
+  const headings = markdownHeadingModel(chapter.source)
   const readingMinutes = Math.max(1, Math.ceil(chapter.source.trim().split(/\s+/).length / 210))
-  const jumpToHeading = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const jumpToHeading = (event, id) => {
+    event.preventDefault()
+    const target = document.getElementById(id)
+    if (!target) return
+    window.history.pushState(null, '', `#${encodeURIComponent(id)}`)
+    target.tabIndex = -1
+    target.focus({ preventScroll: true })
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' })
+  }
 
   // A chapter switch is a new "page" — land the reader at its top, not at the
   // scroll depth of the previous chapter.
-  useEffect(() => { window.scrollTo(0, 0) }, [chapter.id])
+  useEffect(() => {
+    window.scrollTo(0, 0)
+    if (validSection) headingRef.current?.focus()
+  }, [chapter.id, validSection])
+
+  if (!validSection) return <Navigate to="/guide/getting-started" replace />
 
   const navItem = (c, chip) => {
     const isActive = c.id === chapter.id
@@ -51,14 +65,14 @@ export default function GuidePage({ helpOnly = false }) {
       : `relative flex w-full items-baseline gap-2.5 rounded-md px-3 py-2 text-left text-sm ${
           isActive ? 'bg-surface-raised text-content' : 'text-content-muted hover:bg-surface hover:text-content'}`
     return (
-      <button key={c.id} type="button" onClick={() => navigate(`/guide/${c.id}`)}
+      <Link key={c.id} to={`/guide/${c.id}`}
         aria-current={isActive ? 'page' : undefined} className={base}>
         {!chip && isActive && (
           <span aria-hidden className="absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded bg-gradient-primary" />
         )}
         <span className={`font-mono text-[11px] ${isActive ? 'text-content' : 'text-content-subtle'}`}>{c.num}</span>
         <span className="font-medium">{c.title}</span>
-      </button>
+      </Link>
     )
   }
 
@@ -80,7 +94,7 @@ export default function GuidePage({ helpOnly = false }) {
         </nav>
       </aside>}
 
-      <main className={`min-w-0 max-w-4xl pb-10 ${helpOnly ? 'mx-auto' : 'mt-2 lg:mt-0'}`}>
+      <section className={`min-w-0 max-w-4xl pb-10 ${helpOnly ? 'mx-auto' : 'mt-2 lg:mt-0'}`}>
         <header className="relative mb-4 overflow-hidden rounded-2xl border border-border bg-surface px-5 py-5 sm:px-6 sm:py-6">
           <div aria-hidden className="absolute -right-16 -top-20 h-52 w-52 rounded-full bg-indigo-500/10 blur-3xl" />
           <div className="relative">
@@ -91,7 +105,7 @@ export default function GuidePage({ helpOnly = false }) {
               <span>{readingMinutes} min read</span>
               {!helpOnly && <><span aria-hidden>·</span><span>{idx + 1} of {chapters.length}</span></>}
             </div>
-            <h1 className="m-0 max-w-2xl text-2xl font-bold tracking-tight text-content sm:text-3xl">{chapter.title}</h1>
+            <h1 ref={headingRef} tabIndex={-1} className="m-0 max-w-2xl text-2xl font-bold tracking-tight text-content focus:outline-none sm:text-3xl">{chapter.title}</h1>
             <p className="mb-0 mt-2 max-w-2xl text-sm leading-relaxed text-content-muted sm:text-base">{chapter.description}</p>
           </div>
         </header>
@@ -101,8 +115,8 @@ export default function GuidePage({ helpOnly = false }) {
             <p className="m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle">On this page</p>
             <div className="flex gap-2 overflow-x-auto pb-0.5">
               {headings.map((item) => (
-                <button key={item.id} type="button" onClick={() => jumpToHeading(item.id)}
-                  className="shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content">{item.title}</button>
+                <a key={item.id} href={`#${item.id}`} onClick={(event) => jumpToHeading(event, item.id)}
+                  className="shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content">{item.title}</a>
               ))}
             </div>
           </nav>
@@ -130,15 +144,15 @@ export default function GuidePage({ helpOnly = false }) {
             </Link>
           ) : <span />}
         </div>}
-      </main>
+      </section>
 
       <aside className="hidden xl:block">
         <nav aria-label="On this page" className="sticky top-20 border-l border-border pl-4">
           <p className="m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle">On this page</p>
           <div className="flex flex-col gap-0.5">
             {headings.map((item) => (
-              <button key={item.id} type="button" onClick={() => jumpToHeading(item.id)}
-                className="rounded-md bg-transparent px-2 py-1.5 text-left text-xs leading-snug text-content-subtle hover:bg-surface hover:text-content">{item.title}</button>
+              <a key={item.id} href={`#${item.id}`} onClick={(event) => jumpToHeading(event, item.id)}
+                className="rounded-md bg-transparent px-2 py-1.5 text-left text-xs leading-snug text-content-subtle hover:bg-surface hover:text-content">{item.title}</a>
             ))}
           </div>
         </nav>

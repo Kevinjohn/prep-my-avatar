@@ -7,10 +7,13 @@ function url(datasetId, image, displayFilename) {
     ? `/api/dataset/${datasetId}/img/${encodeURIComponent(filename)}` : null;
 }
 
-function Pane({ datasetId, image, label, onPreview, displayFilename, faceOverride, identityOverride }) {
+function Pane({ datasetId, image, label, onPreview, displayFilename = null, faceOverride = undefined,
+  identityOverride = undefined, metricsOverride = undefined, usefulnessOverride = undefined }) {
   const imageUrl = url(datasetId, image, displayFilename);
   const face = faceOverride !== undefined ? (faceOverride || {}) : (image?.analysis?.face || {});
-  const metrics = image?.analysis?.metrics || {};
+  const metrics = metricsOverride !== undefined ? (metricsOverride || {}) : (image?.analysis?.metrics || {});
+  const usefulness = usefulnessOverride !== undefined
+    ? usefulnessOverride : image?.training_usefulness;
   const identity = identityOverride !== undefined ? identityOverride : image?.face_score;
   const previewImage = {
     ...image,
@@ -36,7 +39,7 @@ function Pane({ datasetId, image, label, onPreview, displayFilename, faceOverrid
         )}
       </div>
       <div className="grid grid-cols-2 gap-1 border-t border-border p-2 text-[0.625rem] text-content-muted">
-        <span>technical <b className="text-content">{image?.training_usefulness || 'unknown'}</b></span>
+        <span>technical <b className="text-content">{usefulness || 'unknown'}</b></span>
         <span>face pixels <b className="text-content">{face.quality || 'unchecked'}</b></span>
         <span>sharpness <b className="text-content">{metrics.sharpness ?? '—'}</b></span>
         <span>identity <b className="text-content">{identity?.toFixed?.(3) ?? '—'}</b></span>
@@ -91,7 +94,9 @@ export default function ImageImprovementReview({ images, datasetId, onResolve, o
             <div className="grid grid-cols-2 gap-2">
               <Pane datasetId={datasetId} image={original} label="Exact reconstruction input"
                 displayFilename={sourceFilename} faceOverride={comparison.source_face}
-                identityOverride={comparison.source_identity_score} onPreview={onPreview} />
+                identityOverride={comparison.source_identity_score}
+                metricsOverride={comparison.source_metrics}
+                usefulnessOverride={comparison.source_training_usefulness} onPreview={onPreview} />
               <Pane datasetId={datasetId} image={candidate} label="Reconstructed candidate" onPreview={onPreview} />
             </div>
             <div className="mt-2 rounded border border-border bg-app/40 px-2 py-1.5 text-[0.6875rem]">

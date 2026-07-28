@@ -179,6 +179,23 @@ def test_ttl_purge_on_read():
         da._TTL_SECONDS = orig
 
 
+def test_activity_ttl_uses_monotonic_time_and_globally_purges(monkeypatch):
+    from app.services import dataset_activity as da
+    da.reset()
+    clocks = {'wall': 1000.0, 'mono': 10.0}
+    monkeypatch.setattr(da.time, 'time', lambda: clocks['wall'])
+    monkeypatch.setattr(da.time, 'monotonic', lambda: clocks['mono'])
+    da.begin(1, 'caption')
+
+    clocks.update(wall=-5000.0, mono=20.0)
+    assert da.get(1) is not None
+
+    clocks['mono'] += da._TTL_SECONDS + 1
+    da.begin(2, 'classify')
+    assert 1 not in da._active
+    assert da.get(2) is not None
+
+
 def test_thread_safety_concurrent_datasets():
     """Many begin/progress/bump/end cycles across distinct datasets in parallel:
     no lost updates, no crash, and every entry cleaned up at the end."""

@@ -1,13 +1,13 @@
 # Getting help & reporting problems
 
-Stuck, found a bug, or missing a feature? Two doors, both watched:
+Stuck, found a bug, or missing a feature?
 
-- **Discord** — [discord.gg/j6hnJBFtXE](https://discord.gg/j6hnJBFtXE) — ask in
-  **#help**; usually the fastest way to get unstuck. Feature ideas and votes
-  live in **#roadmap**.
-- **GitHub** — [Issues](https://github.com/perfectgf/lora-dataset-studio/issues) —
-  best for reproducible bugs and feature requests; the templates walk you
-  through what to include.
+- **GitHub** — [Prep My Avatar issues](https://github.com/Kevinjohn/prep-my-avatar/issues)
+  is the supported destination for reproducible bugs and feature requests; the
+  templates walk you through what to include.
+- **Upstream community** — the inherited application's
+  [Discord](https://discord.gg/j6hnJBFtXE) may help with LoRA Dataset Studio
+  behavior, but it does not own or support this fork's changes.
 
 ---
 
@@ -28,7 +28,7 @@ always the same four things:
 The **diagnostic report** button below assembles all of that in one click:
 version, OS, capability status, non-secret settings and the last log lines —
 formatted, copied to your clipboard, ready to paste into Discord or a GitHub
-issue.
+issue in this repository.
 
 What it deliberately **never** includes: your API keys or tokens (only
 whether each one is set) and your folder paths (only whether each one is
@@ -38,5 +38,5 @@ configured). One caveat: the log tail can mention file names from your machine
 ## Feature requests
 
 Describe the **job you were doing when you missed the feature** — the problem
-is more valuable than the proposed solution. Post it in Discord **#roadmap** or
-open a GitHub issue with the *Feature request* template.
+is more valuable than the proposed solution. Open a GitHub issue with the
+*Feature request* template.

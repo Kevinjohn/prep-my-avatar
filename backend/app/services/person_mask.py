@@ -57,7 +57,16 @@ def generate_person_masks(image_paths, out_dir, timeout: int = 1200) -> dict:
     except json.JSONDecodeError as e:
         logger.warning('person_mask: JSON illisible : %s', e)
         return {}
-    if not data.get('ok'):
-        logger.warning('person_mask: échec : %s', data.get('error'))
+    if not isinstance(data, dict) or not data.get('ok'):
+        logger.warning('person_mask: échec : %s',
+                       data.get('error') if isinstance(data, dict) else 'invalid schema')
+        return {}
+    written = data.get('written')
+    results = data.get('results')
+    if (not isinstance(written, int) or isinstance(written, bool) or written < 0
+            or not isinstance(results, dict)
+            or any(not isinstance(k, str) or not isinstance(v, (str, dict))
+                   for k, v in results.items())):
+        logger.warning('person_mask: invalid worker response schema')
         return {}
     return data

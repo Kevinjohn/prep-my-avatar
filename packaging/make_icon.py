@@ -5,12 +5,15 @@ strands) — matches the app's 🧬 theme. Committed alongside the .ico it produ
 build is reproducible; re-run `python packaging/make_icon.py` to regenerate.
 """
 import math
+import os
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
 SIZE = 256
 OUT = Path(__file__).resolve().parent / "icon.ico"
+SIZES = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 
 
 def _lerp(a, b, t):
@@ -48,9 +51,20 @@ def render(size: int = SIZE) -> Image.Image:
 
 def main() -> None:
     icon = render()
-    sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    icon.save(OUT, format="ICO", sizes=sizes)
-    print(f"wrote {OUT} ({', '.join(f'{w}x{h}' for w, h in sizes)})")
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{OUT.name}.", suffix=".tmp", dir=OUT.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        icon.save(temporary, format="ICO", sizes=SIZES)
+        with Image.open(temporary) as generated:
+            generated_sizes = set(generated.ico.sizes())
+            if generated_sizes != set(SIZES):
+                raise RuntimeError(f"generated ICO sizes are {sorted(generated_sizes)!r}")
+            generated.verify()
+        os.replace(temporary, OUT)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print(f"wrote {OUT} ({', '.join(f'{w}x{h}' for w, h in SIZES)})")
 
 
 if __name__ == "__main__":

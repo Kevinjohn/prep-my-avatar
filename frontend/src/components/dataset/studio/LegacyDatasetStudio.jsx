@@ -86,7 +86,7 @@ function StudioBody({ datasetId, family, onFamilyChange }) {
         <aside className="flex flex-col gap-2 lg:sticky lg:top-16 lg:max-h-[calc(100vh-7rem)] lg:overflow-auto">
           <RunSetupPanel d={d} studio={studio} form={form} datasetId={datasetId} />
         </aside>
-        <main id="st-results" className="flex flex-col gap-3 min-w-0 scroll-mt-16">
+        <section id="st-results" aria-label="Studio results" className="flex flex-col gap-3 min-w-0 scroll-mt-16">
           <TrainingFeedbackPanel feedback={d.training_feedback} compact />
           {/* « Best epoch » OBJECTIF : classement InsightFace des checkpoints
               (complète le best_preset issu des votes 👍/👎 juste en dessous). */}
@@ -99,7 +99,7 @@ function StudioBody({ datasetId, family, onFamilyChange }) {
             onMemorize={studio.setBest} fmt={fmt} />
           <ModelComparison items={d.model_comparison} />
           <ResultsArea datasetId={datasetId} d={d} studio={studio} vote={vote} onOpen={setLbImg} />
-        </main>
+        </section>
       </div>
 
       <QuickVoteModal vote={vote} datasetId={datasetId} fmt={fmt} />

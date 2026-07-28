@@ -39,6 +39,11 @@ def test_drop_identity_tags_body_mode():
     assert fv.drop_identity_tags(cap, body=True) == 'standing, full_body, red_dress'
 
 
+def test_drop_identity_tags_keeps_unrelated_compound_tags():
+    assert fv.drop_identity_tags('sitting_on_chair, wheelchair, long_hair') == \
+        'sitting_on_chair, wheelchair'
+
+
 # --- dataset wiring --------------------------------------------------------------
 
 def test_create_and_toggle_fidelity(app):

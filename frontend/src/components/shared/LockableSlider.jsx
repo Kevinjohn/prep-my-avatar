@@ -77,6 +77,7 @@ export default function LockableSlider({
       </div>
       <input
         type="range"
+        aria-label={label}
         min={min}
         max={max}
         step={step}

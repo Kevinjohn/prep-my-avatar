@@ -63,6 +63,18 @@ def test_empty_caption_is_not_a_leak():
     assert fv.caption_has_concept_leak(None, LEG) is False
 
 
+def test_detector_handles_silent_e_inflections():
+    for concept, forms in {
+        'smile': ('smile', 'smiling', 'smiled'),
+        'raise': ('raise', 'raising', 'raised'),
+        'pose': ('pose', 'posing', 'posed'),
+    }.items():
+        for form in forms:
+            assert fv.caption_has_concept_leak(
+                f'The subject is {form}.', concept), (concept, form)
+    assert fv.caption_has_concept_leak('A poised subject.', 'pose') is False
+
+
 # --- 2) lexicon derivation is SCOPED, not sprayed onto every concept ----------
 
 def test_lexical_field_derived_from_leg_concept():
@@ -265,3 +277,22 @@ def test_pipeline_joycaption_backend_scrubs_pose_without_ollama(app, monkeypatch
         for banned in ('knees', 'feet', 'thighs', 'lifted'):
             assert banned not in cap
         assert 'red hair' in cap
+
+
+def test_joycaption_does_not_restore_caption_removed_as_leak(app, monkeypatch):
+    import app.services.joycaption as jc
+
+    with app.app_context():
+        save_config({'captioning': {'backend': 'joycaption'}})
+        ds, img = _leg_concept_with_image()
+        monkeypatch.setattr(jc, 'is_available', lambda: True)
+        monkeypatch.setattr(
+            jc, 'caption_images_joycaption',
+            lambda paths, prompt=None: {path: 'forbidden-only caption' for path in paths})
+        monkeypatch.setattr(svc, '_enforce_concept_omission', lambda *args, **kwargs: '')
+
+        count = svc.caption_images(LOCAL_USER, ds.id)
+
+        db.session.refresh(img)
+        assert count == 0
+        assert not img.caption

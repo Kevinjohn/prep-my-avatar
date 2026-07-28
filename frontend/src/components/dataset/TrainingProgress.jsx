@@ -56,7 +56,7 @@ function LossSparkline({ curve }) {
   );
 }
 
-export default function TrainingProgress({ datasetId, base, trainType, cloud = false }) {
+export default function TrainingProgress({ datasetId, base = null, trainType = null, cloud = false }) {
   const [prog, setProg] = useState(null);
   const timer = useRef(null);
   useEffect(() => {
@@ -98,7 +98,10 @@ export default function TrainingProgress({ datasetId, base, trainType, cloud = f
       </div>
     );
   }
-  const pct = prog.step && prog.total ? Math.min(100, Math.round((prog.step / prog.total) * 100)) : null;
+  const step = Number(prog.step);
+  const total = Number(prog.total);
+  const hasProgress = Number.isFinite(step) && Number.isFinite(total) && total > 0;
+  const pct = hasProgress ? Math.max(0, Math.min(100, Math.round((step / total) * 100))) : null;
   const samples = prog.samples || [];
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-3 py-2">
@@ -109,13 +112,13 @@ export default function TrainingProgress({ datasetId, base, trainType, cloud = f
       {pct != null && (
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2 text-[0.6875rem] text-content-muted flex-wrap">
-            <span className="text-content font-semibold tabular-nums">{prog.step} / {prog.total} steps ({pct}%)</span>
+            <span className="text-content font-semibold tabular-nums">{step} / {total} steps ({pct}%)</span>
             {prog.loss != null && <span className="tabular-nums">loss {prog.loss.toExponential(3)}</span>}
             {prog.speed && <span className="tabular-nums">{prog.speed}</span>}
             {prog.eta && <span className="tabular-nums">ETA {prog.eta}</span>}
           </div>
           <div className="h-2 rounded bg-app/60 border border-border overflow-hidden"
-            role="progressbar" aria-valuenow={prog.step} aria-valuemin={0} aria-valuemax={prog.total}
+            role="progressbar" aria-valuenow={Math.max(0, Math.min(step, total))} aria-valuemin={0} aria-valuemax={total}
             aria-label="Training progress">
             <div className="h-full bg-gradient-primary transition-all duration-700" style={{ width: `${pct}%` }} />
           </div>

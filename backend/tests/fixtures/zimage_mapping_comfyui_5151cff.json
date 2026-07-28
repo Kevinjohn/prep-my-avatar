@@ -1,0 +1,16 @@
+{
+  "upstream_revision": "5151cff293607c2191981fd16c62c1b1a6939695",
+  "config": {"n_layers": 1, "dim": 4, "n_refiner_layers": 2},
+  "representative": {
+    "layers.0.attention.to_q.weight": ["layers.0.attention.qkv.weight", [0, 0, 4]],
+    "layers.0.attention.to_k.weight": ["layers.0.attention.qkv.weight", [0, 4, 4]],
+    "layers.0.attention.to_v.weight": ["layers.0.attention.qkv.weight", [0, 8, 4]],
+    "layers.0.feed_forward.w1.weight": "layers.0.feed_forward.w1.weight",
+    "context_refiner.1.attention.to_q.bias": ["context_refiner.1.attention.qkv.bias", [0, 0, 4]],
+    "noise_refiner.1.adaLN_modulation.0.bias": "noise_refiner.1.adaLN_modulation.0.bias",
+    "all_final_layer.2-1.linear.weight": "final_layer.linear.weight",
+    "all_x_embedder.2-1.weight": "x_embedder.weight",
+    "cap_pad_token": "cap_pad_token",
+    "t_embedder.mlp.2.bias": "t_embedder.mlp.2.bias"
+  }
+}

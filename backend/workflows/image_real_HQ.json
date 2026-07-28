@@ -1,7 +1,7 @@
 {
   "1": {
     "inputs": {
-      "ckpt_name": "Biglove\\mopMixtureOfPervertsDMD_v40.safetensors"
+      "ckpt_name": "Biglove/mopMixtureOfPervertsDMD_v40.safetensors"
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
@@ -25,7 +25,7 @@
     "inputs": {
       "text": "child, loli, mature, bad, wrong, blur, blurry, out of focus, anime, digital art, semirealistic, cartoon, manga, drawing, painting, fake, unreal, long nails, fake, wrong anatomy, hairy legs, big eyes, cgi, fake, bad anatomy, extra limbs, missing fingers, fused fingers, poorly drawn hands, poorly drawn face, mutated hands, long neck, extra arms, extra legs, extra fingers, disfigured, malformed limbs, missing limbs, fat, glitches, cropped, worst quality, low quality, jpeg artifacts, watermark, signature, text, logo, exaggerated features, unnatural skin tone, bokeh, tiling, deformed, lowres, out of frame, cgi, 3d render, aliasing, dick, cock, penis, blurry background, studio photo, professional photo, doll-like skin, plastic texture, uncanny valley, incorrect proportions, duplicate body parts, unnatural poses, large breasts, huge breasts, cum on face, piercing, too long legs, poor anatomical proportions, sweat",
       "clip": [
-        "1",
+        "10",
         1
       ]
     },
@@ -77,7 +77,7 @@
   },
   "10": {
     "inputs": {
-      "lora_name": "DMD2\\dmd2_sdxl_4step_lora_fp16.safetensors",
+      "lora_name": "DMD2/dmd2_sdxl_4step_lora_fp16.safetensors",
       "strength_model": 0,
       "strength_clip": 0,
       "model": [
@@ -96,7 +96,7 @@
   },
   "25": {
     "inputs": {
-      "lora_name": "subtle\\subtle-sdxl_enhance.safetensors",
+      "lora_name": "subtle/subtle-sdxl_enhance.safetensors",
       "strength_model": 0,
       "strength_clip": 0,
       "model": [

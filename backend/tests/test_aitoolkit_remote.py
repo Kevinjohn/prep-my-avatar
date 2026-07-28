@@ -50,6 +50,25 @@ def test_is_ready_false_on_connection_error(remote, monkeypatch):
     assert remote.is_ready() is False
 
 
+def test_find_job_by_name_uses_stable_identity(remote, monkeypatch):
+    seen = []
+
+    def fake(method, url, **kw):
+        seen.append((method, url))
+        return FakeResp(200, {'jobs': [{'id': 17, 'name': 'run name'}]})
+
+    monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
+    assert remote.find_job_by_name('run name')['id'] == '17'
+    assert seen == [('GET', 'http://1.2.3.4:40123/api/jobs')]
+
+
+def test_find_job_by_name_returns_none_for_404(remote, monkeypatch):
+    monkeypatch.setattr(
+        'app.services.aitoolkit_remote.requests.request',
+        lambda *a, **k: FakeResp(200, {'jobs': []}))
+    assert remote.find_job_by_name('missing') is None
+
+
 def test_ensure_settings_round_trips_folders(remote, monkeypatch):
     posts = {}
 
@@ -172,10 +191,11 @@ class _CuttingResp:
     """Serves `body` but cuts the stream after `serve` bytes (mid-transfer
     connection loss, like the sick vast proxies observed live 2026-07-13)."""
 
-    def __init__(self, body, serve, status_code=200):
+    def __init__(self, body, serve, status_code=200, headers=None):
         self.status_code = status_code
         self._body, self._serve = body, serve
         self.text = ''
+        self.headers = headers or {}
 
     def iter_content(self, chunk_size=1):
         import requests as _rq
@@ -205,8 +225,11 @@ def test_download_resumes_with_range_until_expected_size(remote, monkeypatch, tm
         offset = int((kw.get('headers') or {}).get('Range', 'bytes=0-')
                      .split('=')[1].split('-')[0])
         calls.append(offset)
+        headers = {'ETag': '"same"'}
+        if offset:
+            headers['Content-Range'] = f'bytes {offset}-{len(body) - 1}/{len(body)}'
         return _CuttingResp(body[offset:], serve=30,
-                            status_code=206 if offset else 200)
+                            status_code=206 if offset else 200, headers=headers)
 
     monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
     dest = tmp_path / 'f.safetensors'
@@ -229,6 +252,32 @@ def test_download_fails_when_no_progress(remote, monkeypatch, tmp_path):
                                     expected_size=100, attempts=10)
     assert not dest.exists()
     assert not (tmp_path / 'f.safetensors.part').exists()
+
+
+@pytest.mark.parametrize('content_range', ['bytes 0-49/100', 'bytes 60-99/100'])
+def test_download_rejects_wrong_resumed_range(remote, monkeypatch, tmp_path,
+                                               content_range):
+    responses = iter([
+        _CuttingResp(b'a' * 100, serve=50, headers={'ETag': '"v1"'}),
+        _CuttingResp(b'b' * 50, serve=50, status_code=206,
+                     headers={'ETag': '"v1"', 'Content-Range': content_range}),
+    ])
+    monkeypatch.setattr('app.services.aitoolkit_remote.requests.request',
+                        lambda method, url, **kw: next(responses))
+    dest = tmp_path / 'f.safetensors'
+    with pytest.raises(RemoteError, match='invalid byte range'):
+        remote.download_public_file('/out/f.safetensors', str(dest),
+                                    expected_size=100, attempts=2)
+    assert not dest.exists()
+
+
+def test_create_job_requires_a_valid_identifier(remote, monkeypatch):
+    for payload in ({}, {'id': None}, [], None):
+        response = FakeResp(200, payload)
+        monkeypatch.setattr('app.services.aitoolkit_remote.requests.request',
+                            lambda method, url, **kw: response)
+        with pytest.raises(RemoteError, match='job id|non-object'):
+            remote.create_job('run_a', {})
 
 
 def test_download_without_expected_size_keeps_clean_eof_semantics(remote, monkeypatch, tmp_path):
