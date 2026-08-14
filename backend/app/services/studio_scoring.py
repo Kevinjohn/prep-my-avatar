@@ -30,6 +30,13 @@ TEST_ASPECTS = {'9:16', '3:4', '1:1', '4:3', '16:9'}
 
 
 def _wilson_lower_bound(likes: int, voted: int, z: float = 1.96) -> float:
+    """Borne basse de l'intervalle de Wilson (95%) sur le taux de 👍.
+
+    C'est la métrique de tri correcte pour « meilleure config d'après les votes » :
+    un compte brut (likes − dislikes) favorise les configs simplement TESTÉES plus
+    souvent ; le taux brut (likes/voted) favorise les configs à 1 seul vote. Wilson
+    combine taux ÉLEVÉ *et* confiance (nb de votes) : 2👍/2 (0.34) bat 6👍4👎 (0.31),
+    et 5👍/5 (0.57) bat 2👍/2 (0.34). 0.0 si aucun vote."""
     if voted <= 0:
         return 0.0
     p = likes / voted
@@ -38,6 +45,37 @@ def _wilson_lower_bound(likes: int, voted: int, z: float = 1.96) -> float:
     center = p + z2 / (2 * voted)
     margin = z * math.sqrt((p * (1 - p) + z2 / (4 * voted)) / voted)
     return (center - margin) / denominator
+
+
+def _tally_vote(acc: dict, rating) -> None:
+    """Compte UN vote dans `acc` ({likes, dislikes, voted} déjà initialisés).
+
+    Règle centrale de toute la notation : seuls ±1 sont des VOTES. `rating` 0 ou
+    NULL = image non jugée — elle compte dans `images` mais PAS dans `voted`, sinon
+    `like_rate` et Wilson seraient dilués par tout ce qui n'a jamais été regardé.
+
+    Ne touche QUE l'incrément : le choix des lignes à compter (status='done',
+    `filename` non nul, famille…) reste chez l'appelant — ce sont des questions
+    différentes, pas trois orthographes de la même."""
+    if rating == 1:
+        acc['likes'] += 1
+        acc['voted'] += 1
+    elif rating == -1:
+        acc['dislikes'] += 1
+        acc['voted'] += 1
+
+
+def _add_vote_totals(acc: dict, entry: dict) -> None:
+    """Agrège les totaux déjà tallés d'une config dans un cumul (modèle, case…)."""
+    for field in ('likes', 'dislikes', 'images', 'voted'):
+        acc[field] += entry[field]
+
+
+def _checkpoint_label(checkpoint) -> str:
+    """Libellé lisible d'un checkpoint entraîné (« Lola2 · 4000 steps · bigLove
+    zt3 »), avec repli sur le nom de fichier sans extension."""
+    return (format_trained_lora_label(checkpoint)
+            or _basename(checkpoint).rsplit('.', 1)[0])
 
 
 # --- Rating + best settings ---------------------------------------------------
@@ -141,6 +179,9 @@ def training_record_for_checkpoint(dataset_id, family, checkpoint):
 # « échantillon faible » dans l'UI (le tri reste Wilson, qui pénalise déjà les
 # petits échantillons ; ce flag ne sert qu'à AVERTIR l'œil).
 LOW_CONFIDENCE_MIN = 3
+# Départage « taux de 👍 du modèle » : un modèle sans aucun vote n'est ni favorisé
+# ni pénalisé face à un modèle noté.
+NEUTRAL_MODEL_PREF = 0.5
 
 _GENERATION_CONFIG_FIELDS = (
     'checkpoint', 'strength', 'aspect', 'z_model', 'cfg', 'steps', 'steps2',
@@ -166,12 +207,23 @@ def _generation_config(row) -> tuple:
     return tuple(values)
 
 
-def _representative_image(dataset_id, config):
+def _done_images(dataset_id) -> list:
+    """Images abouties du dataset, plus récente d'abord - le corpus dans lequel on
+    cherche une image représentative d'une config."""
+    return (LoraTestImage.query.filter_by(dataset_id=dataset_id, status='done')
+            .order_by(LoraTestImage.id.desc()).all())
+
+
+def _representative_image(dataset_id, config, rows=None):
+    """Image la plus récente produite par EXACTEMENT cette config.
+
+    `rows` partageable (cf. best_cell/`scores`) : best_per_checkpoint appelle cette
+    fonction une fois PAR checkpoint, et sans ce partage chaque appel rechargeait la
+    totalité des images du dataset - un N+1 sur le poll du studio."""
     target = tuple(config.get(field) for field in _GENERATION_CONFIG_FIELDS)
     target = tuple(_normalized_extra_loras(value) if field == 'extra_loras' else value
                    for field, value in zip(_GENERATION_CONFIG_FIELDS, target))
-    rows = (LoraTestImage.query.filter_by(dataset_id=dataset_id, status='done')
-            .order_by(LoraTestImage.id.desc()).all())
+    rows = _done_images(dataset_id) if rows is None else rows
     return next((row for row in rows if _generation_config(row) == target), None)
 
 
@@ -207,12 +259,7 @@ def cell_scores(dataset_id, family=None, rows=None) -> list[dict]:
                                  'score': 0, 'likes': 0, 'dislikes': 0,
                                  'images': 0, 'voted': 0, 'rank': 0.0})
         e['images'] += 1
-        if r.rating == 1:
-            e['likes'] += 1
-            e['voted'] += 1
-        elif r.rating == -1:
-            e['dislikes'] += 1
-            e['voted'] += 1
+        _tally_vote(e, r.rating)
     for e in agg.values():
         e['score'] = e['likes'] - e['dislikes']
         e['rank'] = round(_wilson_lower_bound(e['likes'], e['voted']), 4)
@@ -222,19 +269,6 @@ def cell_scores(dataset_id, family=None, rows=None) -> list[dict]:
         e['low_confidence'] = e['voted'] < LOW_CONFIDENCE_MIN
     return sorted(agg.values(),
                   key=lambda e: (-e['rank'], -e['voted'], e['strength']))
-
-
-def model_net_scores(dataset_id) -> dict:
-    """Sentiment net par modèle (👍−👎 sur toutes ses images) - exposé pour
-    l'affichage. Le gate de best_cell, lui, utilise le TAUX (voir _model_like_rates)."""
-    rows = LoraTestImage.query.filter_by(dataset_id=dataset_id).all()
-    net = {}
-    for r in rows:
-        if r.rating == 1:
-            net[r.z_model] = net.get(r.z_model, 0) + 1
-        elif r.rating == -1:
-            net[r.z_model] = net.get(r.z_model, 0) - 1
-    return net
 
 
 def _model_like_rates(scores) -> dict:
@@ -260,10 +294,7 @@ def model_comparison(dataset_id, scores=None) -> list[dict]:
         a = acc.setdefault(e['z_model'], {
             'z_model': e['z_model'], 'z_model_label': e['z_model_label'],
             'likes': 0, 'dislikes': 0, 'images': 0, 'voted': 0, 'checkpoints': set()})
-        a['likes'] += e['likes']
-        a['dislikes'] += e['dislikes']
-        a['images'] += e['images']
-        a['voted'] += e['voted']
+        _add_vote_totals(a, e)
         a['checkpoints'].add(e['checkpoint'])
     out = []
     for a in acc.values():
@@ -294,13 +325,10 @@ def checkpoint_model_breakdown(dataset_id, scores=None) -> list[dict]:
         key = (e['checkpoint'], e['z_model'])
         a = acc.setdefault(key, {
             'checkpoint': e['checkpoint'],
-            'label': format_trained_lora_label(e['checkpoint']) or _basename(e['checkpoint']).rsplit('.', 1)[0],
+            'label': _checkpoint_label(e['checkpoint']),
             'z_model': e['z_model'], 'z_model_label': e['z_model_label'],
             'likes': 0, 'dislikes': 0, 'images': 0, 'voted': 0})
-        a['likes'] += e['likes']
-        a['dislikes'] += e['dislikes']
-        a['images'] += e['images']
-        a['voted'] += e['voted']
+        _add_vote_totals(a, e)
     out = []
     for a in acc.values():
         a['net'] = a['likes'] - a['dislikes']
@@ -349,6 +377,10 @@ def _feedback_for_records(records):
                     LoraTestImage.filename.isnot(None)).all())
     face_sums = {}
     checkpoints = {}
+    # L'inférence de provenance ne dépend que de (dataset, famille, checkpoint) - une
+    # poignée de valeurs distinctes - mais _record_for_checkpoint résout un chemin sur
+    # disque et lit un mtime. Sans ce mémo elle refaisait ce travail PAR LIGNE.
+    inferred = {}
     for row in rows:
         # New rows carry exact immutable provenance.  Trust that link before
         # filename/folder inference, but only when it belongs to this dataset;
@@ -358,27 +390,20 @@ def _feedback_for_records(records):
             record = None
         if record is None:
             family = (family_of_lora(row.checkpoint) or 'zimage').lower()
-            scoped = by_scope.get((row.dataset_id, family), [])
-            record = _record_for_checkpoint(
-                row.dataset_id, family, row.checkpoint, records=scoped)
+            memo_key = (row.dataset_id, family, row.checkpoint)
+            if memo_key not in inferred:
+                scoped = by_scope.get((row.dataset_id, family), [])
+                inferred[memo_key] = _record_for_checkpoint(
+                    row.dataset_id, family, row.checkpoint, records=scoped)
+            record = inferred[memo_key]
         if record is None:
             unlinked['images'] += 1
-            if row.rating == 1:
-                unlinked['likes'] += 1
-                unlinked['voted'] += 1
-            elif row.rating == -1:
-                unlinked['dislikes'] += 1
-                unlinked['voted'] += 1
+            _tally_vote(unlinked, row.rating)
             continue
         stats = out[record.id]
         stats['images'] += 1
         checkpoints.setdefault(record.id, set()).add(row.checkpoint)
-        if row.rating == 1:
-            stats['likes'] += 1
-            stats['voted'] += 1
-        elif row.rating == -1:
-            stats['dislikes'] += 1
-            stats['voted'] += 1
+        _tally_vote(stats, row.rating)
         if row.face_score is not None:
             face_sums[record.id] = face_sums.get(record.id, 0.0) + float(row.face_score)
             stats['face_scored'] += 1
@@ -387,12 +412,7 @@ def _feedback_for_records(records):
             'record_id': record.id, 'checkpoint': row.checkpoint,
             'strength': row.strength, 'likes': 0, 'dislikes': 0, 'voted': 0,
         })
-        if row.rating == 1:
-            cell['likes'] += 1
-            cell['voted'] += 1
-        elif row.rating == -1:
-            cell['dislikes'] += 1
-            cell['voted'] += 1
+        _tally_vote(cell, row.rating)
 
     for record_id, stats in out.items():
         if stats['voted']:
@@ -499,30 +519,50 @@ def training_feedback(user_id, dataset_id, family=None) -> dict | None:
     }
 
 
-def best_cell(dataset_id, scores=None) -> dict | None:
-    """Config recommandée d'après les votes :
-      1. candidats = configs nettes positives (👍 > 👎) ;
-      2. tri par `rank` Wilson ↓ (taux × confiance) - le MÉRITE de la config prime ;
-      3. départages : nb de votes ↓ (confiance), puis taux de 👍 GLOBAL du modèle ↓
+def _ranked_positive_configs(scores) -> list[dict]:
+    """Configs nettes positives (👍 > 👎), triées meilleure d'abord.
+
+    LE tri de recommandation, en un seul endroit :
+      1. `rank` Wilson ↓ (taux × confiance) - le MÉRITE de la config prime ;
+      2. départages : nb de votes ↓ (confiance), puis taux de 👍 GLOBAL du modèle ↓
          (à config équivalente, on préfère le modèle mieux noté), puis strength ↑.
     Le sentiment du modèle est un DÉPARTAGE, pas un filtre : une config nettement
     mieux notée n'est jamais écartée parce que son modèle est moyen ailleurs (sinon
-    le sweep par-case n'aurait aucun sens). Retourne None tant que rien n'est aimé.
-
-    `scores` peut être passé (déjà calculé) pour éviter de re-scanner la table -
-    studio_payload partage un seul cell_scores entre best_cell/best_preset/best_per_checkpoint."""
-    scores = cell_scores(dataset_id) if scores is None else scores
+    le sweep par-case n'aurait aucun sens). Un modèle sans aucun vote est neutre."""
     candidates = [e for e in scores if e['likes'] > e['dislikes']]
     if not candidates:
-        return None
+        return []
     rates = _model_like_rates(scores)
 
     def model_pref(m):
         r = rates.get(m)
-        return r if r is not None else 0.5  # modèle sans vote = neutre
+        return r if r is not None else NEUTRAL_MODEL_PREF
     candidates.sort(key=lambda e: (-e['rank'], -e['voted'],
                                    -model_pref(e['z_model']), e['strength']))
-    return candidates[0]
+    return candidates
+
+
+def _enriched_config(dataset_id, config, rows=None) -> dict:
+    """Config + son libellé de checkpoint + l'image représentative qui l'illustre."""
+    img = _representative_image(dataset_id, config, rows=rows)
+    return {
+        **config,
+        'label': _checkpoint_label(config['checkpoint']),
+        'prompt': getattr(img, 'prompt', None) if img else None,
+        'seed': img.seed if img else None,
+        'filename': img.filename if img else None,
+    }
+
+
+def best_cell(dataset_id, scores=None) -> dict | None:
+    """Config recommandée d'après les votes : la 1re de `_ranked_positive_configs`
+    (qui porte la règle de tri). Retourne None tant que rien n'est aimé.
+
+    `scores` peut être passé (déjà calculé) pour éviter de re-scanner la table -
+    studio_payload partage un seul cell_scores entre best_cell/best_preset/best_per_checkpoint."""
+    scores = cell_scores(dataset_id) if scores is None else scores
+    ranked = _ranked_positive_configs(scores)
+    return ranked[0] if ranked else None
 
 
 def best_preset(dataset_id, scores=None) -> dict | None:
@@ -531,45 +571,29 @@ def best_preset(dataset_id, scores=None) -> dict | None:
     bc = best_cell(dataset_id, scores=scores)
     if not bc:
         return None
-    img = _representative_image(dataset_id, bc)
-    return {
-        **bc,
-        'label': format_trained_lora_label(bc['checkpoint']) or _basename(bc['checkpoint']).rsplit('.', 1)[0],
-        'prompt': getattr(img, 'prompt', None) if img else None,
-        'seed': img.seed if img else None,
-        'filename': img.filename if img else None,
-    }
+    return _enriched_config(dataset_id, bc)
 
 
 def best_per_checkpoint(dataset_id, scores=None) -> list[dict]:
     """Meilleur réglage PAR checkpoint (les votes varient beaucoup d'un modèle à
     l'autre - un best global ne suffit pas). Pour chaque checkpoint ayant ≥1 config
-    nette positive (👍>👎), retourne sa config la mieux notée (MÊME tri Wilson que
-    best_cell), enrichie d'une image représentative. Trié par rank décroissant.
+    nette positive (👍>👎), retourne sa config la mieux notée (_ranked_positive_configs,
+    le même tri que best_cell), enrichie d'une image représentative. Trié par rank décroissant.
 
     `scores` partageable (cf. best_cell) pour éviter de re-scanner la table."""
     scores = cell_scores(dataset_id) if scores is None else scores
-    candidates = [e for e in scores if e['likes'] > e['dislikes']]
+    candidates = _ranked_positive_configs(scores)
     if not candidates:
         return []
-    rates = _model_like_rates(scores)
-
-    def model_pref(m):
-        r = rates.get(m)
-        return r if r is not None else 0.5
-    candidates.sort(key=lambda e: (-e['rank'], -e['voted'],
-                                   -model_pref(e['z_model']), e['strength']))
     best_by_cp = {}
     for e in candidates:  # déjà triés → le 1er vu par checkpoint = le meilleur
         best_by_cp.setdefault(e['checkpoint'], e)
-    out = []
-    for bc in best_by_cp.values():
-        img = _representative_image(dataset_id, bc)
-        out.append({**bc,
-                    'label': format_trained_lora_label(bc['checkpoint']) or _basename(bc['checkpoint']).rsplit('.', 1)[0],
-                    'prompt': getattr(img, 'prompt', None) if img else None,
-                    'seed': img.seed if img else None,
-                    'filename': img.filename if img else None})
+    # Un SEUL chargement des images pour tous les checkpoints (sinon _representative_image
+    # rechargeait la table entière une fois par checkpoint, sur le poll).
+    rows = _done_images(dataset_id)
+    out = [_enriched_config(dataset_id, bc, rows=rows) for bc in best_by_cp.values()]
+    # Tri stable sur le seul rank : les départages de _ranked_positive_configs
+    # (votes, modèle, strength) survivent entre checkpoints à rank égal.
     out.sort(key=lambda e: -e['rank'])
     return out
 
@@ -775,7 +799,7 @@ def face_ranking(dataset_id, family, rows=None) -> list:
         a[0] += float(r.face_score)
         a[1] += 1
     out = [{'checkpoint': cp,
-            'label': format_trained_lora_label(cp) or _basename(cp).rsplit('.', 1)[0],
+            'label': _checkpoint_label(cp),
             'avg': round(s / n, 4), 'n': n}
            for cp, (s, n) in agg.items()]
     out.sort(key=lambda e: (-e['avg'], -e['n']))

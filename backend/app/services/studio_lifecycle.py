@@ -139,26 +139,22 @@ def resume_run(runtime, user_id, dataset_id=None, run_id=None, family=None) -> d
         allowed = _allowed(img.dataset_id, cell_family)
         if not cell_ds or img.checkpoint not in allowed:
             continue  # dataset/checkpoint disparu → on saute
-        # Pool de bases selon la famille de CETTE cellule (SDXL → bases SDXL ; Krea →
-        # base fixe ; sinon Z-Image), sinon un resume SDXL retomberait sur une base Z-Image.
+        # Pool de bases de la famille de CETTE cellule (sinon un resume SDXL
+        # retomberait sur une base Z-Image). `require=False` : un resume ne lève
+        # jamais en cours de route, il se rabat sur la base persistée / rien.
         if cell_family == 'sdxl':
             if _sdxl_bases is None:
-                _sdxl_bases = [m['filename'] for m in runtime.list_sdxl_base_models()]
+                _sdxl_bases = runtime._base_model_pool('sdxl')
             cell_models = _sdxl_bases
-        elif cell_family == 'krea':
-            # None en tête : les cellules legacy (z_model NULL) et celles dont la
-            # base locale a disparu du disque retombent sur le UNET câblé, jamais
-            # sur un modèle arbitraire.
-            cell_models = [None] + runtime.get_krea_models()
         else:
-            cell_models = runtime.get_zimage_models()
+            cell_models = runtime._base_model_pool(cell_family)
         z_model = (img.z_model if (img.z_model and img.z_model in cell_models)
                    else (cell_models[0] if cell_models else None))
         aspect = img.aspect if img.aspect in runtime.TEST_ASPECTS else runtime.DEFAULT_ASPECT
         # Palier de résolution persisté → mêmes dims qu'au 1er run (sinon table fixe).
         width, height = runtime.aspect_dims(aspect, cell_family, getattr(img, 'resolution_tier', None))
         prompt = (img.prompt or '').strip() or runtime.identity_prompt(cell_ds)
-        seed = img.seed or random.randint(1, 2**31 - 1)
+        seed = img.seed or random.randint(1, runtime.SEED_MAX)
         cell = EffectiveStudioCell.from_row(
             img, family=cell_family, width=width, height=height,
             z_model=z_model, prompt=prompt, seed=seed,

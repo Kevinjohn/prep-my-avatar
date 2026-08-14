@@ -248,10 +248,109 @@ Learned in pass 4.
   validates, the LoRA just never reaches the sampler. Duplication whose failure
   mode is silent beats duplication that is merely long.
 
+Learned in pass 5.
+
+- **A re-export block is two things wearing one coat.** `lora_test_studio`
+  carried 30 `X = _scoring.X` aliases. Half are the module's contract — the
+  sibling modules receive this module as `runtime` and reach `runtime.best_cell`,
+  and tests monkeypatch `lts.get_krea_models` — and half were residue with zero
+  readers anywhere. A reader cannot tell which is which without grepping all 30,
+  so the block reads as "everything here is load-bearing" and nothing in it ever
+  gets deleted. Verify the block *by name*, not as a unit: `runtime.<attr>` in
+  the siblings plus `setattr(lts, ...)` in the tests is the complete list of what
+  is contract. 17 of the 30 were dead.
+- **When two copies exist, the docstring is on the wrong one.** `_wilson_lower_bound`
+  existed twice; the copy with the 8-line explanation of *why* Wilson and not raw
+  net had zero production callers, and the copy every ranking actually runs
+  through had no docstring at all. That is the normal direction of this failure:
+  prose gets written when a thing is introduced, and the *used* copy is the one
+  that later gets moved. Before deleting a duplicate, check which copy is
+  carrying the explanation — and move it, don't drop it.
+- **Prose asserting an invariant is a request for a name.** `best_per_checkpoint`'s
+  docstring said "MÊME tri Wilson que best_cell" — a four-tuple sort key restated
+  by hand in two places, with a comment promising they agree. That promise is now
+  `_ranked_positive_configs`. Pass 3 recorded this; pass 5 is the second sighting,
+  which makes it a rule: a comment that says "same as X" marks a missing function.
+- **An N+1 hides behind an optional parameter that already exists.**
+  `_representative_image` re-queried every done image of the dataset once per
+  checkpoint, on a 3-second poll — while the same module already had the fix as a
+  convention (`scores=None`, "partageable … pour éviter de re-scanner la table").
+  The fix was to follow the file's own established pattern, not to invent caching.
+  When you find repeated work, check whether the module already names the way out.
+- **The empty-pool policy is not part of the pool.** The base-model cascade was
+  written four times, but the callers genuinely disagree on what an empty pool
+  means: creation must refuse, resume must never raise mid-run. Extracting the
+  rule and leaving the policy at the call site (`require=True`) unified four
+  copies without flattening a real difference — the failure mode of getting this
+  wrong is a resumed Krea cell silently re-rendering on a different base.
+
 ### Carried-over findings
 
 Real, verified, deferred because they fell outside their pass's scope. Fold each
 into the pass named, rather than rediscovering it.
+
+- **Verified in pass 5 and deliberately skipped.** Each was confirmed against the
+  code and left alone on purpose:
+  - `studio_scoring.TEST_ASPECTS` (a set) vs `lora_test_studio.TEST_ASPECTS` (a
+    dict) — a real hand-copy, but `lora_test_studio` imports `studio_scoring`, so
+    the set is a deliberate import-cycle break. Unifying it means moving the dict
+    down into `studio_discovery`, which is a structural move, not a sweep edit.
+  - `_ci_join_exists` vs `studio_discovery.resolve_lora_path` — same
+    case-insensitive path walk, different *security* contract: the resolver
+    rejects `..`, enforces `commonpath` containment and requires a file; the probe
+    deliberately accepts directories because its input is workflow-internal.
+    Merging drops a traversal guard.
+  - `_extra_lora_strength` (raises) vs the parse inside
+    `apply_krea_lora_test_settings` (falls back to 1.0) — different *stages*:
+    admission of user input must 400, workflow assembly of already-admitted or
+    persisted values must not fail an otherwise recoverable resume.
+  - The three parses of `row.extra_loras` — their post-conditions differ on the
+    `batch` key, and `_normalized_extra_loras` keeping it is what makes a batch
+    cell a distinct config from its reference cell. One shared parser that
+    stripped `batch` would collapse the ⚖ axis in every score and ranking.
+  - `lora_net_scores` sorting by raw net while `model_comparison` sorts by Wilson
+    — intentional: within one run `launch_matrix` gives every subject an identical
+    axis product, so sample sizes are equal by construction; across runs they are
+    not.
+  - `active_run_count()` global vs `active_run_count(dataset_id)` scoped — the
+    asymmetry is the admission rule (a multi-LoRA comparison spans datasets, so it
+    holds the whole studio), not an oversight.
+  - The unreachable `run_owned` guards in `studio_lifecycle` — `run_owned` is a
+    deliberate single-user no-op and its call sites are the single place a
+    multi-user check would land. Deleting them saves 4 lines and removes the hook.
+  - The three `Protocol` classes and the three `sys.modules[__name__]` names —
+    internal-API shape and cosmetics respectively; neither is a simplification.
+  - `init_image` / `denoise` are structurally always `None` downstream of
+    `_sanitize_gen_knobs`, but the columns are schema and `set_best_settings` can
+    still receive them from a client `generation_config`.
+
+- **Pass 6 (`routes`) or `/code-review`: `studio_payload_run` renders one LoRA
+  under two different names in one response.** `loras[].lora_label`
+  (`studio_payload.py:237`) is the bare basename while `lora_ranking[].lora_label`
+  (`:208`) is the formatted label, so the same LoRA reads
+  `lora_Lola2_000004000_bigLove_zt3` in the column header and
+  `Lola2 · 4000 steps · bigLove zt3` in the ranking panel of the same view
+  (`LoraComparisonGrid.jsx:50` vs `LoraRankingPanel.jsx:32`). Same split at `:246`
+  vs `:121`. Fixing it changes user-visible strings, which is why the sweep left
+  it: it is a behaviour change, not a simplification.
+- **`/code-review`: `_extra_lora_strength` rejects negative strengths that the
+  rest of the stack accepts.** The UI slider (`ZImageLoraConfig.jsx:17-23`) and
+  `inject_zimage_loras` both allow negative LoRA weights; the studio's admission
+  clamp rejects `< 0.0` with a 400, so a config the user can build in Generate
+  cannot be tested in the Studio.
+- **`/code-review`: `_record_for_checkpoint` lowercases `family` while its caller
+  keys `by_scope` on the raw `record.family`.** A record stored with a
+  non-lowercase family would be silently dropped by the re-filter at
+  `studio_scoring.py:142-143`. Either the store guarantees lowercase (and the
+  filter is dead) or it does not (and this drops evidence) — it cannot be both.
+- **Efficiency, outside pass 5's file set: `fetch_object_info_classes` is an
+  uncached multi-MB HTTP GET run once per launched cell.** `preflight_family` is
+  correctly called per cell (resume has no run-level preflight, so deleting it
+  would un-guard resume), but the *probe* should be memoized per launch. The fix
+  belongs in `utils/comfyui.py`, which pass 5 did not own.
+- **Efficiency, pass 6 (`routes`): `studio_run_history` is a 2-query N+1 over up
+  to 81 candidate runs**, hydrating every row of each run only to take `len()`.
+  Two aggregates would do. Not on the poll path, hence deferred.
 
 - **Pass 9 (`analysis-quality`): every imported photo is decoded twice.**
   `analyse_image_bytes` (`import_analysis.py`) and `normalize_to_webp` /
@@ -452,7 +551,7 @@ Update after every pass. `blocked` needs a reason.
 | 2 | lora-training-core | done | `b7e2143` | −18 net. Dead second `_FAMILY_LABEL`, `_trigger_boundary` and `_pid_alive` copies, ai-toolkit arch probe ×2, VAE/TE override rule ×2 (had drifted), queue launch block ×2, family dispatch ×4, dead store. Preflight now reads the stored dHash instead of re-decoding every image. Deferred: shared SHA-256 helper, checkpoint N+1, `_FAMILY_LABEL` in run_share/hf_publish. |
 | 3 | remote-training-publish | done | `b741725` | +33 net (docstrings that state the deduped invariants). Offer filters ×2 and local-only-family guard ×2 (picker vs launch — must agree by contract), Retry/Continue relaunch ×2, publish staleness signature ×2, JSON-object response contract ×4 (vast) and ×2 (ai-toolkit), remote "already started" status set ×3, step-suffix regex ×4, `train_params` guarded parse ×5, legacy fingerprint rule ×2, `error_pod_kept` query ×2, `_dataset_name` in terms of `_dataset_names`, dead `reconcile_orphans(wait=)`. Efficiency: checkpoint N+1 fixed via `mtime_resolver`, plus 3 double-derivations. Deferred: family labels (own pass), `_file_hash` memoization, `_safe_json` ×10. |
 | 4 | generation-engines | done | `0c58f5b` | −159 net. Five dead listers/helpers and 3 orphaned imports out of `utils/comfyui.py`; trained-LoRA picker entry ×3 → `_lora_entry`; LoRA-chain injector ×2 → `_chain_model_loras` (the snapshot-before-mutate subtlety now stated once); `zimage_convert` transformer-ready check ×2 and convert-state write ×5 → two helpers; identity-trait list ×3 → one constant; dead return value out of `apply_zimage_settings`; node 92 added to `_REQUIRED_NODES`. Three module docstrings corrected where they named callers this app does not have. Also cleared the repo's one standing `ruff` error (pass 1's own residue) — as a `noqa`, because it is a test seam. Deferred: models-root unification (Codex: needs correctness tests), caption cleaner/detector regex divergence. |
-| 5 | studio | todo | — | |
+| 5 | studio | done | PENDING | 17 dead re-export aliases + 2 dead frontend-mirror constants + `model_net_scores` deleted; the base-model pool, permanent-LoRA validation, Krea rebalance encoding and shared-seed series extracted once each and shared by `create_run`/`create_comparison_run`/resume; `_wilson_lower_bound` and `_basename` collapsed to aliases with the docstring moved onto the live copy; `_ranked_positive_configs` names the sort `best_cell`/`best_per_checkpoint` both restated; `_tally_vote` names "only ±1 is a vote" (5 sites); `_representative_image` N+1 and the `_record_for_checkpoint` per-row filesystem resolve fixed; `list_all_testable_checkpoints` double scan removed. 10 skips and 5 carried findings recorded above. Gate 1740 passed / 1 skipped, ruff clean. |
 | 6 | routes | todo | — | |
 | 7 | scrape | todo | — | |
 | 8 | data-lifecycle | todo | — | |

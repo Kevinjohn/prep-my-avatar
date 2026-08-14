@@ -20,6 +20,16 @@ under **Unreleased** until a release is tagged.
   checkpoint file. A folder of N checkpoints previously cost N identical
   queries; the annotations themselves are unchanged, and a folder with no
   checkpoints now makes no query at all.
+- The LoRA Test Studio's poll no longer re-reads the whole image table once per
+  checkpoint. Choosing the representative image for each checkpoint's best
+  config re-loaded every finished image of the dataset on each pass; it now
+  loads them once for the whole list. Attributing images to the training run
+  that produced them likewise resolved a path on disk and read its mtime for
+  every image row, and now does so once per distinct dataset/family/checkpoint.
+- Listing every testable checkpoint across datasets now walks the LoRA folder
+  once per family instead of twice. The listing previously asked which families
+  had checkpoints, then re-scanned each of those families to get the same list
+  back.
 
 ### Fixed
 
@@ -28,6 +38,39 @@ under **Unreleased** until a release is tagged.
   cannot admit a job the launcher would later refuse.
 
 ### Internal
+
+- The LoRA Test Studio coordinator no longer re-states the rules its two launch
+  paths share. Building the pool of base models for a family, validating
+  always-on LoRAs, encoding the Krea rebalance value and deriving a run's shared
+  seeds each existed as a hand-copied block in both `create_run` and
+  `create_comparison_run` — and the base-model pool in the resume path as well,
+  making four copies of a rule the three paths must agree on: if resume lost the
+  leading `None` that means "the UNET wired into the workflow", a legacy Krea
+  cell would silently resume onto a different base. Each rule now has one
+  definition. The differences that are real are preserved: creation refuses an
+  empty pool while resume falls back and never raises mid-run, and the two
+  `create_*` functions stay separate because they derive the family, handle the
+  base axis and scope the LoRA whitelist differently.
+- The Wilson ranking metric and the LoRA-path basename helper existed twice
+  each. Both are now single definitions aliased from the module that owns them,
+  and the explanation of why rankings use a Wilson lower bound rather than a raw
+  like count moved from the copy nothing called onto the copy every ranking
+  runs through.
+- The sort behind "recommended config" is now written once. `best_cell` and
+  `best_per_checkpoint` each restated the same candidate filter, neutral-model
+  default and four-part sort key, with a comment in one promising it matched the
+  other; both now call `_ranked_positive_configs`. The rule that only 👍/👎 count
+  as votes — and that an unrated image inflates neither — is likewise named
+  once and used at the five places that were incrementing the same three
+  counters by hand.
+- Removed 17 module-level re-export aliases, two frontend-mirror constants and
+  the `model_net_scores` function from the Studio coordinator, all verified to
+  have no reader in the backend, the tests or the frontend. The aliases that
+  remain are the ones the sibling modules and the test seams actually reach, so
+  the block now describes the module's contract instead of burying it in
+  residue. The module docstring, which described a migration from another
+  project and named symbols this app does not have, now describes the module.
+
 
 - Removed a dead second definition of the training family-label table, a
   duplicated trigger-boundary rule, a duplicated PID-liveness helper, a
