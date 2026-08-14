@@ -20,12 +20,12 @@ from . import face_dataset_service as fds
 from . import lora_training as training
 from .training_jobs import EffectiveTrainingJob
 from .lora_training import (
-    VAE_TE_OVERRIDE_FAMILIES,
     _PERSISTED,
     _TRAINING_GPU_LEASE_TTL,
     _TRAIN_STATE_TTL,
     _atomic_copy,
     _default_variant_for,
+    _effective_vae_te,
     _is_custom_weights,
     _output_dir,
     _run_name,
@@ -160,17 +160,7 @@ def enqueue_training(user_id, dataset_id, extra_steps=None,
     # Custom vae/te : whitelist STRICTE par famille (SDXL-only), persistance et
     # preflight — même contrat qu'au lancement, pour ne pas mettre en file un job
     # voué à un refus 400 (ou à un chemin fantôme) au moment de son démarrage.
-    _q_prov_vae = vae_path is not _PERSISTED and (vae_path or '').strip()
-    _q_prov_te = te_path is not _PERSISTED and (te_path or '').strip()
-    if ttype not in VAE_TE_OVERRIDE_FAMILIES:
-        if _q_prov_vae or _q_prov_te:
-            raise ValueError('VAE / text-encoder overrides are SDXL-only')
-        eff_vae = eff_te = None
-    else:
-        eff_vae = (ds.train_vae_path if vae_path is _PERSISTED
-                   else ((vae_path or '').strip() or None))
-        eff_te = (ds.train_te_path if te_path is _PERSISTED
-                  else ((te_path or '').strip() or None))
+    eff_vae, eff_te = _effective_vae_te(ds, ttype, vae_path, te_path)
     if extra_steps is None:
         training.preflight_custom_paths(ttype, weights=base, vae_path=eff_vae, te_path=eff_te,
                                allow_unverified_weights=allow_unverified_weights)
@@ -365,6 +355,35 @@ def _prepare_queued_launch(q, due):
     return q, item
 
 
+def _try_launch_due(q, due, label: str, log_lead: str) -> str | None:
+    """Lancer l'item dû, puis solder la file. Partagé par les DEUX chemins
+    d'avancement (run qui vient de finir / rien en cours) : la comptabilité
+    d'échec (`status='failed'`, `training_queue_error`, remise à zéro de
+    `training_queue_launch_id`) doit rester identique sur les deux, sinon l'UI
+    rapporte les échecs de file différemment selon le chemin emprunté.
+
+    Retour : `f'{label}:{dataset_id}'` si lancé, None si l'échec a été enregistré.
+    """
+    q, nxt = _prepare_queued_launch(q, due)
+    try:
+        training._launch_queued_item(nxt)  # remet le flag + un nouveau pid (pas de flap GPU)
+        training._save_queue(q[:due] + q[due + 1:])  # retirer SEULEMENT après lancement réussi
+        queue_manager._set_system_state(
+            'training_queue_launch_id', None, ttl_seconds=1)
+        logger.info(f"File training : {log_lead} dataset {nxt['dataset_id']}")
+        return f"{label}:{nxt['dataset_id']}"
+    except Exception as e:
+        nxt = dict(nxt, status='failed', error=str(e))
+        training._save_queue(q[:due] + [nxt] + q[due + 1:])
+        queue_manager._set_system_state(
+            'training_queue_launch_id', None, ttl_seconds=1)
+        queue_manager._set_system_state(
+            'training_queue_error',
+            {'dataset_id': nxt.get('dataset_id'), 'error': str(e)}, ttl_seconds=3600)
+        logger.error(f"File training : échec lancement {nxt.get('dataset_id')}: {e}")
+        return None
+
+
 def _advance_training_queue() -> str | None:
     flag = bool(queue_manager._get_system_state('training_in_progress', False))
     pid = queue_manager._get_system_state('training_pid', None)
@@ -415,8 +434,7 @@ def _advance_training_queue() -> str | None:
                     queue_manager._set_system_state(
                         key, value, ttl_seconds=_TRAIN_STATE_TTL)
             return None  # toujours en cours
-        if _compensate_unstarted_launch():
-            flag = False
+        _compensate_unstarted_launch()
         # Process mort alors que le flag est levé → training terminé.
         # Snapshot du final en nom NUMÉROTÉ (immuable) AVANT d'enchaîner/libérer :
         # sinon un futur « continuer » écrase ce final sans trace. Idempotent, et ce
@@ -429,24 +447,7 @@ def _advance_training_queue() -> str | None:
             logger.warning('snapshot final (advance) échoué : %s', e)
         due = _due_index(q)
         if due is not None and not vision_busy:
-            q, nxt = _prepare_queued_launch(q, due)
-            try:
-                training._launch_queued_item(nxt)  # remet le flag + un nouveau pid (pas de flap GPU)
-                training._save_queue(q[:due] + q[due + 1:])  # retirer SEULEMENT après lancement réussi
-                queue_manager._set_system_state(
-                    'training_queue_launch_id', None, ttl_seconds=1)
-                logger.info(f"File training : terminé → lancement dataset {nxt['dataset_id']}")
-                return f"next:{nxt['dataset_id']}"
-            except Exception as e:
-                nxt = dict(nxt, status='failed', error=str(e))
-                training._save_queue(q[:due] + [nxt] + q[due + 1:])
-                queue_manager._set_system_state(
-                    'training_queue_launch_id', None, ttl_seconds=1)
-                queue_manager._set_system_state(
-                    'training_queue_error',
-                    {'dataset_id': nxt.get('dataset_id'), 'error': str(e)}, ttl_seconds=3600)
-                logger.error(f"File training : échec lancement {nxt.get('dataset_id')}: {e}")
-                return None
+            return _try_launch_due(q, due, 'next', 'terminé → lancement')
         # File vide (ou uniquement des jobs programmés plus tard) → libérer le GPU
         # (le superviseur relance ComfyUI ; le ticker relancera le job à l'échéance).
         queue_manager._set_system_state('training_in_progress', False, ttl_seconds=1)
@@ -460,24 +461,7 @@ def _advance_training_queue() -> str | None:
 
     due = _due_index(q)
     if due is not None and not vision_busy:
-        q, nxt = _prepare_queued_launch(q, due)
-        try:
-            training._launch_queued_item(nxt)
-            training._save_queue(q[:due] + q[due + 1:])  # retirer SEULEMENT après lancement réussi
-            queue_manager._set_system_state(
-                'training_queue_launch_id', None, ttl_seconds=1)
-            logger.info(f"File training : lancement dataset {nxt['dataset_id']}")
-            return f"launched:{nxt['dataset_id']}"
-        except Exception as e:
-            nxt = dict(nxt, status='failed', error=str(e))
-            training._save_queue(q[:due] + [nxt] + q[due + 1:])
-            queue_manager._set_system_state(
-                'training_queue_launch_id', None, ttl_seconds=1)
-            queue_manager._set_system_state(
-                'training_queue_error',
-                {'dataset_id': nxt.get('dataset_id'), 'error': str(e)}, ttl_seconds=3600)
-            logger.error(f"File training : échec lancement {nxt.get('dataset_id')}: {e}")
-            return None
+        return _try_launch_due(q, due, 'launched', 'lancement')
     return None
 
 

@@ -196,6 +196,33 @@ def is_installed() -> bool:
     return bool(p) and p.is_file()
 
 
+def _aitoolkit_declares_arch(arch_pattern: str) -> bool:
+    """L'ai-toolkit installé déclare-t-il une arch dont le nom matche
+    `arch_pattern` ? Scan des sources d'archs (extensions_built_in), lecture
+    fraîche à chaque appel → un `git pull` du mainteneur passe la détection à
+    True sans redémarrage. Le motif est ancré sur `arch = "<nom>"` par
+    l'appelant : une mention incidente (commentaire, variable) ne doit jamais
+    faire un faux positif. Voir _aitoolkit_supports_krea pour l'enjeu."""
+    root = cfg.aitoolkit_path('dir')
+    if not root:
+        return False
+    ext_root = root / 'extensions_built_in'
+    if not ext_root.is_dir():
+        return False
+    pat = re.compile(r'arch\s*=\s*[\'"]' + arch_pattern + r'[\'"]')
+    for dp, _dn, files in os.walk(str(ext_root)):
+        for fn in files:
+            if not fn.endswith('.py'):
+                continue
+            try:
+                with open(os.path.join(dp, fn), encoding='utf-8', errors='ignore') as fh:
+                    if pat.search(fh.read()):
+                        return True
+            except OSError:
+                continue
+    return False
+
+
 def _aitoolkit_supports_krea() -> bool:
     """L'ai-toolkit installé connaît-il l'arch Krea 2 ? C'est CRITIQUE : ai-toolkit
     fait `if ModelClass.arch == config.arch` puis, sans match, retombe
@@ -210,24 +237,7 @@ def _aitoolkit_supports_krea() -> bool:
     variable) ferait un FAUX POSITIF, et surtout si l'arch upstream diffère (ex.
     « krea2_turbo ») la garde donnerait un feu vert alors que get_model_class ne
     matcherait pas → fallback SD silencieux, précisément ce qu'on veut empêcher."""
-    root = cfg.aitoolkit_path('dir')
-    if not root:
-        return False
-    ext_root = root / 'extensions_built_in'
-    if not ext_root.is_dir():
-        return False
-    pat = re.compile(r'arch\s*=\s*[\'"]krea2[\'"]')
-    for dp, _dn, files in os.walk(str(ext_root)):
-        for fn in files:
-            if not fn.endswith('.py'):
-                continue
-            try:
-                with open(os.path.join(dp, fn), encoding='utf-8', errors='ignore') as fh:
-                    if pat.search(fh.read()):
-                        return True
-            except OSError:
-                continue
-    return False
+    return _aitoolkit_declares_arch(r'krea2')
 
 
 def _aitoolkit_supports_flux2klein() -> bool:
@@ -240,24 +250,7 @@ def _aitoolkit_supports_flux2klein() -> bool:
     chaînes émises par _build_job_config_flux2klein), jamais la sous-chaîne
     « klein » seule — une mention incidente ferait un faux positif. Lecture
     fraîche : un `git pull` du mainteneur passe la détection à True sans restart."""
-    root = cfg.aitoolkit_path('dir')
-    if not root:
-        return False
-    ext_root = root / 'extensions_built_in'
-    if not ext_root.is_dir():
-        return False
-    pat = re.compile(r'arch\s*=\s*[\'"]flux2_klein_(?:4b|9b)[\'"]')
-    for dp, _dn, files in os.walk(str(ext_root)):
-        for fn in files:
-            if not fn.endswith('.py'):
-                continue
-            try:
-                with open(os.path.join(dp, fn), encoding='utf-8', errors='ignore') as fh:
-                    if pat.search(fh.read()):
-                        return True
-            except OSError:
-                continue
-    return False
+    return _aitoolkit_declares_arch(r'flux2_klein_(?:4b|9b)')
 
 
 def _safe_trigger(ds) -> str:
@@ -526,8 +519,6 @@ _FAMILY_EXPECTED_ARCH = {'sdxl': 'sdxl', 'krea': 'krea2',
                          'flux': 'flux', 'flux2klein': 'flux'}
 _ARCH_LABEL = {'sdxl': 'an SDXL', 'sd15': 'a Stable Diffusion 1.5',
                'flux': 'a FLUX', 'krea2': 'a Krea 2'}
-_FAMILY_LABEL = {'sdxl': 'SDXL', 'krea': 'Krea 2',
-                 'flux': 'FLUX.1', 'flux2klein': 'FLUX.2 Klein'}
 # Confirmable-refusal marker (mirrors UNCAPTIONED:/MISMATCH_CAPTION:): the UI
 # strips it, asks window.confirm, and retries with allow_unverified_weights.
 _UNVERIFIED_MARKER = 'CUSTOM_WEIGHTS_UNVERIFIED: '
@@ -582,6 +573,29 @@ def preflight_custom_paths(family, weights=None, vae_path=None, te_path=None,
 # Sentinelle « base non fournie » : distingue l'absence d'argument (→ base
 # PERSISTÉE du dataset) de la valeur '' (= base officielle, un choix explicite).
 _PERSISTED = object()
+
+
+def _effective_vae_te(ds, family, vae_path, te_path):
+    """Triplet VAE/TE effectif d'un lancement OU d'une mise en file.
+
+    VAE/TE ne sont honorés QUE par SDXL (ai-toolkit) → toute autre famille
+    REFUSE explicitement un override fourni, jamais d'ignore silencieux.
+    `_PERSISTED` = « non fourni par l'appelant » → on garde la valeur persistée
+    (continue/queue) ; une valeur explicite (même vide) remplace.
+
+    La file et le lancement doivent appliquer EXACTEMENT la même règle : sinon
+    la file accepte un job que le lanceur refusera au démarrage.
+    """
+    prov_vae = vae_path is not _PERSISTED and (vae_path or '').strip()
+    prov_te = te_path is not _PERSISTED and (te_path or '').strip()
+    if family not in VAE_TE_OVERRIDE_FAMILIES:
+        if prov_vae or prov_te:
+            raise ValueError('VAE / text-encoder overrides are SDXL-only')
+        return None, None
+    return ((ds.train_vae_path if vae_path is _PERSISTED
+             else ((vae_path or '').strip() or None)),
+            (ds.train_te_path if te_path is _PERSISTED
+             else ((te_path or '').strip() or None)))
 
 
 def _base_tag_for(base_model) -> str:
@@ -1641,8 +1655,18 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
         for r in kept:
             p = fds._img_path(r)
             if p and os.path.exists(p):
-                with Image.open(p) as im:
-                    hp.append((r, fds._dhash(im)))
+                # La colonne perceptual_hash EST le dHash de ces octets-là (elle
+                # est écrite depuis les octets normalisés au moment de l'import,
+                # et remise à None quand l'image est remplacée). La lire évite un
+                # décodage Pillow COMPLET par image kept à chaque preflight — et
+                # le preflight tourne à l'ouverture de l'onglet, à chaque
+                # lancement et à chaque mise en file. Fallback = décoder, comme
+                # _existing_dhash_rows côté corpus.
+                value = fds._stored_hash_int(r.perceptual_hash)
+                if value is None:
+                    with Image.open(p) as im:
+                        value = fds._dhash(im)
+                hp.append((r, value))
         for i in range(len(hp)):
             for j in range(i + 1, len(hp)):
                 if fds._hamming(hp[i][1], hp[j][1]) <= fds.SCRAPE_DHASH_MAX_DISTANCE:

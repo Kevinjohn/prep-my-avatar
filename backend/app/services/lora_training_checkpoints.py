@@ -18,12 +18,6 @@ from .lora_training import (
 logger = logging.getLogger(__name__)
 
 
-def _trigger_boundary(name: str, prefix: str) -> bool:
-    if not name.startswith(prefix):
-        return False
-    rest = name[len(prefix):]
-    return rest == '' or rest[0] in '_.'
-
 _CK_RE = re.compile(r'_(\d{4,})\.safetensors$')
 
 
@@ -266,7 +260,7 @@ def list_imported_checkpoints(user_id, dataset_id, family=None) -> list[dict]:
         # deployed cloud names may carry the _v<N> dataset-version suffix —
         # strip it before matching against the staging basenames
         stem = re.sub(r'_v\d+(?=\.safetensors$)', '', fn)
-        if not _trigger_boundary(fn, prefix) \
+        if not training._trigger_boundary(fn, prefix) \
                 and fn not in cloud_names and stem not in cloud_names \
                 and not any(fn.startswith(p) for p in cloud_prefixes):
             continue
