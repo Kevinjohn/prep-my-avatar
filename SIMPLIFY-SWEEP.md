@@ -107,6 +107,49 @@ that changes what ends up in the bundle.
    what. Push if the tree is clean and gates are green.
 9. **Update the ledger** and stop.
 
+## Lessons from completed passes
+
+Learned the hard way in pass 1. Read before starting.
+
+- **A lens agent can read the shape and miss the constraint.** Pass 1's
+  highest-rated altitude finding was "replace the engine `if` chains with a
+  registry" — wrong, because those provider imports are deliberately lazy
+  (optional dependencies) and a module-level registry of function references
+  would force them eager. Before acting on any "collapse this into a table"
+  finding, check *why* the branches exist.
+- **Check for re-exports before deleting a now-unused import or constant.**
+  Pass 1 nearly dropped `_hamming` and `SCRAPE_DHASH_MAX_DISTANCE` as orphans;
+  `lora_training.py` and the scrape tests reach through this module for both.
+  Always grep repo-wide, not just the file.
+- **A "duplicate" that has already drifted is the best kind of finding.** Where
+  pass 1 found three copies of the same JSON parse, they were not identical —
+  one caught fewer exception types. Drift is the proof the duplication costs
+  something.
+- **Prefer findings that delete code.** Pass 1's net was −47 lines with zero
+  behaviour change. Anything that adds abstraction to remove a little repetition
+  should clear a higher bar.
+- **The ledger cannot record its own commit SHA.** Either commit the pass and
+  update the ledger in a small follow-up commit, or write the SHA in afterwards.
+
+### Carried-over findings
+
+Real, verified, deferred because they fell outside their pass's scope. Fold each
+into the pass named, rather than rediscovering it.
+
+- **Pass 9 (`analysis-quality`): every imported photo is decoded twice.**
+  `analyse_image_bytes` (`import_analysis.py`) and `normalize_to_webp` /
+  `face_crop_to_square_webp` (`image_processing.py`) each independently run
+  `Image.open` → `ImageOps.exif_transpose` → `convert('RGB')` on the same raw
+  bytes, from `import_images` and `_merge_training_images`. That is 2× full
+  decode per photo on every import, scaling with corpus size — the largest
+  single efficiency finding in the sweep so far. The fix changes both modules'
+  APIs to accept an already-decoded image, which is why pass 1 left it.
+- **Pass 1 follow-up, structural:** the two caption pipelines (`caption_images`
+  and `_caption_concept`) duplicate a whole JoyCaption→Ollama orchestration, and
+  the coverage-state classifier (`covered`/`weak`/`missing`/`unknown`) is
+  hand-written three times with different rules — one path cannot produce
+  `unknown` at all. Both need dedicated passes with their own test coverage.
+
 ## Passes
 
 Grouped so that files which call each other are reviewed together — the reuse and
