@@ -169,7 +169,7 @@ Update after every pass. `blocked` needs a reason.
 
 | # | Pass | Status | Commit | Notes |
 |---|---|---|---|---|
-| 1 | face-dataset-service | done | `pass-1` | −47 net. Dead migration helper, fan-out check ×4, VLM text cleanup ×7, ref-parse ×2, dead dHash branches. Deferred: double image decode on import (needs sibling-module API change), caption-pipeline merge, coverage-state classifier. |
+| 1 | face-dataset-service | done | `790fea8` | −47 net. Dead migration helper, fan-out check ×4, VLM text cleanup ×7, ref-parse ×2, dead dHash branches. Deferred: double image decode on import (needs sibling-module API change), caption-pipeline merge, coverage-state classifier. |
 | 2 | lora-training-core | todo | — | |
 | 3 | remote-training-publish | todo | — | |
 | 4 | generation-engines | todo | — | |
