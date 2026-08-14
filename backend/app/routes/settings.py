@@ -102,22 +102,34 @@ def _secret_presence() -> dict:
     return {name: bool(cfg.secret(name)) for name in cfg.SECRET_KEYS}
 
 
-def _lan_ip():
-    """This machine's primary LAN IPv4, or None. Uses the standard UDP-connect
-    trick: opening a datagram socket toward a public address makes the OS pick the
-    outbound interface — no packet is ever sent — and getsockname() then reveals
-    that interface's IPv4. Returns None on OSError (no route / offline) or when only
-    loopback is available, so callers can fall back to a placeholder."""
+def _probe_outbound_ip(target):
+    """IPv4 of whichever interface the OS would use to reach `target`, or None.
+
+    Le truc standard du connect() UDP : ouvrir un datagram socket vers une adresse
+    ne fait sortir AUCUN paquet, mais force l'OS à choisir la route — getsockname()
+    révèle alors l'IPv4 de cette interface. None sur OSError (pas de route, hors
+    ligne).
+
+    Le FILTRE reste chez l'appelant : ce qu'« une bonne réponse » veut dire diffère
+    par sonde (hors loopback pour le LAN, dans 100.64/10 pour le tailnet), et c'est
+    là qu'est la règle — ici il n'y a que la mécanique du socket."""
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(('8.8.8.8', 80))       # selects the route; no traffic leaves the host
-        ip = s.getsockname()[0]
+        s.connect((target, 80))
+        return s.getsockname()[0]
     except OSError:
         return None
     finally:
         s.close()
-    return None if ip.startswith('127.') else ip
+
+
+def _lan_ip():
+    """This machine's primary LAN IPv4, or None. Probes toward a public address, so
+    the OS picks the default-route interface. Returns None when offline or when only
+    loopback is available, so callers can fall back to a placeholder."""
+    ip = _probe_outbound_ip('8.8.8.8')
+    return ip if ip and not ip.startswith('127.') else None
 
 
 def _is_cgnat(ip) -> bool:
@@ -144,15 +156,7 @@ def _tailscale_ip():
     is None exactly when there's no tailnet address to offer. A Tailscale URL is
     the phone's bulletproof path: it sidesteps Wi-Fi client-isolation, a shifting
     DHCP LAN IP, and works even off the home network."""
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('100.100.100.100', 80))   # selects the tailnet route; nothing is sent
-        ip = s.getsockname()[0]
-    except OSError:
-        return None
-    finally:
-        s.close()
+    ip = _probe_outbound_ip('100.100.100.100')   # selects the tailnet route
     return ip if _is_cgnat(ip) else None
 
 

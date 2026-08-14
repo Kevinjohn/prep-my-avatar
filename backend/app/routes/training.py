@@ -261,7 +261,8 @@ def dataset_train_checkpoints(dataset_id):
     gate = _require_aitoolkit()
     if gate:
         return gate
-    if not svc.get_dataset(LOCAL_USER, dataset_id):
+    ds = svc.get_dataset(LOCAL_USER, dataset_id)
+    if not ds:
         return jsonify({'error': 'not found'}), 404
     # base_model = base sélectionnée dans le dropdown (param absent → base persistée).
     bm = request.args.get('base_model')
@@ -272,7 +273,6 @@ def dataset_train_checkpoints(dataset_id):
     if fam:
         kw['family'] = fam
     from ..services import checkpoint_registry
-    ds = svc.get_dataset(LOCAL_USER, dataset_id)
     fam_resolved = lt._train_type(ds, fam)
     return jsonify({'checkpoints': lt.list_checkpoints(LOCAL_USER, dataset_id, **kw),
                     # cloud saves synced locally (incl. an ACTIVE run's latest)

@@ -283,12 +283,78 @@ Learned in pass 5.
   rule and leaving the policy at the call site (`require=True`) unified four
   copies without flattening a real difference — the failure mode of getting this
   wrong is a resumed Krea cell silently re-rendering on a different base.
+- **Line count is the wrong metric for a rule stated many times.** Pass 6's
+  `_ok_or_404` saves nothing at any call site — one line before, one line after —
+  and *adds* the helper's own lines. It was still right to extract: the rule
+  "a missing resource is a 404 whose body is `{'error': 'not found'}`" was
+  restated 19 times with no name. Codex was asked precisely because the
+  arithmetic and the altitude disagreed, and its verdict was "duplicated policy,
+  not duplicated syntax". When a pass finds a one-liner repeated at scale, count
+  the rules, not the lines.
+- **Naming the common case makes the exceptions legible.** The same pass found
+  two sites that look identical to those 19 and are not:
+  `dataset_lora_test_prompt_reorder` returns a 400 `'invalid'`, and
+  `dataset_training_feedback` tests `payload is not None` where the helper tests
+  truthiness (an empty-dict payload would flip from 200 to 404). Both were left
+  written out in full. Before the extraction they were invisible in a field of
+  identical lines; after it they are the only two that don't call the helper.
+- **A user-visible string is behaviour.** The reuse lens's strongest-looking find
+  was three hand-rolled copies of `_json_bool` sitting in the same file as the
+  helper. Verification killed it: the helper raises `'{name}' must be a boolean`
+  (quoted), while the copies say `rescue_small must be a boolean` and
+  `include_albums must be a boolean.` — unquoted, one with a trailing period.
+  Only one of the three matched, and reusing the helper there turns 3 lines into
+  4. A finding that is right about the shape can still be wrong about the text.
 
 ### Carried-over findings
 
 Real, verified, deferred because they fell outside their pass's scope. Fold each
 into the pass named, rather than rediscovering it.
 
+- **Verified in pass 6 and deliberately skipped.** The four traps below are the
+  valuable half of the pass: each is a pair that a reuse-minded reviewer will keep
+  re-finding, and each must stay split.
+  - **GET-arg vs POST-body `base_model` resolution** (`training.py:267-272`,
+    `:302-306`, `:327-331` vs `:110-114`, `:150-154`, `:205-209`, `:606-609` and
+    the ternary form at `:648`, `:668`, `:697`). The service defaults
+    `base_model=_PERSISTED`; `''` is not "absent", it is the explicit choice "use
+    the official base". Query strings can use `is None` because an empty
+    `?base_model=` still yields `''`; JSON bodies cannot, because `None` means both
+    "missing" and "present and null" — hence `'base_model' in d`. Unify these into
+    one `.get(key) is None` helper and a user picking "Official" in
+    `dataset_train_continue`/`enqueue`/`schedule` has that choice silently dropped
+    in favour of the persisted custom base — the exact `jamais un reset muet` the
+    comment at `training.py:78` says the code exists to prevent.
+  - **`datasets.lora_test_run` vs `studio.studio_run` error mapping**
+    (`datasets.py:1162-1168` vs `studio.py:107-118`). Studio handles a third case,
+    `StudioPartialLaunch` → 503. A per-dataset run is atomic (one dataset, one
+    family, nothing to partially launch); a comparison run fans out and can half
+    succeed. Collapsing to the shorter one turns a real partial failure into a 500;
+    collapsing to the longer one bolts an unreachable branch onto the atomic route
+    and hides that a `StudioPartialLaunch` there would be a genuine bug.
+  - **`_klein_missing_response` vs `_studio_missing_response`.** Both build a 409
+    listing missing assets. Klein's *starts background downloads*; Studio's
+    docstring explicitly refuses to, because its assets are large and
+    licence-gated. Pass 6 collapsed the four Klein call sites into
+    `_map_klein_error` but deliberately left it in `datasets.py` rather than
+    beside `_map_error` in `_common.py`, so the side-effecting one cannot be
+    reached by accident from a Studio route.
+  - **`dataset_train_run_checkpoint_delete`'s gate** (`training.py:637-639`) reads
+    `if gate and not capabilities.probe().get('cloud_training')` where a dozen
+    neighbours read plain `if gate:`. It deletes local *or* cloud checkpoints, so a
+    cloud-only install with no local ai-toolkit must still reach it. "Simplifying"
+    it to match its neighbours 409-blocks cloud-only users from deleting their own
+    cloud checkpoints.
+  - Also skipped: the ~41 `if not svc.get_dataset(...): 404` preambles (a helper in
+    this codebase's `gate = ...; if gate: return gate` idiom is 3 lines replacing 2,
+    and several callers need the fetched row while most need only the boolean); the
+    13 `except ValueError as e: return jsonify({'error': str(e)}), 400` copies
+    (2 lines either way, and `datasets.py` has two competing 400-body shapes —
+    `{'error'}` vs `{'ok': False, 'error'}` — so unifying them is a behaviour
+    decision, not a sweep edit); and the two crop-box coercions
+    (`dataset_ref_crop:287-291` wraps the *service call* in the same `try` as the
+    `int()` casts, so narrowing it to match `dataset_image_crop` would change which
+    exceptions surface as `'invalid crop box'`).
 - **Verified in pass 5 and deliberately skipped.** Each was confirmed against the
   code and left alone on purpose:
   - `studio_scoring.TEST_ASPECTS` (a set) vs `lora_test_studio.TEST_ASPECTS` (a
@@ -348,9 +414,42 @@ into the pass named, rather than rediscovering it.
   correctly called per cell (resume has no run-level preflight, so deleting it
   would un-guard resume), but the *probe* should be memoized per launch. The fix
   belongs in `utils/comfyui.py`, which pass 5 did not own.
-- **Efficiency, pass 6 (`routes`): `studio_run_history` is a 2-query N+1 over up
-  to 81 candidate runs**, hydrating every row of each run only to take `len()`.
-  Two aggregates would do. Not on the poll path, hence deferred.
+- **Efficiency, ~~pass 6 (`routes`)~~ → a services pass: `studio_run_history` is a
+  2-query N+1 over up to 81 candidate runs**, hydrating every row of each run only
+  to take `len()`. Two aggregates would do. Not on the poll path, hence deferred.
+  *Re-filed by pass 6:* the code is `services/studio_payload.py:160`, not a route —
+  `datasets.py:1128` only calls it. The original pass-6 assignment was a misfile.
+- **Efficiency, outside pass 6's file set: the three LoRA listers have no cache,
+  and `studio_payload` calls them ~5× per poll tick.** `get_zimage_loras` /
+  `get_sdxl_loras` / `get_krea_loras` (`utils/comfyui.py:1052-1124`) each do a full
+  `os.walk` of `models/loras` with no caching, while their sibling *base-model*
+  listers in the same file already share a 5-minute TTL cache (`_MODEL_CACHE_TTL`)
+  — the asymmetry reads as an oversight. Per tick of `studio_payload`:
+  `available_families` walks the tree once per family (3), then
+  `list_test_checkpoints` (1) and `permanent_lora_candidates` (1) walk it again.
+  `/api/dataset/<id>/lora-test/status` is polled every 3000ms
+  (`useLoraTestStudio.js`) for as long as any grid run has pending cells, so this
+  is the hottest sustained poll in the app. The fix is the TTL cache the file
+  already has, plus de-duplicating the same-family calls within one payload build.
+  Belongs to a `utils/comfyui.py` + `studio_discovery.py` pass, which pass 6 did
+  not own. (`list_all_testable_checkpoints` shares the pattern but is mount-time
+  only, so it inherits the fix for free.)
+- **Efficiency, pass 10-13 (frontend): `useDataset.refresh()` re-fetches the whole
+  image window from `cursor=null` on every SSE `dataset` event.** The
+  `?include_images=0` half of the same call is already revision-cached server-side
+  (`_DATASET_AGGREGATE_CACHE`), so "SSE change → cheap refetch" was the design and
+  only the image half was left out of it. Bounded to 1/sec by the SSE loop, but
+  during a batch job the revision changes nearly every tick, so a fully-loaded
+  large dataset re-issues `ceil(N/100)` page queries per second for the job's
+  duration.
+- **Pass 15 or a light-constants pass: `settings.py:231` hand-writes
+  `{'klein', 'nanobanana', 'chatgpt'}`** where `datasets.py:400` correctly uses
+  `{'klein', *svc.API_ENGINES}`. Add an engine to `API_ENGINES` and the settings
+  validator silently keeps rejecting it. Not fixed in pass 6: `settings.py` imports
+  `face_dataset_service` only lazily inside functions, and making it pay that
+  import at every settings write to read a 2-tuple is a worse trade than the
+  duplication. The real fix is moving `API_ENGINES` to a light shared constants
+  module — the same shape as pass 15's family-label migration, and outside pass 6.
 
 - **Pass 9 (`analysis-quality`): every imported photo is decoded twice.**
   `analyse_image_bytes` (`import_analysis.py`) and `normalize_to_webp` /
@@ -376,7 +475,12 @@ into the pass named, rather than rediscovering it.
   found it larger than recorded: `lora_training._FAMILY_LABEL`,
   `run_share.py:31`, `hf_publish.py:45`, `utils/comfyui.FAMILY_LABELS` and the
   frontend each carry a copy, and one already says `Krea 2 Turbo` where the
-  others say `Krea 2`. Codex and I agreed to defer: importing from
+  others say `Krea 2`. Pass 6 found a SIXTH copy:
+  `routes/_common._STUDIO_FAMILY_LABELS` (`_common.py:43`), which is the one
+  users see in the Studio's missing-assets and arch-mismatch 409 banners — and it
+  is on the `Krea 2 Turbo` side of the split. Add it to this pass's migration
+  list; the banner text is user-visible, so it is also the strongest argument
+  that the label question needs answering rather than deferring. Codex and I agreed to defer: importing from
   `utils/comfyui` inverts the dependency direction (it pulls in `requests`,
   `subprocess`, `flask`, config), and picking the surviving label is a product
   decision, not a refactor. Give it a small pass that adds a neutral
@@ -524,7 +628,7 @@ it first. Run them last, when every consumer is known.
 | # | Pass | Scope | Origin |
 |---|---|---|---|
 | 14 | `file-hashing` | one shared chunked-SHA-256 helper; delete the five copies in `lora_training_export`, `training_snapshot`, `checkpoint_registry`, `cloud_training`, `backend/infer/lama_model` | passes 2, 3 |
-| 15 | `training-families` | one neutral `services/training_families.py`; migrate `lora_training._FAMILY_LABEL`, `run_share`, `hf_publish`, `utils/comfyui.FAMILY_LABELS` and the frontend copy | pass 3 |
+| 15 | `training-families` | one neutral `services/training_families.py`; migrate `lora_training._FAMILY_LABEL`, `run_share`, `hf_publish`, `utils/comfyui.FAMILY_LABELS`, `routes/_common._STUDIO_FAMILY_LABELS` and the frontend copy | passes 3, 6 |
 
 Pass 15 carries a product decision, not just a refactor: the copies have already
 drifted (`Krea 2 Turbo` vs `Krea 2`) and someone must say which label is correct.
@@ -552,7 +656,7 @@ Update after every pass. `blocked` needs a reason.
 | 3 | remote-training-publish | done | `b741725` | +33 net (docstrings that state the deduped invariants). Offer filters ×2 and local-only-family guard ×2 (picker vs launch — must agree by contract), Retry/Continue relaunch ×2, publish staleness signature ×2, JSON-object response contract ×4 (vast) and ×2 (ai-toolkit), remote "already started" status set ×3, step-suffix regex ×4, `train_params` guarded parse ×5, legacy fingerprint rule ×2, `error_pod_kept` query ×2, `_dataset_name` in terms of `_dataset_names`, dead `reconcile_orphans(wait=)`. Efficiency: checkpoint N+1 fixed via `mtime_resolver`, plus 3 double-derivations. Deferred: family labels (own pass), `_file_hash` memoization, `_safe_json` ×10. |
 | 4 | generation-engines | done | `0c58f5b` | −159 net. Five dead listers/helpers and 3 orphaned imports out of `utils/comfyui.py`; trained-LoRA picker entry ×3 → `_lora_entry`; LoRA-chain injector ×2 → `_chain_model_loras` (the snapshot-before-mutate subtlety now stated once); `zimage_convert` transformer-ready check ×2 and convert-state write ×5 → two helpers; identity-trait list ×3 → one constant; dead return value out of `apply_zimage_settings`; node 92 added to `_REQUIRED_NODES`. Three module docstrings corrected where they named callers this app does not have. Also cleared the repo's one standing `ruff` error (pass 1's own residue) — as a `noqa`, because it is a test seam. Deferred: models-root unification (Codex: needs correctness tests), caption cleaner/detector regex divergence. |
 | 5 | studio | done | 4b9ee14 | 17 dead re-export aliases + 2 dead frontend-mirror constants + `model_net_scores` deleted; the base-model pool, permanent-LoRA validation, Krea rebalance encoding and shared-seed series extracted once each and shared by `create_run`/`create_comparison_run`/resume; `_wilson_lower_bound` and `_basename` collapsed to aliases with the docstring moved onto the live copy; `_ranked_positive_configs` names the sort `best_cell`/`best_per_checkpoint` both restated; `_tally_vote` names "only ±1 is a vote" (5 sites); `_representative_image` N+1 and the `_record_for_checkpoint` per-row filesystem resolve fixed; `list_all_testable_checkpoints` double scan removed. 10 skips and 5 carried findings recorded above. Gate 1740 passed / 1 skipped, ruff clean. |
-| 6 | routes | todo | — | |
+| 6 | routes | done | — | +33 net (the helpers' own docstrings, which state the deduped rules). `_ok_or_404`/`_payload_or_404` name the "not found is a 404 with `{'error': 'not found'}`" contract that was restated at 19 sites across 2 blueprints — 2 look-alike sites deliberately left written out, and now visible as the only exceptions. `_map_klein_error` collapses the Klein-missing branch + its inline import from 4 handlers (kept in `datasets.py`, not `_common.py`: it starts downloads, which the Studio 409 refuses). `_head_crop_warning` names the guard-rail rule with both CTAs left caller-supplied, since the two user-visible strings had drifted and must stay drifted. `_probe_outbound_ip` shares the UDP-connect socket lifecycle between `_lan_ip`/`_tailscale_ip` with each probe's filter left at the caller. 5 redundant local re-imports of module-level names dropped; `dataset_train_checkpoints` no longer runs `get_dataset` twice per request. 4 traps + 3 skips and 4 carried findings recorded above; the efficiency lens found nothing inside this pass's file set. Gate 1740 passed / 1 skipped, ruff clean. |
 | 7 | scrape | todo | — | |
 | 8 | data-lifecycle | todo | — | |
 | 9 | analysis-quality | todo | — | |

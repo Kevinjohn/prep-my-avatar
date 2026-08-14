@@ -9,6 +9,18 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- The API's "not found" contract is now written once instead of nineteen times.
+  Every route that answered a missing dataset, image or run with a 404 spelled
+  out the same status-and-body pair by hand; that rule now lives in two named
+  helpers. Two routes that look identical but are not — one answers 400 for an
+  invalid reorder, one distinguishes an empty result from a missing one — are
+  still written out in full, and are now the only two that stand out.
+- Listing a dataset's checkpoints no longer looks the dataset up twice in the
+  same request.
+- The "auto head-crop didn't run" warning is now chosen in one place. Both the
+  reference upload and the re-crop decide the message the same way — is the
+  Ollama vision model ready, or was no face found — while keeping their own
+  wording, which differs between the two screens and is unchanged here.
 - Training preflight no longer re-decodes every admitted image to find
   near-duplicates. It reads the stored `perceptual_hash` that the import
   already wrote from the same normalized bytes, and falls back to decoding only
