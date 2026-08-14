@@ -28,6 +28,16 @@ def _json_response(response, operation):
         raise VastError(f'{operation} returned malformed JSON') from e
 
 
+def _json_object(response, operation) -> dict:
+    """`_json_response` plus the object check every caller then repeated: the
+    provider's error bodies are sometimes a bare string or list, and every
+    endpoint here reads `.get(...)` off the result."""
+    data = _json_response(response, operation)
+    if not isinstance(data, dict):
+        raise VastError(f'{operation} returned an invalid response')
+    return data
+
+
 def _request(method, path, *, base=API_BASE, **kwargs):
     key = cfg.secret('VAST_API_KEY')
     if not key:
@@ -66,9 +76,7 @@ def search_offers(min_vram_gb: int, max_dph: float, limit: int = 20,
     r = _request('POST', '/bundles/', json=body)
     if r.status_code != 200:
         raise VastError(f'offer search failed: HTTP {r.status_code}')
-    data = _json_response(r, 'offer search')
-    if not isinstance(data, dict):
-        raise VastError('offer search returned an invalid response')
+    data = _json_object(r, 'offer search')
     offers = data.get('offers') or []
     out = [{
         'offer_id': o.get('id'),
@@ -105,9 +113,7 @@ def create_instance(offer_id, disk_gb: int, label: str, template_hash: str | Non
         if onstart:
             body['onstart'] = onstart
     r = _request('PUT', f'/asks/{offer_id}/', json=body)
-    data = _json_response(r, 'create_instance') if r.status_code == 200 else {}
-    if not isinstance(data, dict):
-        raise VastError('create_instance returned an invalid response')
+    data = _json_object(r, 'create_instance') if r.status_code == 200 else {}
     if r.status_code != 200 or not data.get('success'):
         raise VastError(f'create_instance failed: HTTP {r.status_code} {data}')
     contract_id = data.get('new_contract')
@@ -135,9 +141,7 @@ def list_instances() -> list:
     r = _request('GET', '/instances/', base=API_BASE_V1)
     if r.status_code != 200:
         raise VastError(f'list_instances failed: HTTP {r.status_code}')
-    data = _json_response(r, 'list_instances')
-    if not isinstance(data, dict):
-        raise VastError('list_instances returned an invalid response')
+    data = _json_object(r, 'list_instances')
     return [_normalize(i) for i in data.get('instances') or []]
 
 
@@ -146,9 +150,7 @@ def get_instance(instance_id):
     Falls back to the list scan if the shape ever changes."""
     r = _request('GET', f'/instances/{instance_id}/')
     if r.status_code == 200:
-        data = _json_response(r, 'get_instance')
-        if not isinstance(data, dict):
-            raise VastError('get_instance returned an invalid response')
+        data = _json_object(r, 'get_instance')
         one = data.get('instances')
         if isinstance(one, dict) and one.get('id') is not None:
             return _normalize(one)

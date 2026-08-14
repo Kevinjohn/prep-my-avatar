@@ -15,6 +15,11 @@ under **Unreleased** until a release is tagged.
   when that column is empty. Preflight runs on tab open, on every launch and on
   every queue admission, so this removes a full Pillow decode per kept image
   from all three.
+- Listing a dataset's checkpoints now loads that dataset's training-run records
+  once for the whole folder instead of re-running the same query for every
+  checkpoint file. A folder of N checkpoints previously cost N identical
+  queries; the annotations themselves are unchanged, and a folder with no
+  checkpoints now makes no query at all.
 
 ### Fixed
 
@@ -28,6 +33,19 @@ under **Unreleased** until a release is tagged.
   duplicated trigger-boundary rule, a duplicated PID-liveness helper, a
   duplicated ai-toolkit arch probe, a duplicated queue-launch block, and a dead
   store in the queue advance path. No behaviour change.
+- Cloud training, the vast.ai and ai-toolkit clients, Hugging Face publishing
+  and the run registry now each state their shared rules once instead of
+  repeating them. The GPU-tier picker and the launch derive their offer filters
+  and their local-only-family refusal from the same helpers, so the picker can
+  no longer offer something the launch would reject; Retry and Continue share
+  one relaunch path, so a training parameter cannot be preserved by one and
+  dropped by the other; the publish staleness check derives both of its
+  snapshots from one field list; and the ai-toolkit "already started" status
+  vocabulary, the checkpoint step-suffix pattern, the `train_params` parse rule,
+  the JSON-object response contract and the legacy-fingerprint compatibility
+  rule each exist in one place. Also removed an unused `reconcile_orphans`
+  parameter and stopped recomputing three per-request values that were being
+  derived twice. No behaviour change.
 
 ## 2026.07.28.2
 

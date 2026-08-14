@@ -41,6 +41,22 @@ class RemoteAiToolkit:
             raise RemoteError(f'{method} {path} -> HTTP {r.status_code}: {r.text[:200]}')
         return r.json()
 
+    def _json_object(self, method, path, what, **kwargs):
+        """One request whose reply MUST be a JSON object, with every failure —
+        status, decode, shape — mapped to RemoteError. `_json` above only
+        checks the status, so the callers that need the whole contract used to
+        spell all three steps out for themselves."""
+        r = self._request(method, path, **kwargs)
+        if r.status_code != 200:
+            raise RemoteError(f'{what} -> HTTP {r.status_code}: {r.text[:200]}')
+        try:
+            payload = r.json()
+        except (TypeError, ValueError) as exc:
+            raise RemoteError(f'{what} returned invalid JSON') from exc
+        if not isinstance(payload, dict):
+            raise RemoteError(f'{what} returned a non-object response')
+        return payload
+
     # -- readiness / settings ---------------------------------------------
     def is_ready(self) -> bool:
         try:
@@ -108,16 +124,9 @@ class RemoteAiToolkit:
 
     # -- jobs ----------------------------------------------------------------
     def create_job(self, name: str, job_config: dict, gpu_ids: str = '0') -> str:
-        r = self._request('POST', '/api/jobs',
-                          json={'name': name, 'gpu_ids': gpu_ids, 'job_config': job_config})
-        if r.status_code != 200:
-            raise RemoteError(f'create_job -> HTTP {r.status_code}: {r.text[:200]}')
-        try:
-            payload = r.json()
-        except (TypeError, ValueError) as exc:
-            raise RemoteError('create_job returned invalid JSON') from exc
-        if not isinstance(payload, dict):
-            raise RemoteError('create_job returned a non-object response')
+        payload = self._json_object(
+            'POST', '/api/jobs', 'create_job',
+            json={'name': name, 'gpu_ids': gpu_ids, 'job_config': job_config})
         job_id = payload.get('id')
         if job_id is None or not str(job_id).strip():
             raise RemoteError('create_job response is missing a job id')
@@ -129,16 +138,7 @@ class RemoteAiToolkit:
         The pinned UI contract exposes list-all at ``GET /api/jobs`` and makes
         ``Job.name`` unique. There is no name path route, so scan exact names.
         """
-        path = '/api/jobs'
-        r = self._request('GET', path)
-        if r.status_code != 200:
-            raise RemoteError(f'find_job_by_name -> HTTP {r.status_code}: {r.text[:200]}')
-        try:
-            payload = r.json()
-        except (TypeError, ValueError) as exc:
-            raise RemoteError('find_job_by_name returned invalid JSON') from exc
-        if not isinstance(payload, dict):
-            raise RemoteError('find_job_by_name returned a non-object response')
+        payload = self._json_object('GET', '/api/jobs', 'find_job_by_name')
         jobs = payload.get('jobs')
         if not isinstance(jobs, list):
             raise RemoteError('find_job_by_name response is missing the jobs list')
