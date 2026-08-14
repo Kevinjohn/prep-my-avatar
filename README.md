@@ -14,6 +14,8 @@ large photo corpus → analyse → plan coverage → generate missing combinatio
 
 ## Workflow at a glance
 
+If you are new to the project, open the [standalone visual getting-started guide](docs/guide/getting-started.html). It begins with the actual outcome: reference images, a family-specific Character LoRA, a provider-owned avatar such as Gemini’s, or a portable training pack. It then explains what this app can create, where each result can be reused, and why every preparation step exists. The same orientation is available inside the app at **Guide → Getting started**. The Markdown file at [`docs/guide/getting-started.md`](docs/guide/getting-started.md) remains available as an operational plain-text reference.
+
 ### 1. Import and review the source corpus
 
 Import preserves every original while the Corpus Workbench surfaces technical
@@ -102,19 +104,16 @@ for the fork-specific architecture and data contracts.
 
 ## Installation and launch
 
-For the guided desktop launch, clone this repository and run `start.bat` on
-Windows. For a manual API-only launch, create a Python 3.10–3.12 virtual
-environment and install `backend/requirements.txt`. Install the private source
-launcher once with `python backend/source_launcher.py --install --root . --data-dir data`,
-then start with `python data/source-launcher.py --root . --data-dir data`.
-Docker users can copy `.env.example` to `.env`, set `LDS_ACCESS_TOKEN`, and run
-`docker compose up --build`. The in-app [Getting started guide](docs/guide/getting-started.md)
-describes these options and the optional GPU tools in more detail.
+For the shortest path on Windows, clone this repository and run `start.bat`.
+For macOS, Linux, and Docker's API-only mode, follow the step-by-step commands in
+[`docs/guide/getting-started.md`](docs/guide/getting-started.md#install-and-launch).
+Once the app is open, **Guide → Getting started** explains which optional tools
+and API keys unlock generation, automatic analysis, and training.
 
 ## Process and health model
 
-Run the application through the private `data/source-launcher.py` installed above
-(or the bundled launcher). It repairs an interrupted update before importing the
+Run the application through the private `data/source-launcher.py` installed by
+that setup (or the bundled launcher). It repairs an interrupted update before importing the
 mutable checkout.
 One server process owns a data directory at a time: the launcher enforces this
 with `data/server.lock` because the schedulers, provider monitors, and SQLite job

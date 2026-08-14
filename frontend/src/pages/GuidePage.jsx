@@ -17,7 +17,7 @@ import gettingHelp from '../../../docs/guide/getting-help.md?raw'
    intended order, not decoration. `extra` mounts a live component under the
    markdown (the diagnostic button on the help chapter). */
 export const CHAPTERS = [
-  { id: 'getting-started', num: '01', title: 'Getting started', description: 'Install the app, connect the tools you need, and understand the workspace.', source: gettingStarted },
+  { id: 'getting-started', num: '01', title: 'Getting started', description: 'Prepare a reusable likeness so you can create recognisable photos and videos of yourself without starting over each time.', source: gettingStarted },
   { id: 'using-the-app', num: '02', title: 'Using the app', description: 'Follow the complete workflow for character, concept, and style datasets.', source: usingTheApp },
   { id: 'dataset-guide', num: '03', title: 'Building a good dataset', description: 'Make stronger choices about images, captions, settings, and checkpoints.', source: datasetGuide },
   { id: 'troubleshooting', num: '04', title: 'Troubleshooting', description: 'Find a symptom, understand the cause, and apply the shortest reliable fix.', source: troubleshooting },

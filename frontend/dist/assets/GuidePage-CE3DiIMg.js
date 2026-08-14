@@ -1,91 +1,219 @@
-import{j as e,o as S,r as j,N as I,L as k}from"./index-7i1nApGm.js";import{D as A}from"./DiagnosticReport-C0h1UP1w.js";function L(a){return String(a||"").replace(/[`*_]/g,"").normalize("NFKC").toLocaleLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu,"-").replace(/^-|-$/g,"")||"section"}function T(a){const o=new Map;return a.map(s=>{const t=L(s),i=(o.get(t)||0)+1;return o.set(t,i),i===1?t:`${t}-${i}`})}function R(a){const o=[...String(a||"").matchAll(/^##\s+(.+)$/gm)].map(t=>t[1]),s=T(o);return o.map((t,i)=>({title:t.replace(/[`*_]/g,""),id:s[i]}))}function g(a,o="i"){const s=[],t=/(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;let i=0,r,c=0;for(;(r=t.exec(a))!==null;){r.index>i&&s.push(a.slice(i,r.index));const n=r[0],h=`${o}-${c++}`;if(n.startsWith("`"))s.push(e.jsx("code",{className:"px-1 py-0.5 rounded bg-surface-raised text-indigo-200 text-[0.8125em] font-mono",children:n.slice(1,-1)},h));else if(n.startsWith("**"))s.push(e.jsx("strong",{className:"text-content font-semibold",children:n.slice(2,-2)},h));else if(n.startsWith("*"))s.push(e.jsx("em",{children:n.slice(1,-1)},h));else{const l=n.match(/^\[([^\]]+)\]\(([^)]+)\)$/);s.push(e.jsx("a",{href:l[2],target:"_blank",rel:"noreferrer",className:"text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300",children:l[1]},h))}i=r.index+n.length}return i<a.length&&s.push(a.slice(i)),s}function C(a){const o=a.replace(/\r\n/g,`
+import{j as e,o as A,r as T,N as S,L as k}from"./index-CV-l1KqT.js";import{D as N}from"./DiagnosticReport-2mRFOQRV.js";function C(a){return String(a||"").replace(/[`*_]/g,"").normalize("NFKC").toLocaleLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu,"-").replace(/^-|-$/g,"")||"section"}function I(a){const s=new Map;return a.map(o=>{const t=C(o),i=(s.get(t)||0)+1;return s.set(t,i),i===1?t:`${t}-${i}`})}function P(a){const s=[...String(a||"").matchAll(/^##\s+(.+)$/gm)].map(t=>t[1]),o=I(s);return s.map((t,i)=>({title:t.replace(/[`*_]/g,""),id:o[i]}))}function g(a,s="i"){const o=[],t=/(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;let i=0,r,c=0;for(;(r=t.exec(a))!==null;){r.index>i&&o.push(a.slice(i,r.index));const n=r[0],h=`${s}-${c++}`;if(n.startsWith("`"))o.push(e.jsx("code",{className:"px-1 py-0.5 rounded bg-surface-raised text-indigo-200 text-[0.8125em] font-mono",children:n.slice(1,-1)},h));else if(n.startsWith("**"))o.push(e.jsx("strong",{className:"text-content font-semibold",children:n.slice(2,-2)},h));else if(n.startsWith("*"))o.push(e.jsx("em",{children:n.slice(1,-1)},h));else{const l=n.match(/^\[([^\]]+)\]\(([^)]+)\)$/);o.push(e.jsx("a",{href:l[2],target:"_blank",rel:"noreferrer",className:"text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300",children:l[1]},h))}i=r.index+n.length}return i<a.length&&o.push(a.slice(i)),o}function L(a){const s=a.replace(/\r\n/g,`
 `).split(`
-`),s=[];let t=0;for(;t<o.length;){const i=o[t];if(!i.trim()){t++;continue}if(i.startsWith("```")){const n=[];for(t++;t<o.length&&!o[t].startsWith("```");)n.push(o[t++]);t++,s.push({t:"code",body:n.join(`
-`)});continue}const r=i.match(/^(#{1,3})\s+(.*)$/);if(r){s.push({t:`h${r[1].length}`,body:r[2]}),t++;continue}if(/^(-{3,}|\*{3,})\s*$/.test(i)){s.push({t:"hr"}),t++;continue}if(i.startsWith(">")){const n=[];for(;t<o.length&&o[t].startsWith(">");)n.push(o[t++].replace(/^>\s?/,""));s.push({t:"quote",body:n.join(" ")});continue}if(/^\|/.test(i)){const n=[];for(;t<o.length&&/^\|/.test(o[t]);)n.push(o[t++]);const h=u=>u.replace(/^\||\|$/g,"").split("|").map(y=>y.trim()),l=h(n[0]),p=n[1]?h(n[1]):[];p.length===l.length&&p.every(u=>/^:?-{3,}:?$/.test(u))?s.push({t:"table",header:l,body:n.slice(2).map(h)}):n.forEach(u=>s.push({t:"p",body:u}));continue}if(/^(\s*)([-*]|\d+\.)\s+/.test(i)){const n=[],h=/^\s*\d+\./.test(i);for(;t<o.length&&/^(\s*)([-*]|\d+\.)\s+/.test(o[t]);){let l=o[t].replace(/^(\s*)([-*]|\d+\.)\s+/,"");for(t++;t<o.length&&/^\s{2,}\S/.test(o[t])&&!/^(\s*)([-*]|\d+\.)\s+/.test(o[t]);)l+=" "+o[t++].trim();n.push(l)}s.push({t:"list",ordered:h,items:n});continue}const c=[i];for(t++;t<o.length&&o[t].trim()&&!/^(#{1,3}\s|```|\||>|(\s*)([-*]|\d+\.)\s|-{3,}\s*$)/.test(o[t]);)c.push(o[t++]);s.push({t:"p",body:c.join(" ")})}return s}function x(a,o,s=!1){const t=`b${o}`;switch(a.t){case"h1":return e.jsx("h1",{className:"m-0 mt-2 text-content font-bold text-2xl",children:g(a.body,t)},t);case"h2":return e.jsx("h2",{id:s?void 0:a.headingId,className:`${s?"text-xl":"mt-4 border-b border-border pb-1.5 text-lg"} m-0 scroll-mt-24 text-content font-bold`,children:g(a.body,t)},t);case"h3":return e.jsx("h3",{className:"m-0 mt-2 text-content font-semibold text-base",children:g(a.body,t)},t);case"hr":return e.jsx("hr",{className:"border-border my-2"},t);case"quote":return e.jsx("blockquote",{className:"m-0 rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-4 py-3 text-content text-sm leading-relaxed",children:g(a.body,t)},t);case"code":return e.jsx("pre",{tabIndex:0,className:"m-0 rounded-lg border border-border bg-app/60 p-3 overflow-x-auto text-[0.8125rem] text-content-muted font-mono",children:a.body},t);case"table":return e.jsx("div",{className:"overflow-x-auto rounded-lg border border-border",children:e.jsxs("table",{className:"w-full text-sm border-collapse",children:[e.jsx("thead",{children:e.jsx("tr",{className:"bg-surface-raised",children:a.header.map((i,r)=>e.jsx("th",{className:"text-left px-3 py-2 text-content font-semibold border-b border-border whitespace-nowrap",children:g(i,`${t}h${r}`)},r))})}),e.jsx("tbody",{children:a.body.map((i,r)=>e.jsx("tr",{className:r%2?"bg-surface":"",children:i.map((c,n)=>e.jsx("td",{className:"px-3 py-2 text-content-muted align-top border-b border-border last:border-b-0",children:g(c,`${t}r${r}c${n}`)},n))},r))})]})},t);case"list":{const i=a.ordered?"ol":"ul";return e.jsx(i,{className:`m-0 flex flex-col text-sm text-content-muted ${s&&a.ordered?"list-none gap-2 p-0":`gap-1.5 pl-5 ${a.ordered?"list-decimal":"list-disc"}`}`,children:a.items.map((r,c)=>{const n=r.match(/^\[([ xX])\]\s+(.*)$/);return n?e.jsxs("li",{className:"list-none -ml-5 flex items-start gap-2",children:[e.jsx("span",{"aria-hidden":!0,className:`mt-0.5 grid place-items-center w-4 h-4 shrink-0 rounded border text-[0.625rem] ${n[1]===" "?"border-border-strong text-transparent":"border-emerald-400/60 bg-emerald-500/15 text-emerald-300"}`,children:"✓"}),e.jsx("span",{children:g(n[2],`${t}i${c}`)})]},c):s&&a.ordered?e.jsxs("li",{className:"flex gap-3 rounded-lg border border-border bg-app px-3 py-3 leading-relaxed",children:[e.jsx("span",{"aria-hidden":!0,className:"grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-500/15 font-mono text-[0.6875rem] font-bold text-indigo-300",children:String(c+1).padStart(2,"0")}),e.jsx("span",{children:g(r,`${t}i${c}`)})]},c):e.jsx("li",{children:g(r,`${t}i${c}`)},c)})},t)}default:return e.jsx("p",{className:"m-0 text-sm text-content-muted leading-relaxed",children:g(a.body,t)},t)}}function P({source:a,variant:o="default"}){const s=C(a||""),t=s.filter(r=>r.t==="h2"),i=T(t.map(r=>r.body));if(t.forEach((r,c)=>{r.headingId=i[c]}),o==="guide"){const r=s.filter((l,p)=>!(p===0&&l.t==="h1")),c=[],n=[];let h=null;return r.forEach((l,p)=>{l.t==="h2"?(h={heading:l,blocks:[],index:p},n.push(h)):h?h.blocks.push({block:l,index:p}):l.t!=="hr"&&c.push({block:l,index:p})}),e.jsxs("div",{className:"flex max-w-none flex-col gap-4",children:[c.length>0&&e.jsx("div",{className:"flex flex-col gap-3 rounded-xl border border-indigo-400/20 bg-gradient-to-br from-indigo-500/10 via-surface to-surface px-4 py-4 sm:px-5",children:c.map(({block:l,index:p})=>x(l,p,!0))}),n.map(({heading:l,blocks:p,index:b})=>e.jsxs("section",{id:l.headingId,className:"scroll-mt-24 rounded-xl border border-border bg-surface px-4 py-4 shadow-sm shadow-black/10 sm:px-5 sm:py-5",children:[e.jsxs("div",{className:"mb-4 flex items-start gap-3 border-b border-border pb-3",children:[e.jsx("span",{"aria-hidden":!0,className:"mt-1 h-5 w-1 shrink-0 rounded-full bg-gradient-primary"}),x(l,b,!0)]}),e.jsx("div",{className:"flex flex-col gap-3",children:p.map(({block:u,index:y})=>x(u,y,!0))})]},l.headingId))]})}return e.jsx("div",{className:"flex max-w-none flex-col gap-3",children:s.map((r,c)=>x(r,c))})}const U=`# Getting started
+`),o=[];let t=0;for(;t<s.length;){const i=s[t];if(!i.trim()){t++;continue}if(i.startsWith("```")){const n=[];for(t++;t<s.length&&!s[t].startsWith("```");)n.push(s[t++]);t++,o.push({t:"code",body:n.join(`
+`)});continue}const r=i.match(/^(#{1,3})\s+(.*)$/);if(r){o.push({t:`h${r[1].length}`,body:r[2]}),t++;continue}if(/^(-{3,}|\*{3,})\s*$/.test(i)){o.push({t:"hr"}),t++;continue}if(i.startsWith(">")){const n=[];for(;t<s.length&&s[t].startsWith(">");)n.push(s[t++].replace(/^>\s?/,""));o.push({t:"quote",body:n.join(" ")});continue}if(/^\|/.test(i)){const n=[];for(;t<s.length&&/^\|/.test(s[t]);)n.push(s[t++]);const h=u=>u.replace(/^\||\|$/g,"").split("|").map(y=>y.trim()),l=h(n[0]),p=n[1]?h(n[1]):[];p.length===l.length&&p.every(u=>/^:?-{3,}:?$/.test(u))?o.push({t:"table",header:l,body:n.slice(2).map(h)}):n.forEach(u=>o.push({t:"p",body:u}));continue}if(/^(\s*)([-*]|\d+\.)\s+/.test(i)){const n=[],h=/^\s*\d+\./.test(i);for(;t<s.length&&/^(\s*)([-*]|\d+\.)\s+/.test(s[t]);){let l=s[t].replace(/^(\s*)([-*]|\d+\.)\s+/,"");for(t++;t<s.length&&/^\s{2,}\S/.test(s[t])&&!/^(\s*)([-*]|\d+\.)\s+/.test(s[t]);)l+=" "+s[t++].trim();n.push(l)}o.push({t:"list",ordered:h,items:n});continue}const c=[i];for(t++;t<s.length&&s[t].trim()&&!/^(#{1,3}\s|```|\||>|(\s*)([-*]|\d+\.)\s|-{3,}\s*$)/.test(s[t]);)c.push(s[t++]);o.push({t:"p",body:c.join(" ")})}return o}function w(a,s,o=!1){const t=`b${s}`;switch(a.t){case"h1":return e.jsx("h1",{className:"m-0 mt-2 text-content font-bold text-2xl",children:g(a.body,t)},t);case"h2":return e.jsx("h2",{id:o?void 0:a.headingId,className:`${o?"text-xl":"mt-4 border-b border-border pb-1.5 text-lg"} m-0 scroll-mt-24 text-content font-bold`,children:g(a.body,t)},t);case"h3":return e.jsx("h3",{className:"m-0 mt-2 text-content font-semibold text-base",children:g(a.body,t)},t);case"hr":return e.jsx("hr",{className:"border-border my-2"},t);case"quote":return e.jsx("blockquote",{className:"m-0 rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-4 py-3 text-content text-sm leading-relaxed",children:g(a.body,t)},t);case"code":return e.jsx("pre",{tabIndex:0,className:"m-0 rounded-lg border border-border bg-app/60 p-3 overflow-x-auto text-[0.8125rem] text-content-muted font-mono",children:a.body},t);case"table":return e.jsx("div",{className:"overflow-x-auto rounded-lg border border-border",children:e.jsxs("table",{className:"w-full text-sm border-collapse",children:[e.jsx("thead",{children:e.jsx("tr",{className:"bg-surface-raised",children:a.header.map((i,r)=>e.jsx("th",{className:"text-left px-3 py-2 text-content font-semibold border-b border-border whitespace-nowrap",children:g(i,`${t}h${r}`)},r))})}),e.jsx("tbody",{children:a.body.map((i,r)=>e.jsx("tr",{className:r%2?"bg-surface":"",children:i.map((c,n)=>e.jsx("td",{className:"px-3 py-2 text-content-muted align-top border-b border-border last:border-b-0",children:g(c,`${t}r${r}c${n}`)},n))},r))})]})},t);case"list":{const i=a.ordered?"ol":"ul";return e.jsx(i,{className:`m-0 flex flex-col text-sm text-content-muted ${o&&a.ordered?"list-none gap-2 p-0":`gap-1.5 pl-5 ${a.ordered?"list-decimal":"list-disc"}`}`,children:a.items.map((r,c)=>{const n=r.match(/^\[([ xX])\]\s+(.*)$/);return n?e.jsxs("li",{className:"list-none -ml-5 flex items-start gap-2",children:[e.jsx("span",{"aria-hidden":!0,className:`mt-0.5 grid place-items-center w-4 h-4 shrink-0 rounded border text-[0.625rem] ${n[1]===" "?"border-border-strong text-transparent":"border-emerald-400/60 bg-emerald-500/15 text-emerald-300"}`,children:"✓"}),e.jsx("span",{children:g(n[2],`${t}i${c}`)})]},c):o&&a.ordered?e.jsxs("li",{className:"flex gap-3 rounded-lg border border-border bg-app px-3 py-3 leading-relaxed",children:[e.jsx("span",{"aria-hidden":!0,className:"grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-500/15 font-mono text-[0.6875rem] font-bold text-indigo-300",children:String(c+1).padStart(2,"0")}),e.jsx("span",{children:g(r,`${t}i${c}`)})]},c):e.jsx("li",{children:g(r,`${t}i${c}`)},c)})},t)}default:return e.jsx("p",{className:"m-0 text-sm text-content-muted leading-relaxed",children:g(a.body,t)},t)}}function R({source:a,variant:s="default"}){const o=L(a||""),t=o.filter(r=>r.t==="h2"),i=I(t.map(r=>r.body));if(t.forEach((r,c)=>{r.headingId=i[c]}),s==="guide"){const r=o.filter((l,p)=>!(p===0&&l.t==="h1")),c=[],n=[];let h=null;return r.forEach((l,p)=>{l.t==="h2"?(h={heading:l,blocks:[],index:p},n.push(h)):h?h.blocks.push({block:l,index:p}):l.t!=="hr"&&c.push({block:l,index:p})}),e.jsxs("div",{className:"flex max-w-none flex-col gap-4",children:[c.length>0&&e.jsx("div",{className:"flex flex-col gap-3 rounded-xl border border-indigo-400/20 bg-gradient-to-br from-indigo-500/10 via-surface to-surface px-4 py-4 sm:px-5",children:c.map(({block:l,index:p})=>w(l,p,!0))}),n.map(({heading:l,blocks:p,index:b})=>e.jsxs("section",{id:l.headingId,className:"scroll-mt-24 rounded-xl border border-border bg-surface px-4 py-4 shadow-sm shadow-black/10 sm:px-5 sm:py-5",children:[e.jsxs("div",{className:"mb-4 flex items-start gap-3 border-b border-border pb-3",children:[e.jsx("span",{"aria-hidden":!0,className:"mt-1 h-5 w-1 shrink-0 rounded-full bg-gradient-primary"}),w(l,b,!0)]}),e.jsx("div",{className:"flex flex-col gap-3",children:p.map(({block:u,index:y})=>w(u,y,!0))})]},l.headingId))]})}return e.jsx("div",{className:"flex max-w-none flex-col gap-3",children:o.map((r,c)=>w(r,c))})}const U=`# Getting started
 
-Prep My Avatar turns a real photo corpus into a trained, ranked LoRA —
-curation, captioning, face-scoring and training behind a single browser tab, on
-your own machine. The useful part of LoRA training isn't the training; it's
-building a clean, balanced, well-captioned image set. This app puts that whole
-pipeline behind one UI.
+> Prefer a visual walkthrough? Open the [standalone HTML guide](getting-started.html), or launch the app and choose **Guide → Getting started**. This Markdown file is the plain-text reference.
 
-> **In a hurry?** Launch the app, let the **Setup** wizard scan your machine,
-> and create your first dataset from your own photos — no API key, no GPU, no
-> external tool required for that first step.
+## The problem this solves
+
+You need recognisable photos or videos of yourself repeatedly—for a website, social post, presentation, campaign, thumbnail, or story. Another photoshoot every time is slow, and starting from scratch with an image tool can produce a different-looking person on every attempt. The goal is not to own an avatar. The goal is to make useful new material featuring your likeness without rebuilding that likeness for every image, video, or service.
+
+This is useful for creators, founders, educators, performers, campaigners, and anyone else who regularly needs consistent images of themselves.
+
+The problem is repetition and inconsistency: useful photographs are scattered, similar selfies provide limited evidence, and each image tool can create a different-looking person. Prep My Avatar helps you prepare reliable evidence once. Start with five strong photos, review them, and add genuinely different views only when your intended result needs them. You can then use those photos directly with a capable model or train a compatible LoRA when you need repeated consistency and more control.
+
+“Digital avatar” is only shorthand for several possible solutions. Prep My Avatar can prepare reference images, export a portable image-and-caption training pack, or train a family-specific Character LoRA. A provider-owned avatar—such as Gemini’s face-and-voice personal avatar—is created and stored by that provider, not by this app.
+
+Choose where you want to reuse your likeness before choosing tools:
+
+| You want | The actual output | Where it goes |
+| --- | --- | --- |
+| New still images of yourself | Reference photos and finished image files | A service that accepts image references, including the supported in-app generation engines |
+| A reusable image-model identity | A Character LoRA \`.safetensors\` file tied to one model family | A compatible Z-Image, SDXL, Krea 2, FLUX.1, or FLUX.2 Klein workflow |
+| A Gemini personal avatar | A face-and-voice avatar linked to your Google account | Gemini and Google products where available; create this directly with Google |
+| Training material for another tool | A ZIP of PNG/TXT pairs plus a provenance manifest | ai-toolkit, kohya_ss / sd-scripts, OneTrainer, and similar trainers |
+
+You can start by importing five photos and reviewing them without an API key, a local GPU, or a training account. A final LoRA requires more accepted images and a compatible local or cloud training route.
 
 ---
 
-## Two ways to run it
+## What you need before you open the app
 
-| Capability | API-only | Full local |
-|---|---|---|
-| **What works** | Create datasets, generate via Gemini/ChatGPT, curate, caption via API, export ZIP | Everything — plus local (Klein) generation, JoyCaption, face scoring, masks, training, Test Studio |
-| **Needs** | Python 3.10–3.12, an API key | ComfyUI and/or ai-toolkit + an NVIDIA GPU (12 GB+ for local generation) |
-| **Good for** | Laptops, first try, cloud training | The full pipeline on a training rig |
+### Images of the person or subject
 
-You can start API-only and add the local tools later — features light up
-automatically when their tool is detected.
+For a character dataset, start with photos you own or have permission to process. Five clear photos are enough to test the workflow, but they are not an ideal final training set. More useful variety gives the app more to work with: different framings, angles, expressions, lighting, poses, backgrounds, and clothing.
 
-## First launch
+There is no hard five-photo minimum. The app's coverage plan will show which kinds of images are covered and which are still missing. You can add more photos later.
 
-**Windows (one command):** clone the repo, then run \`start.bat\`. It picks a
-ML-compatible Python (3.11–3.12), creates a \`.venv\`, installs the requirements and
-opens the app at \`http://127.0.0.1:5050/\`.
+Keep the original files somewhere safe. The app preserves imported originals and creates its own training derivatives.
 
-**Any OS (manual venv):**
+### A clear goal
 
+When you create a dataset, choose the kind that matches what you want to teach:
+
+| Choose | Use it for | What you provide |
+| --- | --- | --- |
+| **Character** | A person or face | A name, a unique trigger word, and photos of the person |
+| **Concept** | A recurring action, effect, object, or idea | A name, a unique trigger word, a description of what the captions must leave out, and example images |
+| **Style** | A visual aesthetic applied across images | A name and varied images that share the style; no prompt trigger is required |
+
+For a first run with photos of yourself, choose **Character**. Use a distinctive trigger such as \`zchar_alex\`, not a common word such as \`alex\` or \`person\`.
+
+You will also choose a target model family. This controls the caption format and can be changed later. The default **Z-Image** option uses prose captions.
+
+### Decide how far you want to go
+
+| Your goal | You need now | You can skip for now |
+| --- | --- | --- |
+| Try the workflow with your own photos | The app and five or more test photos | API keys, ComfyUI, Ollama, and a GPU |
+| Generate missing poses or framings | A Gemini API key, an OpenAI API key, or local Klein through ComfyUI | ai-toolkit and cloud training |
+| Get automatic captions and coverage mapping | Ollama plus the configured vision model | ComfyUI and ai-toolkit |
+| Train on your own machine | ai-toolkit and its compatible local environment | A generation API key |
+| Train without a local GPU | A vast.ai API key and account credit | Local ai-toolkit and a local GPU |
+| Prepare data for another trainer | The app and your source images | All generation and training tools |
+
+The safest first step is to import your photos, review them, and export a small test dataset. Add generation or training tools when you know you need them.
+
+---
+
+## Install and launch
+
+### Windows: use the bundled launcher
+
+Clone or download the repository, then double-click **\`start.bat\`**. It creates the local Python environment, installs the core dependencies, starts the app, and opens it at:
+
+\`\`\`text
+http://127.0.0.1:5050/
 \`\`\`
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\\Scripts\\activate
-pip install -r backend/requirements.txt
+
+The launcher prefers Python 3.11 or 3.12. If neither is installed, it can download a self-contained Python 3.12 on an online Windows machine. The app's core features can run without the optional machine-learning extras.
+
+### macOS or Linux: run the launcher manually
+
+Use Python 3.11 or 3.12 if you want the optional face scoring, person masks, or watermark tools. The core application requires Python 3.10 or newer.
+
+\`\`\`bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
 python backend/source_launcher.py --install --root . --data-dir data
 python data/source-launcher.py --root . --data-dir data
 \`\`\`
 
-**Docker (API-only):** \`cp .env.example .env\`, set \`LDS_ACCESS_TOKEN\` in \`.env\`
-to a long random value, then run \`docker compose up --build\`. Open
-\`http://127.0.0.1:5050/remote-login\` and enter that token.
+Then open \`http://127.0.0.1:5050/\` in your browser.
 
-The supported launch options and requirements are in
-[Installation and launch](https://github.com/Kevinjohn/prep-my-avatar#installation-and-launch)
-in this repository's README.
+On Windows, the equivalent manual commands use \`.venv\\Scripts\\activate\` and \`python\` rather than \`python3\`.
 
-## The Setup wizard
+### Docker: API-only mode
 
-On first launch you land in **Setup**. It scans your machine automatically and
-walks through five steps — each one unlocks a set of features:
+Docker runs the core app and does not include ComfyUI or ai-toolkit. Create a \`.env\` file next to \`docker-compose.yml\`, add a long random access token, and start the container:
 
-1. **Image generation** — add a Gemini or OpenAI API key (or point at a local
-   Klein model) so the app can generate dataset images.
-2. **ComfyUI** — unlocks local (Klein) generation and the Test Studio.
-3. **Ollama** — the local vision model behind auto-captioning, six-axis corpus
-   coverage mapping and head-crop.
-4. **Quality tools** — face-similarity scoring and person masks (a one-click
-   \`pip install\`).
-5. **ai-toolkit** — the training engine.
+Put this in \`.env\`:
 
-Nothing is mandatory: **Skip setup** is always available, and every step can be
-revisited later from **Settings**, where each tool has a Test button that tells
-you immediately whether the app can see it.
+\`\`\`dotenv
+LDS_ACCESS_TOKEN=replace-with-a-long-random-value
+\`\`\`
 
-## Around the app
+Then run:
 
-- **Datasets** — the home tab and your **library**: photo tiles of every
-  dataset, grouped by model family, with a search box and a badge for each
-  family you've already trained. Create one and work it through the guided
-  flow (source → curate → caption → train).
-- **🏋️ Runs** — every training in one place, cloud *and* local: live progress,
-  the settings each launch used, retry a failed run (↻), continue a finished
-  one (▶), and download the LoRA (appears once ai-toolkit or a vast.ai key is set).
-- **Test Studio** — grid-test a trained LoRA across checkpoints and strengths,
-  vote, and rank (appears once ComfyUI is reachable).
-- **Guide** — this manual.
-- **Setup** — the guided wizard, re-runnable anytime.
-- **Settings** — everything the wizard configures, plus server, updates,
-  maintenance and the diagnostic report.
+\`\`\`bash
+docker compose up --build
+\`\`\`
 
-Next chapter: **Using the app** — the full walkthrough, dataset type by dataset
-type.
+Open \`http://127.0.0.1:5050/remote-login\` and enter the token from \`.env\`.
+
+---
+
+## Complete the Setup wizard
+
+The first time you open the app, it takes you to **Setup**. Let it scan your machine, then configure only the steps you need. You can skip a step and return to it later from **Setup** or **Settings**.
+
+### Image generation
+
+Add one of these keys if you want the app to generate images for missing coverage:
+
+- **Gemini API key** — enables Nano Banana. Get one from [Google AI Studio](https://aistudio.google.com/apikey).
+- **OpenAI API key** — enables ChatGPT image generation. Get one from [OpenAI API keys](https://platform.openai.com/api-keys).
+
+You do not need both. Save and test the key in the wizard. The key is stored locally in the app's environment file and is not shown again.
+
+If you use a remote engine, go to **Settings → Image engines → Remote-generation privacy** and enable remote generation before making a request. The app sends the prompt and the bounded reference pack to the provider you select. Images marked **Exclude** stay out of that pack.
+
+### ComfyUI and local Klein
+
+Install ComfyUI separately if you want local image generation or **Test Studio**. Point **Setup → ComfyUI** at:
+
+- the ComfyUI API, normally \`http://127.0.0.1:8188\`; and
+- the ComfyUI folder containing \`main.py\` and \`models/\`.
+
+Local Klein is optional. It needs the Klein model files and a machine with roughly 16 GB of VRAM for the fp8 model. The Setup step can download the supported files after the ComfyUI folder has been validated.
+
+### Ollama and automatic analysis
+
+Install and start [Ollama](https://ollama.com/download), then use the Setup step to pull the configured vision model. Ollama enables automatic captions, coverage classification, and head-crop assistance. Ollama being installed is not enough—the vision model must also be available.
+
+If you do not want to install Ollama yet, you can still import, review, manually caption, and export. The automatic coverage and captioning steps will not be available until a vision model is ready.
+
+### Quality tools
+
+The **Quality tools** step installs optional local helpers for face-similarity scoring, person masks, and watermark inpainting. They improve review and cleanup but do not replace your judgment, and the app can work without them.
+
+Use Python 3.11 or 3.12 for the reviewed machine-learning dependency set. On another Python version, skip these tools or configure a separate supported interpreter in **Settings → Local tools**.
+
+### Training
+
+Choose one training route only when you are ready:
+
+- **Local training:** install [ai-toolkit](https://github.com/ostris/ai-toolkit) and point **Setup → ai-toolkit** at its folder.
+- **Cloud training:** add a vast.ai API key in **Settings → Training**. Cloud runs use rented GPUs and cost money; review the price and budget limits before launching.
+- **Training elsewhere:** skip this step and use **Export ZIP** after curation and captioning.
+
+---
+
+## The first dataset workflow
+
+Follow this order for a character dataset. The workspace keeps the next useful step visible as you go.
+
+1. **Create a Character dataset.** Open **Datasets → New dataset**, enter a name, choose a unique trigger word, select a target model, and choose **Face** or **Face + body** fidelity. Start with **Face** unless you specifically need the LoRA to reproduce body shape or permanent body marks.
+
+   You should now see an empty dataset workspace with an import area.
+
+2. **Import your source photos.** Add your five test photos or your larger collection. The app keeps the originals, skips exact reimports, and keeps near-duplicates visible so you can decide what to do with them.
+
+   Start with the real corpus. This lets the coverage plan identify genuine gaps before you spend money on generation.
+
+3. **Review and admit useful images.** Run the local technical analysis if available. Review sharpness, exposure, duplicates, framing, rights, and identity. Mark the images you want to train on as **Keep**. Reject or leave out images that are blurry, repeated, unsuitable, or not yours to use.
+
+4. **Map coverage.** With Ollama available, classify the imported photos and open the coverage plan. It distinguishes covered, weak, missing, and unknown framing or visual combinations. Unknown evidence means “review this,” not “generate a replacement.”
+
+5. **Choose a reference and anchors.** Set a primary reference if you want local Klein or want to pin a particular identity image. Otherwise, the app can select a bounded and diverse anchor pack from the imported corpus for API generation. Keep provider-sensitive images marked **Exclude**.
+
+6. **Generate only real gaps.** If the coverage plan recommends missing shots and you configured an engine, select the suggested shots and generate them. Each result keeps its engine, prompt, target gap, and reference provenance.
+
+   If you do not have an API key or ComfyUI, skip this step. You can still train or export the photos you kept.
+
+7. **Curate the combined set.** Review imported and generated images together. Keep the images that are useful and on-identity. Use face-similarity scores as a ranking aid when the quality tool is installed. For a low-quality source, use **Reconstruct & compare** and keep either the original or the reconstruction, never both.
+
+8. **Caption the kept images.** Run captioning, then read the results. For a character dataset, captions should describe the pose, clothes, setting, lighting, and framing without turning the person's identity into prompt text. Fix every identity-leak warning before training.
+
+9. **Train or export.** Run the training preflight. It checks counts, balance, captions, duplicates, quality, identity, watermarks, provenance, rights, and the source mix. Then either choose **Train locally**, choose **Train in cloud**, or choose **Export ZIP** for another trainer.
+
+10. **Evaluate and protect the result.** If ComfyUI is configured, use **Test Studio** to compare checkpoints with fixed seeds and save the strongest settings. Create a **Backup** from the dataset workspace before making a large change or moving to another machine.
+
+---
+
+## Before your first generation or training run
+
+Check these items:
+
+- You have permission to use every identifiable person's image.
+- Your trigger word is unique and consistent.
+- You know whether you are training face-only or face-plus-body fidelity.
+- The imported set contains real variety, not five near-identical crops.
+- Remote generation is enabled only if you understand what will leave your machine.
+- Every generated image you keep has a reason to be in the dataset.
+- Captions do not describe the character's identity or permanent features as ordinary prompt words.
+- You know whether the next step is local training, paid cloud training, or export.
+- You have a portable backup before deleting or moving the dataset.
+
+---
+
+## What to read next
+
+- **[Using the app](/guide/using-the-app)** — the detailed walkthrough for character, concept, and style datasets.
+- **[Building a good dataset](/guide/dataset-guide)** — why variety, captions, coverage, and identity checks matter.
+- **[Troubleshooting](/guide/troubleshooting)** — fixes for the most common setup and training problems.
 `,F=`# Using the app
 
 The workspace is a **guided flow**: each stage stays folded until the one
@@ -503,7 +631,7 @@ best one**. Later checkpoints know the identity better but obey prompts worse.
 
 *Everything above is enforced or surfaced by the app itself (pre-flight checks,
 leak badge, composition bar, advanced options). This page just explains why.*
-`,B=`# Troubleshooting
+`,K=`# Troubleshooting
 
 Symptom-first, most-reported first. If your problem isn't here, the next
 chapter (**Getting help**) shows how to report it with one click.
@@ -625,7 +753,7 @@ runs it still knows about, but local cleanup success is not a billing guarantee:
 provider requests can fail and a run created outside this app is not tracked.
 Until the provider console confirms the instance is terminated, assume it may
 still be billable and terminate it there manually if necessary.
-`,K=`# Getting help & reporting problems
+`,O=`# Getting help & reporting problems
 
 Stuck, found a bug, or missing a feature?
 
@@ -667,4 +795,4 @@ configured). One caveat: the log tail can mention file names from your machine
 Describe the **job you were doing when you missed the feature** — the problem
 is more valuable than the proposed solution. Open a GitHub issue with the
 *Feature request* template.
-`,v=[{id:"getting-started",num:"01",title:"Getting started",description:"Install the app, connect the tools you need, and understand the workspace.",source:U},{id:"using-the-app",num:"02",title:"Using the app",description:"Follow the complete workflow for character, concept, and style datasets.",source:F},{id:"dataset-guide",num:"03",title:"Building a good dataset",description:"Make stronger choices about images, captions, settings, and checkpoints.",source:G},{id:"troubleshooting",num:"04",title:"Troubleshooting",description:"Find a symptom, understand the cause, and apply the shortest reliable fix.",source:B}],N={id:"getting-help",num:"05",title:"Getting help",description:"Create a useful report and share the details needed to solve a problem.",source:K,extra:"diagnostic"},M=[...v,N];function W({helpOnly:a=!1}){const{section:o}=S(),s=a?[N]:v,t=o||"getting-started",i=a?0:s.findIndex(d=>d.id===t),r=a||i>=0,c=j.useRef(null),n=r?s[i]:s[0],h=i>0?s[i-1]:null,l=i<s.length-1?s[i+1]:null,p=R(n.source),b=Math.max(1,Math.ceil(n.source.trim().split(/\s+/).length/210)),u=(d,f)=>{d.preventDefault();const m=document.getElementById(f);if(!m)return;window.history.pushState(null,"",`#${encodeURIComponent(f)}`),m.tabIndex=-1,m.focus({preventScroll:!0});const w=window.matchMedia("(prefers-reduced-motion: reduce)").matches;m.scrollIntoView({behavior:w?"auto":"smooth",block:"start"})};if(j.useEffect(()=>{var d;window.scrollTo(0,0),r&&((d=c.current)==null||d.focus())},[n.id,r]),!r)return e.jsx(I,{to:"/guide/getting-started",replace:!0});const y=(d,f)=>{const m=d.id===n.id,w=f?`flex shrink-0 items-baseline gap-1.5 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium ${m?"border-border-strong bg-surface-raised text-content":"border-border text-content-muted hover:text-content"}`:`relative flex w-full items-baseline gap-2.5 rounded-md px-3 py-2 text-left text-sm ${m?"bg-surface-raised text-content":"text-content-muted hover:bg-surface hover:text-content"}`;return e.jsxs(k,{to:`/guide/${d.id}`,"aria-current":m?"page":void 0,className:w,children:[!f&&m&&e.jsx("span",{"aria-hidden":!0,className:"absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded bg-gradient-primary"}),e.jsx("span",{className:`font-mono text-[11px] ${m?"text-content":"text-content-subtle"}`,children:d.num}),e.jsx("span",{className:"font-medium",children:d.title})]},d.id)};return e.jsxs("div",{className:a?"mx-auto max-w-5xl xl:grid xl:grid-cols-[minmax(0,1fr)_190px] xl:items-start xl:gap-7":"lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:items-start lg:gap-7 xl:grid-cols-[210px_minmax(0,1fr)_190px]",children:[!a&&e.jsxs("aside",{children:[e.jsx("nav",{"aria-label":"Guide chapters",className:"-mx-4 flex gap-2 overflow-x-auto px-4 pb-3 lg:hidden",children:v.map(d=>y(d,!0))}),e.jsxs("nav",{"aria-label":"Guide chapters",className:"hidden lg:sticky lg:top-20 lg:block",children:[e.jsx("p",{className:"px-3 pb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"Field manual"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:v.map(d=>y(d,!1))})]})]}),e.jsxs("section",{className:`min-w-0 max-w-4xl pb-10 ${a?"mx-auto":"mt-2 lg:mt-0"}`,children:[e.jsxs("header",{className:"relative mb-4 overflow-hidden rounded-2xl border border-border bg-surface px-5 py-5 sm:px-6 sm:py-6",children:[e.jsx("div",{"aria-hidden":!0,className:"absolute -right-16 -top-20 h-52 w-52 rounded-full bg-indigo-500/10 blur-3xl"}),e.jsxs("div",{className:"relative",children:[e.jsxs("div",{className:"mb-3 flex flex-wrap items-center gap-2 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-content-subtle",children:[e.jsx("span",{className:"rounded-md border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 text-indigo-300",children:a?"Support":`Chapter ${n.num}`}),e.jsxs("span",{children:[b," min read"]}),!a&&e.jsxs(e.Fragment,{children:[e.jsx("span",{"aria-hidden":!0,children:"·"}),e.jsxs("span",{children:[i+1," of ",s.length]})]})]}),e.jsx("h1",{ref:c,tabIndex:-1,className:"m-0 max-w-2xl text-2xl font-bold tracking-tight text-content focus:outline-none sm:text-3xl",children:n.title}),e.jsx("p",{className:"mb-0 mt-2 max-w-2xl text-sm leading-relaxed text-content-muted sm:text-base",children:n.description})]})]}),p.length>0&&e.jsxs("nav",{"aria-label":"On this page",className:"mb-4 rounded-xl border border-border bg-surface p-3 xl:hidden",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex gap-2 overflow-x-auto pb-0.5",children:p.map(d=>e.jsx("a",{href:`#${d.id}`,onClick:f=>u(f,d.id),className:"shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content",children:d.title},d.id))})]}),e.jsx(P,{source:n.source,variant:"guide"}),n.extra==="diagnostic"&&e.jsx("div",{className:"mt-6",children:e.jsx(A,{})}),!a&&e.jsxs("div",{className:"mt-6 grid grid-cols-2 gap-3 border-t border-border pt-4",children:[h?e.jsxs(k,{to:`/guide/${h.id}`,className:"group flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 no-underline hover:bg-surface-raised",children:[e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"←"}),e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Previous"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:h.title})]})]}):e.jsx("span",{}),l?e.jsxs(k,{to:`/guide/${l.id}`,className:"group flex min-w-0 items-center justify-end gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 text-right no-underline hover:bg-surface-raised",children:[e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Next"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:l.title})]}),e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"→"})]}):e.jsx("span",{})]})]}),e.jsx("aside",{className:"hidden xl:block",children:e.jsxs("nav",{"aria-label":"On this page",className:"sticky top-20 border-l border-border pl-4",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:p.map(d=>e.jsx("a",{href:`#${d.id}`,onClick:f=>u(f,d.id),className:"rounded-md bg-transparent px-2 py-1.5 text-left text-xs leading-snug text-content-subtle hover:bg-surface hover:text-content",children:d.title},d.id))})]})})]})}export{M as ALL_GUIDE_CHAPTERS,v as CHAPTERS,N as HELP_CHAPTER,W as default};
+`,v=[{id:"getting-started",num:"01",title:"Getting started",description:"Prepare a reusable likeness so you can create recognisable photos and videos of yourself without starting over each time.",source:U},{id:"using-the-app",num:"02",title:"Using the app",description:"Follow the complete workflow for character, concept, and style datasets.",source:F},{id:"dataset-guide",num:"03",title:"Building a good dataset",description:"Make stronger choices about images, captions, settings, and checkpoints.",source:G},{id:"troubleshooting",num:"04",title:"Troubleshooting",description:"Find a symptom, understand the cause, and apply the shortest reliable fix.",source:K}],j={id:"getting-help",num:"05",title:"Getting help",description:"Create a useful report and share the details needed to solve a problem.",source:O,extra:"diagnostic"},D=[...v,j];function q({helpOnly:a=!1}){const{section:s}=A(),o=a?[j]:v,t=s||"getting-started",i=a?0:o.findIndex(d=>d.id===t),r=a||i>=0,c=T.useRef(null),n=r?o[i]:o[0],h=i>0?o[i-1]:null,l=i<o.length-1?o[i+1]:null,p=P(n.source),b=Math.max(1,Math.ceil(n.source.trim().split(/\s+/).length/210)),u=(d,f)=>{d.preventDefault();const m=document.getElementById(f);if(!m)return;window.history.pushState(null,"",`#${encodeURIComponent(f)}`),m.tabIndex=-1,m.focus({preventScroll:!0});const x=window.matchMedia("(prefers-reduced-motion: reduce)").matches;m.scrollIntoView({behavior:x?"auto":"smooth",block:"start"})};if(T.useEffect(()=>{var d;window.scrollTo(0,0),r&&((d=c.current)==null||d.focus())},[n.id,r]),!r)return e.jsx(S,{to:"/guide/getting-started",replace:!0});const y=(d,f)=>{const m=d.id===n.id,x=f?`flex shrink-0 items-baseline gap-1.5 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium ${m?"border-border-strong bg-surface-raised text-content":"border-border text-content-muted hover:text-content"}`:`relative flex w-full items-baseline gap-2.5 rounded-md px-3 py-2 text-left text-sm ${m?"bg-surface-raised text-content":"text-content-muted hover:bg-surface hover:text-content"}`;return e.jsxs(k,{to:`/guide/${d.id}`,"aria-current":m?"page":void 0,className:x,children:[!f&&m&&e.jsx("span",{"aria-hidden":!0,className:"absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded bg-gradient-primary"}),e.jsx("span",{className:`font-mono text-[11px] ${m?"text-content":"text-content-subtle"}`,children:d.num}),e.jsx("span",{className:"font-medium",children:d.title})]},d.id)};return e.jsxs("div",{className:a?"mx-auto max-w-5xl xl:grid xl:grid-cols-[minmax(0,1fr)_190px] xl:items-start xl:gap-7":"lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:items-start lg:gap-7 xl:grid-cols-[210px_minmax(0,1fr)_190px]",children:[!a&&e.jsxs("aside",{children:[e.jsx("nav",{"aria-label":"Guide chapters",className:"-mx-4 flex gap-2 overflow-x-auto px-4 pb-3 lg:hidden",children:v.map(d=>y(d,!0))}),e.jsxs("nav",{"aria-label":"Guide chapters",className:"hidden lg:sticky lg:top-20 lg:block",children:[e.jsx("p",{className:"px-3 pb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"Field manual"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:v.map(d=>y(d,!1))})]})]}),e.jsxs("section",{className:`min-w-0 max-w-4xl pb-10 ${a?"mx-auto":"mt-2 lg:mt-0"}`,children:[e.jsxs("header",{className:"relative mb-4 overflow-hidden rounded-2xl border border-border bg-surface px-5 py-5 sm:px-6 sm:py-6",children:[e.jsx("div",{"aria-hidden":!0,className:"absolute -right-16 -top-20 h-52 w-52 rounded-full bg-indigo-500/10 blur-3xl"}),e.jsxs("div",{className:"relative",children:[e.jsxs("div",{className:"mb-3 flex flex-wrap items-center gap-2 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-content-subtle",children:[e.jsx("span",{className:"rounded-md border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 text-indigo-300",children:a?"Support":`Chapter ${n.num}`}),e.jsxs("span",{children:[b," min read"]}),!a&&e.jsxs(e.Fragment,{children:[e.jsx("span",{"aria-hidden":!0,children:"·"}),e.jsxs("span",{children:[i+1," of ",o.length]})]})]}),e.jsx("h1",{ref:c,tabIndex:-1,className:"m-0 max-w-2xl text-2xl font-bold tracking-tight text-content focus:outline-none sm:text-3xl",children:n.title}),e.jsx("p",{className:"mb-0 mt-2 max-w-2xl text-sm leading-relaxed text-content-muted sm:text-base",children:n.description})]})]}),p.length>0&&e.jsxs("nav",{"aria-label":"On this page",className:"mb-4 rounded-xl border border-border bg-surface p-3 xl:hidden",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex gap-2 overflow-x-auto pb-0.5",children:p.map(d=>e.jsx("a",{href:`#${d.id}`,onClick:f=>u(f,d.id),className:"shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content",children:d.title},d.id))})]}),e.jsx(R,{source:n.source,variant:"guide"}),n.extra==="diagnostic"&&e.jsx("div",{className:"mt-6",children:e.jsx(N,{})}),!a&&e.jsxs("div",{className:"mt-6 grid grid-cols-2 gap-3 border-t border-border pt-4",children:[h?e.jsxs(k,{to:`/guide/${h.id}`,className:"group flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 no-underline hover:bg-surface-raised",children:[e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"←"}),e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Previous"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:h.title})]})]}):e.jsx("span",{}),l?e.jsxs(k,{to:`/guide/${l.id}`,className:"group flex min-w-0 items-center justify-end gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 text-right no-underline hover:bg-surface-raised",children:[e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Next"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:l.title})]}),e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"→"})]}):e.jsx("span",{})]})]}),e.jsx("aside",{className:"hidden xl:block",children:e.jsxs("nav",{"aria-label":"On this page",className:"sticky top-20 border-l border-border pl-4",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:p.map(d=>e.jsx("a",{href:`#${d.id}`,onClick:f=>u(f,d.id),className:"rounded-md bg-transparent px-2 py-1.5 text-left text-xs leading-snug text-content-subtle hover:bg-surface hover:text-content",children:d.title},d.id))})]})})]})}export{D as ALL_GUIDE_CHAPTERS,v as CHAPTERS,j as HELP_CHAPTER,q as default};
