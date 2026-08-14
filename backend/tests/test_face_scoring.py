@@ -1,3 +1,10 @@
+"""face_similarity contract tests.
+
+The subprocess seam is `app.services.ml_worker.subprocess.run`, not
+`face_similarity.subprocess.run`: face_similarity no longer runs the worker
+itself, it delegates to the shared JSON-worker runner. Patch it where it
+actually runs.
+"""
 import io
 import json
 import os
@@ -57,7 +64,7 @@ def test_analyze_faces_maps_state_and_sim_onto_rows(app, monkeypatch):
                                                         "face_exposure": 81}}}
         # Noise lines before the JSON line -- the parser must pick the LAST `{`-line.
         noisy_stdout = "some progress line\n[face] loading model\n" + json.dumps(contract)
-        monkeypatch.setattr('app.services.face_similarity.subprocess.run',
+        monkeypatch.setattr('app.services.ml_worker.subprocess.run',
                             lambda *a, **k: _Proc(noisy_stdout))
         counts, _err = svc.analyze_faces(LOCAL_USER, ds.id)
         refreshed = svc.db.session.get(FaceDatasetImage, img.id)
@@ -111,7 +118,7 @@ def test_analyze_faces_ref_not_ok_returns_empty_and_no_row_change(app, monkeypat
     with app.app_context():
         ds, img = _dataset_with_ref_and_kept_image(svc, LOCAL_USER)
         contract = {"ref_ok": False, "results": {}, "error": "ref unusable"}
-        monkeypatch.setattr('app.services.face_similarity.subprocess.run',
+        monkeypatch.setattr('app.services.ml_worker.subprocess.run',
                             lambda *a, **k: _Proc(json.dumps(contract)))
         counts, _err = svc.analyze_faces(LOCAL_USER, ds.id)
         refreshed = svc.db.session.get(FaceDatasetImage, img.id)
@@ -131,7 +138,7 @@ def test_score_dataset_faces_unavailable_returns_error_without_subprocess(
     def _boom(*a, **k):
         raise AssertionError('subprocess.run must not be called when unavailable')
 
-    monkeypatch.setattr('app.services.face_similarity.subprocess.run', _boom)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _boom)
     ref = tmp_path / 'ref.jpg'
     image = tmp_path / 'image.jpg'
     ref.write_bytes(b'input')
@@ -184,7 +191,7 @@ def test_score_dataset_faces_stdin_payload_includes_models_root(app, monkeypatch
         captured['input'] = kwargs.get('input')
         return _Proc(json.dumps({"ref_ok": True, "results": {}}))
 
-    monkeypatch.setattr('app.services.face_similarity.subprocess.run', _fake_run)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _fake_run)
     with app.app_context():
         save_config({'face_scoring': {'models_root': 'C:/models/insightface'}})
         import tempfile
@@ -211,7 +218,7 @@ def test_score_dataset_faces_stdin_payload_models_root_none_when_unconfigured(ap
         captured['input'] = kwargs.get('input')
         return _Proc(json.dumps({"ref_ok": True, "results": {}}))
 
-    monkeypatch.setattr('app.services.face_similarity.subprocess.run', _fake_run)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _fake_run)
     with app.app_context():
         import tempfile
         with tempfile.TemporaryDirectory() as d:
@@ -239,7 +246,7 @@ def test_score_dataset_faces_native_crash_returns_empty_not_exception(app, monke
     def _crash(*a, **k):
         raise OSError('the interpreter died')
 
-    monkeypatch.setattr('app.services.face_similarity.subprocess.run', _crash)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _crash)
     with app.app_context():
         ds, img = _dataset_with_ref_and_kept_image(svc, LOCAL_USER)
         counts, err = svc.analyze_faces(LOCAL_USER, ds.id)  # must not raise
@@ -283,7 +290,7 @@ def test_score_dataset_faces_crash_reports_stderr_tail(app, monkeypatch):
                '  File "face_analysis.py", line 61\n'
                'AssertionError')
     monkeypatch.setattr(
-        'app.services.face_similarity.subprocess.run',
+        'app.services.ml_worker.subprocess.run',
         lambda *a, **k: _Proc('', stderr=_stderr, returncode=1))
     with app.app_context():
         with tempfile.TemporaryDirectory() as d:

@@ -65,10 +65,6 @@ def _spawn_detached(binary: str):
     return proc
 
 
-def _stderr_tail(_proc) -> str:
-    return ''
-
-
 def start_ollama(*, wait_timeout: float = _READY_TIMEOUT,
                  poll_interval: float = _POLL_INTERVAL) -> dict:
     """Idempotently bring the local Ollama server up. Returns:
@@ -76,7 +72,11 @@ def start_ollama(*, wait_timeout: float = _READY_TIMEOUT,
       started & answered   -> {ok:True,  reachable:True}
       not installed        -> {ok:False, reachable:False, error:...}
       launch failed        -> {ok:False, reachable:False, error:...}
-      spawned, never ready -> {ok:False, reachable:False, error:..., stderr:...}
+      spawned, never ready -> {ok:False, reachable:False, error:...}
+    There is deliberately NO stderr in the failure body: the spawn above sends
+    the detached server's output to DEVNULL rather than a log this process
+    cannot rotate after it exits, so there is nothing to quote. Asserted by
+    test_start_timeout_returns_structured_error_without_unbounded_log.
     Never raises."""
     # Serialize the reachability-check/spawn/readiness sequence. Concurrent
     # HTTP requests join the same startup attempt and re-check reachability
@@ -118,12 +118,8 @@ def _start_ollama_locked(*, wait_timeout: float, poll_interval: float) -> dict:
     # Final check closes the race between the last sleep and the deadline.
     if _reachable(url):
         return {'ok': True, 'reachable': True}
-    out = {'ok': False, 'reachable': False,
-           'error': f'Ollama did not become reachable within {int(wait_timeout)}s.'}
-    tail = _stderr_tail(proc)
-    if tail:
-        out['stderr'] = tail
-    return out
+    return {'ok': False, 'reachable': False,
+            'error': f'Ollama did not become reachable within {int(wait_timeout)}s.'}
 
 
 def _is_loopback_url(url: str) -> bool:

@@ -1,3 +1,9 @@
+"""JoyCaption wire-protocol and provenance tests.
+
+The subprocess seam is `app.services.ml_worker.subprocess.run`, not
+`joycaption.subprocess.run`: joycaption no longer runs the worker itself, it
+delegates to the shared JSON-worker runner. Patch it where it actually runs.
+"""
 import json
 import subprocess
 
@@ -27,7 +33,7 @@ def test_joycaption_seed_revision_protocol_and_provenance(app, tmp_path, monkeyp
                 'errors': {}, 'provenance': provenance,
             }), '')
 
-    monkeypatch.setattr(joycaption.subprocess, 'run', run)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', run)
     result = joycaption.caption_images_joycaption(
         [str(image)], seed=73, revision='a' * 40)
 

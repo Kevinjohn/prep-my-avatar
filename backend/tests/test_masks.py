@@ -1,3 +1,9 @@
+"""person_mask contract tests.
+
+The subprocess seam is `app.services.ml_worker.subprocess.run`, not
+`person_mask.subprocess.run`: person_mask no longer runs the worker itself, it
+delegates to the shared JSON-worker runner. Patch it where it actually runs.
+"""
 import io
 import json
 import os
@@ -40,7 +46,7 @@ def test_generate_person_masks_returns_dict_with_results(app, monkeypatch, tmp_p
     }}
     # Noise lines before the JSON line -- the parser must pick the LAST `{`-line.
     noisy_stdout = "progress line\n[mask] loading\n" + json.dumps(contract)
-    monkeypatch.setattr('app.services.person_mask.subprocess.run',
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run',
                         lambda *a, **k: _Proc(noisy_stdout))
 
     with app.app_context():
@@ -61,7 +67,7 @@ def test_generate_person_masks_unavailable_returns_empty_without_subprocess(app,
     def _boom(*a, **k):
         raise AssertionError('subprocess.run must not be called when unavailable')
 
-    monkeypatch.setattr('app.services.person_mask.subprocess.run', _boom)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _boom)
     with app.app_context():
         assert pm.generate_person_masks(['/does/not/matter'], '/out') == {}
 
@@ -89,7 +95,7 @@ def test_generate_person_masks_native_crash_returns_empty_not_exception(app, mon
     def _crash(*a, **k):
         raise OSError('the interpreter died')
 
-    monkeypatch.setattr('app.services.person_mask.subprocess.run', _crash)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _crash)
     with app.app_context():
         p = os.path.join(str(tmp_path), 'test.png')
         with open(p, 'wb') as fh:
@@ -108,7 +114,7 @@ def test_generate_person_masks_stdin_payload_wire_format(app, monkeypatch, tmp_p
         captured['input'] = kwargs.get('input')
         return _Proc(json.dumps({"ok": True, "written": 1, "results": {}}))
 
-    monkeypatch.setattr('app.services.person_mask.subprocess.run', _fake_run)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _fake_run)
     with app.app_context():
         p = os.path.join(str(tmp_path), 'test.png')
         with open(p, 'wb') as fh:
@@ -133,7 +139,7 @@ def test_generate_person_masks_ok_false_returns_empty(app, monkeypatch, tmp_path
     def _fake_run(*a, **k):
         return _Proc(json.dumps({"ok": False, "error": "rembg init failed"}))
 
-    monkeypatch.setattr('app.services.person_mask.subprocess.run', _fake_run)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _fake_run)
     with app.app_context():
         p = os.path.join(str(tmp_path), 'test.png')
         with open(p, 'wb') as fh:
@@ -150,7 +156,7 @@ def test_generate_person_masks_bad_json_returns_empty(app, monkeypatch, tmp_path
     def _fake_run(*a, **k):
         return _Proc("progress\nno json here\n")
 
-    monkeypatch.setattr('app.services.person_mask.subprocess.run', _fake_run)
+    monkeypatch.setattr('app.services.ml_worker.subprocess.run', _fake_run)
     with app.app_context():
         p = os.path.join(str(tmp_path), 'test.png')
         with open(p, 'wb') as fh:
