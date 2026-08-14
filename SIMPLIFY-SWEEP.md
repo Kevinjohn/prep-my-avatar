@@ -61,13 +61,16 @@ correctness.
 
 ## Gates
 
-Confirm the exact commands on first run and correct them here if they differ.
-
-**Backend** (95 test files under `backend/tests`):
+**Backend** (95 test files under `backend/tests`). Use the repo `.venv`
+interpreter explicitly — bare `python` does not resolve under pyenv on this
+machine, and `python3` is a 3.14 install without the dependencies:
 
 ```bash
-python -m pytest backend/tests -q
+.venv/bin/python -m pytest backend/tests -q
 ```
+
+Check the exit code directly rather than eyeballing piped output; `| tail` masks
+a failure as exit 0. Green baseline as of 2026-08-14: 1740 passed, 1 skipped.
 
 Note `pyproject.toml` sets `filterwarnings = ["error"]` — a new warning fails the
 suite. That is intended; do not silence it to get green.
@@ -166,7 +169,7 @@ Update after every pass. `blocked` needs a reason.
 
 | # | Pass | Status | Commit | Notes |
 |---|---|---|---|---|
-| 1 | face-dataset-service | todo | — | |
+| 1 | face-dataset-service | done | `pass-1` | −47 net. Dead migration helper, fan-out check ×4, VLM text cleanup ×7, ref-parse ×2, dead dHash branches. Deferred: double image decode on import (needs sibling-module API change), caption-pipeline merge, coverage-state classifier. |
 | 2 | lora-training-core | todo | — | |
 | 3 | remote-training-publish | todo | — | |
 | 4 | generation-engines | todo | — | |

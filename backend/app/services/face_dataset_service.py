@@ -155,6 +155,21 @@ _IMAGE_REGENERATE_LOCKS = tuple(threading.Lock() for _ in range(64))
 _DATASET_GENERATION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
+def _check_fanout_capacity(dataset_id, additional) -> None:
+    """Anti-DoS: the fan-out is free (never debited) → cap pending in-flight
+    generations per dataset so one user can't monopolize the single GPU.
+
+    In-flight means a pending row that has no file yet: the generation was
+    accepted but has not landed. Every generation entry point goes through here
+    so the cap and that definition stay in one place.
+    """
+    in_flight = (FaceDatasetImage.query
+                 .filter_by(dataset_id=dataset_id, status='pending')
+                 .filter(FaceDatasetImage.filename.is_(None)).count())
+    if in_flight + additional > MAX_FANOUT:
+        raise ValueError(f'too many generations in flight ({in_flight}), wait or cancel')
+
+
 class KleinNodesMissing(Exception):
     """Klein graph preflight failure carried from the service to the HTTP mapper."""
 
@@ -2327,10 +2342,7 @@ def build_backup_zip(user_id, dataset_id, *, destination=None):
         z.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=1))
         z.writestr('images.json', json.dumps(images_meta, ensure_ascii=False, indent=1))
         ref_names = [n for n in (ds.ref_filename, ds.ref_original_filename) if n]
-        try:
-            ref_names += list(json.loads(ds.ref_extra_filenames or '[]'))
-        except ValueError:
-            pass
+        ref_names += extra_ref_filenames(ds)
         for n in dict.fromkeys(ref_names):
             add_file(z, n, f'ref/{n}')
         for img in rows:
@@ -2663,15 +2675,9 @@ def _import_backup_archive(user_id, z, state):
         ds.ref_filename = None
     if ds.ref_original_filename and ds.ref_original_filename not in extracted['ref']:
         ds.ref_original_filename = None
-    try:
-        extra_refs = json.loads(ds.ref_extra_filenames or '[]')
-    except (TypeError, ValueError):
-        extra_refs = []
-    if not isinstance(extra_refs, list):
-        extra_refs = []
     ds.ref_extra_filenames = json.dumps([
-        name for name in extra_refs
-        if isinstance(name, str) and Path(name).name == name and name in extracted['ref']
+        name for name in extra_ref_filenames(ds)
+        if Path(name).name == name and name in extracted['ref']
     ], ensure_ascii=False)
     db.session.commit()
     normalize_legacy_image_improvement_rows(ds.id)
@@ -3888,17 +3894,10 @@ def _accept_scrape_bytes(raw, seen_hashes, skipped, rescue_small=False):
     except (OSError, ValueError):
         skipped['errors'] += 1
         return None
-    if isinstance(seen_hashes, _DHashIndex):
-        duplicate = seen_hashes.nearest_within(fp)[0] is not None
-    else:
-        duplicate = any(_hamming(fp, s) <= SCRAPE_DHASH_MAX_DISTANCE for s in seen_hashes)
-    if duplicate:
+    if seen_hashes.nearest_within(fp)[0] is not None:
         skipped['duplicates'] += 1
         return None
-    if isinstance(seen_hashes, _DHashIndex):
-        seen_hashes.add(None, fp)
-    else:
-        seen_hashes.append(fp)
+    seen_hashes.add(None, fp)
     return raw
 
 
@@ -4041,11 +4040,7 @@ def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
     # Capacity and model preflight happen once, after every quality/dedup filter,
     # but before creating a source/result pair. No small candidate => no Klein scan.
     if rescue_candidates:
-        in_flight = (FaceDatasetImage.query
-                     .filter_by(dataset_id=dataset_id, status='pending')
-                     .filter(FaceDatasetImage.filename.is_(None)).count())
-        if in_flight + len(rescue_candidates) > MAX_FANOUT:
-            raise ValueError(f'too many generations in flight ({in_flight}), wait or cancel')
+        _check_fanout_capacity(dataset_id, len(rescue_candidates))
         from .klein_edit_helper import (KLEIN_REQUIRED, KleinModelsMissing,
                                         klein_missing_assets)
         missing = klein_missing_assets()
@@ -4370,6 +4365,14 @@ def _get_concept_terms(ds, image_path=None, describe=None) -> list:
     return base
 
 
+def _clean_model_text(value) -> str:
+    """Trim a raw VLM/LLM answer: whitespace, then the stray wrapping quote the
+    models sometimes emit, then whitespace again. Every caption/classify call
+    site funnels through here so a change in model output format (added fencing,
+    a different quote character) is fixed once rather than at seven read sites."""
+    return (value or '').strip().strip('"').strip()
+
+
 def _enforce_concept_omission(caption, leak_re, image_bytes, concept_desc, describe=None):
     """Guarantee omission: detect forbidden terms in `caption`, ask Qwen for a rewrite
     that NAMES the offending words (<=2 tries, kept by _refine_output_ok), then a
@@ -4391,7 +4394,7 @@ def _enforce_concept_omission(caption, leak_re, image_bytes, concept_desc, descr
                     num_predict=5000, keep_alive=_VISION_BATCH_KEEPALIVE)
             except Exception:  # noqa: BLE001 - best-effort correction
                 fixed = ''
-            fixed = (fixed or '').strip().strip('"').strip()
+            fixed = _clean_model_text(fixed)
             if _refine_output_ok(fixed, caption):
                 caption = fixed
     if leak_re.search(caption):
@@ -4446,7 +4449,7 @@ def _caption_concept(ds, force, backend, token=None):
             logger.warning('caption concept: JoyCaption indisponible (%s)', e)
         still = []
         for img, p in remaining:
-            cap = (jc.get(p) or '').strip().strip('"').strip()
+            cap = _clean_model_text(jc.get(p))
             if cap:
                 refine_targets.append((img, p, cap))
             else:
@@ -4500,7 +4503,7 @@ def _caption_concept(ds, force, backend, token=None):
                         timeout=(10, 300))
                 except Exception as e:  # noqa: BLE001 - refine best-effort
                     logger.warning('caption concept: Qwen refine failed (%s)', e)
-                refined = (refined or '').strip().strip('"').strip()
+                refined = _clean_model_text(refined)
                 if _refine_output_ok(refined, joycap):
                     final = refined
                 else:
@@ -4514,7 +4517,7 @@ def _caption_concept(ds, force, backend, token=None):
                                                     timeout=(10, 300))
                     except Exception:  # noqa: BLE001
                         alt = ''
-                    alt = (alt or '').strip().strip('"').strip()
+                    alt = _clean_model_text(alt)
                     final = alt or joycap
                 final = _enforce_concept_omission(final, leak_re, data, concept_desc,
                                                   describe=describe_image_ollama)
@@ -4542,7 +4545,7 @@ def _caption_concept(ds, force, backend, token=None):
                     data, cap_prompt, num_predict=2000,
                     keep_alive=_VISION_BATCH_KEEPALIVE,
                     auto_start_local=True, timeout=(10, 300))
-                cap = (cap or '').strip().strip('"').strip()
+                cap = _clean_model_text(cap)
                 if cap:
                     cap = _enforce_concept_omission(cap, leak_re, data, concept_desc,
                                                     describe=describe_image_ollama) or cap
@@ -4668,7 +4671,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
                 logger.warning('caption_images: JoyCaption indisponible (%s)', e)
             still = []
             for img, p in remaining:
-                cap = (jc.get(p) or '').strip().strip('"').strip()
+                cap = _clean_model_text(jc.get(p))
                 if cap:
                     cleaned = cleaner(cap)
                     if _usable_caption(cleaned):
@@ -4707,7 +4710,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
                             fh.read(), cap_prompt, num_predict=2000,
                             keep_alive=_VISION_BATCH_KEEPALIVE,
                             auto_start_local=(index == 1), timeout=(10, 300))
-                    cap = (cap or '').strip().strip('"').strip()
+                    cap = _clean_model_text(cap)
                     if cap:
                         cleaned = cleaner(cap)
                         if _usable_caption(cleaned):
@@ -5339,13 +5342,7 @@ def generate_variations(user_id, dataset_id, variations, multiplier, klein_model
     _missing = klein_missing_assets()
     if any(a in _missing for a in KLEIN_REQUIRED):
         raise KleinModelsMissing(_missing)
-    # Anti-DoS: the fan-out is free (never debited) → cap pending in-flight
-    # generations per dataset so one user can't monopolize the single GPU.
-    in_flight = (FaceDatasetImage.query
-                 .filter_by(dataset_id=dataset_id, status='pending')
-                 .filter(FaceDatasetImage.filename.is_(None)).count())
-    if in_flight + total > MAX_FANOUT:
-        raise ValueError(f'too many generations in flight ({in_flight}), wait or cancel')
+    _check_fanout_capacity(dataset_id, total)
     # Extra identity refs (multi-references) : chaînées en ReferenceLatent natifs
     # côté Klein — mêmes fichiers que le chemin Nano Banana multi-réfs.
     extra_paths = [os.path.join(_dataset_dir(ds.id), fn) for fn in extra_ref_filenames(ds)]
@@ -5459,12 +5456,7 @@ def _improve_existing_image_locked(user_id, image_id):
     if any(asset in missing for asset in keh.KLEIN_REQUIRED):
         raise keh.KleinModelsMissing(missing)
 
-    in_flight = (FaceDatasetImage.query
-                 .filter_by(dataset_id=img.dataset_id, status='pending')
-                 .filter(FaceDatasetImage.filename.is_(None)).count())
-    if in_flight + 1 > MAX_FANOUT:
-        raise ValueError(
-            f'too many generations in flight ({in_flight}), wait or cancel')
+    _check_fanout_capacity(img.dataset_id, 1)
 
     # The source carries composition; a small reviewed anchor pack constrains
     # identity from other real photos. The configured consistency LoRA remains
@@ -6119,12 +6111,7 @@ def _generate_variations_nanobanana_locked(app, user_id, dataset_id, variations,
         raise ValueError('no variations selected')
     if total > MAX_FANOUT:
         raise ValueError(f'fan-out too large ({total} > {MAX_FANOUT})')
-    in_flight = (FaceDatasetImage.query
-                 .filter_by(dataset_id=dataset_id, status='pending')
-                 .filter(FaceDatasetImage.filename.is_(None)).count())
-    if in_flight + total > MAX_FANOUT:
-        raise ValueError(
-            f'too many generations in flight ({in_flight}), wait or cancel')
+    _check_fanout_capacity(dataset_id, total)
     # The full imported corpus stays on the dataset; only a bounded, diverse
     # anchor set is sent to the provider for this request.
     anchors = select_generation_references(ds)
@@ -6508,40 +6495,6 @@ def link_completed_dataset_image(job_id, filename, failed=False, reason=None):
     if qa_candidate_id is not None:
         from flask import current_app
         _start_completed_improvement_qa(current_app._get_current_object(), qa_candidate_id)
-
-
-# --- Migration helper (run once manually after deploy) ---------------------
-def migrate_existing_images_to_per_dataset():
-    """Migration helper - run once manually after deploy. Not called automatically."""
-    counts = {'moved': 0, 'skipped': 0, 'missing': 0}
-    output_dir = _comfy_output_dir()
-    if output_dir is None:
-        return counts
-    datasets = FaceDataset.query.all()
-    for ds in datasets:
-        if ds.ref_filename:
-            src = os.path.join(output_dir, ds.ref_filename)
-            dst = os.path.join(_dataset_dir(ds.id), ds.ref_filename)
-            if os.path.exists(src) and not os.path.exists(dst):
-                shutil.move(src, dst)
-                counts['moved'] += 1
-            elif os.path.exists(dst):
-                counts['skipped'] += 1
-            else:
-                counts['missing'] += 1
-        for img in FaceDatasetImage.query.filter_by(dataset_id=ds.id).all():
-            if not img.filename:  # pending/failed rows without a file
-                continue
-            src = os.path.join(output_dir, img.filename)
-            dst = os.path.join(_dataset_dir(img.dataset_id), img.filename)
-            if os.path.exists(src) and not os.path.exists(dst):
-                shutil.move(src, dst)
-                counts['moved'] += 1
-            elif os.path.exists(dst):
-                counts['skipped'] += 1
-            else:
-                counts['missing'] += 1
-    return counts
 
 
 # --- Export ----------------------------------------------------------------
