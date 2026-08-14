@@ -63,17 +63,18 @@ class ValidationResult:
     error: Optional[str] = None
     suggestions: List[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
-        """Sérialisation JSON-safe pour les réponses API."""
-        return {
-            'is_valid': self.is_valid,
-            'platform': self.platform.value,
-            'url_type': self.url_type.value,
-            'value': self.value,
-            'original_url': self.original_url,
-            'error': self.error,
-            'suggestions': self.suggestions,
-        }
+
+def is_bunkr_host(host: str) -> bool:
+    """True si `host` appartient à Bunkr, dont les TLDs tournent (bunkr.cr, bunkrr.su…).
+
+    Le label 'bunkr' doit être le SLD (avant-dernier label) : un simple
+    host-contains laisserait passer `bunkr.cr.evil.com`, où 'bunkr' n'est qu'un
+    sous-domaine — soit un contournement de TOUTES les allowlists qui appellent
+    ceci. RÈGLE UNIQUE, appelée par `detect_platform` et par les deux gardes
+    anti-SSRF de sous-processus (`gdl`, `universal`) : les trois doivent bouger
+    ensemble le jour où Bunkr change encore de forme."""
+    labels = (host or '').split('.')
+    return len(labels) >= 2 and labels[-2].startswith('bunkr')
 
 
 class URLValidator:
@@ -183,11 +184,7 @@ class URLValidator:
         host = (urlparse(url).hostname or '').lower()
         if not host:
             return Platform.UNKNOWN
-        # Bunkr : TLDs rotatifs → le label 'bunkr' doit être le SLD (avant-dernier label),
-        # ex : bunkr.cr, bunkrr.su — on vérifie labels[-2] pour éviter les sous-domaines
-        # trompeurs comme bunkr.cr.evil.com où 'bunkr' est un sous-domaine, pas le SLD.
-        labels = host.split('.')
-        if len(labels) >= 2 and labels[-2].startswith('bunkr'):
+        if is_bunkr_host(host):
             return Platform.BUNKR
         for domain, platform in URLValidator._HOST_PLATFORMS:
             if host == domain or host.endswith('.' + domain):
@@ -199,7 +196,7 @@ class URLValidator:
         url = (url or "").strip()
 
         if not url.startswith(('http://', 'https://')):
-            if '.' in url and url:
+            if '.' in url:
                 url = f"https://{url}"
             else:
                 return ValidationResult(

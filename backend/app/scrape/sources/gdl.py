@@ -41,12 +41,11 @@ EXIT_UNSUPPORTED = 64
 
 def _subprocess_url_allowed(url):
     """Only recognized platform hosts may reach an extractor subprocess."""
-    from ..validators import Platform, url_validator
+    from ..validators import Platform, is_bunkr_host, url_validator
     host = (urlparse(url).hostname or '').lower()
     if url_validator.detect_platform(url) != Platform.UNKNOWN:
         return True
-    labels = host.split('.')
-    if len(labels) >= 2 and labels[-2].startswith('bunkr'):
+    if is_bunkr_host(host):
         return True
     return any(host == domain or host.endswith('.' + domain)
                for domain in _GENERIC_EXTRACTOR_DOMAINS)

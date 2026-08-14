@@ -305,6 +305,33 @@ Learned in pass 5.
   `include_albums must be a boolean.` — unquoted, one with a trailing period.
   Only one of the three matched, and reusing the helper there turns 3 lines into
   4. A finding that is right about the shape can still be wrong about the text.
+- **The call chain can be the seam, not just the name.** Three of the four lenses
+  found the same real waste in pass 7: `netfetch._validated_public_target` resolves
+  DNS, throws the answer away, and resolves again — three `getaddrinfo` calls per
+  thumbnail where one would do. The obvious fix is for the inner validator to hand
+  its addresses back. It cannot:
+  `test_shared_media_fetch_revalidates_url_before_network` monkeypatches
+  `_validate_public_http_url` and asserts `fetch_hardened_bytes` returns `'ssrf'`,
+  so the *call* from the outer function to the inner one is the security
+  regression test. Removing the second resolution means editing that test to fit
+  the refactor, which is the wrong way round. Four passes of "a module-level name
+  is a test seam" now extend to: so is the edge between two of them.
+- **Two lists that are provably equal today can still be a trap.** Two lenses
+  proposed merging `gdl._GENERIC_EXTRACTOR_DOMAINS` with
+  `universal.VETTED_DOMAINS` — verified identical, 20 domains, empty symmetric
+  difference. The altitude lens caught why not: the first is a *supplement* to
+  `detect_platform` for the gallery-dl subprocess, the second is the *sole* gate
+  on handing a user URL to yt-dlp, which resolves and redirects outside our SSRF
+  checks. Merging converts a historical coincidence into an enforced coupling, so
+  that adding a gallery-dl platform silently grants it the unsandboxed path. What
+  *is* shared is the rule underneath — the Bunkr rotating-TLD check, written out
+  three times. Share the predicate, keep the data apart.
+- **Deleting beats deduplicating.** Three lenses independently proposed folding
+  `netfetch._looks_like_image` into `_bytes_look_like_image` — the same five-entry
+  magic-byte table, twice, with a comment saying so. The correct fix was neither:
+  `_looks_like_image`'s only caller was `_validate_media_file`, whose only caller
+  was nobody. Both went. When a duplicate's fix looks like a clean delegation,
+  check whether one side has any reason to exist first.
 
 ### Carried-over findings
 
@@ -574,6 +601,99 @@ Verified in pass 4 and deliberately **skipped**, for the same reason.
   into the shared chainer, and putting `_coverage_metadata` on `_e()`: all three
   rejected by altitude as shape-matching without a shared rule.
 
+- **PRODUCT DECISION, surfaced by pass 7 — the whole download half of `scrape/`
+  is unreachable.** Two lenses independently established it and I confirmed the
+  greps: `routes/scrape.py:69` calls `match.source.scan(match)` and nothing else;
+  `Source.download` has no production caller; the real image fetch is
+  `face_dataset_service._download_scrape_item`, which calls
+  `netfetch.fetch_hardened_bytes` directly and never touches a `Source`. That is
+  roughly 700 of the module's 3,974 lines — every `download()`, the curl_cffi
+  streamers, `download_via_ytdlp`, and the `own_downloader`/`media_kinds`
+  capability plumbing. `sources/__init__.py:8-10` says the retention is
+  deliberate ("legacy/video consumers… there is no scrape-download HTTP route"),
+  and each entry point has a direct test, so deleting it means deleting those
+  tests too. **Not a sweep decision** — it is "do we still intend to ship
+  in-app scrape downloading?" Ask before any pass acts on it.
+- **Verified in pass 7 and deliberately skipped.** The traps below are the
+  valuable half of the pass; each is somewhere a reuse-minded reviewer will go
+  first.
+  - **`gdl._GENERIC_EXTRACTOR_DOMAINS` vs `universal.VETTED_DOMAINS`** — provably
+    equal today, must stay apart. See the lesson above.
+  - **Four content-type allowlists** (`gdl_source.py:56-59`, `civitai.py:63-66`,
+    the shared `base.IMAGE_MEDIA_TYPES` used by reddit/sexcom, and
+    `face_dataset_service.py:3699`). Each encodes a different policy: gallery-dl
+    admits video, Civitai adds `image/jpg` because its CDN sends it, the concept
+    import excludes GIF on purpose. Reddit and Sex.com were the one pair whose
+    three values coincided, which is why only they were merged.
+  - **Five extension-derivation defaults** — `.mp4` (erome, from the URL suffix),
+    `.mp4` (picazor, from the content-type), `.png` (civitai — its CDN serves
+    mostly PNG), `.jpg` (reddit/sexcom), `.bin` (gallery-dl base). The default
+    *is* the per-site knowledge: it is the guess made when content-type and URL
+    both fail. Unifying it mislabels the majority case for three of the five.
+  - **Three host canonicalisers** (`erome._normalize` → forces `www.`,
+    `fapello._canonical_fapello_url` → strips it, `reddit._canonical_reddit_url`
+    → forces `www.` *and* makes a network round-trip to resolve `/s/` links).
+    Two want opposite conventions and one isn't a pure function.
+  - **`DOWNLOAD_TIMEOUT` — one name, four values** (180/300/120/300) and
+    `MAX_PAGES` two (10/14, the latter sized against picazor's 300-item cap).
+    Per-site cost budgets wearing a shared name; hoisting either hangs one site
+    or truncates another below its own cap.
+  - **Pagination arithmetic in `image_sites`/`civitai`/`sexcom`** — same three
+    lines, but `--chapter-range` counts galleries and `--range` counts images,
+    and reddit is cursor-paginated with no arithmetic at all. Only the
+    `page → "101-200"` string is genuinely shared.
+  - **`erome`/`picazor` `match()`'s lenient CDN branch**, which `redgifs` and
+    `instagram` deliberately lack: those two route through yt-dlp and dereference
+    `match.validation`, so a shared lenient `match()` turns a clean 400 into an
+    `AttributeError` inside `scan`.
+  - **The six one-screen `GalleryDlSource` subclasses** and the four
+    `validators._validate_X` methods: the first is the shared-base pattern
+    working (every line is a per-site declaration), the second differs by capture
+    group index, reserved-word list and check order.
+- **`erome.download` / `picazor.download`: ~100 duplicated lines, left alone.**
+  The reuse lens ranked this its #1 find and altitude called it the largest
+  line-count win in the module. Skipped, and Codex independently agreed: both
+  methods are in the unreachable half above, they have already drifted
+  behaviourally (URL-suffix vs content-type extension policy, different block
+  messages), and a helper that preserves both drifts needs a callable plus four
+  parameters — a differently-shaped version of what is there. Codex's objection
+  is the reason to revisit: duplicated SSRF/streaming/cleanup logic can drift on
+  a security fix. **If `Source.download` ever becomes reachable, extract first.**
+- **`netfetch` resolves DNS three times per fetched image.** Real and on the
+  hottest path (`/api/scrape/thumb` fires once per scanned tile, up to 400 per
+  scan). Blocked by a test seam — see the lesson above. Fixing it properly means
+  deciding whether `fetch_hardened_bytes`'s re-validation contract should be
+  expressed as a call or as a resolved-address argument, and rewriting
+  `test_shared_media_fetch_revalidates_url_before_network` around that answer.
+- **`base.Capabilities` declares five fields nothing reads.**
+  `can_enumerate_profile`, `needs_auth`, `media_kinds`, `own_downloader` and
+  `polite` are set by all 16 sources and consumed by none; only
+  `is_universal_fallback` has a reader (`registry.py:44`). Two docstrings assert
+  enforcement points that do not exist — `base.py:44` describes `polite` as
+  sleep/rate-limiting (nothing sleeps) and `base.py:73-77` describes `category`
+  as an admin gate that `routes/scrape.py:7` says was dropped. Skipped as a
+  change to the module's extension contract, and it is downstream of the product
+  decision above. Fold into pass 8 or a follow-up once that is answered.
+- **`Source.scan` "never raises" is enforced by hand in nine adapters.** Nothing
+  enforces it: `registry.resolve` wraps `match()` but `routes/scrape.py:69` calls
+  `scan()` bare, so every adapter copies the same `except Exception` guard and a
+  new one that forgets it 500s the route. The fix is a `Source.safe_scan` at the
+  one call boundary — an architectural change plus an edit to `routes/`, outside
+  pass 7's file set.
+- **`instagram._build_loader` rebuilds the session on every scan**, including a
+  `browser_cookie3` Firefox+Chrome cookie-DB read (and the macOS keychain). Once
+  per scan request, not per image, but it is the most expensive non-network
+  operation in the module. Memoizing it trades away cookie freshness for a user
+  who logs in mid-session — a behaviour change, so it needs a decision on TTL
+  rather than a sweep edit.
+- Smaller pass-7 skips: `picazor._parse_picazor_url` returns five keys nobody
+  reads; `_covers_scan`'s error slot is structurally always `None` (but the tuple
+  matches the `scan()` contract used module-wide); `page = max(0, getattr(match,
+  'page', 0) or 0)` five times over a typed dataclass field; six different names
+  for "scan item cap" (the *values* must stay per-site); `host == d or
+  host.endswith('.' + d)` in five places — already locally named as
+  `_is_reddit_host` in one, and a one-line expression in the rest.
+
 ## Passes
 
 Grouped so that files which call each other are reviewed together — the reuse and
@@ -657,7 +777,7 @@ Update after every pass. `blocked` needs a reason.
 | 4 | generation-engines | done | `0c58f5b` | −159 net. Five dead listers/helpers and 3 orphaned imports out of `utils/comfyui.py`; trained-LoRA picker entry ×3 → `_lora_entry`; LoRA-chain injector ×2 → `_chain_model_loras` (the snapshot-before-mutate subtlety now stated once); `zimage_convert` transformer-ready check ×2 and convert-state write ×5 → two helpers; identity-trait list ×3 → one constant; dead return value out of `apply_zimage_settings`; node 92 added to `_REQUIRED_NODES`. Three module docstrings corrected where they named callers this app does not have. Also cleared the repo's one standing `ruff` error (pass 1's own residue) — as a `noqa`, because it is a test seam. Deferred: models-root unification (Codex: needs correctness tests), caption cleaner/detector regex divergence. |
 | 5 | studio | done | 4b9ee14 | 17 dead re-export aliases + 2 dead frontend-mirror constants + `model_net_scores` deleted; the base-model pool, permanent-LoRA validation, Krea rebalance encoding and shared-seed series extracted once each and shared by `create_run`/`create_comparison_run`/resume; `_wilson_lower_bound` and `_basename` collapsed to aliases with the docstring moved onto the live copy; `_ranked_positive_configs` names the sort `best_cell`/`best_per_checkpoint` both restated; `_tally_vote` names "only ±1 is a vote" (5 sites); `_representative_image` N+1 and the `_record_for_checkpoint` per-row filesystem resolve fixed; `list_all_testable_checkpoints` double scan removed. 10 skips and 5 carried findings recorded above. Gate 1740 passed / 1 skipped, ruff clean. |
 | 6 | routes | done | `809669e` | +33 net (the helpers' own docstrings, which state the deduped rules). `_ok_or_404`/`_payload_or_404` name the "not found is a 404 with `{'error': 'not found'}`" contract that was restated at 19 sites across 2 blueprints — 2 look-alike sites deliberately left written out, and now visible as the only exceptions. `_map_klein_error` collapses the Klein-missing branch + its inline import from 4 handlers (kept in `datasets.py`, not `_common.py`: it starts downloads, which the Studio 409 refuses). `_head_crop_warning` names the guard-rail rule with both CTAs left caller-supplied, since the two user-visible strings had drifted and must stay drifted. `_probe_outbound_ip` shares the UDP-connect socket lifecycle between `_lan_ip`/`_tailscale_ip` with each probe's filter left at the caller. 5 redundant local re-imports of module-level names dropped; `dataset_train_checkpoints` no longer runs `get_dataset` twice per request. 4 traps + 3 skips and 4 carried findings recorded above; the efficiency lens found nothing inside this pass's file set. Gate 1740 passed / 1 skipped, ruff clean. |
-| 7 | scrape | todo | — | |
+| 7 | scrape | done | `PENDING` | −65 net. `base.download_direct_media` names the fetch→content-type→atomic-write rule that Reddit and Sex.com had byte-identical (constants included); the other three copies keep their own media policy and are now documented as the trap they are. `gdl_source` stopped hand-rolling `atomic_write_bytes`, which sat imported by three siblings in the same package and was the only copy outside the atomicity test. `validators.is_bunkr_host` gives the rotating-TLD SSRF rule one home instead of three — while the two domain allowlists it serves stay deliberately separate. Dead: `_validate_media_file` + `_looks_like_image` (37 lines, and one of the two magic-byte tables went with them), `ValidationResult.to_dict`, netfetch's unused `COMFYUI_OUTPUT_DIR` shim. 8 traps recorded above, plus 3 lessons. Skipped with Codex's agreement: the ~100-line erome/picazor streaming downloader. Skipped on verification: the triple DNS resolution (the call chain is the security regression test). Surfaced, not decided: ~700 lines of `scrape/` are unreachable from production. Gate 1740 passed / 1 skipped, ruff clean. |
 | 8 | data-lifecycle | todo | — | |
 | 9 | analysis-quality | todo | — | |
 | 10 | dataset-components | todo | — | |

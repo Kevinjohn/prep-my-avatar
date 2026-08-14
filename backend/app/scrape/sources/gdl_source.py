@@ -4,11 +4,10 @@ sous-classe ~10 lignes : platform_enum + name/priority/capabilities + gdl_opts +
 cookies_key. match() = host (via validators.detect_platform) ; scan/download
 délèguent au moteur gdl.py."""
 import os
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .base import Source, Match
+from .base import Source, Match, atomic_write_bytes
 from . import gdl
 
 
@@ -71,20 +70,5 @@ class GalleryDlSource(Source):
         if not extension:
             extension = Path(urlparse(url).path).suffix.lower()[:10] or '.bin'
         destination = Path(f'{dest_base}{extension}')
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f'.{destination.name}.', suffix='.tmp', dir=destination.parent)
-        try:
-            with os.fdopen(descriptor, 'wb') as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-        except Exception:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-            Path(temporary).unlink(missing_ok=True)
-            raise
+        atomic_write_bytes(destination, data)
         return True, destination.name, None

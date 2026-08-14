@@ -22,13 +22,11 @@ VETTED_DOMAINS = (
 
 
 def _host_vetted(url):
+    from ..validators import is_bunkr_host
     host = (urlparse(url).hostname or '').lower()
     if not host:
         return False
-    labels = host.split('.')
-    # Bunkr (TLDs rotatifs) : matcher UNIQUEMENT le label SLD (avant-dernier), sinon
-    # un host trompeur type bunkr.cr.evil.com passerait l'allowlist (bypass SSRF).
-    if len(labels) >= 2 and labels[-2].startswith('bunkr'):
+    if is_bunkr_host(host):
         return True
     return any(host == d or host.endswith('.' + d) for d in VETTED_DOMAINS)
 

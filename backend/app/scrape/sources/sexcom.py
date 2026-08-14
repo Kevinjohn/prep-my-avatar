@@ -22,7 +22,7 @@ import logging
 from urllib.parse import parse_qsl, urlparse
 
 from ..validators import Platform
-from .base import Source, Capabilities, Match
+from .base import Source, Capabilities, Match, download_direct_media
 from . import gdl
 from . import registry
 
@@ -39,10 +39,6 @@ _SEXCOM_CAPS = Capabilities(
     media_kinds=frozenset({'image'}),
     own_downloader=True,   # médias = URLs CDN directes (l'import les télécharge lui-même)
 )
-
-_MEDIA_TYPES = frozenset({'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'})
-_CT_EXT = {'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
-           'image/webp': '.webp', 'image/gif': '.gif'}
 
 
 def _search_params_for(url):
@@ -146,23 +142,10 @@ class SexcomSource(Source):
     def download(self, url, dest_base):
         """Télécharge une image CDN en direct (fetch durci). NB : l'import concept
         télécharge en réalité les URLs lui-même (_download_scrape_item) ; ce
-        download() honore le contrat Source pour tout autre appelant."""
-        import os
-        from ..netfetch import MAX_DRIVER_BYTES, fetch_hardened_bytes
-        ok, data, ctype, reason = fetch_hardened_bytes(
-            url, allowed_types=_MEDIA_TYPES, max_bytes=MAX_DRIVER_BYTES)
-        if not ok or not data:
-            return False, None, f'Sex.com : téléchargement échoué ({reason}).'
-        ct = (ctype or '').split(';', 1)[0].strip().lower()
-        ext = _CT_EXT.get(ct) or (os.path.splitext(urlparse(url).path)[1].lower() or '.jpg')
-        dest_dir = os.path.dirname(dest_base)
-        filename = os.path.basename(dest_base) + ext
-        try:
-            from .base import atomic_write_bytes
-            atomic_write_bytes(os.path.join(dest_dir, filename), data)
-        except OSError as e:
-            return False, None, f"Sex.com : erreur d'écriture ({e})."
-        return True, filename, None
+        download() honore le contrat Source pour tout autre appelant. Le CDN
+        sex.com ne sert que du raster (les GIFs/vidéos sont hors périmètre, cf.
+        docstring du module) → politique média par défaut."""
+        return download_direct_media(url, dest_base, label='Sex.com')
 
 
 registry.register(SexcomSource())
