@@ -2,7 +2,21 @@
 
 Paste the **Goal prompt** below into a session to run one pass. The ledger at the
 bottom is the resume point, so a fresh session can pick up wherever the last one
-stopped. One pass per session; do not attempt the whole sweep in one context.
+stopped.
+
+**Two run modes.** *One pass per session* is the default and the safe one — a
+pass is a lot of verification, and a fresh context per pass is what keeps the
+verification honest. *Continuous* runs passes back to back in one session until
+the ledger is clear; use it when you want the whole sweep landed and are willing
+to trade some per-pass scrutiny for it. Either way the per-pass protocol is
+identical, and **every pass still gets its own commit, its own issue and its own
+PR** — a pass that makes something worse must cost one `git revert` and one
+closed PR, never an unpicking.
+
+In continuous mode each pass branches off the *previous pass's* branch rather
+than `main`, because every pass touches this file and `CHANGELOG.md`; branching
+them all off `main` produces a queue of PRs that conflict with each other. The
+stack merges in order and each PR's diff is only its own work.
 
 ---
 
@@ -25,6 +39,13 @@ stopped. One pass per session; do not attempt the whole sweep in one context.
 >
 > If the gates were red before you touched anything, fix nothing, mark the pass
 > `blocked`, and tell me.
+
+For a **continuous** run, replace the last two lines of the first paragraph and
+the "Do not start the next pass" sentence with: *work through every remaining
+`todo` pass in ledger order without stopping, one commit / issue / PR per pass,
+and report once at the end.* Everything else in the protocol is unchanged — in
+particular, still capture a baseline per pass and still verify every finding
+yourself.
 
 ---
 
@@ -320,6 +341,21 @@ that belonged in a service tends to settle. `datasets.py` (1,267) and
 Pass 10 is oversized — `DatasetWorkspace.jsx` alone is 1,474 lines. Split it at
 run time if the fan-out looks thin.
 
+### Wave 4 — cross-cutting
+
+These are not file groups. Each is a single duplication that spans several passes,
+so no pass owns it; each was found and deliberately deferred by the pass that hit
+it first. Run them last, when every consumer is known.
+
+| # | Pass | Scope | Origin |
+|---|---|---|---|
+| 14 | `file-hashing` | one shared chunked-SHA-256 helper; delete the five copies in `lora_training_export`, `training_snapshot`, `checkpoint_registry`, `cloud_training`, `backend/infer/lama_model` | passes 2, 3 |
+| 15 | `training-families` | one neutral `services/training_families.py`; migrate `lora_training._FAMILY_LABEL`, `run_share`, `hf_publish`, `utils/comfyui.FAMILY_LABELS` and the frontend copy | pass 3 |
+
+Pass 15 carries a product decision, not just a refactor: the copies have already
+drifted (`Krea 2 Turbo` vs `Krea 2`) and someone must say which label is correct.
+Surface that rather than picking silently.
+
 ## Calibration
 
 - **Reuse** is the highest-yield lens here. 48 service files and 123 components
@@ -350,3 +386,5 @@ Update after every pass. `blocked` needs a reason.
 | 11 | hooks-utils | todo | — | |
 | 12 | pages-shell | todo | — | |
 | 13 | remaining-components | todo | — | |
+| 14 | file-hashing | todo | — | |
+| 15 | training-families | todo | — | |
