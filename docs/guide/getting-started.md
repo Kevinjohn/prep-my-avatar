@@ -1,6 +1,6 @@
 # Getting started
 
-> Prefer a visual walkthrough? Open the [standalone HTML guide](getting-started.html), or launch the app and choose **Guide → Getting started**. This Markdown file is the plain-text reference.
+> Prefer a visual walkthrough? Launch the app and choose **Guide → Getting started**, or open `docs/guide/getting-started.html` from your local copy of the repository. This Markdown file is the plain-text reference.
 
 ## The problem this solves
 

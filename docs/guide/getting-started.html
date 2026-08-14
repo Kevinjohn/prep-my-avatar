@@ -99,30 +99,9 @@
     .decision-branch strong { display: block; font-size: 14px; line-height: 1.35; }
     .decision-branch span { display: block; margin-top: 9px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 
-    .needs { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--rule); }
-    .need { padding: 23px 20px 25px 0; }
-    .need + .need { padding-left: 20px; border-left: 1px solid var(--rule); }
-    .need-number { display: block; color: var(--blue); font-size: 13px; font-weight: 700; }
     h3 { margin: 7px 0 7px; font-size: 18px; line-height: 1.3; letter-spacing: -.02em; }
     .section > h3 { margin: 52px 0 16px; }
-    .need p, .route p, .step p, .first-step p { margin-bottom: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
 
-    .flow { position: relative; display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; margin-top: 32px; }
-    .flow::before { content: ""; position: absolute; top: 11px; right: 8%; left: 8%; height: 1px; background: var(--rule); }
-    .flow-step { position: relative; z-index: 1; padding-right: 11px; }
-    .flow-dot { display: block; width: 23px; height: 23px; margin-bottom: 12px; border: 6px solid var(--paper); border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
-    .flow-step strong { display: block; margin-bottom: 5px; font-size: 13px; }
-    .flow-step h3 { margin: 0 0 4px; font-size: 15px; }
-    .flow-step p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
-
-    .routes { margin-top: 25px; border-top: 1px solid var(--rule); }
-    .route { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 18px; align-items: start; padding: 19px 0; border-bottom: 1px solid var(--rule); }
-    .route-label { margin: 2px 0 0; color: var(--quiet); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-    .route h3 { margin: 0 0 4px; font-size: 17px; }
-    .route p { margin: 0; }
-    .route ul { margin: 3px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 13px; }
-    .route li::before { content: "·"; margin-right: 6px; color: var(--green); font-weight: 700; }
-    .route-link { align-self: center; white-space: nowrap; font-size: 13px; font-weight: 650; text-decoration: none; }
     .terms { margin-top: 40px; border-top: 1px solid var(--rule); }
     .term { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 24px; padding: 22px 0; border-bottom: 1px solid var(--rule); }
     .term dt { font-weight: 650; }
@@ -144,7 +123,6 @@
     td { padding: 20px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; color: var(--muted); line-height: 1.65; }
     td:first-child { color: var(--ink); font-weight: 650; }
     table strong { color: var(--ink); }
-    .choice-link { white-space: nowrap; font-weight: 650; text-decoration: none; }
     .outcome { padding: 50px 0 0; scroll-margin-top: 92px; }
     .outcome + .outcome { margin-top: 74px; padding-top: 74px; border-top: 1px solid var(--rule); }
     .outcome h3 { margin: 11px 0 17px; font-size: 25px; }
@@ -167,20 +145,11 @@
     .next-page { margin-top: 112px; padding-top: 42px; border-top: 1px solid var(--rule); }
     .next-page a { font-weight: 650; }
 
-    .step { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 25px; padding: 32px 0; border-bottom: 1px solid var(--rule); }
-    .step-meta { color: var(--blue); font-size: 13px; font-weight: 700; }
-    .step h3 { margin: 0 0 7px; font-size: 21px; }
-    .step p { margin-bottom: 18px; }
     figure { margin: 0; }
     figure img { width: 100%; border: 1px solid #d8dbe0; border-radius: 5px; background: #11131b; }
     figcaption { margin-top: 7px; color: var(--quiet); font-size: 12px; }
 
-    .first-steps { margin: 24px 0 0; padding: 0; list-style: none; counter-reset: first; }
-    .first-steps li { counter-increment: first; display: grid; grid-template-columns: 34px 1fr; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--rule); }
-    .first-steps li::before { content: counter(first, decimal-leading-zero); color: var(--blue); font-size: 13px; font-weight: 700; }
-    .first-steps strong { display: block; margin-bottom: 3px; font-size: 16px; }
-    .first-steps span { color: var(--muted); font-size: 14px; }
-    .final-links { display: flex; flex-wrap: wrap; gap: 17px; margin-top: 25px; font-size: 14px; font-weight: 650; }
+    .small-note { margin-top: 20px; color: var(--quiet); font-size: 13px; line-height: 1.6; }
 
     .outline { position: sticky; top: 96px; padding-left: 17px; border-left: 1px solid var(--rule); font-size: 12px; }
     .outline h2 { margin: 0 0 10px; font-size: 12px; letter-spacing: 0; }
@@ -203,19 +172,6 @@
       .section, .section:first-of-type { margin-top: 80px; }
       .intro-note { margin: 68px 0; padding: 21px 20px; }
       .section-heading { padding-bottom: 20px; }
-      .needs { display: block; }
-      .need, .need + .need { padding: 18px 0; border-left: 0; }
-      .need + .need { border-top: 1px solid var(--rule); }
-      .flow { display: block; margin-left: 7px; }
-      .flow::before { top: 10px; bottom: 10px; left: 11px; width: 1px; height: auto; }
-      .flow-step { display: grid; grid-template-columns: 23px 1fr; column-gap: 15px; padding: 0 0 25px; }
-      .flow-dot { grid-row: 1 / span 3; margin: 0; }
-      .flow-step strong { margin: 0; }
-      .flow-step h3 { margin: 3px 0; }
-      .route { display: block; padding: 20px 0; }
-      .route-label { margin-bottom: 7px; }
-      .route ul { margin-top: 10px; }
-      .route-link { display: inline-block; margin-top: 12px; }
       .term { display: block; }
       .term dt { margin-bottom: 4px; }
       .facts { display: block; }
@@ -223,8 +179,6 @@
       .facts dd { padding-top: 0; }
       .reason-list li { grid-template-columns: 32px 1fr; }
       .reason-list span { grid-column: 2; }
-      .step { display: block; padding: 27px 0; }
-      .step-meta { margin-bottom: 8px; }
       .why-flow { display: block; }
       .why-stage, .why-stage + .why-stage { padding: 26px 0; border-left: 0; }
       .why-stage + .why-stage { border-top: 1px solid var(--rule); }
