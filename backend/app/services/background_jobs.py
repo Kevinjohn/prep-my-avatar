@@ -33,11 +33,31 @@ def _identity(kind, dedupe_key) -> tuple[str, str]:
 
 
 def _loads(value, fallback):
+    """Decode one JSON column, degrading a corrupt or wrong-shaped value to
+    ``fallback``.
+
+    The SHAPE check is part of the contract, not the caller's job: a hand-edited
+    or legacy row whose ``log`` holds an object rather than an array must read as
+    ``[]`` for EVERY reader, otherwise the next one added turns that row into a
+    TypeError in a request thread. ``fallback=None`` opts out — ``progress`` is
+    the one column with no single expected shape.
+    """
     try:
         parsed = json.loads(value) if value else fallback
     except (TypeError, ValueError):
         return fallback
+    if fallback is not None and not isinstance(parsed, type(fallback)):
+        return fallback
     return parsed
+
+
+def _terminal_error(row) -> RuntimeError:
+    """The refusal raised on any attempt to mutate a job that already ended.
+
+    Raised from both terminal guards in ``touch`` — the session-local fast path
+    and the database-level one that catches a worker committing between them —
+    so the two can never disagree about what the user is told."""
+    return RuntimeError(f'background job {row.id} is already terminal ({row.state})')
 
 
 def create(kind, dedupe_key, payload=None, *, resumable=False) -> BackgroundJob:
@@ -93,8 +113,7 @@ def touch(job_id, *, state=None, result=None, error=None, error_code=None,
         # not rewrite the result/log after recovery or another worker has made
         # the job terminal.
         if mutation or (state is not None and state != row.state):
-            raise RuntimeError(
-                f'background job {row.id} is already terminal ({row.state})')
+            raise _terminal_error(row)
         return row
     now = utcnow()
     values = {'heartbeat_at': now, 'updated_at': now}
@@ -112,8 +131,6 @@ def touch(job_id, *, state=None, result=None, error=None, error_code=None,
         values['progress'] = json.dumps(progress, ensure_ascii=False)
     if log is not None:
         lines = _loads(row.log, [])
-        if not isinstance(lines, list):
-            lines = []
         lines.append(str(log).rstrip('\n')[-4000:])
         values['log'] = json.dumps(lines[-_LOG_MAX:], ensure_ascii=False)
     if state in TERMINAL_STATES:
@@ -131,8 +148,7 @@ def touch(job_id, *, state=None, result=None, error=None, error_code=None,
         current = get(job_id)
         if current is None:
             return None
-        raise RuntimeError(
-            f'background job {current.id} is already terminal ({current.state})')
+        raise _terminal_error(current)
     db.session.commit()
     return get(job_id)
 
@@ -141,12 +157,8 @@ def snapshot(row: BackgroundJob | None) -> dict:
     if row is None:
         return {'state': 'idle'}
     result = _loads(row.result, {})
-    if not isinstance(result, dict):
-        result = {}
     progress = _loads(row.progress, None)
     lines = _loads(row.log, [])
-    if not isinstance(lines, list):
-        lines = []
     return {
         **result,
         'job_id': row.id,

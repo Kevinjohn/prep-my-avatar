@@ -31,8 +31,10 @@ import threading
 import time
 
 # Kinds the UI knows how to restore. Kept as a documented allow-list so a typo in a
-# begin() call is easy to spot (nothing enforces it — it's documentation + a guard
-# for tests). 'generate' covers the ⚡ Generate-variations batch (Nano Banana /
+# begin() call is easy to spot. NOTHING reads this tuple — not begin(), not a test:
+# it is prose in a tuple's clothing, and the enforcement is the bare literals at the
+# begin() call sites matching the ones the front-end switches on.
+# 'generate' covers the ⚡ Generate-variations batch (Nano Banana /
 # ChatGPT / Klein) — it keeps the Generate button (and every concurrent action)
 # disabled for the WHOLE batch, not just the launch request.
 KINDS = ('watermark_detect', 'watermark_clean', 'caption', 'recaption',
@@ -47,6 +49,35 @@ _lock = threading.Lock()
 # dataset_id -> { token -> {kind, done, total, started_at, _touched} }
 _active: dict = {}
 _counter = itertools.count(1)
+
+
+def _mint(dataset_id, kind, total, now, wall_now, **extra):
+    """Create one registry entry and return ``(token, entry)``. Caller holds ``_lock``.
+
+    Both minting sites go through here because the entry's key set is a CONTRACT:
+    ``get`` reads five of these keys back and ``_purge_stale`` reads ``_touched``.
+    The token grammar is a contract too — ``_dsid_of`` parses the dataset id back
+    out of it, so the format lives in exactly one place.
+    """
+    token = f'{dataset_id}:{kind}:{next(_counter)}'
+    entry = {'kind': kind, 'done': 0, 'total': int(total or 0),
+             'started_at': wall_now, '_started_order': now, '_touched': now,
+             **extra}
+    _active.setdefault(dataset_id, {})[token] = entry
+    return token, entry
+
+
+def _drop(dataset_id, token):
+    """Remove one token, and the dataset's bucket once it holds nothing.
+
+    An empty bucket left behind would keep the dataset in ``_purge_stale``'s scan
+    for ever. Caller holds ``_lock``."""
+    bucket = _active.get(dataset_id)
+    if bucket is None:
+        return
+    bucket.pop(token, None)
+    if not bucket:
+        _active.pop(dataset_id, None)
 
 
 def _purge_stale(now):
@@ -67,15 +98,11 @@ def begin(dataset_id, kind, total=0, detail=None, engine=None):
     now = time.monotonic()
     with _lock:
         _purge_stale(now)
-        token = f'{dataset_id}:{kind}:{next(_counter)}'
-        _active.setdefault(dataset_id, {})[token] = {
-            'kind': kind, 'done': 0, 'total': int(total or 0),
-            'started_at': wall_now, '_started_order': now, '_touched': now,
-        }
+        token, entry = _mint(dataset_id, kind, total, now, wall_now)
         if detail:
-            _active[dataset_id][token]['detail'] = str(detail)
+            entry['detail'] = str(detail)
         if engine:
-            _active[dataset_id][token]['engine'] = str(engine).lower()
+            entry['engine'] = str(engine).lower()
     return token
 
 
@@ -113,14 +140,8 @@ def bump(token, n=1):
 def end(token):
     """Remove a batch's entry. Idempotent (safe on an unknown/None token) so a
     ``finally``-block ``end`` never raises even if the entry was already purged."""
-    dsid = _dsid_of(token)
     with _lock:
-        bucket = _active.get(dsid)
-        if not bucket:
-            return
-        bucket.pop(token, None)
-        if not bucket:
-            _active.pop(dsid, None)
+        _drop(_dsid_of(token), token)
 
 
 def sync_pending(dataset_id, kind, pending, engine=None):
@@ -150,18 +171,13 @@ def sync_pending(dataset_id, kind, pending, engine=None):
                     if e['kind'] == kind and e.get('_synced')), None)
         if pending <= 0:
             if tok:
-                bucket.pop(tok, None)
-                if not bucket:
-                    _active.pop(dataset_id, None)
+                _drop(dataset_id, tok)
             return
         if tok is None:
-            bucket = _active.setdefault(dataset_id, {})
-            tok = f'{dataset_id}:{kind}:{next(_counter)}'
-            bucket[tok] = {'kind': kind, 'done': 0, 'total': int(pending),
-                           'started_at': wall_now, '_started_order': now,
-                           '_touched': now,
-                           '_peak': int(pending), '_synced': True}
-        entry = bucket[tok]
+            tok, entry = _mint(dataset_id, kind, pending, now, wall_now,
+                               _peak=int(pending), _synced=True)
+        else:
+            entry = bucket[tok]
         if engine:
             entry['engine'] = str(engine).lower()
         entry['_peak'] = max(entry['_peak'], int(pending))

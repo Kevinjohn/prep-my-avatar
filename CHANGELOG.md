@@ -9,6 +9,40 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- The in-app updater now writes every one of its crash-critical files — the
+  update journal, the restart receipt, the private recovery bootstrap and its
+  manifest, and the restart request — through a single write-then-rename
+  routine, instead of five hand-written copies of the same sequence. All five
+  already agreed; keeping them in step by hand was the risk, in the one part of
+  the app whose entire job is surviving an interruption.
+- The updater decides "did this update change the Python dependencies?" and
+  "did it change the front-end lockfile?" in one place each. The forward path
+  used those answers to install, and the rollback path restated them in order to
+  undo the install — so a change to one and not the other could have left the
+  environment upgraded but never restored.
+- After an update, the front-end is verified once: rebuilt from source when
+  source changed, otherwise checked as a shipped bundle. Previously both
+  conditions were computed, combined, and then re-tested inside the branch.
+- Fixed a misleading trash-restore report: when rolling back a partly-completed
+  operation, the items that were successfully put back are now the ones marked
+  as rolled back. The four places that undo a batch of file moves now share one
+  routine, and it reports which moves it actually reversed rather than assuming
+  all of them succeeded.
+- Trash entries that can no longer be restored are marked as such through one
+  routine, so the two conditions that make an entry restorable are always stated
+  together instead of one being set without the other.
+- Directories holding deleted files are made owner-only through a single helper,
+  so the permission fix cannot be applied in one place and forgotten in another.
+- The integrity audit now reads each table once instead of re-querying several of
+  them per check, and validates perceptual hashes with the same strictness as
+  content hashes.
+- Background job records now reject a wrong-shaped log or result column at the
+  point they are decoded, rather than each reader repairing it separately — so a
+  hand-edited or legacy row cannot become an error in one code path and be
+  silently tolerated in another.
+- Curation history resolves the dataset once per request and uses that answer
+  everywhere, instead of re-deriving it from the caller's input at six separate
+  points inside the same operation.
 - Reddit and Sex.com now share one direct-media downloader instead of keeping
   byte-identical copies of it, along with the content-type tables that decide
   which formats are accepted and what extension a saved file gets. The three

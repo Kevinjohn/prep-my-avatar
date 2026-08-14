@@ -17,6 +17,7 @@ from ..utils.time import utcnow
 from . import curation_history, trash
 
 _HASH_RE = re.compile(r'^[0-9a-f]{64}$')
+_PHASH_RE = re.compile(r'^[0-9a-f]{16}$')
 _IMAGE_STATUSES = {'pending', 'keep', 'reject', 'failed', 'trashed'}
 _KINDS = {None, '', 'character', 'concept', 'style'}
 _FIDELITIES = {None, '', 'face', 'body'}
@@ -99,11 +100,19 @@ def run(*, include_orphans=True) -> dict:
     except Exception as exc:
         add('warning', 'foreign_key_check_unavailable', str(exc))
 
+    # Every table this audit inspects is materialized ONCE, here. `run()` never
+    # commits or flushes, so a repeat query could only ever return the same rows;
+    # re-issuing one per check just walks the table again.
     datasets = FaceDataset.query.all()
     dataset_ids = {row.id for row in datasets}
     images = FaceDatasetImage.query.all()
     image_by_id = {row.id: row for row in images}
-    queue_by_job = {row.job_id: row for row in ImageGenerationQueue.query.all()}
+    queue_rows = ImageGenerationQueue.query.all()
+    # job_id is UNIQUE NOT NULL, so this index loses no row.
+    queue_by_job = {row.job_id: row for row in queue_rows}
+    lora_test_images = LoraTestImage.query.all()
+    training_runs = TrainingRunRecord.query.all()
+    cloud_runs = CloudTrainingRun.query.all()
 
     images_by_dataset = {}
     for image in images:
@@ -121,8 +130,7 @@ def run(*, include_orphans=True) -> dict:
         if image.source_sha256 and not _HASH_RE.fullmatch(image.source_sha256):
             add('warning', 'invalid_source_hash', 'Stored source SHA-256 is malformed.',
                 image_id=image.id)
-        if image.perceptual_hash and not re.fullmatch(
-                r'[0-9a-f]{16}', image.perceptual_hash):
+        if image.perceptual_hash and not _PHASH_RE.fullmatch(image.perceptual_hash):
             add('warning', 'invalid_perceptual_hash',
                 'Stored 64-bit perceptual hash is malformed.', image_id=image.id)
         for field in ('analysis_json', 'coverage_json', 'coverage_provenance',
@@ -222,13 +230,9 @@ def run(*, include_orphans=True) -> dict:
                     getattr(ds, field), expected_type, f'invalid_{field}',
                     f'{field} has the wrong JSON shape.', dataset_id=ds.id)
         if ds.coverage_targets:
-            try:
-                parsed_targets = json.loads(ds.coverage_targets)
-            except (TypeError, ValueError):
-                parsed_targets = None
-            if not isinstance(parsed_targets, dict):
-                add('warning', 'invalid_coverage_targets',
-                    'Coverage targets are not a JSON object.', dataset_id=ds.id)
+            structured_json(
+                ds.coverage_targets, dict, 'invalid_coverage_targets',
+                'Coverage targets are not a JSON object.', dataset_id=ds.id)
         if ds.trashed_at:
             if not ds.trash_entry_id:
                 add('error', 'trashed_dataset_without_entry',
@@ -253,7 +257,9 @@ def run(*, include_orphans=True) -> dict:
                     add('error', 'invalid_trashed_dataset_entry',
                         'Dataset restore entry is missing or does not match its backup.',
                         dataset_id=ds.id, trash_entry_id=ds.trash_entry_id)
-        if ds.trashed_at:
+            # A trashed dataset's files live in the trash entry checked above, not
+            # in its (now absent) dataset folder — the filesystem audit below does
+            # not apply to it.
             continue
         candidates = [('ref_filename', ds.ref_filename),
                       ('ref_original_filename', ds.ref_original_filename)]
@@ -300,7 +306,7 @@ def run(*, include_orphans=True) -> dict:
             if not candidate.is_file():
                 add('error', 'missing_referenced_file',
                     f'{field} points to a file that is missing.', dataset_id=ds.id,
-                    filename=filename)
+                    filename=str(filename))
 
         if include_orphans:
             sidecars = set()
@@ -333,17 +339,16 @@ def run(*, include_orphans=True) -> dict:
                     'File is not referenced by the dataset database.', dataset_id=ds.id,
                     filename=relative)
 
-    for model, label in ((LoraTestImage, 'lora_test_image'),):
-        for row in model.query.all():
-            if row.dataset_id not in dataset_ids:
-                add('error', 'dangling_dataset_reference',
-                    f'{label} points to a missing dataset.', table=label,
-                    row_id=row.id, dataset_id=row.dataset_id)
-            if row.extra_loras:
-                structured_json(
-                    row.extra_loras, list, 'invalid_lora_test_extra_loras',
-                    'Studio extra LoRAs are not a JSON list.', table=label,
-                    row_id=row.id, dataset_id=row.dataset_id)
+    for row in lora_test_images:
+        if row.dataset_id not in dataset_ids:
+            add('error', 'dangling_dataset_reference',
+                'lora_test_image points to a missing dataset.',
+                table='lora_test_image', row_id=row.id, dataset_id=row.dataset_id)
+        if row.extra_loras:
+            structured_json(
+                row.extra_loras, list, 'invalid_lora_test_extra_loras',
+                'Studio extra LoRAs are not a JSON list.', table='lora_test_image',
+                row_id=row.id, dataset_id=row.dataset_id)
 
     for row in CurationEvent.query.all():
         if curation_history.decode_snapshot_pair(
@@ -352,7 +357,7 @@ def run(*, include_orphans=True) -> dict:
                 'Curation snapshots are not compatible with undo.',
                 table='curation_event', row_id=row.id, dataset_id=row.dataset_id)
 
-    for row in ImageGenerationQueue.query.all():
+    for row in queue_rows:
         for field in ('workflow_data', 'job_metadata'):
             if getattr(row, field):
                 structured_json(
@@ -373,15 +378,15 @@ def run(*, include_orphans=True) -> dict:
     # Launch records are historical provenance and intentionally survive a
     # future permanent dataset purge. Surface that relationship without making
     # an otherwise consistent database fail its integrity gate.
-    for model, label in ((TrainingRunRecord, 'training_run_record'),
-                         (CloudTrainingRun, 'cloud_training_run')):
-        for row in model.query.all():
+    for rows, label in ((training_runs, 'training_run_record'),
+                        (cloud_runs, 'cloud_training_run')):
+        for row in rows:
             if row.dataset_id not in dataset_ids:
                 add('warning', 'historical_dataset_missing',
                     f'{label} refers to a dataset that has since been removed.',
                     table=label, row_id=row.id, dataset_id=row.dataset_id)
 
-    for row in CloudTrainingRun.query.all():
+    for row in cloud_runs:
         if row.train_params:
             structured_json(
                 row.train_params, dict, 'invalid_cloud_train_params',
@@ -389,7 +394,7 @@ def run(*, include_orphans=True) -> dict:
                 table='cloud_training_run', row_id=row.id,
                 dataset_id=row.dataset_id)
 
-    for row in TrainingRunRecord.query.all():
+    for row in training_runs:
         if row.manifest is not None:
             structured_json(
                 row.manifest, list, 'invalid_training_manifest',
@@ -410,11 +415,10 @@ def run(*, include_orphans=True) -> dict:
             'Training preset settings are not a JSON object.',
             table='training_preset', row_id=row.id)
 
-    training_run_datasets = {
-        row.id: row.dataset_id for row in TrainingRunRecord.query.all()
-    }
-    for row in LoraTestImage.query.filter(
-            LoraTestImage.training_run_record_id.isnot(None)).all():
+    training_run_datasets = {row.id: row.dataset_id for row in training_runs}
+    for row in lora_test_images:
+        if row.training_run_record_id is None:
+            continue
         linked_dataset_id = training_run_datasets.get(row.training_run_record_id)
         if linked_dataset_id is None:
             add('warning', 'missing_studio_training_provenance',

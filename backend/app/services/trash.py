@@ -42,14 +42,24 @@ def serialized_transaction(function):
     return wrapped
 
 
+def _make_private(directory: Path) -> None:
+    """Take the umask back off a directory that must stay owner-only.
+
+    ``mkdir(mode=0o700)`` is MASKED by the process umask, so a directory holding
+    a user's deleted files can end up group- or world-readable. Best-effort: a
+    filesystem that cannot represent POSIX modes must not fail a delete."""
+    if os.name == 'nt':
+        return
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
+
+
 def trash_root() -> Path:
     root = cfg._data_dir() / 'trash'
     root.mkdir(parents=True, exist_ok=True)
-    if os.name != 'nt':
-        try:
-            root.chmod(0o700)
-        except OSError:
-            pass
+    _make_private(root)
     return root
 
 
@@ -58,6 +68,10 @@ def _new_entry(context='', metadata=None) -> tuple[Path, dict]:
     safe_ctx = ''.join(ch if ch.isascii() and (ch.isalnum() or ch in '-_') else '_'
                        for ch in str(context))[:60]
     base = f'{stamp}_{safe_ctx}' if safe_ctx else stamp
+    # Both callers are @serialized_transaction, so this lock is redundant TODAY.
+    # It is kept because the exclusivity it provides is what makes the loop below
+    # a claim rather than a guess: mkdir is the atomic step, and a future caller
+    # that reaches _new_entry undecorated must not silently lose that.
     with _ENTRY_CREATE_LOCK:
         dest_dir = trash_root() / base
         n = 1
@@ -65,11 +79,7 @@ def _new_entry(context='', metadata=None) -> tuple[Path, dict]:
             n += 1
             dest_dir = trash_root() / f'{base}_{n}'
         dest_dir.mkdir(parents=True, mode=0o700)
-    if os.name != 'nt':
-        try:
-            dest_dir.chmod(0o700)
-        except OSError:
-            pass
+    _make_private(dest_dir)
     meta = {
         'version': 1,
         'created_at': datetime.now().astimezone().isoformat(timespec='seconds'),
@@ -90,6 +100,43 @@ def _write_metadata(entry: Path, metadata: dict) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     tmp.replace(entry / _META_NAME)
+
+
+def _undo_moves(moves, *, what) -> list[tuple[Path, Path]]:
+    """Move each ``(source, destination)`` pair back, newest first, best effort.
+
+    Returns the pairs actually reversed. A SHORTER list than `moves` is the
+    signal that the transaction is only partly unwound — the caller must then
+    publish a recovery marker rather than report a clean failure. Every failure
+    is swallowed and logged on purpose: the payload's only surviving copy sits at
+    one end or the other of each move, so one unmovable file must not abandon the
+    rest of the compensation."""
+    undone = []
+    for source, destination in reversed(moves):
+        try:
+            source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(destination), str(source))
+        except OSError:
+            logger.exception('could not roll back failed %s: %s', what, source)
+            continue
+        undone.append((source, destination))
+    return undone
+
+
+def _mark_unrestorable(entry: Path, kind: str, *, metadata=None, **extra) -> None:
+    """Publish an entry as explicitly non-restorable once its payload has gone.
+
+    `_inventory` calls an entry restorable on TWO conditions — a non-empty
+    ``files`` list and ``restorable`` not being False — so both writers of that
+    verdict go through here and cannot drift into stating only half of it.
+    Best-effort: the destructive step this annotates has already happened, and a
+    failed marker must not turn a completed purge into an error."""
+    payload = metadata if metadata is not None else {'version': 1, 'files': []}
+    payload.update({'kind': kind, 'restorable': False, **extra})
+    try:
+        _write_metadata(entry, payload)
+    except OSError:
+        logger.exception('could not mark trash entry %s as non-restorable', entry)
 
 
 @serialized_transaction
@@ -144,19 +191,12 @@ def send_paths_to_trash(paths, context='', metadata=None) -> dict:
         meta['transaction_state'] = 'complete'
         _write_metadata(entry, meta)
     except BaseException:
-        rollback_failed = False
-        for source, destination in reversed(moved):
-            try:
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(destination), str(source))
-                for planned_source, _planned_destination, item in planned:
-                    if planned_source == source:
-                        item['state'] = 'rolled_back'
-                        break
-            except OSError:
-                rollback_failed = True
-                logger.exception('could not roll back failed trash move %s', source)
-        if rollback_failed:
+        undone = _undo_moves(moved, what='trash move')
+        reversed_sources = {source for source, _destination in undone}
+        for planned_source, _planned_destination, item in planned:
+            if planned_source in reversed_sources:
+                item['state'] = 'rolled_back'
+        if len(undone) != len(moved):
             meta['recovery_required'] = True
             meta['transaction_state'] = 'recovery_required'
             meta['error'] = 'A failed trash operation could not be fully rolled back'
@@ -272,11 +312,7 @@ def restore_entry(entry_id, *, consume=True) -> dict:
             shutil.move(str(source), str(destination))
             restored.append((source, destination))
     except Exception:
-        for source, destination in reversed(restored):
-            try:
-                shutil.move(str(destination), str(source))
-            except OSError:
-                logger.exception('could not roll back failed trash restore %s', destination)
+        _undo_moves(restored, what='trash restore')
         raise
     if consume:
         try:
@@ -311,12 +347,7 @@ def rollback_restored_entry(entry_id, metadata) -> None:
             restored_back.append((source, destination))
     except Exception:
         # Re-establish the restored state if re-trashing only partly succeeded.
-        for source, destination in reversed(restored_back):
-            try:
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(destination), str(source))
-            except OSError:
-                logger.exception('could not roll back failed re-trash %s', source)
+        _undo_moves(restored_back, what='re-trash')
         raise
 
 
@@ -334,20 +365,26 @@ def remove_entry(entry_id) -> None:
     except OSError:
         if entry.exists() and entry.is_dir():
             try:
-                try:
-                    metadata = entry_metadata(entry_id)
-                except (OSError, ValueError):
-                    metadata = {'version': 1, 'files': []}
-                metadata.update({
-                    'kind': 'restored_cleanup_pending',
-                    'restorable': False,
-                    'files': [],
-                    'label': 'Restored item (cleanup pending)',
-                })
-                _write_metadata(entry, metadata)
-            except OSError:
-                logger.exception('could not mark consumed trash entry %s', entry_id)
+                metadata = entry_metadata(entry_id)
+            except (OSError, ValueError):
+                metadata = None
+            _mark_unrestorable(entry, 'restored_cleanup_pending', metadata=metadata,
+                               files=[], label='Restored item (cleanup pending)')
         raise
+
+
+def _iter_file_sizes(path: Path):
+    """Yield ``(filename, bytes)`` for every regular file under `path`.
+
+    Files the OS refuses to stat are skipped, not raised: a racing delete must
+    never fail a size report. Shared by the two callers so the WALK is one rule
+    — the two TOTALS deliberately are not (see `_inventory`)."""
+    for dirpath, _dirs, files in os.walk(path):
+        for filename in files:
+            try:
+                yield filename, os.path.getsize(os.path.join(dirpath, filename))
+            except OSError:
+                continue
 
 
 def _inventory() -> tuple[int, list[dict]]:
@@ -363,15 +400,13 @@ def _inventory() -> tuple[int, list[dict]]:
         except (OSError, ValueError):
             meta = {'context': entry.name, 'kind': 'legacy', 'files': []}
         size = 0
-        for dirpath, _dirs, files in os.walk(entry):
-            for filename in files:
-                try:
-                    file_size = os.path.getsize(os.path.join(dirpath, filename))
-                    total += file_size
-                    if filename != _META_NAME:
-                        size += file_size
-                except OSError:
-                    pass
+        # Two numbers from one walk, and they are NOT the same number: `total` is
+        # the bytes Empty Trash will actually free, `size` is what the user is
+        # shown per entry and excludes our own journal.
+        for filename, file_size in _iter_file_sizes(entry):
+            total += file_size
+            if filename != _META_NAME:
+                size += file_size
         result.append({
             'id': entry.name,
             'created_at': meta.get('created_at'),
@@ -405,14 +440,8 @@ def _path_size(path: Path) -> int:
             return path.stat().st_size
         except OSError:
             return 0
-    total = 0
-    for dirpath, _dirs, files in os.walk(path):
-        for filename in files:
-            try:
-                total += os.path.getsize(os.path.join(dirpath, filename))
-            except OSError:
-                pass
-    return total
+    # Counts the entry's journal too — this is what a purge really frees.
+    return sum(file_size for _filename, file_size in _iter_file_sizes(path))
 
 
 @serialized_transaction
@@ -449,10 +478,5 @@ def empty_trash(*, purge_record=None) -> dict:
             failed += 1
             logger.warning('empty_trash: could not remove %s: %s', entry, e)
             if entry.is_dir() and entry.exists():
-                try:
-                    meta = metadata or {'version': 1, 'files': []}
-                    meta.update({'kind': 'purged_bytes', 'restorable': False})
-                    _write_metadata(entry, meta)
-                except OSError:
-                    pass
+                _mark_unrestorable(entry, 'purged_bytes', metadata=metadata)
     return {'removed': removed, 'failed': failed, 'freed_bytes': freed}

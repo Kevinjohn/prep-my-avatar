@@ -332,6 +332,34 @@ Learned in pass 5.
   `_looks_like_image`'s only caller was `_validate_media_file`, whose only caller
   was nobody. Both went. When a duplicate's fix looks like a clean delegation,
   check whether one side has any reason to exist first.
+- **Two callers of the same walk can want two different totals.** `trash._path_size`
+  and `trash._inventory` both walk an entry summing file sizes, and pass 8's reuse
+  lens read them as one duplicated loop. They are not: `_inventory` deliberately
+  excludes `.trash-meta.json` (it reports what the *user* deleted) while `_path_size`
+  includes it (it reports what Empty Trash actually frees). Sharing the *total*
+  breaks one of them. Sharing the *iterator* — `_iter_file_sizes` yielding
+  `(filename, bytes)` — leaves each caller its own arithmetic and still puts the
+  os.walk-and-swallow-OSError rule in one place. When two duplicated loops disagree
+  about the answer, extract the traversal, not the result.
+- **Extract the message, not the check.** `background_jobs.touch` guards "already
+  terminal" twice: once against the session-local row, once against a re-read after
+  the DB write, catching a worker that committed in between. Two lenses called that
+  a duplicated guard. It is a layered one — deleting either loses a real race. What
+  *was* duplicated was the sentence the user sees, so only `_terminal_error` came
+  out. A repeated `raise` is not evidence of a repeated question.
+- **A comment can be a finding.** `dataset_activity.KINDS` was documented as a guard
+  "so a typo in a begin() call is easy to spot"; repo-wide grep found zero readers —
+  not `begin`, not a test. The tuple is prose, and the real enforcement is the bare
+  string literals at the call sites matching what the front-end switches on. Deleting
+  a documented public-ish name is a bigger step than the sweep should take alone, but
+  leaving a comment that claims an enforcement nothing performs is worse than the
+  duplication the lens was looking for. Correcting the claim was the edit.
+- **Five copies inside one file justify a helper; five copies across five files
+  need a decision.** `updater.py` wrote temp-fsync-rename five times, so the helper
+  landed. The same rule also exists in `scrape/sources/base`, `face_dataset_service`,
+  `config`, and `trash` — and those must *not* merge, because they differ in
+  directory-fsync, chmod, and (for `trash._write_metadata`) being a per-file test
+  seam in a hot move loop. Scope the dedup to where the copies actually agree.
 
 ### Carried-over findings
 
@@ -693,6 +721,53 @@ Verified in pass 4 and deliberately **skipped**, for the same reason.
   for "scan item cap" (the *values* must stay per-site); `host == d or
   host.endswith('.' + d)` in five places — already locally named as
   `_is_reddit_host` in one, and a one-line expression in the rest.
+- **`background_jobs.touch` rewrites the whole log blob per line — O(N²) on ML
+  install.** `setup_installer.py:695,700` feeds pip's stdout into `_append` →
+  `_persist` → `touch(job_id, log=line)` one line at a time. Each call reloads,
+  re-serializes and UPDATEs the entire ~36 KB JSON log in its own transaction:
+  roughly 2,000 write transactions and ~72 MB of JSON churn for a single ML
+  install. The adjacent *progress* path already has the right throttle, with a
+  comment naming this exact problem (`setup_installer.py:344-352`). The fix needs
+  a `touch` signature change (append-N-lines, or a coalescing buffer) plus edits
+  in `setup_installer.py`, which sits outside pass 8's file set. **Fold into the
+  pass that owns `setup_installer.py`, or take it as a standalone change.**
+- **`updater`'s command-output formatting has silently drifted, in a
+  user-visible string.** `((r.stdout or '') + (r.stderr or '')).strip()` appears at
+  `updater.py:260, 565, 778, 844`; at `:768` and `:788` the same expression has the
+  operands **reversed** and the `.strip()` **dropped**. Separately, the same `'log'`
+  response key is truncated `[-4000:]` in five places and `[-1500:]` in two. Both
+  are real duplication with real drift, and both were skipped under the pass's
+  "be especially conservative in the self-update path" guardrail: unifying them
+  changes what the user reads after a failed update. Recommended shape when taken
+  deliberately: one `_combined_output(result, limit)` normalised to
+  `stdout + stderr` stripped, plus named `_RESULT_LOG_TAIL = 4000` /
+  `_COMMAND_LOG_TAIL = 1500` constants — with the choice of which sites get which
+  limit made as a product decision, not as a refactoring side-effect.
+- **One atomic-write rule, five private implementations.** After pass 8 dedup'd
+  `updater.py`'s five copies into `_atomic_write_bytes`/`_atomic_write_json`, the
+  repo still holds `scrape/sources/base.atomic_write_bytes`,
+  `services/face_dataset_service._atomic_write_bytes`, `config._write_private_text`,
+  and `trash._write_metadata` — all writing a temp file, fsyncing, and renaming.
+  They are *not* interchangeable today: they differ on whether the parent directory
+  is fsynced, whether the file is chmod'd, and `trash._write_metadata` is a
+  monkeypatch seam called per file inside a hot move loop. The right end state is
+  one rule in `app/utils/` with those differences expressed as arguments, and the
+  seams re-pointed at it — an architectural change, so **surface it for pass 14 or
+  a standalone PR rather than doing it inside a file-group pass.**
+- **`CURATION_UNDO_CONFLICT` is a string contract across two files.** Raised at
+  `curation_history.py:153,158,178` as a `ValueError` message prefix and parsed by
+  `routes/datasets.py:957` with `startswith('CURATION_UNDO_CONFLICT:')`. A shared
+  constant (or a real exception type) belongs here, but the consumer is outside
+  pass 8's file set — same shape as pass 7's `Source.safe_scan` skip.
+- **`dataset_activity.KINDS` has no readers at all.** Zero references repo-wide.
+  Pass 8 corrected its misleading comment rather than deleting a public-looking
+  module constant; the deletion is still available if the front-end's kind list is
+  ever given a single source of truth.
+- **`background_jobs.touch` returns `get(job_id)` and no caller uses it.** Dropping
+  the return would save a full re-read per touch on the O(N²) path above, but it is
+  a public API change *and* `get` is a monkeypatch seam
+  (`test_background_jobs.py:144` exercises the `touch → get` call edge as a
+  stale-session race test). Take it together with the throttling change, not before.
 
 ## Passes
 
@@ -778,7 +853,7 @@ Update after every pass. `blocked` needs a reason.
 | 5 | studio | done | 4b9ee14 | 17 dead re-export aliases + 2 dead frontend-mirror constants + `model_net_scores` deleted; the base-model pool, permanent-LoRA validation, Krea rebalance encoding and shared-seed series extracted once each and shared by `create_run`/`create_comparison_run`/resume; `_wilson_lower_bound` and `_basename` collapsed to aliases with the docstring moved onto the live copy; `_ranked_positive_configs` names the sort `best_cell`/`best_per_checkpoint` both restated; `_tally_vote` names "only ±1 is a vote" (5 sites); `_representative_image` N+1 and the `_record_for_checkpoint` per-row filesystem resolve fixed; `list_all_testable_checkpoints` double scan removed. 10 skips and 5 carried findings recorded above. Gate 1740 passed / 1 skipped, ruff clean. |
 | 6 | routes | done | `809669e` | +33 net (the helpers' own docstrings, which state the deduped rules). `_ok_or_404`/`_payload_or_404` name the "not found is a 404 with `{'error': 'not found'}`" contract that was restated at 19 sites across 2 blueprints — 2 look-alike sites deliberately left written out, and now visible as the only exceptions. `_map_klein_error` collapses the Klein-missing branch + its inline import from 4 handlers (kept in `datasets.py`, not `_common.py`: it starts downloads, which the Studio 409 refuses). `_head_crop_warning` names the guard-rail rule with both CTAs left caller-supplied, since the two user-visible strings had drifted and must stay drifted. `_probe_outbound_ip` shares the UDP-connect socket lifecycle between `_lan_ip`/`_tailscale_ip` with each probe's filter left at the caller. 5 redundant local re-imports of module-level names dropped; `dataset_train_checkpoints` no longer runs `get_dataset` twice per request. 4 traps + 3 skips and 4 carried findings recorded above; the efficiency lens found nothing inside this pass's file set. Gate 1740 passed / 1 skipped, ruff clean. |
 | 7 | scrape | done | `36230c0` | −65 net. `base.download_direct_media` names the fetch→content-type→atomic-write rule that Reddit and Sex.com had byte-identical (constants included); the other three copies keep their own media policy and are now documented as the trap they are. `gdl_source` stopped hand-rolling `atomic_write_bytes`, which sat imported by three siblings in the same package and was the only copy outside the atomicity test. `validators.is_bunkr_host` gives the rotating-TLD SSRF rule one home instead of three — while the two domain allowlists it serves stay deliberately separate. Dead: `_validate_media_file` + `_looks_like_image` (37 lines, and one of the two magic-byte tables went with them), `ValidationResult.to_dict`, netfetch's unused `COMFYUI_OUTPUT_DIR` shim. 8 traps recorded above, plus 3 lessons. Skipped with Codex's agreement: the ~100-line erome/picazor streaming downloader. Skipped on verification: the triple DNS resolution (the call chain is the security regression test). Surfaced, not decided: ~700 lines of `scrape/` are unreachable from production. Gate 1740 passed / 1 skipped, ruff clean. |
-| 8 | data-lifecycle | todo | — | |
+| 8 | data-lifecycle | done | — | +76 net, but ~140 of the 355 added lines are docstrings recording why the traps must stay split — executable code is down. `updater._atomic_write_bytes`/`_atomic_write_json` replace five hand-written temp-fsync-rename copies in the module whose whole job is surviving an interruption; `_python_dependency_change`/`_frontend_dependency_change` stop the forward and rollback paths restating the same predicate (the third, `_frontend_source_change`, stays separate because the asymmetry is deliberate); `_installed_distributions`, a `fail()` epilogue in `git_update_status`, `DEFAULT_UPDATE_REPO` imported instead of hard-coded twice, and the frontend verification flattened to if/elif. `trash._undo_moves` unifies four rollback loops and fixed a real bug on the way: `send_paths_to_trash` marked every planned item `rolled_back` regardless of which moves actually reversed. Also `trash._make_private`, `_mark_unrestorable`, `_iter_file_sizes` (iterator shared, totals deliberately not). `integrity` materializes each table once, `_PHASH_RE` matches `_HASH_RE`'s strictness, dead re-checks removed. `background_jobs._loads` enforces shape at decode, `_terminal_error` unifies the message the two layered guards raise. `curation_history` resolves the dataset once instead of re-coercing at six sites. `dataset_activity._mint`/`_drop`. 5 lessons and 6 carried-over findings recorded above, including the O(N²) `touch` log write, updater's drifted output formatting, and the five-copy atomic-write rule. Gate 1740 passed / 1 skipped, ruff clean. |
 | 9 | analysis-quality | todo | — | |
 | 10 | dataset-components | todo | — | |
 | 11 | hooks-utils | todo | — | |

@@ -88,10 +88,14 @@ def decode_snapshot_pair(before_state, after_state):
 
 
 def list_events(user_id, dataset_id, *, limit=30, before_id=None) -> dict | None:
-    if _owned_dataset(user_id, dataset_id) is None:
+    # Every id below is ``ds.id``, not ``int(dataset_id)``: the ownership check
+    # already resolved the row, so re-coercing the caller's argument at each site
+    # would be a second, unchecked answer to a question already settled.
+    ds = _owned_dataset(user_id, dataset_id)
+    if ds is None:
         return None
     limit = max(1, min(int(limit or 30), 100))
-    query = CurationEvent.query.filter_by(dataset_id=int(dataset_id))
+    query = CurationEvent.query.filter_by(dataset_id=ds.id)
     if before_id is not None:
         query = query.filter(CurationEvent.id < int(before_id))
     rows = query.order_by(CurationEvent.id.desc()).limit(limit + 1).all()
@@ -100,7 +104,7 @@ def list_events(user_id, dataset_id, *, limit=30, before_id=None) -> dict | None
     batch_ids = {row.batch_id for row in rows}
     batch_sizes = dict(
         db.session.query(CurationEvent.batch_id, db.func.count(CurationEvent.id))
-        .filter(CurationEvent.dataset_id == int(dataset_id),
+        .filter(CurationEvent.dataset_id == ds.id,
                 CurationEvent.batch_id.in_(batch_ids))
         .group_by(CurationEvent.batch_id).all()
     ) if batch_ids else {}
@@ -121,7 +125,7 @@ def list_events(user_id, dataset_id, *, limit=30, before_id=None) -> dict | None
         'events': events,
         'next_cursor': rows[-1].id if has_more and rows else None,
         'can_undo': (CurationEvent.query.filter_by(
-            dataset_id=int(dataset_id), reverted_at=None).first() is not None),
+            dataset_id=ds.id, reverted_at=None).first() is not None),
     }
 
 
@@ -133,10 +137,11 @@ def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
     newer work. In that case the transaction is rejected with an actionable
     conflict instead of silently time-travelling through subsequent edits.
     """
-    if _owned_dataset(user_id, dataset_id) is None:
+    ds = _owned_dataset(user_id, dataset_id)
+    if ds is None:
         return None
     query = CurationEvent.query.filter_by(
-        dataset_id=int(dataset_id), reverted_at=None)
+        dataset_id=ds.id, reverted_at=None)
     if event_id is not None:
         selected = query.filter_by(id=int(event_id)).first()
     else:
@@ -149,7 +154,7 @@ def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
     for event in events:
         image = db.session.get(FaceDatasetImage, event.image_id)
         snapshots = decode_snapshot_pair(event.before_state, event.after_state)
-        if image is None or image.dataset_id != int(dataset_id) or snapshots is None:
+        if image is None or image.dataset_id != ds.id or snapshots is None:
             raise ValueError('CURATION_UNDO_CONFLICT: a referenced image or snapshot is unavailable')
         before, after = snapshots
         for field, expected in after.items():
@@ -162,7 +167,7 @@ def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
         # older undo must not leap over any unreverted event touching the same
         # field, even when the latest value happens to match again.
         newer = (CurationEvent.query
-                 .filter(CurationEvent.dataset_id == int(dataset_id),
+                 .filter(CurationEvent.dataset_id == ds.id,
                          CurationEvent.image_id == event.image_id,
                          CurationEvent.id > event.id,
                          CurationEvent.reverted_at.is_(None),
