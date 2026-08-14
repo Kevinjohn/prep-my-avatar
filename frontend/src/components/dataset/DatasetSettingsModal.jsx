@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { datasetIdentityComplete } from './datasetIdentityRules';
 
 const FIELD =
   'px-3 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm ' +
@@ -36,7 +37,9 @@ export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
   }, [busy, onClose, submitting]);
 
   const pending = busy || submitting;
-  const canSave = name.trim() && (style || trigger.trim()) && (!concept || desc.trim());
+  const canSave = datasetIdentityComplete({
+    name, trigger, description: desc, isConcept: concept, isStyle: style,
+  });
   const save = async () => {
     if (!canSave || pending) return;
     setSubmitting(true);

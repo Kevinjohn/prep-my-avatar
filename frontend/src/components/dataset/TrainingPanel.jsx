@@ -1,4 +1,3 @@
-// react-frontend/src/components/dataset/TrainingPanel.jsx
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getJson, safePostJson as postJson } from '../../api/fetchClient';
@@ -17,6 +16,7 @@ import PreflightModal from './PreflightModal';
 import CloudLaunchDialog from './CloudLaunchDialog';
 import { baseName, DEFAULT_CUSTOM_FAMILIES, looksAbsolute } from './trainingPanelModel';
 import { deriveCloudTrainingState } from './trainingCloudState';
+import { OPT_FOR_FLAG } from './trainingLaunchPolicy';
 import TrainingAdvancedOptions from './TrainingAdvancedOptions';
 import TrainingCheckpointBrowserView from './TrainingCheckpointBrowserView';
 import { useTrainingPresets } from './useTrainingPresets';
@@ -24,8 +24,7 @@ import { useCheckpointBrowser } from './useCheckpointBrowser';
 import { useTrainingMonitoring } from '../../hooks/useTrainingMonitoring';
 import { useTrainingLaunch } from '../../hooks/useTrainingLaunch';
 
-// « Custom weights… » : valeur-sentinelle de l'entrée du sélecteur de base qui
-// révèle le champ chemin. Les familles qui l'exposent + celles honorant VAE/TE
+// Familles qui exposent « Custom weights… » + celles honorant VAE/TE
 // (miroir de CUSTOM_WEIGHTS_FAMILIES / VAE_TE_OVERRIDE_FAMILIES côté serveur ;
 // base-info les renvoie, ces défauts ne servent qu'avant son chargement).
 // Absolute path = the persisted custom-weights path (never a ComfyUI-relative
@@ -43,6 +42,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const toast = useToast();
   const confirm = useConfirmDialog();
   const promptDialog = usePromptDialog();
+  // Polls every 10s: advances the queue server-side + updates the UI. Skipped
+  // entirely while training is hidden (ai-toolkit not configured) — no point
+  // hitting endpoints the backend doesn't expose in that state.
   const { status, statusLoaded, cloudStatus, refreshStatus } = useTrainingMonitoring({
     trainingVisible: caps.training_visible, cloudTraining: caps.cloud_training,
     onNavigationStateChange,
@@ -51,9 +53,6 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   // {registered, version, changed, diff} — provenance du dataset (registre).
   const [trainingFeedback, setTrainingFeedback] = useState(null);
-  // Saves cloud synchronisés en local (y compris ceux d'un run EN COURS) —
-  // liste séparée : le prompt Resume-or-Fresh ne raisonne que sur le local.
-  // {run_dir_bytes, training_dataset_bytes, cloud_staging_bytes, deployed_bytes, total_bytes}
   // {steps, kind, n_images, rationale} renvoyé par /train/checkpoints — le POURQUOI
   // du barème adaptatif, affiché avec le champ Steps (pédagogie, pas boîte noire).
   const [stepsInfo, setStepsInfo] = useState(null);
@@ -87,21 +86,16 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const [samplePromptsText, setSamplePromptsText] = useState('');
   const checkpointBrowser = useCheckpointBrowser({ dataset: ds, baseInfo,
     visible: caps.training_visible, toast, onCountChange: onCheckpointsChange });
+  // Saves cloud synchronisés en local (y compris ceux d'un run EN COURS) —
+  // liste séparée : le prompt Resume-or-Fresh ne raisonne que sur le local.
+  // {run_dir_bytes, training_dataset_bytes, cloud_staging_bytes, deployed_bytes, total_bytes}
   const { trainType: checkpointTrainType, setTrainType: setCheckpointTrainType,
     base: checkpointBase, setBase: setCheckpointBase, checkpoints, imported,
     cloudCheckpoints: cloudCkpts, datasetState, diskUsage, loaded: ckLoaded,
     refresh: loadCheckpoints } = checkpointBrowser;
-  // Presets de réglages avancés : snapshots nommés, partageables (fichier JSON).
-  // Stockés bruts côté serveur ; la validation se fait à l'APPLICATION (clés
-  // inconnues ignorées, valeurs invalides signalées) → tolérant aux versions.
-
-  // Poll toutes les 10 s : avance la file côté serveur + maj de l'UI. Skipped
-  // entirely while training is hidden (ai-toolkit not configured) — no point
-  // hitting endpoints the backend doesn't expose in that state.
 
   useEffect(() => {
     if (navigationPanel === 'advanced') setAdvancedOpen(true);
-    if (navigationPanel === 'checkpoints') setCheckpointsOpen(true);
   }, [navigationPanel]);
 
   const togglePanel = (panelId, current, setter) => (event) => {
@@ -182,7 +176,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // cette famille » de « ComfyUI pas encore pointé » (le vrai motif sur un clone neuf).
   // Défaut true tant que baseInfo n'est pas chargé, pour ne pas flasher la CTA au montage.
   const comfyConfigured = baseInfo?.comfyui_configured !== false;
-  const isCustomBase = !!base;
+  const baseSelected = !!base;
   // « Custom weights… » (local-only) : familles qui l'exposent + celles honorant
   // VAE/TE (SDXL). base-info fait foi ; défauts avant chargement.
   const customFamilies = baseInfo?.custom_weights_families || DEFAULT_CUSTOM_FAMILIES;
@@ -193,7 +187,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const customWeightsEmpty = customBase && customSupported && !String(base).trim();
   // La conversion diffusers ne concerne QUE Z-Image (SDXL = single-file direct) ;
   // le mode « Custom weights… » (chemin absolu direct) ne convertit jamais.
-  const needsConversion = trainType === 'zimage' && isCustomBase && !customBase;
+  const needsConversion = trainType === 'zimage' && baseSelected && !customBase;
   const baseConverted = needsConversion && !!(baseInfo?.converted?.[base]);
   const convertRunning = needsConversion && baseInfo?.convert?.status === 'running' && baseInfo?.convert?.z_model === base;
   const convertError = (needsConversion && baseInfo?.convert?.status === 'error' && baseInfo?.convert?.z_model === base)
@@ -300,6 +294,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     const msg = (d && d.error) || fallback;
     toast.error(d && d.hint ? `${msg} — ${d.hint}` : msg);
   };
+  // Presets de réglages avancés : snapshots nommés, partageables (fichier JSON).
+  // Stockés bruts côté serveur ; la validation se fait à l'APPLICATION (clés
+  // inconnues ignorées, valeurs invalides signalées) → tolérant aux versions.
   const presetController = useTrainingPresets({ datasetId: ds.currentId, trainType,
     setAdvancedSettings: setAdv, toast, confirm, promptDialog, postTrain,
     reportError: toastTrainError });
@@ -338,7 +335,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     // deleting it silently breaks the saved winning combo.
     const best = ds.data?.best_settings;
     const isBest = best?.lora_filename
-      && String(best.lora_filename).split(/[\\/]/).pop() === String(filename).split(/[\\/]/).pop();
+      && baseName(best.lora_filename) === baseName(filename);
     const message = isBest
       ? `« ${label} » is the LoRA saved as this dataset's best setting in the Test Studio. The saved combination will stop working, but the file remains recoverable in Settings until you empty the Trash.`
       : `« ${label} » will be moved out of ComfyUI's ${checkpointLorasLabel} folder and remain recoverable in Settings until you empty the Trash.`;
@@ -598,10 +595,6 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
             const mode = await askResumeOrFresh();
             if (!mode) return;
             const fresh = mode === 'fresh';
-            // ds.train takes camelCase opts — map the confirmable force flags.
-            const OPT_FOR_FLAG = { allow_caption_mismatch: 'allowCaptionMismatch',
-                                   allow_uncaptioned: 'allowUncaptioned',
-                                   allow_unverified_weights: 'allowUnverifiedWeights' };
             let opts = { baseModel: base, variant, trainType, masked, steps: stepsN, fresh,
                          vaePath, tePath };
             let d = await ds.train(opts);
@@ -711,7 +704,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
         advTimestepDefault={advTimestepDefault} advTimestepSupported={advTimestepSupported} advWarmup={advWarmup} advWarmupChoices={advWarmupChoices} advancedOpen={advancedOpen}
         base={base} baseBlocksTrain={baseBlocksTrain} baseConverted={baseConverted} baseInfo={baseInfo} baseLabel={baseLabel}
         comfyConfigured={comfyConfigured} concept={concept} convertError={convertError} convertRunning={convertRunning} currentBases={currentBases}
-        customBase={customBase} customSupported={customSupported} doPrepareBase={doPrepareBase} hasInvalidStepsOverride={hasInvalidStepsOverride} isCustomBase={isCustomBase}
+        customBase={customBase} customSupported={customSupported} doPrepareBase={doPrepareBase} hasInvalidStepsOverride={hasInvalidStepsOverride} baseSelected={baseSelected}
         keptCount={keptCount} launchConfigReady={launchConfigReady} masked={masked} maskedRembgMissing={maskedRembgMissing} needsConversion={needsConversion}
         openSched={openSched} preflightFloor={preflightFloor} presetController={presetController} queued={queued} recoSteps={recoSteps}
         samplePromptsText={samplePromptsText} saveAdv={saveAdv} saveSamplePrompts={saveSamplePrompts} schedAt={schedAt} schedule={schedule}

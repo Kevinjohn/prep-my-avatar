@@ -1,14 +1,9 @@
 import { useMemo, useState } from 'react';
 import { buildSmallImageRescuePairs } from '../../utils/smallImageRescue';
-
-function imageUrl(datasetId, image, nonce = 0) {
-  if (!image?.filename) return null;
-  const suffix = nonce ? `?v=${nonce}` : '';
-  return `/api/dataset/${datasetId}/img/${encodeURIComponent(image.filename)}${suffix}`;
-}
+import { datasetImageUrl } from './datasetImageUrl';
 
 function ImagePane({ datasetId, image, nonce, label, tone, fallback, onPreview }) {
-  const url = imageUrl(datasetId, image, nonce);
+  const url = datasetImageUrl(datasetId, image, nonce);
   return (
     <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-app/50">
       <div className="flex min-h-8 items-center justify-between gap-1 border-b border-border px-2 py-1">

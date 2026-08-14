@@ -214,6 +214,36 @@ under **Unreleased** until a release is tagged.
   positive `ReferenceLatent` node the multi-reference chain anchors to
   unconditionally, so a workflow missing it fails at validation with a clear
   message rather than further downstream.
+- The URL of a dataset image is now built in one place. Seventeen surfaces
+  assembled the path by hand, which meant seventeen chances to forget the
+  filename encoding — a photo with a space or a `#` in its name would simply not
+  load, on whichever surface had missed it. The shared builder also decides the
+  cache-busting rule once: a nonce only where an edit rewrites the file in place
+  under the same name, so every other surface gets a cacheable URL.
+- The framing vocabulary — face, bust, body, back — had five copies across the
+  composition bar, the coverage plan, the catalog and the corpus workbench, each
+  with its own order, labels and colours that happened to agree. It is now one
+  definition, so adding a fifth framing is one edit rather than a hunt. The
+  body-fidelity training target stays where it is, because only one surface
+  offers that choice.
+- "Is this dataset ready to save?" is now one predicate shared by the create
+  form and the settings modal, with tests. Both spelled the same three clauses
+  out in a different order; a change to the server contract had two places to
+  land and no way to notice it had only landed in one. Getting it wrong enables
+  a button whose request the server rejects with a bare 400 and no explanation.
+- The dataset grid no longer re-renders every tile when one checkbox is ticked.
+  The tiles are memoised and the toggle handed to them is stable, which together
+  take a selection change on a large dataset from ~6 ms to ~0.8 ms — memoisation
+  alone bought nothing, because the changing handler defeated it. The derived
+  pair sets the workspace hands its children are likewise derived once per image
+  list, so their own memos start hitting.
+- The training panel's status poll no longer re-renders the workspace every ten
+  seconds to report that nothing changed, and the checkpoint browser no longer
+  re-lists the checkpoint directory fifteen times a minute during a base
+  conversion — both were reacting to a fresh object rather than to a changed
+  value. Also removed dead navigation handling, moved four comment blocks back
+  onto the code they describe, and renamed a flag that had stopped meaning what
+  it said.
 
 ## 2026.07.28.2
 

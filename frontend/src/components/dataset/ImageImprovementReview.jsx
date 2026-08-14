@@ -1,15 +1,10 @@
 import { useMemo, useState } from 'react';
 import { buildImageImprovementPairs } from '../../utils/imageImprovement';
-
-function url(datasetId, image, displayFilename) {
-  const filename = displayFilename || image?.filename;
-  return filename
-    ? `/api/dataset/${datasetId}/img/${encodeURIComponent(filename)}` : null;
-}
+import { datasetImageUrl } from './datasetImageUrl';
 
 function Pane({ datasetId, image, label, onPreview, displayFilename = null, faceOverride = undefined,
   identityOverride = undefined, metricsOverride = undefined, usefulnessOverride = undefined }) {
-  const imageUrl = url(datasetId, image, displayFilename);
+  const imageUrl = datasetImageUrl(datasetId, displayFilename || image?.filename);
   const face = faceOverride !== undefined ? (faceOverride || {}) : (image?.analysis?.face || {});
   const metrics = metricsOverride !== undefined ? (metricsOverride || {}) : (image?.analysis?.metrics || {});
   const usefulness = usefulnessOverride !== undefined

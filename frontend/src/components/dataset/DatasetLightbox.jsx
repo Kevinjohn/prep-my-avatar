@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import { displayLabel } from '../../utils/labels';
+import { datasetImageUrl } from './datasetImageUrl';
 
 const IMPROVE_HELP = 'Klein reconstructs from the preserved original with identity references. It is generative: compare both versions, then admit exactly one.';
 
@@ -40,7 +41,7 @@ export default function DatasetLightbox({
   useEffect(() => { closeRef.current?.focus(); }, []);
 
   if (!img || !img.filename) return null;
-  const url = `/api/dataset/${datasetId}/img/${encodeURIComponent(img.filename)}${nonce ? `?v=${nonce}` : ''}`;
+  const url = datasetImageUrl(datasetId, img, nonce);
   const alt = displayLabel(img.variation_label) || 'dataset image';
   const improvementActive = improving || improvePending;
   const improveDisabled = busy || improvementActive || improveReady || !kleinAvailable;

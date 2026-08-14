@@ -3,7 +3,6 @@
  * images fine). Ratio presets snap the box; `defaultAspect` presets the initial
  * ratio (the reference crop starts at 1:1 — its historical convention — but
  * stays freely reshapeable: nothing downstream actually requires a square).
- * `lockSquare` pins 1:1 and hides the ratio row (kept for callers that need it).
  * Returns the box in NATURAL image pixels, same contract as before.
  * Custom implementation (no react-easy-crop): that lib pins a fixed frame and
  * moves the image under it — it cannot stretch the selection itself. */
@@ -51,10 +50,10 @@ function ratioBox(cur, ratio, W, H) {
 }
 
 export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = null,
-                                    lockSquare = false, defaultAspect = null }) {
+                                    defaultAspect = null }) {
   const [nat, setNat] = useState(null);        // {W, H} natural size
   const [box, setBox] = useState(null);        // crop box in NATURAL px
-  const [aspect, setAspect] = useState(lockSquare ? 1 : defaultAspect);   // null = free
+  const [aspect, setAspect] = useState(defaultAspect);   // null = free
   const imgRef = useRef(null);
   const dialogRef = useRef(null);
   const cancelRef = useRef(null);
@@ -81,10 +80,9 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = nul
     const W = e.target.naturalWidth; const H = e.target.naturalHeight;
     setNat({ W, H });
     // Initial box: largest centered box of the initial ratio, or 80% of the frame.
-    const a = lockSquare ? 1 : defaultAspect;
-    if (a) {
-      let w = W; let h = w / a;
-      if (h > H) { h = H; w = h * a; }
+    if (defaultAspect) {
+      let w = W; let h = w / defaultAspect;
+      if (h > H) { h = H; w = h * defaultAspect; }
       setBox({ x: (W - w) / 2, y: (H - h) / 2, w, h });
     } else {
       setBox(clampCropBox({ x: W * 0.1, y: H * 0.1, w: W * 0.8, h: H * 0.8 }, W, H));
@@ -137,7 +135,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = nul
     if (edges.top) y1 = Math.min(Math.max(0, y1 + dy), y2 - MIN_SIDE);
     if (edges.bottom) y2 = Math.max(Math.min(H, y2 + dy), y1 + MIN_SIDE);
     let nb = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
-    const ratio = lockSquare ? 1 : aspect;
+    const ratio = aspect;
     if (ratio) {
       // Constrain to the ratio: the dominant dragged dimension wins, the other
       // follows; anchor on the opposite corner/edge so the grab point tracks.
@@ -156,7 +154,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = nul
       if (nb.y + nb.h > H) { nb.h = H - nb.y; nb.w = nb.h * ratio; if (edges.left) nb.x = x2 - nb.w; }
     }
     setBox(ratio ? clampRatioCropBox(nb, ratio, W, H) : clampCropBox(nb, W, H));
-  }, [nat, aspect, lockSquare, scale]);
+  }, [nat, aspect, scale]);
 
   const endDrag = useCallback(() => { dragRef.current = null; }, []);
   useEffect(() => {
@@ -206,21 +204,19 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = nul
         </div>
       </div>
       <div className="shrink-0 w-full max-w-4xl mx-auto mt-3 flex flex-col gap-2">
-        {!lockSquare && (
-          <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Crop aspect ratio">
-            <span className="text-white/60 text-xs">Ratio</span>
-            {ASPECTS.map(([label, value]) => (
-              <button key={label} type="button" onClick={() => pickAspect(value)}
-                aria-pressed={aspect === value}
-                className={`px-2 py-0.5 rounded text-xs font-semibold ${aspect === value
-                  ? 'bg-indigo-500 text-white'
-                  : 'bg-white/10 text-white/70 hover:bg-white/20'}`}>
-                {label}
-              </button>
-            ))}
-            <span className="text-white/40 text-[10px]">free = stretch the box any way you like</span>
-          </div>
-        )}
+        <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Crop aspect ratio">
+          <span className="text-white/60 text-xs">Ratio</span>
+          {ASPECTS.map(([label, value]) => (
+            <button key={label} type="button" onClick={() => pickAspect(value)}
+              aria-pressed={aspect === value}
+              className={`px-2 py-0.5 rounded text-xs font-semibold ${aspect === value
+                ? 'bg-indigo-500 text-white'
+                : 'bg-white/10 text-white/70 hover:bg-white/20'}`}>
+              {label}
+            </button>
+          ))}
+          <span className="text-white/40 text-[10px]">free = stretch the box any way you like</span>
+        </div>
         {box && nat && (
           <fieldset className="flex items-center gap-2 flex-wrap border-0 p-0 text-white/70 text-xs">
             <legend className="sr-only">Crop selection coordinates and size</legend>

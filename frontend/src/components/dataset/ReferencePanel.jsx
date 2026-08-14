@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { datasetImageUrl } from './datasetImageUrl';
 
 // Cap identique à MAX_EXTRA_REFS côté backend (face_dataset_service).
 const MAX_EXTRA_REFS = 3;
@@ -10,7 +11,7 @@ export default function ReferencePanel({ refFilename, datasetId, onSetRef, onCro
   // Auto head-crop = OPT-IN (vision pass, pauses ComfyUI). Default OFF: upload is
   // instant (centered square) and ✂ Crop adjusts manually — faster in practice.
   const [autoCrop, setAutoCrop] = useState(false);
-  const imgUrl = (fn) => `/api/dataset/${datasetId}/img/${encodeURIComponent(fn)}${nonce ? `?v=${nonce}` : ''}`;
+  const imgUrl = (fn) => datasetImageUrl(datasetId, fn, nonce);
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-3">
       <div className="flex items-center gap-3">

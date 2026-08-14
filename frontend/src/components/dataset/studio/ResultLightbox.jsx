@@ -11,6 +11,7 @@
 import { useEffect, useRef } from 'react';
 import { useFocusTrap } from '../../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../../hooks/useBodyScrollLock';
+import { datasetImageUrl } from '../datasetImageUrl';
 
 export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt }) {
   const ref = useRef(null);
@@ -34,7 +35,7 @@ export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt })
       <button type="button" onClick={(event) => { event.stopPropagation(); onClose(); }} aria-label="Close"
         className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 border border-white/20 text-white text-lg z-10 hover:bg-white/20">×</button>
       <div className="flex flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
-        <img src={`/api/dataset/${datasetId}/img/${encodeURIComponent(img.filename)}`}
+        <img src={datasetImageUrl(datasetId, img)}
           alt={img.label} className="max-w-[92vw] max-h-[80vh] object-contain rounded-lg border border-white/15" />
         <div className="text-content-muted text-xs tabular-nums text-center">
           {img.label} · strength {fmt(img.strength)}{img.aspect ? ` · ${img.aspect}` : ''}

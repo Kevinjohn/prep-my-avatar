@@ -398,6 +398,37 @@ Learned in pass 5.
   above can answer *exactly*, so a larger radius would silently return false
   negatives and a smaller one is a filter the caller can apply to the distance
   already returned. Deleting the parameter deleted the need to validate it.
+- **Some frontend tests read the source, not the behaviour.** In
+  `frontend/src/components/dataset/`, `datasetInteractionSafety.test.js` and
+  `DatasetLightbox.test.js` `readFileSync` a dozen components and assert regexes
+  against their raw text — `/const \[submitting, setSubmitting\] = useState\(false\)/`,
+  `/if \(await ds\.crop\(cropImg\.id, box\)\) setCropImg\(null\)/`, and a
+  structural slice of `VariationCatalog.jsx` between two literal strings. A
+  perfectly behaviour-preserving rename or reorder turns them red. Before
+  refactoring anything in that directory, grep the test files for the component's
+  name and read what they pin. They are pinning a *reason*, so satisfying them is
+  usually right; the exception is when the pinned line is the thing you are
+  deliberately deleting, and then the assertion has to go with it.
+- **`React.memo` on its own buys nothing.** Measured on the real 400-tile grid:
+  memoising `DatasetGridItem` alone took a checkbox tick from 6.01 ms to 5.71 ms —
+  5%, i.e. noise. Memo plus a `useCallback` on the one prop that changed identity
+  on a pure selection change took it to 0.77 ms — 87%. A shallow compare is only
+  as good as the least stable prop, so the finding is never "memoise this
+  component", it is "memoise this component *and* name the prop that defeats it".
+- **A poll that reports "nothing changed" through a fresh object re-renders
+  everything.** `TrainingPanel`'s 10-second status poll handed the workspace a new
+  `{ ready, queueCount }` literal every tick with identical field values;
+  `Object.is` never matched, so React could not bail out and the whole workspace
+  re-rendered six times a minute forever (3.3 ms in the test renderer, on a page
+  the user is reading). Only two scalars were ever consumed, so an equality
+  bail-out in the setter is provably invisible. Look for this shape wherever a
+  poll feeds `useState` — it is a jank source, not a throughput one, and it never
+  shows up in a profile as a single expensive thing.
+- **Measure before believing an efficiency finding.** Eight candidates in this
+  pass looked like real waste and measured under 0.15 ms at N=400 — an unmemoized
+  filter in a render body, a `RegExp` compiled per call, three `JSON.stringify`s
+  per image. They were dropped. The ones worth doing were all *repeat-forever* or
+  *per-interaction* costs, not per-render arithmetic.
 
 ### Carried-over findings
 
@@ -915,6 +946,38 @@ Verified in pass 4 and deliberately **skipped**, for the same reason.
   - **Stale reference:** `utils/resolution.py:11` cites
     `AspectRatioSelector.jsx`, which does not exist anywhere in `frontend/`.
 
+- **Verified in pass 10, deferred to pass 11 (`hooks-utils`)** — each is a hook or
+  a generic helper, so its home is `hooks/` or `utils/`, not a component file.
+  - **The set-toggle reducer** is byte-identical in `DatasetGrid.jsx` and
+    `ConceptSourcesPanel.jsx` (add if absent, remove if present, return a new
+    `Set`). A `useSelection`/`toggleInSet` helper is the fix.
+  - **The in-flight-ids guard** (`SmallImageRescueReview.jsx:62-78` and
+    `ImageImprovementReview.jsx:63-75`) is the same hook twice: a `Set` of ids
+    with a request in flight, added before the await and removed in a `finally`,
+    used to disable the buttons for that row.
+  - **`useEscapeToClose` and `usePersistedPreference`** — the "close on Escape
+    unless busy" effect and the "read once from `localStorage`, write on change,
+    swallow the private-mode throw" pair are each written out in several dataset
+    components.
+  - **`useDataset.refresh()` re-fetches the whole image list on every SSE tick**,
+    and rebuilds every row object, so nothing downstream can memoise across a
+    poll. Reusing the previous row object when its fields are unchanged is what
+    makes the tile memoisation added in pass 10 pay off during generation.
+  - **The cloud-status poll has no idle state** — it runs every 5 s whether or not
+    a cloud run exists.
+
+- **Verified in pass 10 and deliberately skipped.**
+  - **Windowing `CorpusWorkbench`'s grid.** It renders every imported photo. The
+    fix is real, but every form of it adds a visible affordance ("show more", or
+    a scroll container that no longer prints), which is a behaviour change.
+  - **No thumbnail endpoint.** Every grid loads full-resolution originals and
+    scales them in CSS. This is a backend route plus a cache, not a sweep edit.
+  - **The `pending` count discrepancy** between `AutoTriageBar` and the checklist
+    is a product question about what "pending" means, not a duplication.
+  - **French comment blocks** survive in roughly a dozen frontend files. Pass 10
+    translated the two it was already editing; translating the rest is a
+    standalone chore, not something to bury inside a behaviour-preserving pass.
+
 ## Passes
 
 Grouped so that files which call each other are reviewed together — the reuse and
@@ -1001,7 +1064,7 @@ Update after every pass. `blocked` needs a reason.
 | 7 | scrape | done | `36230c0` | −65 net. `base.download_direct_media` names the fetch→content-type→atomic-write rule that Reddit and Sex.com had byte-identical (constants included); the other three copies keep their own media policy and are now documented as the trap they are. `gdl_source` stopped hand-rolling `atomic_write_bytes`, which sat imported by three siblings in the same package and was the only copy outside the atomicity test. `validators.is_bunkr_host` gives the rotating-TLD SSRF rule one home instead of three — while the two domain allowlists it serves stay deliberately separate. Dead: `_validate_media_file` + `_looks_like_image` (37 lines, and one of the two magic-byte tables went with them), `ValidationResult.to_dict`, netfetch's unused `COMFYUI_OUTPUT_DIR` shim. 8 traps recorded above, plus 3 lessons. Skipped with Codex's agreement: the ~100-line erome/picazor streaming downloader. Skipped on verification: the triple DNS resolution (the call chain is the security regression test). Surfaced, not decided: ~700 lines of `scrape/` are unreachable from production. Gate 1740 passed / 1 skipped, ruff clean. |
 | 8 | data-lifecycle | done | `cd65d00` | +76 net, but ~140 of the 355 added lines are docstrings recording why the traps must stay split — executable code is down. `updater._atomic_write_bytes`/`_atomic_write_json` replace five hand-written temp-fsync-rename copies in the module whose whole job is surviving an interruption; `_python_dependency_change`/`_frontend_dependency_change` stop the forward and rollback paths restating the same predicate (the third, `_frontend_source_change`, stays separate because the asymmetry is deliberate); `_installed_distributions`, a `fail()` epilogue in `git_update_status`, `DEFAULT_UPDATE_REPO` imported instead of hard-coded twice, and the frontend verification flattened to if/elif. `trash._undo_moves` unifies four rollback loops and fixed a real bug on the way: `send_paths_to_trash` marked every planned item `rolled_back` regardless of which moves actually reversed. Also `trash._make_private`, `_mark_unrestorable`, `_iter_file_sizes` (iterator shared, totals deliberately not). `integrity` materializes each table once, `_PHASH_RE` matches `_HASH_RE`'s strictness, dead re-checks removed. `background_jobs._loads` enforces shape at decode, `_terminal_error` unifies the message the two layered guards raise. `curation_history` resolves the dataset once instead of re-coercing at six sites. `dataset_activity._mint`/`_drop`. 5 lessons and 6 carried-over findings recorded above, including the O(N²) `touch` log write, updater's drifted output formatting, and the five-copy atomic-write rule. Gate 1740 passed / 1 skipped, ruff clean. |
 | 9 | analysis-quality | done | `7e2f2ab` | Net roughly flat, and again most of the added lines are docstrings stating rules that were previously restated in code. `services/ml_worker.py` gives the "run an ML worker in a dedicated interpreter, speak JSON over stdin/stdout" protocol one home; `face_similarity`, `person_mask`, `watermark_lama._run_lama_payload` and `joycaption` had all four written it out, three of them under a docstring literally saying "meme pattern que <sibling>", and it had drifted on the log wording, the exception grouping, the log level and — the one that cost a user-visible bug — whether a dead worker returned a structured error or a silent `{}`. Each caller keeps its own schema validation and its own fatality decision; `inpaint_batch` deliberately keeps its own call (it needs partial stdout after a timeout) and now says so. `_stderr_tail` went from two byte-identical copies to one. `image_processing._bbox_from_vision_json` backs both bbox parsers, which had three different exception tuples over one wire format. Dead: `ollama_control._stderr_tail` (a `return ''` stub whose docstring promised a `stderr` key the tests assert is absent), `watermark_lama._lama_python`, `_run_lama_payload`'s unreachable image-not-found guard, `_staged_image_path`'s unused default, `nearest_within(radius=)` and the two ValueErrors guarding it. Efficiency, in-scope: `_exposure_score` reads a 256-bin histogram instead of building a quarter-million-element Python list and running `statistics.mean` over it (22.1 ms → 7.3 ms per photo, arithmetic identical), `_grey_thumbnail` removes a full RGB copy and a second greyscale conversion per photo, and `inpaint_batch` no longer json-parses every stdout line twice on the success path. `_TIERS` carries its own display labels so a new tier can no longer be a `KeyError` raised out of `/api/capabilities`. 5 lessons and 17 carried-over findings recorded above — including the measured double decode on import (~29 % of the CPU import pass), the per-image 8B vision model reload, and the per-file `import_images` call that makes a 400-photo import O(N²). Gate 1740 passed / 1 skipped, ruff clean. |
-| 10 | dataset-components | todo | — | |
+| 10 | dataset-components | done | — | Three new single-definition modules. `datasetImageUrl.js` replaces seventeen hand-built `/api/dataset/<id>/img/<name>` strings — every one of them a separate chance to drop the `encodeURIComponent`, which breaks silently on a filename with a space or a `#`; the builder also fixes where a cache-busting nonce belongs (only where an edit rewrites the file under the same name) so the rest stay cacheable. `variationCatalogModel.js` absorbs the framing vocabulary (order, labels, colours, the face-fidelity target, an `emptyFramingCounts()`) that `CompositionBar`, `CoveragePlan`, `VariationCatalog` and `CorpusWorkbench` each declared for themselves; `TARGET_BODY` stays in `CompositionBar` because only that surface offers the choice. `datasetIdentityRules.js` + tests give the create form and the settings modal one answer to "is this saveable?" — they had the same three clauses in a different order, and disagreeing means enabling a button whose request 400s with no toast. Efficiency, measured not assumed: `DatasetGridItem` is `memo`'d **and** its `toggle` is a stable `useCallback` declared above the early return — 6.011 ms → 0.765 ms for a selection change on a large grid, where `memo` alone gave 5.712 ms and would have read as a win that wasn't; the workspace's five derived pair `Set`s are now one `useMemo` on `images`, which is what lets `CorpusWorkbench` and `AutoTriageBar`'s own memos hit; `trainingNavigation` and `useCheckpointBrowser` stop reacting to fresh objects that report unchanged values (a 10 s poll re-rendering the workspace, and a 4 s one re-listing the checkpoint directory during a base conversion that cannot produce checkpoints). Eight further efficiency candidates measured under 0.15 ms and were dropped. Dead/altitude: the dead `navigationPanel === 'checkpoints'` branch (`workspaceNavigation.js` normalises that route away), `buildWatermarkRecap`'s export and its unused fallback call, the `navImages`/`images` alias, an arrow wrapper around `ds.regenerate`, four orphaned comment blocks moved back onto their code, `isCustomBase` → `baseSelected`, two inline path-splits replaced with the imported `baseName`, `OPT_FOR_FLAG` lifted out of a click handler into `trainingLaunchPolicy`, `activityProgress`/`flashLandingTarget` extracted from three and two copies. 4 lessons and 12 carried-over findings recorded above. Gate: lint clean, typecheck clean, 207 pass / 0 fail, build green, bundle within budget (largest JS 107687, total 270868 gzip). |
 | 11 | hooks-utils | todo | — | |
 | 12 | pages-shell | todo | — | |
 | 13 | remaining-components | todo | — | |

@@ -4,6 +4,14 @@ export const CONFIRMABLE_TRAINING_REFUSALS = [
   ['CUSTOM_WEIGHTS_UNVERIFIED: ', 'allow_unverified_weights'],
 ]
 
+// ds.train takes camelCase opts — maps the confirmable force flags (server
+// vocabulary, snake_case) to the option ds.train expects on a retry.
+export const OPT_FOR_FLAG = {
+  allow_caption_mismatch: 'allowCaptionMismatch',
+  allow_uncaptioned: 'allowUncaptioned',
+  allow_unverified_weights: 'allowUnverifiedWeights',
+}
+
 export function parseTrainingSteps(value) {
   const normalized = String(value || '').trim()
   const parsed = normalized && /^\d+$/.test(normalized) ? Number(normalized) : null

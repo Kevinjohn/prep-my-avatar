@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom'
 import TrainingFeedbackPanel from './TrainingFeedbackPanel'
 import { fmtBytes } from './trainingPanelModel'
+import { checkpointsToKeep, nextContinueStep } from './trainingPanelResponsibilities'
 
 /** Result-family browser, checkpoint actions, and imported LoRA inventory. */
 export default function TrainingCheckpointBrowserView(props) {
@@ -123,7 +124,7 @@ export default function TrainingCheckpointBrowserView(props) {
               </button>
               <button type="button" disabled={status.in_progress || !checkpointMatchesTraining}
                 onClick={async () => {
-                  const last = Math.max(...checkpoints.map((c) => c.step));
+                  const last = nextContinueStep(checkpoints);
                   if (await confirm({
                     title: `Continue training from step ${last}?`,
                     message: `Resume “${checkpointBaseLabel}” for 1,000 more steps, targeting step ${last + 1000}.`,
@@ -201,14 +202,7 @@ export default function TrainingCheckpointBrowserView(props) {
             <div className="flex items-center gap-2">
               <button type="button"
                 onClick={async () => {
-                  const finals = checkpoints.filter((c) => c.final).map((c) => c.filename);
-                  const best = bestEpoch?.available ? [bestEpoch.checkpoint] : [];
-                  const keep = [...new Set([...finals, ...best])];
-                  if (!keep.length) {
-                    // no final yet (unfinished run): keep the last step
-                    const last = checkpoints[checkpoints.length - 1];
-                    if (last) keep.push(last.filename);
-                  }
+                  const keep = checkpointsToKeep(checkpoints, bestEpoch);
                   const removed = checkpoints.filter((c) => !keep.includes(c.filename)).length;
                   if (!removed) return;
                   if (!(await confirm({
@@ -321,5 +315,5 @@ export default function TrainingCheckpointBrowserView(props) {
       </div>
     </details>
   )
-  return props.checkpointHost ? createPortal(content, props.checkpointHost) : content
+  return checkpointHost ? createPortal(content, checkpointHost) : content
 }
