@@ -85,13 +85,41 @@ def converted_dir(z_model: str) -> str:
     return str(_converted_root() / _safe_name(z_model))
 
 
-def is_converted(z_model: str) -> bool:
-    root = Path(converted_dir(z_model))
+def _transformer_ready(root: Path) -> bool:
+    """Le dossier diffusers porte-t-il un transformer utilisable (poids ET config
+    présents et non vides) ?
+
+    La MÊME question est posée aux deux bouts de la conversion : `convert` la pose
+    au staging pour décider s'il pose le marqueur, `is_converted` la pose à la
+    racine finale pour décider si la conversion peut être réutilisée. Les deux
+    doivent s'accorder par contrat — une règle plus stricte d'un côté ferait poser
+    un marqueur sur un dossier que l'autre refuserait ensuite (reconversion
+    silencieuse à chaque lancement), et l'inverse ferait entraîner sur un
+    transformer tronqué. Elle est donc écrite une fois."""
     weights = root / 'transformer' / 'diffusion_pytorch_model.safetensors'
     config = root / 'transformer' / 'config.json'
-    return ((root / _COMPLETE_MARKER).is_file()
-            and weights.is_file() and weights.stat().st_size > 0
+    return (weights.is_file() and weights.stat().st_size > 0
             and config.is_file() and config.stat().st_size > 0)
+
+
+def _publish_convert_state(z_model, status: str, error: str | None = None) -> dict:
+    """Écrit l'état de conversion lu par le poll UI, et le retourne.
+
+    Clé et TTL énoncés une seule fois : les cinq points d'écriture (démarrage,
+    succès, échec, échec de démarrage du worker, réconciliation post-crash)
+    décrivent la même entrée system_state, et un TTL divergent sur l'un d'eux
+    ferait disparaître le statut d'une conversion de 12 Go sous les yeux de
+    l'utilisateur."""
+    state = {'z_model': z_model, 'status': status}
+    if error is not None:
+        state['error'] = error
+    queue_manager._set_system_state(_CONVERT_KEY, state, ttl_seconds=3600)
+    return state
+
+
+def is_converted(z_model: str) -> bool:
+    root = Path(converted_dir(z_model))
+    return (root / _COMPLETE_MARKER).is_file() and _transformer_ready(root)
 
 
 def convert(z_model: str) -> str:
@@ -114,10 +142,7 @@ def convert(z_model: str) -> str:
         proc = subprocess.run(
             [str(_venv_python()), _CONVERTER, merge, official_config_path,
              '--save', str(staging)], capture_output=True, text=True, timeout=2400)
-        weights = staging / 'transformer' / 'diffusion_pytorch_model.safetensors'
-        config = staging / 'transformer' / 'config.json'
-        if proc.returncode != 0 or not weights.is_file() or weights.stat().st_size == 0 \
-                or not config.is_file() or config.stat().st_size == 0:
+        if proc.returncode != 0 or not _transformer_ready(staging):
             tail = (proc.stdout or '')[-600:] + ' | ' + (proc.stderr or '')[-600:]
             raise ValueError(f'conversion failed: {tail}')
         (staging / _COMPLETE_MARKER).write_text('ok\n', encoding='utf-8')
@@ -151,12 +176,9 @@ def convert_status() -> dict:
     if active:
         return state
     if isinstance(z_model, str) and is_converted(z_model):
-        reconciled = {'z_model': z_model, 'status': 'done'}
-    else:
-        reconciled = {'z_model': z_model, 'status': 'error',
-                      'error': 'conversion was interrupted; retry the conversion'}
-    queue_manager._set_system_state(_CONVERT_KEY, reconciled, ttl_seconds=3600)
-    return reconciled
+        return _publish_convert_state(z_model, 'done')
+    return _publish_convert_state(z_model, 'error',
+                                  'conversion was interrupted; retry the conversion')
 
 
 def start_convert_async(app, z_model: str) -> None:
@@ -174,20 +196,16 @@ def start_convert_async(app, z_model: str) -> None:
         if state.get('status') == 'running' and state.get('z_model') in _active_conversions:
             raise ValueError('a conversion is already in progress')
         _active_conversions.add(z_model)
-        queue_manager._set_system_state(_CONVERT_KEY, {'z_model': z_model, 'status': 'running'},
-                                        ttl_seconds=3600)
+        _publish_convert_state(z_model, 'running')
 
     def _run():
         with app.app_context():
             try:
                 convert(z_model)
-                queue_manager._set_system_state(
-                    _CONVERT_KEY, {'z_model': z_model, 'status': 'done'}, ttl_seconds=3600)
+                _publish_convert_state(z_model, 'done')
                 logger.info(f'conversion base terminée : {z_model}')
             except Exception as e:
-                queue_manager._set_system_state(
-                    _CONVERT_KEY, {'z_model': z_model, 'status': 'error', 'error': str(e)},
-                    ttl_seconds=3600)
+                _publish_convert_state(z_model, 'error', str(e))
                 logger.error(f'conversion base échouée ({z_model}) : {e}')
             finally:
                 with _convert_lock:
@@ -198,9 +216,6 @@ def start_convert_async(app, z_model: str) -> None:
     except Exception as exc:
         with _convert_lock:
             _active_conversions.discard(z_model)
-        queue_manager._set_system_state(
-            _CONVERT_KEY,
-            {'z_model': z_model, 'status': 'error',
-             'error': f'conversion worker failed to start: {exc}'},
-            ttl_seconds=3600)
+        _publish_convert_state(z_model, 'error',
+                               f'conversion worker failed to start: {exc}')
         raise

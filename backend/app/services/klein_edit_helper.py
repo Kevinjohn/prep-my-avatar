@@ -3,7 +3,8 @@
 Reused by the face-dataset fan-out. Builds a minimal job from the same
 single-edit workflow /generate_edit uses in single mode (WORKFLOW_IMPROVE_SKIN_PATH,
 nodes 52=LoadImage, 6=CLIPTextEncode prompt, 77=KSampler seed, 9=SaveImage,
-114=UNETLoader Klein). Deliberately a small focused helper rather than a refactor
+114=UNETLoader Klein, 10=VAELoader, 90=CLIPLoader, 92=ReferenceLatent positive —
+see `_REQUIRED_NODES`). Deliberately a small focused helper rather than a refactor
 of the large live generate_edit route.
 
 Node preflight: the shipped 'improve skin.json' is written to use ONLY core +
@@ -43,7 +44,11 @@ WORKFLOW_IMPROVE_SKIN_PATH = cfg.BACKEND_DIR / 'workflows' / 'improve skin.json'
 # Node 6 = CLIPTextEncode: the per-job prompt is written straight into its `text`
 # widget (the RES4LYF TextBox1 node 145 that used to hold it was removed so the
 # graph needs no custom-node packs).
-_REQUIRED_NODES = ('52', '6', '77', '9', '114', '10', '90')
+# Node 92 = ReferenceLatent (Positive): the multi-reference chain anchors to it
+# unconditionally, so it belongs here with the rest. Node 139 (base LoRA) is
+# deliberately NOT listed — its absence is handled explicitly below and only
+# degrades the consistency LoRA.
+_REQUIRED_NODES = ('52', '6', '77', '9', '114', '10', '90', '92')
 
 # The Klein pipeline's model dependencies, keyed by the setup_installer download
 # action that provides each. REQUIRED = the graph is invalid without it (block +

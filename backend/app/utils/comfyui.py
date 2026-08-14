@@ -12,23 +12,27 @@ Dataset Studio, config-driven and slimmed:
   - hidden_models/hidden_loras visibility filtering dropped (single-user app —
     nothing to hide).
   - Video/other-app listers dropped: `get_subtle_loras`, `get_klein_loras`
-    (unused by klein_edit_helper, the only prospective caller — it only needs
-    `load_workflow_local` + `get_flux2_klein_models`), `get_ltx_camera_loras`,
-    `get_wan_video_loras`, `get_biglove_models` (duplicate of
-    `get_checkpoint_models`, folded away), `get_krea_style_loras`.
+    (unused by klein_edit_helper, the only prospective caller — it resolves
+    Klein models itself and needs only `load_workflow_local`),
+    `get_ltx_camera_loras`, `get_wan_video_loras`, `get_biglove_models`
+    (duplicate of `get_checkpoint_models`, folded away), `get_krea_style_loras`.
   - Also dropped (no caller in this app): `configure_http_notify_node` /
     `check_comfyui_dependencies` (the video webhook-notify flow this app's
     polling-based job_queue doesn't use), `get_comfyui_queue_status`,
-    `invalidate_model_caches`, `get_model_folder_paths`, `unload_ollama_model`.
+    `invalidate_model_caches`, `get_model_folder_paths`, `unload_ollama_model`,
+    `download_image_from_worker` (this app has no remote-worker fan-out),
+    `save_sampler_params_overrides` (the admin editor it was written for was
+    never lifted — the read half stays, `sampler_params.json` is hand-edited),
+    `get_flux2_klein_models` (klein_edit_helper resolves Klein models against
+    what is actually installed, see its `resolve_klein_unet`), and the
+    `check_ollama_running`/`start_ollama`/`ensure_ollama_running` trio
+    (superseded by `app.services.ollama_control`, which owns the lifecycle).
 """
 from __future__ import annotations
 
-import glob
 import logging
 import os
 import re
-import socket
-import subprocess
 import threading
 import time
 from urllib.parse import urlencode, urljoin
@@ -216,25 +220,12 @@ def _load_sampler_params_overrides() -> dict:
         return {}
 
 
-def save_sampler_params_overrides(overrides: dict) -> None:
-    """Persist admin overrides to `sampler_params.json` (atomic write).
-
-    Raises OSError on disk failure. The admin endpoint should let those
-    propagate as a 500 so the operator sees the real cause.
-    """
-    import json
-    tmp_path = _SAMPLER_PARAMS_JSON_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(overrides, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, _SAMPLER_PARAMS_JSON_PATH)
-
-
 def get_effective_sampler_params() -> dict:
     """Return the merged view of code defaults + admin overrides.
 
     For each model present in either source, returns a single dict with
-    overrides applied on top of the code default. Used both by the admin
-    endpoint (to seed the editor) and by `_resolve_optimal_params`.
+    overrides applied on top of the code default. Read by
+    `_resolve_optimal_params`.
     """
     overrides = _load_sampler_params_overrides()
     merged = {}
@@ -512,35 +503,6 @@ def get_comfyui_history(prompt_id, worker_url=None):
         _record_comfyui_failure()
         raise ComfyUIHistoryUnavailable(
             f'Invalid ComfyUI history response from {api_addr}: {e}') from e
-
-
-def download_image_from_worker(filename, worker_url, output_dir):
-    """Télécharge une image générée depuis un worker distant via l'API ComfyUI.
-
-    Args:
-        filename: Nom du fichier image (ex: "123_GeneratedImage_00001_.png").
-        worker_url: URL de l'API du worker (ex: "http://192.168.1.100:8188/").
-        output_dir: Répertoire local où sauvegarder l'image.
-
-    Returns:
-        True si succès, False sinon.
-    """
-    try:
-        url = urljoin(worker_url, f"/view?filename={filename}&type=output")
-        response = requests.get(url, timeout=60, stream=True)
-        response.raise_for_status()
-
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, filename)
-        with open(filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        logger.info(f"Image téléchargée depuis worker : {filename} -> {output_dir}")
-        return True
-    except Exception as e:
-        logger.error(f"Erreur téléchargement image {filename} depuis {worker_url} : {e}")
-        return False
 
 
 def fetch_output_image_bytes(filename, subfolder='', timeout=30):
@@ -1062,6 +1024,31 @@ def clear_model_caches() -> None:
                 c["key"] = None
 
 
+def _lora_entry(rel_dir: str, filename: str, family: str) -> dict:
+    """One trained-LoRA picker entry, in the single shape every family lister
+    returns: {filename, displayName, triggerWord, triggerWords, group, step}.
+
+    Written once because only the FOLDER PREDICATE legitimately differs between
+    the family listers below — everything downstream of it (the LoraLoader
+    filename form, the ai-toolkit label with its Klein-cleanup fallback, the
+    first-trigger convention) is one rule. `FAMILY_LABELS` already names more
+    families than there are listers, so the next one is written by copy-paste;
+    with the rule stated here it inherits the fixes instead of the drift.
+    group/step : regroupement des checkpoints d'un même dataset dans le picker."""
+    triggers = _extract_klein_triggers(filename)
+    grp, stp = trained_lora_group(filename, family)
+    return {
+        "filename": (filename if rel_dir == "."
+                     else os.path.join(rel_dir, filename)).replace("/", "\\"),
+        "displayName": (format_trained_lora_label(filename, family)
+                        or _clean_klein_lora_label(filename)),
+        "triggerWord": triggers[0]["prompt"] if triggers else None,
+        "triggerWords": triggers,
+        "group": grp,
+        "step": stp,
+    }
+
+
 def get_zimage_loras():
     """List Z-Image LoRAs: .safetensors under a 'z image' / 'zimage' subfolder of
     models/loras. Returns [{filename, displayName, triggerWord, triggerWords, group,
@@ -1078,20 +1065,8 @@ def get_zimage_loras():
                 if "z image" not in low and "zimage" not in low and "z-image" not in low:
                     continue
                 for f in sorted(files):
-                    if not f.lower().endswith(".safetensors"):
-                        continue
-                    rel = (f if rel_dir == "." else os.path.join(rel_dir, f)).replace("/", "\\")
-                    triggers = _extract_klein_triggers(f)
-                    grp, stp = trained_lora_group(f, 'zimage')
-                    out.append({
-                        "filename": rel,
-                        "displayName": format_trained_lora_label(f, 'zimage') or _clean_klein_lora_label(f),
-                        "triggerWord": triggers[0]["prompt"] if triggers else None,
-                        "triggerWords": triggers,
-                        # group/step : regroupement des checkpoints d'un même dataset dans le picker.
-                        "group": grp,
-                        "step": stp,
-                    })
+                    if f.lower().endswith(".safetensors"):
+                        out.append(_lora_entry(rel_dir, f, 'zimage'))
     except Exception as e:
         logger.error(f"get_zimage_loras error: {e}")
     return out
@@ -1115,19 +1090,8 @@ def get_sdxl_loras():
                 if low != 'sdxl' and not low.startswith('sdxl' + os.sep):
                     continue
                 for f in sorted(files):
-                    if not f.lower().endswith(".safetensors"):
-                        continue
-                    rel = (f if rel_dir == "." else os.path.join(rel_dir, f)).replace("/", "\\")
-                    triggers = _extract_klein_triggers(f)
-                    grp, stp = trained_lora_group(f, 'sdxl')
-                    out.append({
-                        "filename": rel,
-                        "displayName": format_trained_lora_label(f, 'sdxl') or _clean_klein_lora_label(f),
-                        "triggerWord": triggers[0]["prompt"] if triggers else None,
-                        "triggerWords": triggers,
-                        "group": grp,
-                        "step": stp,
-                    })
+                    if f.lower().endswith(".safetensors"):
+                        out.append(_lora_entry(rel_dir, f, 'sdxl'))
     except Exception as e:
         logger.error(f"get_sdxl_loras error: {e}")
     return out
@@ -1153,90 +1117,11 @@ def get_krea_loras():
                 if low != 'krea' and not low.startswith('krea' + os.sep):
                     continue
                 for f in sorted(files):
-                    if not f.lower().endswith(".safetensors"):
-                        continue
-                    rel = (f if rel_dir == "." else os.path.join(rel_dir, f)).replace("/", "\\")
-                    triggers = _extract_klein_triggers(f)
-                    grp, stp = trained_lora_group(f, 'krea')
-                    out.append({
-                        "filename": rel,
-                        "displayName": format_trained_lora_label(f, 'krea') or _clean_klein_lora_label(f),
-                        "triggerWord": triggers[0]["prompt"] if triggers else None,
-                        "triggerWords": triggers,
-                        "group": grp,
-                        "step": stp,
-                    })
+                    if f.lower().endswith(".safetensors"):
+                        out.append(_lora_entry(rel_dir, f, 'krea'))
     except Exception as e:
         logger.error(f"get_krea_loras error: {e}")
     return out
-
-
-def _clean_flux2_klein_model_label(filename: str) -> str:
-    """Make a Flux 2 Klein model filename human-readable for a picker dropdown.
-
-    e.g. 'flux-2-klein-9b-fp8.safetensors' -> 'Flux 2 Klein 9B fp8'.
-    Falls back to the bare basename if the cleanup leaves nothing useful.
-    """
-    name = filename.rsplit('.', 1)[0]
-    name = re.sub(r'[-_]+', ' ', name).strip()
-    # Title-case word-by-word, preserving common quantization suffixes (fp8, q4, etc.)
-    parts = []
-    for word in name.split(' '):
-        if re.fullmatch(r'(?i)(fp\d+|q\d+|bf16|nf4|gguf)', word):
-            parts.append(word.lower())
-        elif re.fullmatch(r'(?i)(kv|vae|clip|t5|cn)', word):
-            parts.append(word.upper())
-        elif re.fullmatch(r'\d+[bB]', word):
-            parts.append(word.upper())
-        else:
-            parts.append(word.capitalize())
-    cleaned = ' '.join(parts)
-    return cleaned or filename.rsplit('.', 1)[0]
-
-
-def get_flux2_klein_models():
-    """Scan the Flux 2 Klein diffusion models directory.
-
-    Returns a list of {filename, displayName} dicts. `filename` is the path
-    relative to the ComfyUI diffusion_models root (with the 'Flux2 klein\\'
-    subfolder prefix) so it can be injected directly into a workflow's
-    UNETLoader `unet_name` field.
-
-    Back-compat: if the 'Flux2 klein/' subfolder is missing or empty, falls
-    back to any root-level Flux 2 Klein files so the picker still works
-    during the file-move transition. Empty list when unconfigured."""
-    lora_dir = _lora_dir()
-    if not lora_dir:
-        return []
-    try:
-        diffusion_dir = os.path.join(os.path.dirname(lora_dir), "diffusion_models")
-        subfolder = os.path.join(diffusion_dir, "Flux2 klein")
-
-        models = []
-        if os.path.isdir(subfolder):
-            for path in sorted(glob.glob(os.path.join(subfolder, "*.safetensors"))):
-                filename = os.path.basename(path)
-                models.append({
-                    "filename": f"Flux2 klein\\{filename}",
-                    "displayName": _clean_flux2_klein_model_label(filename),
-                })
-
-        # Fallback: pick up any Flux 2 Klein file still at the diffusion_models root
-        # so the picker keeps working while the user is mid-migration.
-        if not models and os.path.isdir(diffusion_dir):
-            for path in sorted(glob.glob(os.path.join(diffusion_dir, "*klein*.safetensors"))):
-                filename = os.path.basename(path)
-                models.append({
-                    "filename": filename,
-                    "displayName": _clean_flux2_klein_model_label(filename),
-                })
-
-        logger.info(f"Found {len(models)} Flux 2 Klein model(s)")
-        return models
-
-    except Exception as e:
-        logger.error(f"Error scanning Flux 2 Klein models: {e}", exc_info=True)
-        return []
 
 
 # --- LoRA-chain injectors ---------------------------------------------------
@@ -1261,6 +1146,53 @@ KREA_ALLOWED_WEIGHT_DTYPES = frozenset({
 })
 
 
+def _chain_model_loras(workflow, requested, allowed, *, unet_node, consumers,
+                       clamp, node_prefix, title):
+    """Chain LoraLoaderModelOnly nodes after a UNETLoader and repoint that node's
+    model consumers to the tail of the chain. Returns the number injected.
+
+    The engine-specific wrappers below differ only in DATA — which node loads the
+    UNET, which nodes consume its model, the strength bounds, and the node
+    naming. The algorithm is one rule, and the part that matters is easy to get
+    wrong twice: the consumer list is snapshotted BEFORE any node is inserted, so
+    the first link in the chain is never repointed at itself. A fix to that
+    landing in only one copy fails silently — the workflow still validates, the
+    LoRA just never reaches the sampler for one engine."""
+    rewritable_consumers = [
+        workflow[cons] for cons in consumers
+        if cons in workflow
+        and isinstance(workflow[cons].get("inputs", {}).get("model"), list)
+    ]
+    if (unet_node not in workflow or not isinstance(requested, list)
+            or not rewritable_consumers):
+        return 0
+    lo, hi = clamp
+    prev = unet_node
+    injected = 0
+    for idx, item in enumerate(requested):
+        if not isinstance(item, dict):
+            continue
+        fn = str(item.get("filename") or "")
+        if fn not in allowed:
+            continue
+        try:
+            strength = max(lo, min(hi, float(item.get("strength", 1.0))))
+        except (TypeError, ValueError):
+            strength = 1.0
+        node_id = f"{node_prefix}{idx}"
+        workflow[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"lora_name": fn, "strength_model": strength, "model": [prev, 0]},
+            "_meta": {"title": f"{title} {idx}"},
+        }
+        prev = node_id
+        injected += 1
+    if injected:
+        for node in rewritable_consumers:
+            node["inputs"]["model"] = [prev, 0]
+    return injected
+
+
 def inject_krea_loras(workflow, requested, allowed, unet_node="20", consumers=("26",)):
     """Chain LoraLoaderModelOnly nodes after the Krea 2 UNETLoader (node 20) and
     repoint its model consumers (KSampler node 26) to the end of the chain.
@@ -1271,38 +1203,9 @@ def inject_krea_loras(workflow, requested, allowed, unet_node="20", consumers=("
     filter-bypass qui n'agissent qu'à strength >10) est portée par le slider front.
     Returns the number of LoRAs injected; 0 leaves the workflow untouched.
     Independent of the conditioning rebalance (node 30), on the prompt path."""
-    rewritable_consumers = [
-        workflow[cons] for cons in consumers
-        if cons in workflow
-        and isinstance(workflow[cons].get("inputs", {}).get("model"), list)
-    ]
-    if (unet_node not in workflow or not isinstance(requested, list)
-            or not rewritable_consumers):
-        return 0
-    prev = unet_node
-    injected = 0
-    for idx, item in enumerate(requested):
-        if not isinstance(item, dict):
-            continue
-        fn = str(item.get("filename") or "")
-        if fn not in allowed:
-            continue
-        try:
-            strength = max(0.0, min(20.0, float(item.get("strength", 1.0))))
-        except (TypeError, ValueError):
-            strength = 1.0
-        node_id = f"krea_lora_{idx}"
-        workflow[node_id] = {
-            "class_type": "LoraLoaderModelOnly",
-            "inputs": {"lora_name": fn, "strength_model": strength, "model": [prev, 0]},
-            "_meta": {"title": f"Krea 2 LoRA {idx}"},
-        }
-        prev = node_id
-        injected += 1
-    if injected:
-        for node in rewritable_consumers:
-            node["inputs"]["model"] = [prev, 0]
-    return injected
+    return _chain_model_loras(workflow, requested, allowed, unet_node=unet_node,
+                              consumers=consumers, clamp=(0.0, 20.0),
+                              node_prefix="krea_lora_", title="Krea 2 LoRA")
 
 
 # Krea2T-Enhancer (MODEL-side patcher). NODE_CLASS_MAPPINGS key confirmed in SRC.
@@ -1345,42 +1248,13 @@ def inject_zimage_loras(workflow, requested, allowed,
     its model consumers to the end of the chain.
 
     `requested` = [{filename, strength}], `allowed` = whitelist of filenames
-    (path-injection guard). Strength clamped to [-2.0, 6.0]. Returns the number
-    of LoRAs injected; 0 leaves the workflow untouched."""
-    rewritable_consumers = [
-        workflow[cons] for cons in consumers
-        if cons in workflow
-        and isinstance(workflow[cons].get("inputs", {}).get("model"), list)
-    ]
-    if (unet_node not in workflow or not isinstance(requested, list)
-            or not rewritable_consumers):
-        return 0
-    prev = unet_node
-    injected = 0
-    for idx, item in enumerate(requested):
-        if not isinstance(item, dict):
-            continue
-        fn = str(item.get("filename") or "")
-        if fn not in allowed:
-            continue
-        try:
-            # Négatif autorisé (inverse le concept, plage UI -2..2) ; max 6 conservé
-            # pour rétro-compat avec les anciennes valeurs persistées.
-            strength = max(-2.0, min(6.0, float(item.get("strength", 1.0))))
-        except (TypeError, ValueError):
-            strength = 1.0
-        node_id = f"z_lora_{idx}"
-        workflow[node_id] = {
-            "class_type": "LoraLoaderModelOnly",
-            "inputs": {"lora_name": fn, "strength_model": strength, "model": [prev, 0]},
-            "_meta": {"title": f"Z-Image LoRA {idx}"},
-        }
-        prev = node_id
-        injected += 1
-    if injected:
-        for node in rewritable_consumers:
-            node["inputs"]["model"] = [prev, 0]
-    return injected
+    (path-injection guard). Strength clamped to [-2.0, 6.0] : négatif autorisé
+    (inverse le concept, plage UI -2..2) ; max 6 conservé pour rétro-compat avec
+    les anciennes valeurs persistées. Returns the number of LoRAs injected; 0
+    leaves the workflow untouched."""
+    return _chain_model_loras(workflow, requested, allowed, unet_node=unet_node,
+                              consumers=consumers, clamp=(-2.0, 6.0),
+                              node_prefix="z_lora_", title="Z-Image LoRA")
 
 
 def inject_sdxl_loras(workflow, requested, allowed, anchor="25"):
@@ -1430,52 +1304,3 @@ def inject_sdxl_loras(workflow, requested, allowed, anchor="25"):
             if inp.get("clip") == [anchor, 1]:
                 inp["clip"] = [prev, 1]
     return injected
-
-
-# --- Ollama Management ---
-# Kept only because queue_prompt_to_comfyui's Ollama-node-detection branch
-# calls ensure_ollama_running() — this app's vision captioning
-# (app.services.vision_ollama) also runs through the same local Ollama.
-
-def check_ollama_running(host="127.0.0.1", port=11434):
-    """Checks if Ollama is running by connecting to its port."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            return s.connect_ex((host, port)) == 0
-    except Exception as e:
-        logger.error(f"Error checking Ollama status: {e}")
-        return False
-
-
-def start_ollama():
-    """Starts Ollama in the background."""
-    try:
-        creation_flags = subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
-        subprocess.Popen(["ollama", "serve"], creationflags=creation_flags)
-        logger.info("Ollama service start command issued.")
-        return True
-    except FileNotFoundError:
-        logger.error("Ollama executable not found in PATH.")
-        return False
-    except Exception as e:
-        logger.error(f"Failed to start Ollama: {e}")
-        return False
-
-
-def ensure_ollama_running():
-    """Checks if Ollama is running, and starts it if not."""
-    if not check_ollama_running():
-        logger.info("Ollama is not running. Attempting to start it...")
-        if start_ollama():
-            # Wait a bit for it to start
-            for i in range(10):
-                time.sleep(1)
-                if check_ollama_running():
-                    logger.info(f"Ollama started successfully after {i+1} seconds.")
-                    return True
-            logger.warning("Ollama start command issued but port is still closed after 10 seconds.")
-            return False
-        else:
-            return False
-    return True
