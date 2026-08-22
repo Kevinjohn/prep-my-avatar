@@ -4,4 +4,5 @@ export const STRENGTH_CHOICES = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85
 export const DEFAULT_STRENGTHS = [0.7, 0.85, 1.0];
 export const MAX_TEST_IMAGES = 24;
 // Libellés des familles d'entraînement (= pipelines), pour le sélecteur de famille.
+// Deliberately partial: ComparisonStudio preserves its existing Z-Image fallback for other families.
 export const FAMILY_LABELS = { zimage: 'Z-Image', sdxl: 'SDXL', krea: 'Krea 2' };

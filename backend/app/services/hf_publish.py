@@ -37,13 +37,12 @@ from ..config import LOCAL_USER
 from ..utils.redact import redact_user_paths
 from ..version import APP_VERSION
 from . import face_dataset_service as fds
+from ..utils.training_families import FAMILY_LABELS
 
 # Licence choices offered in the modal — the usual dataset licences plus a
 # catch-all. Validated server-side (never trust the client's dropdown).
 LICENSE_CHOICES = ('cc0-1.0', 'cc-by-4.0', 'cc-by-nc-4.0', 'openrail', 'other')
 
-_FAMILY_LABEL = {'zimage': 'Z-Image', 'krea': 'Krea 2', 'sdxl': 'SDXL',
-                 'flux': 'FLUX.1', 'flux2klein': 'FLUX.2 Klein'}
 _KIND_LABEL = {'concept': 'concept', 'style': 'style'}   # else -> 'character'
 
 GITHUB_REPO = 'perfectgf/lora-dataset-studio'
@@ -220,7 +219,7 @@ def build_readme(ds, count, license, nfaa) -> str:
     """YAML front-matter (license / task_categories / tags) + a dataset card
     derived from the ⎘ Share-config pattern (kind, target family, image count,
     trigger, 'built with LoRA Dataset Studio' + repo link). Fully redacted."""
-    fam = _FAMILY_LABEL.get(_target_family(ds), _target_family(ds))
+    fam = FAMILY_LABELS.get(_target_family(ds), _target_family(ds))
     kind = _kind_label(ds)
     trigger = ' '.join(str(ds.trigger_word or '').split())
     tags = ['lora-dataset-studio']

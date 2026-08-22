@@ -4,6 +4,7 @@ from flask import jsonify
 from .. import capabilities
 from ..domain_errors import PublicDomainError
 from ..gpu_window import GpuBusyError
+from ..utils.training_families import FAMILY_LABELS
 
 
 def _map_error(e: Exception):
@@ -60,10 +61,6 @@ def _require_comfyui():
     return None
 
 
-_STUDIO_FAMILY_LABELS = {'zimage': 'Z-Image', 'sdxl': 'SDXL', 'krea': 'Krea 2 Turbo',
-                         'flux': 'FLUX.1', 'flux2klein': 'FLUX.2 Klein'}
-
-
 def _studio_missing_response(e):
     """Turn a StudioAssetsMissing into a structured 409 (same spirit as Klein's
     missing-models 409): a human message + the itemized file/node lists the front
@@ -74,7 +71,7 @@ def _studio_missing_response(e):
     encoders are large and often license-gated, and the missing custom nodes aren't
     files at all — a clear 'place X here / install node Y' is the P0 contract.
     Shared by the per-dataset run and the comparison run."""
-    fam = _STUDIO_FAMILY_LABELS.get(e.family, e.family)
+    fam = FAMILY_LABELS.get(e.family, e.family)
     bits = []
     if e.missing_files:
         bits.append(f"{len(e.missing_files)} required model file(s)")
@@ -103,8 +100,8 @@ def _studio_arch_mismatch_response(e):
     from its header, is not the Studio family's — ComfyUI would silently drop it
     and render every tile as if the LoRA were off. Tell the user WHICH Studio /
     family the file actually belongs to instead of letting the grid run blank."""
-    fam = _STUDIO_FAMILY_LABELS.get(e.family, e.family)
-    det = _STUDIO_FAMILY_LABELS.get(e.detected, e.detected)
+    fam = FAMILY_LABELS.get(e.family, e.family)
+    det = FAMILY_LABELS.get(e.detected, e.detected)
     name = (e.checkpoint or '').replace('\\', '/').rsplit('/', 1)[-1]
     msg = (f"“{name}” is a {det} LoRA, but this is the {fam} Studio — "
            f"ComfyUI would silently drop it and every tile would render as if the "

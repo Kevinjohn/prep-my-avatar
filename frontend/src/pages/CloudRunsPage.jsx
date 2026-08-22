@@ -8,6 +8,7 @@ import { useConfirmDialog, usePromptDialog } from '../components/common/ConfirmD
 import { usePersistedPreference } from '../hooks/usePersistedPreference';
 import TrainingProgress from '../components/dataset/TrainingProgress';
 import RunComparisonPanel from '../components/runs/RunComparisonPanel';
+import { TRAINING_FAMILY_LABELS } from '../utils/trainingFamilies';
 
 /* Dedicated hub for cloud training runs across ALL datasets: watch the ones in
    progress (live progress + samples), stop them, and download finished LoRAs —
@@ -15,7 +16,6 @@ import RunComparisonPanel from '../components/runs/RunComparisonPanel';
    /train/cloud/runs endpoint (actives + recent history + budget summary). */
 
 const POLL_MS = 5000;
-const FAMILY_LABEL = { zimage: 'Z-Image', krea: 'Krea 2', sdxl: 'SDXL', flux: 'FLUX.1', flux2klein: 'FLUX.2 Klein' };
 
 // "Recent" history collapse: a UI preference, not run data — persisted globally
 // (same lazy-init + effect pattern as `datasetGridTileSize` in DatasetGrid.jsx /
@@ -46,7 +46,7 @@ function timeAgo(iso) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-function famLabel(f) { return FAMILY_LABEL[f] || f || 'LoRA'; }
+function famLabel(f) { return TRAINING_FAMILY_LABELS[f] || f || 'LoRA'; }
 
 function durationLabel(seconds) {
   if (!Number.isFinite(Number(seconds))) return '';

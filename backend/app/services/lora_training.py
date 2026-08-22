@@ -35,6 +35,7 @@ from .. import config as cfg
 from ..domain_errors import DomainValidationError
 from ..models import FaceDataset, FaceDatasetImage
 from ..job_queue import queue_manager
+from ..utils.training_families import FAMILY_LABELS
 from . import face_dataset_service as fds
 from .person_mask import generate_person_masks
 
@@ -410,8 +411,6 @@ def _detect_safetensors_arch(keys) -> str | None:
 #
 # Verdict = FAMILY key ('zimage'|'sdxl'|'krea'|'flux'|'flux2klein') or None
 # (undetectable → callers MUST NOT block; the guarantee is simply absent).
-_LORA_ARCH_LABEL = {'zimage': 'Z-Image', 'sdxl': 'SDXL', 'krea': 'Krea 2',
-                    'flux': 'FLUX.1', 'flux2klein': 'FLUX.2 Klein'}
 # Key-namespace GROUP: two families in the SAME group share the tensor namespace,
 # so a wrong file loads its keys (a version mismatch then fails LOUDLY on a shape
 # error, not silently). Different groups = disjoint names = SILENT drop = the
@@ -544,7 +543,7 @@ def preflight_custom_paths(family, weights=None, vae_path=None, te_path=None,
     ValueError (the _UNVERIFIED_MARKER) unless `allow_unverified_weights` — the
     same confirm-and-retry contract as UNCAPTIONED. vae_path/te_path are only
     ever passed for SDXL (the caller enforces the per-family whitelist)."""
-    fam_label = _FAMILY_LABEL.get(family, family)
+    fam_label = FAMILY_LABELS.get(family, family)
     if _is_custom_weights(weights):
         if not os.path.isfile(weights):
             raise ValueError(f'custom weights file not found: {weights}')
@@ -1467,8 +1466,6 @@ def recommended_steps_info(dataset_id) -> dict:
 # surapprentissage.
 TRAIN_MIN_IMAGES = {'zimage': (12, 20), 'sdxl': (20, 30), 'krea': (15, 20), 'flux': (15, 20),
                     'flux2klein': (15, 20)}
-_FAMILY_LABEL = {'zimage': 'Z-Image', 'sdxl': 'SDXL', 'krea': 'Krea 2', 'flux': 'FLUX.1',
-                 'flux2klein': 'FLUX.2 Klein'}
 # VRAM mesurée : Krea 2 (12B) sature un 24 GB à 1024 (cf. KREA_TRAIN_RESOLUTION). Flux
 # est un DiT de même classe (12B) → même seuil recommandé.
 _KREA_MIN_VRAM_GB = 24
@@ -1498,7 +1495,7 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
     if not ds:
         raise ValueError('dataset not found')
     ttype = _train_type(ds, train_type)
-    label = _FAMILY_LABEL.get(ttype, ttype)
+    label = FAMILY_LABELS.get(ttype, ttype)
     blockers, warnings = [], []
     checks = []
 

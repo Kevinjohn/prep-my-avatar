@@ -1,3 +1,5 @@
+import { TRAINING_FAMILY_LABELS } from './trainingFamilies.js';
+
 export function defaultCheckpointBase(bases) {
   const choices = Array.isArray(bases) ? bases : [];
   const official = choices.find((item) => item?.value === '');
@@ -9,11 +11,7 @@ export function checkpointSelectionMatchesTraining(checkpointType, checkpointBas
 }
 
 export function trainFamilyLabel(type) {
-  if (type === 'sdxl') return 'SDXL';
-  if (type === 'krea') return 'Krea 2';
-  if (type === 'flux') return 'FLUX.1';
-  if (type === 'flux2klein') return 'FLUX.2 Klein';
-  return 'Z-Image';
+  return TRAINING_FAMILY_LABELS[type] || 'Z-Image';
 }
 
 export function loraFolderLabel(type) {

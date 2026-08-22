@@ -41,6 +41,7 @@ import requests
 from flask import current_app
 
 from .. import config as cfg
+from .training_families import FAMILY_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -579,13 +580,6 @@ def free_comfyui_vram(worker_url=None):
 # Steps d'entraînement ai-toolkit : zero-paddés à 9 chiffres (000004000). Un token
 # tout-chiffres de 4+ caractères = un compteur de steps (pas une version 'v13').
 _TRAINED_STEP_RE = re.compile(r'^\d{4,}$')
-
-# Familles d'entraînement (= pipeline). La clé interne ('zimage'/'sdxl'/'krea') et
-# son libellé d'affichage : source UNIQUE, réutilisée par le studio (sélecteur de
-# famille) et par le label de LoRA ci-dessous.
-FAMILY_LABELS = {'zimage': 'Z-Image', 'sdxl': 'SDXL', 'krea': 'Krea 2', 'flux': 'FLUX.1',
-                 'flux2klein': 'FLUX.2 Klein'}
-
 
 def family_of_lora(filename: str) -> str | None:
     """Déduit la famille (pipeline) d'un LoRA de son DOSSIER ComfyUI : les LoRA

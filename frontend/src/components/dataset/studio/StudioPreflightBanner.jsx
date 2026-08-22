@@ -13,13 +13,12 @@
  * ComfyUI would silently drop it and every tile would render as if the LoRA were
  * off. A distinct, higher-priority stop than a missing asset.
  */
-const FAMILY_LABELS = { zimage: 'Z-Image', sdxl: 'SDXL', krea: 'Krea 2 Turbo',
-  flux: 'FLUX.1', flux2klein: 'FLUX.2 Klein' };
+import { TRAINING_FAMILY_LABELS } from '../../../utils/trainingFamilies';
 
 export default function StudioPreflightBanner({ missing, archMismatch, onDismiss }) {
   if (archMismatch) {
-    const fam = FAMILY_LABELS[archMismatch.family] || archMismatch.family || 'this';
-    const det = FAMILY_LABELS[archMismatch.detected] || archMismatch.detected || 'a different';
+    const fam = TRAINING_FAMILY_LABELS[archMismatch.family] || archMismatch.family || 'this';
+    const det = TRAINING_FAMILY_LABELS[archMismatch.detected] || archMismatch.detected || 'a different';
     const name = (archMismatch.checkpoint || '').replace(/\\/g, '/').split('/').pop();
     return (
       <div role="alert"
@@ -41,7 +40,7 @@ export default function StudioPreflightBanner({ missing, archMismatch, onDismiss
   const files = missing.files || [];
   const nodes = missing.nodes || [];
   if (!files.length && !nodes.length) return null;
-  const fam = FAMILY_LABELS[missing.family] || missing.family || 'This';
+  const fam = TRAINING_FAMILY_LABELS[missing.family] || missing.family || 'This';
 
   return (
     <div role="alert"
