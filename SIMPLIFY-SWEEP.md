@@ -2,7 +2,21 @@
 
 Paste the **Goal prompt** below into a session to run one pass. The ledger at the
 bottom is the resume point, so a fresh session can pick up wherever the last one
-stopped. One pass per session; do not attempt the whole sweep in one context.
+stopped.
+
+**Two run modes.** *One pass per session* is the default and the safe one — a
+pass is a lot of verification, and a fresh context per pass is what keeps the
+verification honest. *Continuous* runs passes back to back in one session until
+the ledger is clear; use it when you want the whole sweep landed and are willing
+to trade some per-pass scrutiny for it. Either way the per-pass protocol is
+identical, and **every pass still gets its own commit, its own issue and its own
+PR** — a pass that makes something worse must cost one `git revert` and one
+closed PR, never an unpicking.
+
+In continuous mode each pass branches off the *previous pass's* branch rather
+than `main`, because every pass touches this file and `CHANGELOG.md`; branching
+them all off `main` produces a queue of PRs that conflict with each other. The
+stack merges in order and each PR's diff is only its own work.
 
 ---
 
@@ -25,6 +39,13 @@ stopped. One pass per session; do not attempt the whole sweep in one context.
 >
 > If the gates were red before you touched anything, fix nothing, mark the pass
 > `blocked`, and tell me.
+
+For a **continuous** run, replace the last two lines of the first paragraph and
+the "Do not start the next pass" sentence with: *work through every remaining
+`todo` pass in ledger order without stopping, one commit / issue / PR per pass,
+and report once at the end.* Everything else in the protocol is unchanged — in
+particular, still capture a baseline per pass and still verify every finding
+yourself.
 
 ---
 
@@ -195,6 +216,38 @@ Learned in pass 3.
   (which of two drifted family labels is correct; whether an endpoint's
   freshness contract may change). Both were deferred by consensus, correctly.
 
+Learned in pass 4.
+
+- **`module.attr` access is a test seam. This is now the third pass it has
+  bitten.** Pass 4 removed `hamming as _hamming` from `face_dataset_service` on
+  a *green ruff F401* — and turned the gate red, because
+  `test_dataset_import_from_scrape.py:65` reaches it as `svc._hamming`. Ruff
+  cannot see through `module.attr`, so **F401 on a service module is a question,
+  not a verdict**: grep the test tree for `<module>.<name>` before believing it.
+  The import is back, with `# noqa: F401` naming the seam so the next reader
+  does not repeat this. (Pass 1's lesson said to grep repo-wide; the new part is
+  that a *linter* telling you it is dead does not discharge that.)
+- **A dead symbol's docstring is usually lying about something else too.**
+  Every one of the five listers/helpers deleted from `utils/comfyui.py` sat
+  under a module docstring that described the app as having callers it does not
+  have (`get_flux2_klein_models` "for klein_edit_helper", `apply_zimage_settings`
+  "so the /generate route and the studio"). The prose drifts with the code and
+  nothing tests prose. When you delete a symbol, re-read the paragraph above it.
+- **Extract the algorithm, not the family.** The three trained-LoRA listers and
+  the two LoRA-chain injectors each looked like three/two copies of a function;
+  what was actually shared was the *entry shape* and the *chaining algorithm*,
+  with the folder predicate and the node wiring legitimately different. Naming
+  the shared part and passing the different part as data deleted 160 lines;
+  merging the functions outright would have been rejected — and was, for
+  `inject_sdxl_loras`, which also wires `clip` and discovers consumers by
+  scanning.
+- **The snapshot-before-mutate bug is the argument for the extraction.**
+  `_chain_model_loras` snapshots its consumer list before inserting any node, so
+  the first link is never repointed at itself. That subtlety existed in two
+  copies; a fix landing in one would fail *silently* — the workflow still
+  validates, the LoRA just never reaches the sampler. Duplication whose failure
+  mode is silent beats duplication that is merely long.
+
 ### Carried-over findings
 
 Real, verified, deferred because they fell outside their pass's scope. Fold each
@@ -232,6 +285,23 @@ into the pass named, rather than rediscovering it.
   shape as the `file-hashing` pass.
 - ~~Pass 3: N+1 registry query per checkpoint.~~ **Done in pass 3**
   (`checkpoint_registry.mtime_resolver`).
+- **`/code-review`, correctness: the caption cleaner and the caption *detector*
+  disagree.** `face_variations._DROP_SENT` only matches `skin\s+(?:tone|texture)`
+  and carries no eye-colour or face-shape pattern, while `_IDENTITY_LEAK` (used
+  by `caption_has_identity_leak`) matches more. A caption can therefore survive
+  cleaning and still be judged a leak — and `lora_training.py:1618` uses that
+  judgement to *drop rows from training*. Deriving one regex from the other
+  changes which captions get cleaned, so it is not a sweep finding.
+- **`/code-review`, correctness: three modules disagree on the ComfyUI
+  model-reference separator.** Checkpoints are referenced with `/`, unet and
+  lora with `\`, and `resolve_klein_unet` uses `os.sep`. They agree today only
+  because ComfyUI normalises; the third form is the one that changes meaning
+  across platforms. Related: `zimage_convert._resolve_merge` only finds its file
+  through the basename fallback on POSIX.
+- **`/code-review`, minor: `chatgpt_image._generate_via_subscription` reuses the
+  local name `body`** for the request payload (line 193) and the response text
+  (line 240). Safe only because the 401 retry branch `continue`s before the
+  second binding is read — one edit away from being a real bug.
 
 Verified in pass 2 and deliberately **skipped** — recorded so they are not
 rediscovered and re-argued. Each fails a non-negotiable rather than being wrong.
@@ -274,6 +344,32 @@ Verified in pass 3 and deliberately **skipped**, for the same reason.
 - `_remote_basename` (4 one-liners), the `_hub_header` scalar keys, a shared
   staging-scan helper, and `hf_publish`'s `_jobs` / `_lock` in-memory mirror
   (architectural). All net roughly zero lines or exceed the pass.
+
+Verified in pass 4 and deliberately **skipped**, for the same reason.
+
+- Unifying the two models-root derivations (`_out_dir()` + `../models` vs
+  `cfg.comfyui_dir('models')`) and deleting `_out_dir()`: **Codex consensus to
+  defer.** The two genuinely resolve differently when the config carries an
+  override, so this is a correctness fix that needs its own targeted tests, not
+  a dedup.
+- `enqueue_klein_edit` resolving Klein assets twice: `klein_missing_assets` is a
+  test seam — `test_image_improve.py` monkeypatches it as a *zero-argument*
+  lambda at six sites, so neither bypassing it nor giving it parameters is safe.
+- A `_BY_LABEL` index over the variation catalog: nets ≈ 0 lines, and a 63-item
+  scan is nothing beside generating the image it precedes (altitude).
+- The unreachable trailing `return None` in `nanobanana.py:90` and
+  `chatgpt_image.py:253`: one line each, and the explicit terminator documents
+  the None-on-failure contract for a future third retry branch.
+- `chatgpt_image.pinned_lane()`, `_MODEL_SUFFIXES`, `NSFW_LABEL_PREFIX`: each
+  needs edits well outside the pass, or is trivial, or wants a test rather than
+  an extraction.
+- `check_comfyui_status`: dead but for its own test. Deleting a *tested* public
+  health accessor is churn, not simplification.
+- `chatgpt_oauth`'s double `_load()` per subscription request: tiny file, and
+  merging the two reads changes the locking shape.
+- Merging `get_zimage_models` / `get_krea_models`, folding `inject_sdxl_loras`
+  into the shared chainer, and putting `_coverage_metadata` on `_e()`: all three
+  rejected by altitude as shape-matching without a shared rule.
 
 ## Passes
 
@@ -320,6 +416,21 @@ that belonged in a service tends to settle. `datasets.py` (1,267) and
 Pass 10 is oversized — `DatasetWorkspace.jsx` alone is 1,474 lines. Split it at
 run time if the fan-out looks thin.
 
+### Wave 4 — cross-cutting
+
+These are not file groups. Each is a single duplication that spans several passes,
+so no pass owns it; each was found and deliberately deferred by the pass that hit
+it first. Run them last, when every consumer is known.
+
+| # | Pass | Scope | Origin |
+|---|---|---|---|
+| 14 | `file-hashing` | one shared chunked-SHA-256 helper; delete the five copies in `lora_training_export`, `training_snapshot`, `checkpoint_registry`, `cloud_training`, `backend/infer/lama_model` | passes 2, 3 |
+| 15 | `training-families` | one neutral `services/training_families.py`; migrate `lora_training._FAMILY_LABEL`, `run_share`, `hf_publish`, `utils/comfyui.FAMILY_LABELS` and the frontend copy | pass 3 |
+
+Pass 15 carries a product decision, not just a refactor: the copies have already
+drifted (`Krea 2 Turbo` vs `Krea 2`) and someone must say which label is correct.
+Surface that rather than picking silently.
+
 ## Calibration
 
 - **Reuse** is the highest-yield lens here. 48 service files and 123 components
@@ -340,7 +451,7 @@ Update after every pass. `blocked` needs a reason.
 | 1 | face-dataset-service | done | `790fea8` | −47 net. Dead migration helper, fan-out check ×4, VLM text cleanup ×7, ref-parse ×2, dead dHash branches. Deferred: double image decode on import (needs sibling-module API change), caption-pipeline merge, coverage-state classifier. |
 | 2 | lora-training-core | done | `b7e2143` | −18 net. Dead second `_FAMILY_LABEL`, `_trigger_boundary` and `_pid_alive` copies, ai-toolkit arch probe ×2, VAE/TE override rule ×2 (had drifted), queue launch block ×2, family dispatch ×4, dead store. Preflight now reads the stored dHash instead of re-decoding every image. Deferred: shared SHA-256 helper, checkpoint N+1, `_FAMILY_LABEL` in run_share/hf_publish. |
 | 3 | remote-training-publish | done | `b741725` | +33 net (docstrings that state the deduped invariants). Offer filters ×2 and local-only-family guard ×2 (picker vs launch — must agree by contract), Retry/Continue relaunch ×2, publish staleness signature ×2, JSON-object response contract ×4 (vast) and ×2 (ai-toolkit), remote "already started" status set ×3, step-suffix regex ×4, `train_params` guarded parse ×5, legacy fingerprint rule ×2, `error_pod_kept` query ×2, `_dataset_name` in terms of `_dataset_names`, dead `reconcile_orphans(wait=)`. Efficiency: checkpoint N+1 fixed via `mtime_resolver`, plus 3 double-derivations. Deferred: family labels (own pass), `_file_hash` memoization, `_safe_json` ×10. |
-| 4 | generation-engines | todo | — | |
+| 4 | generation-engines | done | `0c58f5b` | −159 net. Five dead listers/helpers and 3 orphaned imports out of `utils/comfyui.py`; trained-LoRA picker entry ×3 → `_lora_entry`; LoRA-chain injector ×2 → `_chain_model_loras` (the snapshot-before-mutate subtlety now stated once); `zimage_convert` transformer-ready check ×2 and convert-state write ×5 → two helpers; identity-trait list ×3 → one constant; dead return value out of `apply_zimage_settings`; node 92 added to `_REQUIRED_NODES`. Three module docstrings corrected where they named callers this app does not have. Also cleared the repo's one standing `ruff` error (pass 1's own residue) — as a `noqa`, because it is a test seam. Deferred: models-root unification (Codex: needs correctness tests), caption cleaner/detector regex divergence. |
 | 5 | studio | todo | — | |
 | 6 | routes | todo | — | |
 | 7 | scrape | todo | — | |
@@ -350,3 +461,5 @@ Update after every pass. `blocked` needs a reason.
 | 11 | hooks-utils | todo | — | |
 | 12 | pages-shell | todo | — | |
 | 13 | remaining-components | todo | — | |
+| 14 | file-hashing | todo | — | |
+| 15 | training-families | todo | — | |

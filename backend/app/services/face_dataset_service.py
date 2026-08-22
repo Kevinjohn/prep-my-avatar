@@ -33,7 +33,8 @@ from . import curation_history
 from . import image_processing
 from . import trash
 from .import_analysis import analyse_image_bytes, analysis_json, parse_analysis
-from .perceptual_hash import DHashIndex as _DHashIndex, dhash as _dhash, hamming as _hamming
+from .perceptual_hash import (DHashIndex as _DHashIndex, dhash as _dhash,
+                              hamming as _hamming)  # noqa: F401 - _hamming is a test seam
 
 # Garde le modèle vision chaud entre les images d'un même batch caption/classify
 # (sinon Ollama le recharge - cold start ~10s - à CHAQUE image). Déchargé en fin

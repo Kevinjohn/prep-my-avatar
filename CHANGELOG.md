@@ -46,6 +46,42 @@ under **Unreleased** until a release is tagged.
   rule each exist in one place. Also removed an unused `reconcile_orphans`
   parameter and stopped recomputing three per-request values that were being
   derived twice. No behaviour change.
+- Trimmed the ComfyUI helper down to what this app actually calls. Five listers
+  and helpers inherited from the parent project — video/other-app LoRA listers,
+  a duplicate checkpoint lister, a webhook-notify configurator, a Klein model
+  lister the Klein path does not use, and an Ollama lifecycle trio superseded by
+  `ollama_control` — had no caller here and are gone, along with the imports
+  they held open. Three module docstrings that described callers this app does
+  not have were corrected rather than left to mislead the next reader.
+- The three trained-LoRA pickers (Z-Image, SDXL, Krea) now build their entries
+  through one helper, so the picker's filename form, label fallback and trigger
+  convention are stated once and the next family lister inherits the fixes
+  instead of the drift. Only the folder predicate differs between them, and it
+  stays local to each.
+- The Krea and Z-Image LoRA-chain injectors now share one chaining routine,
+  parameterised by which node loads the UNET, which nodes consume its model, and
+  the strength bounds. The part worth stating once is that the consumer list is
+  snapshotted before any node is inserted, so the head of the chain is never
+  repointed at itself — a fix to that in only one copy would have failed
+  silently, with the workflow still validating and the LoRA simply never
+  reaching the sampler. The SDXL injector is deliberately left alone: it wires
+  `clip` as well as `model` and finds its consumers by scanning.
+- Z-Image conversion now asks "is this transformer usable?" and writes its
+  progress state through one helper each, instead of five near-copies. The two
+  ends of the conversion have to agree by contract — a stricter rule at one end
+  would silently re-convert a 12 GB model on every launch, a looser one would
+  train against a truncated transformer — and the poll state's key and TTL are
+  now stated once. Also dropped a return value from the Z-Image workflow helper
+  that only the parent project's `/generate` history logging consumed; the one
+  caller here discarded it.
+- The face-variation prompts now interpolate one shared identity-trait clause
+  across their three wrappers instead of repeating it, so a trait added for one
+  engine cannot go missing for another — a divergence that fails nowhere and
+  just trains a LoRA on a face that drifts. Prompt text is byte-identical.
+  Separately, the Klein edit workflow's required-node list now includes the
+  positive `ReferenceLatent` node the multi-reference chain anchors to
+  unconditionally, so a workflow missing it fails at validation with a clear
+  message rather than further downstream.
 
 ## 2026.07.28.2
 

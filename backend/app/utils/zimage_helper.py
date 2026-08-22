@@ -1,10 +1,11 @@
 # app/utils/zimage_helper.py
 """Shared Z-Image (ZTurbo) workflow injection helper.
 
-Factorizes the Z-Image parameter injection that previously lived inline in
-``app/main/routes.py`` (the ``is_zturbo_workflow`` branch) so the /generate
-route AND the LoRA test studio configure the ZTurbo workflow through ONE code
-path that stays in sync with the workflow JSON shape:
+Factorizes the Z-Image parameter injection that previously lived inline in the
+parent project's ``app/main/routes.py`` (the ``is_zturbo_workflow`` branch).
+That route was not lifted, so the LoRA test studio is the only caller here; the
+helper survives as the one place that stays in sync with the workflow JSON
+shape:
 
     node 1  = UNETLoader          (z_model)
     node 4  = CLIPTextEncode      (positive prompt)
@@ -20,7 +21,6 @@ consumers 7 + 9 to the end of the LoraLoaderModelOnly chain).
 from __future__ import annotations
 
 import logging
-import os
 
 from .comfyui import get_zimage_loras, get_zimage_models, inject_zimage_loras
 
@@ -59,13 +59,11 @@ def apply_zimage_settings(workflow, *, z_steps=None, z_cfg=None, z_model=None,
     The remaining keyword args (prompt/seed/dims/filename_prefix) are the
     studio-side extras; ``None`` leaves the workflow value untouched.
 
-    Returns ``{'z_model_used', 'z_loras_used', 'loras_injected'}`` where
-    ``z_model_used`` is the basename of the applied model (or None) and
-    ``z_loras_used`` is the [{name, strength}] list of LoRAs actually applied
-    (or None) — both in the exact format the /generate history logging expects.
+    Returns nothing: the contract is "mutate the workflow in place". It used to
+    also build a {'z_model_used', 'z_loras_used', 'loras_injected'} record for
+    the parent project's /generate history logging — a route this app does not
+    have, and its one caller discarded the value.
     """
-    info = {'z_model_used': None, 'z_loras_used': None, 'loras_injected': 0}
-
     if z_steps not in (None, ''):
         if ZT_NODE_STEPS in workflow and "steps" in workflow[ZT_NODE_STEPS].get("inputs", {}):
             workflow[ZT_NODE_STEPS]["inputs"]["steps"] = max(1, min(50, int(z_steps)))
@@ -79,21 +77,12 @@ def apply_zimage_settings(workflow, *, z_steps=None, z_cfg=None, z_model=None,
         models = allowed_models if allowed_models is not None else get_zimage_models()
         if z_model in models:
             workflow[ZT_NODE_UNET]["inputs"]["unet_name"] = z_model
-            info['z_model_used'] = os.path.basename(z_model)
             logger.info(f"Z-Image: model -> {z_model}")
 
     if z_loras:
         allowed = (allowed_loras if allowed_loras is not None
                    else {item['filename'] for item in get_zimage_loras()})
         n_inj = inject_zimage_loras(workflow, z_loras, allowed)
-        applied = [item for item in z_loras
-                   if isinstance(item, dict) and item.get('filename') in allowed]
-        if applied:
-            info['z_loras_used'] = [
-                {'name': os.path.basename(item['filename']),
-                 'strength': item.get('strength', 1.0)}
-                for item in applied]
-        info['loras_injected'] = n_inj
         if n_inj:
             logger.info(f"Z-Image: injected {n_inj} LoRA(s)")
 
@@ -114,5 +103,3 @@ def apply_zimage_settings(workflow, *, z_steps=None, z_cfg=None, z_model=None,
         workflow[ZT_NODE_LATENT]["inputs"]["batch_size"] = int(batch_size)
     if filename_prefix is not None and ZT_NODE_SAVE in workflow:
         workflow[ZT_NODE_SAVE]["inputs"]["filename_prefix"] = filename_prefix
-
-    return info

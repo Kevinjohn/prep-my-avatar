@@ -11,10 +11,18 @@ import re
 # Verrou d'identité renforcé (deep-research 2026-06-14, source primaire Google AI) :
 # nommer les traits + interdire l'embellissement améliore la cohérence du visage.
 # NB : la qualité de la photo de référence reste le facteur déterminant.
+#
+# La LISTE DE TRAITS est énoncée ici et interpolée dans les trois wrappers (API
+# mono-réf, API multi-réfs, Klein) : c'est la même consigne, et les trois doivent
+# la nommer à l'identique — ajouter « menton » à une copie et l'oublier ailleurs
+# n'échoue nulle part, ça entraîne simplement un LoRA sur un visage qui dérive
+# selon le moteur. Ce qui ENTOURE la liste diffère légitimement (Klein est un
+# modèle d'édition instructionnel, cf. wrap_variation_klein) et reste local.
+_IDENTITY_TRAITS = ("same eye shape and color, nose, jawline, lips, skin tone and "
+                    "texture, and face proportions")
 IDENTITY_GUARD = (
     "This is the SAME person as the reference image. Preserve their facial identity "
-    "EXACTLY: same eye shape and color, nose, jawline, lips, skin tone and texture, "
-    "and face proportions. Do NOT beautify, slim, age, or alter the face. Use the "
+    f"EXACTLY: {_IDENTITY_TRAITS}. Do NOT beautify, slim, age, or alter the face. Use the "
     "reference ONLY to lock the facial identity: take the clothing/outfit and the "
     "facial expression from the description below, and do NOT copy the outfit or the "
     "expression shown in the reference image. "
@@ -26,8 +34,7 @@ IDENTITY_GUARD = (
 IDENTITY_GUARD_MULTI = (
     "ALL the reference images show the SAME person (different angles, expressions or "
     "framings). Use EVERY reference image together to lock the identity. Preserve their "
-    "facial identity EXACTLY: same eye shape and color, nose, jawline, lips, skin tone "
-    "and texture, and face proportions. Do NOT beautify, slim, age, or alter the face. "
+    f"facial identity EXACTLY: {_IDENTITY_TRAITS}. Do NOT beautify, slim, age, or alter the face. "
     "Use the reference images ONLY to lock the facial identity: take the clothing/outfit "
     "and the facial expression from the description below, and do NOT copy the outfit or "
     "the expression shown in the reference images. "
@@ -86,8 +93,7 @@ def wrap_variation_klein(prompt: str, nsfw: bool = False, framing: str | None = 
           "framing, clothing and facial expression accordingly; do not copy the "
           "composition, the outfit or the facial expression of the reference image (use "
           "it only for the facial identity). "
-          "Keep the facial identity exactly the same: same eye shape and color, nose, "
-          "jawline, lips, skin tone and texture, and face proportions. Do not beautify "
+          f"Keep the facial identity exactly the same: {_IDENTITY_TRAITS}. Do not beautify "
           "or alter the face. Sharp focus, natural skin texture with visible pores, "
           f"realistic lighting with soft shadows, high detail. {ending}")
 
@@ -476,8 +482,10 @@ def select_preset(name: str):
 
 
 def prompt_by_label(label):
-    """Raw catalog prompt for a display label (fallback for pre-migration rows).
-    Searches the SFW catalog then the NSFW one (regenerate needs both)."""
+    """Catalog prompt for a display label, POST-augmentation (the outfit /
+    expression directives baked in above are part of it) — the fallback for
+    pre-migration rows that never stored `variation_prompt`. Searches the SFW
+    catalog then the NSFW one (regenerate needs both)."""
     return next((e['prompt'] for e in VARIATION_CATALOG + NSFW_VARIATION_CATALOG
                  if e['label'] == label), None)
 
