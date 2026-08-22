@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..config import REPO_ROOT, get as _cfg_get
+from ..config import DEFAULT_UPDATE_REPO, REPO_ROOT, get as _cfg_get
 
 _GIT_TIMEOUT = 120
 _UPDATE_LOCK = threading.Lock()
@@ -46,6 +46,39 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _atomic_write_bytes(path: Path, data: bytes, *, sync_dir: bool = True) -> None:
+    """Publish `path` in one step: write a private sibling temporary, fsync it,
+    then rename over the target.
+
+    This module's whole job is surviving a crash mid-update, so the sequence is
+    stated ONCE and every durable write in the file goes through it. The
+    temporary is the target's own name plus '.tmp', so an interrupted write
+    leaves an obviously-partial file beside its target rather than a plausible
+    one. `sync_dir=False` is for a caller publishing SEVERAL files into a single
+    directory: it fsyncs that directory once at the end instead of per file.
+    """
+    temporary = path.with_name(path.name + '.tmp')
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    if sync_dir:
+        _fsync_directory(path.parent)
+
+
+def _atomic_write_json(path: Path, payload, *, sync_dir: bool = True,
+                       **dump_kwargs) -> None:
+    """As `_atomic_write_bytes`, for one JSON document.
+
+    Serialization kwargs stay at the CALL SITE deliberately: `boot-bundle.json`
+    is read back and hashed by the launcher, so normalizing its encoding here
+    would invalidate every manifest already on disk."""
+    _atomic_write_bytes(path, json.dumps(payload, **dump_kwargs).encode('utf-8'),
+                        sync_dir=sync_dir)
+
+
 def _journal_path(root: Path) -> Path:
     data_dir = Path(os.environ.get('LDS_DATA_DIR', str(root / 'data')))
     return data_dir / 'update-transaction.json'
@@ -59,14 +92,7 @@ def _write_journal(root: Path, payload: dict) -> None:
             path.parent.chmod(0o700)
         except OSError:
             pass
-    tmp = path.with_suffix('.json.tmp')
-    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-        json.dump(payload, handle, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    tmp.replace(path)
-    _fsync_directory(path.parent)
+    _atomic_write_json(path, payload, indent=2)
 
 
 def _clear_journal(root: Path) -> bool:
@@ -93,7 +119,10 @@ def acknowledge_restart_readiness(nonce: str, root: Path = REPO_ROOT) -> bool:
             return False
         if not nonce:
             return False
-        if journal and journal.get('state') == 'awaiting_restart':
+        # 'awaiting_restart' and 'committed' are checked IDENTICALLY — same nonce,
+        # same HEAD. The only difference is that the first still has to promote the
+        # journal; stating the shared checks once means the two answers cannot drift.
+        if journal and journal.get('state') in ('awaiting_restart', 'committed'):
             if nonce != journal.get('restart_nonce'):
                 return False
             try:
@@ -102,38 +131,22 @@ def acknowledge_restart_readiness(nonce: str, root: Path = REPO_ROOT) -> bool:
                 return False
             if current != journal.get('target'):
                 return False
-            journal['state'] = 'committed'
-            journal['ready_at'] = datetime.now(timezone.utc).isoformat()
-            try:
-                _write_journal(root, journal)
-            except OSError:
-                return False
-        elif journal and journal.get('state') == 'committed':
-            if nonce != journal.get('restart_nonce'):
-                return False
-            try:
-                current = (_git(root, 'rev-parse', 'HEAD').stdout or '').strip()
-            except (OSError, subprocess.SubprocessError):
-                return False
-            if current != journal.get('target'):
-                return False
+            if journal['state'] == 'awaiting_restart':
+                journal['state'] = 'committed'
+                journal['ready_at'] = datetime.now(timezone.utc).isoformat()
+                try:
+                    _write_journal(root, journal)
+                except OSError:
+                    return False
 
         # Manual restarts have no update transaction. Keep their exact process
         # identity durable too, and do not consume either receipt on observation.
         receipt = path.with_name('restart-readiness.json')
         payload = {'restart_nonce': nonce,
                    'ready_at': datetime.now(timezone.utc).isoformat()}
-        temporary = receipt.with_suffix('.json.tmp')
         try:
             receipt.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(
-                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-                json.dump(payload, handle, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(receipt)
-            _fsync_directory(receipt.parent)
+            _atomic_write_json(receipt, payload, sort_keys=True)
         except OSError:
             return False
         return True
@@ -151,31 +164,16 @@ def _install_recovery_bootstrap(root: Path) -> tuple[bool, str]:
         for source, name in sources:
             payload = source.read_bytes()
             compile(payload, str(source), 'exec')
-            target = directory / name
-            temporary = target.with_suffix('.py.tmp')
-            descriptor = os.open(
-                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, 'wb') as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(target)
+            # The manifest below is written LAST and syncs the directory for the
+            # whole bundle, so the code files skip their own directory fsync.
+            _atomic_write_bytes(directory / name, payload, sync_dir=False)
         manifest = {
             'version': 1,
             'files': {
                 name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
                 for _source, name in sources},
         }
-        manifest_path = directory / 'boot-bundle.json'
-        manifest_tmp = manifest_path.with_suffix('.json.tmp')
-        descriptor = os.open(
-            manifest_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            json.dump(manifest, handle, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        manifest_tmp.replace(manifest_path)
-        _fsync_directory(directory)
+        _atomic_write_json(directory / 'boot-bundle.json', manifest, sort_keys=True)
         return True, ''
     except (OSError, SyntaxError) as exc:
         return False, str(exc)
@@ -269,6 +267,52 @@ def _canonical_package_name(value: str) -> str:
     return re.sub(r'[-_.]+', '-', str(value).strip()).lower()
 
 
+def _installed_distributions(value):
+    """Map canonical package name -> ``value(dist)`` for every installed
+    distribution that reports a name.
+
+    Deliberately NOT cached, and deliberately re-called around every pip run:
+    the whole point of the three call sites is comparing the environment BEFORE
+    a resolver run with the environment AFTER it. What is shared here is the
+    canonicalisation and the nameless-distribution skip, so the before/after
+    sets are always keyed the same way and can be compared directly."""
+    return {
+        _canonical_package_name(dist.metadata.get('Name') or ''): value(dist)
+        for dist in importlib.metadata.distributions()
+        if dist.metadata.get('Name')
+    }
+
+
+def _python_dependency_change(changed_names) -> bool:
+    """Whether an incoming change set touches the Python dependency inputs.
+
+    The forward path decides whether to snapshot and reinstall from this; the
+    rollback path decides whether to REVERSE that install from it. Stated twice,
+    the two could disagree and leave the interpreter reinstalled but never
+    restored — so they read the same predicate."""
+    return any(name == 'pyproject.toml' or name.startswith('backend/requirements')
+               for name in changed_names)
+
+
+def _frontend_dependency_change(changed_names) -> bool:
+    """Whether an incoming change set touches the front-end lockfile inputs.
+    Paired with `_python_dependency_change`; same forward/rollback reasoning."""
+    return any(name in ('frontend/package.json', 'frontend/pnpm-lock.yaml')
+               for name in changed_names)
+
+
+def _frontend_source_change(changed_names) -> bool:
+    """Whether any front-end SOURCE changed — that is, anything under
+    ``frontend/`` other than the built bundle.
+
+    Kept separate from `_frontend_dependency_change` on purpose: forward
+    verification rebuilds on any source change, while rollback only reinstalls
+    when the lockfile itself moved. That asymmetry is intended, so the two
+    questions stay two functions."""
+    return any(name.startswith('frontend/') and not name.startswith('frontend/dist/')
+               for name in changed_names)
+
+
 def _pip_environment_snapshot() -> tuple[dict | None, str]:
     """Capture enough state to restore the interpreter exactly after a failed
     resolver run. Requirements files alone cannot remove newly-added transitive
@@ -284,11 +328,7 @@ def _pip_environment_snapshot() -> tuple[dict | None, str]:
     if result.returncode != 0:
         return None, (result.stderr or result.stdout or 'pip freeze failed').strip()[-1500:]
     frozen = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    packages = {
-        _canonical_package_name(dist.metadata.get('Name') or ''): dist.version
-        for dist in importlib.metadata.distributions()
-        if dist.metadata.get('Name')
-    }
+    packages = _installed_distributions(lambda dist: dist.version)
     return {'freeze': frozen, 'packages': packages}, ''
 
 
@@ -324,12 +364,7 @@ def _restore_python_environment(root: Path, snapshot: dict,
         logs.append(output)
     if not ok:
         return False
-    current = {
-        _canonical_package_name(dist.metadata.get('Name') or ''):
-            (dist.metadata.get('Name') or '')
-        for dist in importlib.metadata.distributions()
-        if dist.metadata.get('Name')
-    }
+    current = _installed_distributions(lambda dist: dist.metadata.get('Name') or '')
     extras = sorted(current[name] for name in current if name not in original)
     if extras:
         ok, output = _run_checked(
@@ -339,11 +374,7 @@ def _restore_python_environment(root: Path, snapshot: dict,
         if not ok:
             return False
     # Verify the final set and versions, not merely pip's return code.
-    final = {
-        _canonical_package_name(dist.metadata.get('Name') or ''): dist.version
-        for dist in importlib.metadata.distributions()
-        if dist.metadata.get('Name')
-    }
+    final = _installed_distributions(lambda dist: dist.version)
     expected = {_canonical_package_name(name): str(version)
                 for name, version in original.items()}
     if final != expected:
@@ -572,8 +603,7 @@ def _rollback_update(root: Path, before: str, journal: dict, reason: str,
         # and dependency state converge on the same revision again.
         if journal.get('state_before_rollback') in ('installing_dependencies', 'verifying'):
             changed = journal.get('changed_files') or []
-            if any(name == 'pyproject.toml' or name.startswith('backend/requirements')
-                   for name in changed):
+            if _python_dependency_change(changed):
                 snapshot = journal.get('python_environment_before')
                 if snapshot:
                     restore_ok = (_restore_python_environment(root, snapshot, logs)
@@ -590,8 +620,7 @@ def _rollback_update(root: Path, before: str, journal: dict, reason: str,
                         restore_ok = restore_ok and ok
                         if restore_log:
                             logs.append(restore_log)
-            if any(name in ('frontend/package.json', 'frontend/pnpm-lock.yaml')
-                   for name in changed):
+            if _frontend_dependency_change(changed):
                 pnpm = _pnpm_command(root)
                 if pnpm:
                     ok, restore_log = _run_checked(
@@ -678,59 +707,54 @@ def git_update_status(root=None) -> dict | None:
     if not is_git_checkout(root):
         return None
     base = {'ok': True, 'is_git': True, 'current': APP_VERSION, 'update_available': False}
+
+    def fail(reason: str, **extra) -> dict:
+        """Every failure exit is the same three statements; say them once so no
+        future branch can set a reason and forget to clear ``ok``."""
+        base.update({'ok': False, 'reason': reason, **extra})
+        return base
+
     try:
         branch_result = _git(root, 'rev-parse', '--abbrev-ref', 'HEAD')
         branch = (branch_result.stdout or '').strip()
         if branch_result.returncode != 0 or not branch or branch == 'HEAD':
-            base['ok'] = False
-            base['reason'] = 'Could not resolve the current git branch.'
-            return base
+            return fail('Could not resolve the current git branch.')
         fetch = _git(root, 'fetch', '--quiet', 'origin', branch)
         if fetch.returncode != 0:
-            base['ok'] = False
-            base['reason'] = 'git fetch failed (offline, or no access to the remote).'
-            return base
+            return fail('git fetch failed (offline, or no access to the remote).')
         behind_result = _git(root, 'rev-list', '--count', f'HEAD..origin/{branch}')
         behind = (behind_result.stdout or '').strip()
         local_result = _git(root, 'rev-parse', '--short', 'HEAD')
         remote_result = _git(root, 'rev-parse', '--short', f'origin/{branch}')
         if (behind_result.returncode != 0 or local_result.returncode != 0
                 or remote_result.returncode != 0):
-            base['ok'] = False
-            base['reason'] = 'Could not compare the local and fetched revisions.'
-            return base
+            return fail('Could not compare the local and fetched revisions.')
         base['branch'] = branch
         base['current_sha'] = (local_result.stdout or '').strip()
         base['remote_sha'] = (remote_result.stdout or '').strip()
         try:
             n = int(behind)
         except ValueError:
-            base['ok'] = False
-            base['reason'] = 'Git returned an invalid revision comparison.'
-            return base
+            n = -1
         if n < 0 or not re.fullmatch(r'[0-9a-fA-F]{4,64}', base['current_sha']) \
                 or not re.fullmatch(r'[0-9a-fA-F]{4,64}', base['remote_sha']):
-            base['ok'] = False
-            base['reason'] = 'Git returned an invalid revision comparison.'
-            return base
+            return fail('Git returned an invalid revision comparison.')
         base['behind'] = n
         base['update_available'] = n > 0
         # Links so the user can read WHAT the pending update contains before
         # pulling: a compare view of exactly the incoming commits when behind,
         # else the branch history. Short SHAs work fine in GitHub URLs.
-        repo = _cfg_get('updates.repo') or 'Kevinjohn/prep-my-avatar'
+        repo = _cfg_get('updates.repo') or DEFAULT_UPDATE_REPO
         base['repo'] = repo
         base['commits_url'] = f'https://github.com/{repo}/commits/{branch}'
         if n > 0 and base['current_sha'] and base['remote_sha']:
             base['compare_url'] = (f'https://github.com/{repo}/compare/'
                                    f"{base['current_sha']}...{base['remote_sha']}")
     except FileNotFoundError:
-        base['ok'] = False
-        base['git_missing'] = True
-        base['reason'] = 'git is not installed / not on PATH — install Git to enable in-app updates.'
+        fail('git is not installed / not on PATH — install Git to enable in-app updates.',
+             git_missing=True)
     except subprocess.SubprocessError:
-        base['ok'] = False
-        base['reason'] = 'git command timed out.'
+        fail('git command timed out.')
     return base
 
 
@@ -754,8 +778,7 @@ def _apply_update_locked(root=None) -> dict:
     """
     root = Path(root or REPO_ROOT)
     if not is_git_checkout(root):
-        from ..config import get as cfg_get
-        repo = cfg_get('updates.repo') or 'Kevinjohn/prep-my-avatar'
+        repo = _cfg_get('updates.repo') or DEFAULT_UPDATE_REPO
         return {'ok': False, 'manual': True,
                 'reason': 'This is a packaged build (no git checkout) — download the latest '
                           'release and replace the folder.',
@@ -803,15 +826,10 @@ def _apply_update_locked(root=None) -> dict:
     except subprocess.SubprocessError:
         return {'ok': False, 'reason': 'git command timed out; the live checkout was not changed.'}
 
-    python_deps = any(name == 'pyproject.toml'
-                      or name.startswith('backend/requirements') for name in changed_names)
-    frontend_deps = any(name in ('frontend/package.json', 'frontend/pnpm-lock.yaml')
-                        for name in changed_names)
-    frontend_sources = any(
-        name.startswith('frontend/') and not name.startswith('frontend/dist/')
-        for name in changed_names)
+    python_deps = _python_dependency_change(changed_names)
+    frontend_deps = _frontend_dependency_change(changed_names)
+    frontend_sources = _frontend_source_change(changed_names)
     frontend_bundle = any(name.startswith('frontend/dist/') for name in changed_names)
-    frontend_verification = frontend_sources or frontend_bundle
     python_snapshot = None
     if python_deps:
         python_snapshot, snapshot_error = _pip_environment_snapshot()
@@ -921,15 +939,17 @@ def _apply_update_locked(root=None) -> dict:
         journal['state_before_rollback'] = 'verifying'
         return _rollback_update(root, before, journal,
                                 f'{startup_reason} The update was rolled back.', logs)
-    if frontend_verification:
-        if frontend_sources:
-            frontend_ok, frontend_reason = _verify_frontend(root, pnpm, logs)
-        else:
-            frontend_ok, frontend_reason = _verify_frontend_bundle(root)
-        if not frontend_ok:
-            journal['state_before_rollback'] = 'verifying'
-            return _rollback_update(root, before, journal,
-                                    f'{frontend_reason} The update was rolled back.', logs)
+    # Sources take priority: a rebuild verifies the shipped bundle as a side
+    # effect, so there is nothing left for the bundle-only check to add.
+    frontend_ok, frontend_reason = True, ''
+    if frontend_sources:
+        frontend_ok, frontend_reason = _verify_frontend(root, pnpm, logs)
+    elif frontend_bundle:
+        frontend_ok, frontend_reason = _verify_frontend_bundle(root)
+    if not frontend_ok:
+        journal['state_before_rollback'] = 'verifying'
+        return _rollback_update(root, before, journal,
+                                f'{frontend_reason} The update was rolled back.', logs)
     after = (_git(root, 'rev-parse', 'HEAD').stdout or '').strip()
     if after != target:
         journal['state_before_rollback'] = 'verifying'
@@ -993,16 +1013,9 @@ def schedule_restart(delay: float = 1.2, restart_nonce: str | None = None) -> No
                 'Could not install the private restart bootstrap; '
                 f'the server remains running: {recovery_error}')
 
-    py = sys.executable
-    run_py = os.path.abspath(sys.argv[0])
-    workdir = os.path.dirname(run_py) or None
-    data_dir = str(_journal_path(REPO_ROOT).parent)
-    private_launcher = os.path.join(data_dir, 'source-launcher.py')
-    parent_pid = os.getpid()
-
     if supervised:
-        data_dir = Path(os.environ.get('LDS_DATA_DIR', str(REPO_ROOT / 'data')))
-        request_path = data_dir / 'restart-request.json'
+        request_dir = Path(os.environ.get('LDS_DATA_DIR', str(REPO_ROOT / 'data')))
+        request_path = request_dir / 'restart-request.json'
         request_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             'host': os.environ.get('LDS_HOST') or _cfg_get('server.host') or '127.0.0.1',
@@ -1010,14 +1023,7 @@ def schedule_restart(delay: float = 1.2, restart_nonce: str | None = None) -> No
         }
         if restart_nonce:
             payload['restart_nonce'] = restart_nonce
-        temporary = request_path.with_suffix('.json.tmp')
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            json.dump(payload, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(request_path)
-        _fsync_directory(request_path.parent)
+        _atomic_write_json(request_path, payload)
 
         def _exit_for_supervisor():
             import time
@@ -1026,6 +1032,15 @@ def schedule_restart(delay: float = 1.2, restart_nonce: str | None = None) -> No
 
         threading.Thread(target=_exit_for_supervisor, daemon=True).start()
         return
+
+    # Only the unsupervised path spawns a helper, so its inputs are gathered here
+    # rather than above the branch that never reaches them.
+    py = sys.executable
+    run_py = os.path.abspath(sys.argv[0])
+    workdir = os.path.dirname(run_py) or None
+    data_dir = str(_journal_path(REPO_ROOT).parent)
+    private_launcher = os.path.join(data_dir, 'source-launcher.py')
+    parent_pid = os.getpid()
 
     helper = (
         'import os,time,subprocess\n'
@@ -1045,7 +1060,7 @@ def schedule_restart(delay: float = 1.2, restart_nonce: str | None = None) -> No
         f'child=subprocess.Popen([{py!r},{private_launcher!r},"--root",'
         f'{str(REPO_ROOT)!r},"--data-dir",{data_dir!r}], cwd={workdir!r}, '
         'creationflags=flags, env=env)\n'
-        'rc=child.wait()\n'
+        'child.wait()\n'
     )
 
     def _spawn_then_exit():
