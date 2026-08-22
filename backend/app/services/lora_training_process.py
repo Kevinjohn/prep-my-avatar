@@ -19,10 +19,11 @@ from . import face_dataset_service as fds
 from . import lora_training as training
 from .training_jobs import EffectiveTrainingJob
 from .lora_training import (
-    MIN_FREE_GB_TRAIN, VAE_TE_OVERRIDE_FAMILIES, _PERSISTED,
+    MIN_FREE_GB_TRAIN, _PERSISTED,
     _TRAINING_GPU_LEASE_TTL, _TRAIN_LAUNCH_LOCK, _TRAIN_STATE_TTL,
     _aitoolkit_dir, _aitoolkit_supports_flux2klein, _aitoolkit_supports_krea,
-    _datasets_dir, _default_variant_for, _hf_home, _is_custom_weights,
+    _datasets_dir, _default_variant_for, _effective_vae_te, _hf_home,
+    _is_custom_weights,
     _jobs_dir, _mask_fields, _masks_dir,
     _output_dir, _run_name, _safe_trigger,
     _sdxl_base_choices, _train_type, _valid_variants_for, _venv_python,
@@ -305,21 +306,9 @@ def _launch_training(user_id, dataset_id, steps: int | None = None,
             and base_model not in _sdxl_base_choices()):
         raise ValueError('unknown SDXL checkpoint')
     # --- Custom base/vae/te : whitelist STRICTE par famille + preflight avant spawn.
-    # VAE/TE ne sont honorés QUE par SDXL (ai-toolkit) → refuser explicitement pour
-    # toute autre famille (jamais d'ignore silencieux). `_PERSISTED` = « non fourni
-    # par l'appelant » → on garde la valeur persistée (continue/queue) ; une valeur
-    # explicite (même vide) remplace. Une famille non-SDXL n'emporte jamais de VAE/TE.
-    _prov_vae = vae_path is not _PERSISTED and (vae_path or '').strip()
-    _prov_te = te_path is not _PERSISTED and (te_path or '').strip()
-    if launch_fam not in VAE_TE_OVERRIDE_FAMILIES:
-        if _prov_vae or _prov_te:
-            raise ValueError('VAE / text-encoder overrides are SDXL-only')
-        eff_vae = eff_te = None
-    else:
-        eff_vae = (ds.train_vae_path if vae_path is _PERSISTED
-                   else ((vae_path or '').strip() or None))
-        eff_te = (ds.train_te_path if te_path is _PERSISTED
-                  else ((te_path or '').strip() or None))
+    # Une famille non-SDXL n'emporte jamais de VAE/TE (cf. _effective_vae_te, qui
+    # porte la MÊME règle pour la mise en file).
+    eff_vae, eff_te = _effective_vae_te(ds, launch_fam, vae_path, te_path)
     # Preflight (fichier existe, header safetensors lisible, sniff d'arch) — un
     # sniff non concluant lève un refus CONFIRMABLE (_UNVERIFIED_MARKER), levé par
     # `allow_unverified_weights` exactement comme UNCAPTIONED.

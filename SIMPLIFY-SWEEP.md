@@ -131,6 +131,34 @@ Learned the hard way in pass 1. Read before starting.
 - **The ledger cannot record its own commit SHA.** Either commit the pass and
   update the ledger in a small follow-up commit, or write the SHA in afterwards.
 
+Learned in pass 2.
+
+- **Import order is the constraint that governs cross-module dedup.**
+  `lora_training.py` imports its own carved-out siblings *mid-file* (settings
+  @698, export @1105, config_builder @1120, checkpoints @1129, process @1913,
+  queue @2197) and ends with an `__all__` facade re-exporting everything. A
+  sibling can only `from .lora_training import X` when `X` is defined *above*
+  that sibling's own import line; anything defined later must be reached at call
+  time as `training.X`. Pass 2's reuse lens proposed a top-level import that
+  would have raised `ImportError` at startup. Check the line number of the
+  definition against the line number of the import before moving any name.
+- **Where to put a new shared helper is decided by its callers' import lines,**
+  not by what reads well. `_effective_vae_te` had to sit near the top of
+  `lora_training.py` so that both process (@1913) and queue (@2197) could import
+  it eagerly.
+- **`training.X` attribute access is a test seam, not an oversight.** Several
+  tests monkeypatch through the module object. Converting `training.X` into a
+  direct `from … import X` silently breaks patching without failing at import.
+- **A second module-level assignment makes the first one dead.** Pass 2 found a
+  `_FAMILY_LABEL` dict declared twice ~900 lines apart; function bodies resolve
+  globals at call time, so only the later one was ever read. Two definitions of
+  the same module-level name are always a finding.
+- **Re-doing work is not always waste.** The efficiency lens flagged
+  `training_snapshot.capture` hashing each source twice; the second pass is a
+  documented re-verification after the whole copy window, because a file copied
+  early can be edited while later files copy. Read the comment before deleting
+  the second call.
+
 ### Carried-over findings
 
 Real, verified, deferred because they fell outside their pass's scope. Fold each
@@ -149,6 +177,35 @@ into the pass named, rather than rediscovering it.
   the coverage-state classifier (`covered`/`weak`/`missing`/`unknown`) is
   hand-written three times with different rules — one path cannot produce
   `unknown` at all. Both need dedicated passes with their own test coverage.
+- **Its own pass (`file-hashing`): chunked SHA-256 is written five times.**
+  `lora_training_export._sha256_file`, `training_snapshot._sha256`,
+  `checkpoint_registry._file_hash`, `cloud_training._file_sha256` and
+  `backend/infer/lama_model._sha256` are the same open-loop-digest with
+  different chunk sizes. It spans passes 2, 3 and 9, so no single pass owns it;
+  give it a small pass that adds one shared helper and deletes the other four.
+- **Pass 3 (`remote-training-publish`): N+1 registry query per checkpoint.**
+  `list_checkpoints` calls `checkpoint_registry.record_for_mtime` once per
+  checkpoint file. The fix needs a batch lookup on the `checkpoint_registry`
+  API, which is pass 3's file, so pass 2 left it alone.
+- **Pass 3 (`remote-training-publish`): `_FAMILY_LABEL` is hand-redeclared.**
+  `run_share.py:31` and `hf_publish.py:45` each carry their own copy of the
+  family-label map that `lora_training.py` already exports. Pass 2 removed the
+  dead in-file duplicate; these two are in pass 3's scope.
+
+Verified in pass 2 and deliberately **skipped** — recorded so they are not
+rediscovered and re-argued. Each fails a non-negotiable rather than being wrong.
+
+- Moving the ~185 lines of train-settings vocabulary and validators out of
+  `lora_training.py` into `lora_training_settings.py`: architectural, and
+  deletes nothing.
+- Splitting the 435-line `training_preflight` into `_rule_*` functions: adds
+  abstraction, removes zero lines.
+- `imported_checkpoint_path` derived in both `dataset_disk_usage` and
+  `delete_imported_checkpoint`: medium confidence, and the second is a
+  destructive path.
+- The `training_folder` ternary repeated 5× in `lora_training_config_builder`:
+  nets −2 lines.
+- The 8 `_x_eff` getters sharing a lookup shape: marginal, low agent confidence.
 
 ## Passes
 
@@ -213,7 +270,7 @@ Update after every pass. `blocked` needs a reason.
 | # | Pass | Status | Commit | Notes |
 |---|---|---|---|---|
 | 1 | face-dataset-service | done | `790fea8` | −47 net. Dead migration helper, fan-out check ×4, VLM text cleanup ×7, ref-parse ×2, dead dHash branches. Deferred: double image decode on import (needs sibling-module API change), caption-pipeline merge, coverage-state classifier. |
-| 2 | lora-training-core | todo | — | |
+| 2 | lora-training-core | done | `b7e2143` | −18 net. Dead second `_FAMILY_LABEL`, `_trigger_boundary` and `_pid_alive` copies, ai-toolkit arch probe ×2, VAE/TE override rule ×2 (had drifted), queue launch block ×2, family dispatch ×4, dead store. Preflight now reads the stored dHash instead of re-decoding every image. Deferred: shared SHA-256 helper, checkpoint N+1, `_FAMILY_LABEL` in run_share/hf_publish. |
 | 3 | remote-training-publish | todo | — | |
 | 4 | generation-engines | todo | — | |
 | 5 | studio | todo | — | |

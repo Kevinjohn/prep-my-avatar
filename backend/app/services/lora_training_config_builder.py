@@ -40,20 +40,18 @@ def build_job_config(ds, dataset_folder: str, steps: int = 3000, training_folder
     `training_folder` (cloud seam) : utilisé TEL QUEL comme process.training_folder
     dans les 3 familles - aucun appel à _output_dir() (pas d'ai-toolkit local requis).
     Défaut (None) = comportement historique inchangé (_output_dir() / _run_name(ds))."""
-    if _train_type(ds) == 'sdxl':
-        cfg_ = _build_job_config_sdxl(ds, dataset_folder, steps, training_folder=training_folder)
-        _apply_style_overrides(ds, cfg_['config']['process'][0])
-        return cfg_
-    if _train_type(ds) == 'krea':
-        cfg_ = _build_job_config_krea(ds, dataset_folder, steps, training_folder=training_folder)
-        _apply_style_overrides(ds, cfg_['config']['process'][0])
-        return cfg_
-    if _train_type(ds) == 'flux':
-        cfg_ = _build_job_config_flux(ds, dataset_folder, steps, training_folder=training_folder)
-        _apply_style_overrides(ds, cfg_['config']['process'][0])
-        return cfg_
-    if _train_type(ds) == 'flux2klein':
-        cfg_ = _build_job_config_flux2klein(ds, dataset_folder, steps, training_folder=training_folder)
+    # Une famille = un builder dédié, puis le MÊME post-traitement style. Table
+    # locale (et non module-level) : les builders sont définis plus bas dans ce
+    # fichier. Famille inconnue → None → on tombe sur le chemin zimage ci-dessous,
+    # qui reste le défaut historique.
+    builder = {
+        'sdxl': _build_job_config_sdxl,
+        'krea': _build_job_config_krea,
+        'flux': _build_job_config_flux,
+        'flux2klein': _build_job_config_flux2klein,
+    }.get(_train_type(ds))
+    if builder is not None:
+        cfg_ = builder(ds, dataset_folder, steps, training_folder=training_folder)
         _apply_style_overrides(ds, cfg_['config']['process'][0])
         return cfg_
     trigger = _safe_trigger(ds)

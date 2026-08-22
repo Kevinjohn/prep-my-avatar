@@ -24,13 +24,6 @@ from .lora_training import (
 logger = logging.getLogger(__name__)
 
 
-def _pid_alive(pid) -> bool:
-    try:
-        import psutil
-        return bool(pid) and psutil.pid_exists(int(pid))
-    except Exception:
-        return False
-
 def _masks_dir(dataset_folder: str) -> str:
     """Dossier des masques d'un export (convention mask_path ai-toolkit : dossier
     frère, mêmes noms de fichiers)."""
@@ -238,7 +231,7 @@ def cleanup_abandoned_local_training_staging() -> int:
             pid = owner.get('pid') if isinstance(owner, dict) else None
         except (OSError, ValueError):
             pid = None
-        if pid is not None and _pid_alive(pid):
+        if pid is not None and training._pid_alive(pid):
             continue
         shutil.rmtree(candidate, ignore_errors=True)
         if not candidate.exists():

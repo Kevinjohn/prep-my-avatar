@@ -7,7 +7,27 @@ under **Unreleased** until a release is tagged.
 
 ## Unreleased
 
-No unreleased changes.
+### Changed
+
+- Training preflight no longer re-decodes every admitted image to find
+  near-duplicates. It reads the stored `perceptual_hash` that the import
+  already wrote from the same normalized bytes, and falls back to decoding only
+  when that column is empty. Preflight runs on tab open, on every launch and on
+  every queue admission, so this removes a full Pillow decode per kept image
+  from all three.
+
+### Fixed
+
+- The queue and the launcher now apply one shared rule for SDXL-only VAE /
+  text-encoder overrides, instead of two hand-synchronised copies, so the queue
+  cannot admit a job the launcher would later refuse.
+
+### Internal
+
+- Removed a dead second definition of the training family-label table, a
+  duplicated trigger-boundary rule, a duplicated PID-liveness helper, a
+  duplicated ai-toolkit arch probe, a duplicated queue-launch block, and a dead
+  store in the queue advance path. No behaviour change.
 
 ## 2026.07.28.2
 
