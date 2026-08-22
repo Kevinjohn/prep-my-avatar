@@ -1,4 +1,11 @@
-"""Pure image normalization and vision-bounding-box helpers."""
+"""Image normalization, the vision bounding-box calls, and their pure parsers.
+
+Only `normalize_to_webp`, `_bbox_from_vision_json`/`parse_watermark_bbox` and
+`face_crop_to_square_webp(use_vision=False)` are pure. `detect_head_bbox` and
+`detect_watermark_bbox` POST to a local Ollama and cost seconds each; the split
+between them and the parsers is deliberate, so a batch can tell an EMPTY vision
+answer apart from a clean "no watermark here".
+"""
 
 import io
 import json
@@ -21,6 +28,37 @@ def normalize_to_webp(image_bytes: bytes, size: int = 1024) -> bytes:
     return output.getvalue()
 
 
+def _bbox_from_vision_json(raw, *, honour_present=False):
+    """Decode one bbox answer from a vision model into ``(x1, y1, x2, y2)`` in
+    [0, 1], or ``None`` when there is no usable box.
+
+    Both bbox prompts share this wire format and both had their own copy of it,
+    with different exception tuples covering the same failures. The rules it
+    states, in order: the answer is the FIRST ``{...}`` in a reply that may be
+    wrapped in prose; the model emits a 0-1000 grid; Qwen3-VL routinely emits
+    SWAPPED corners, so min/max rather than trust; and anything outside the grid
+    (or degenerate) is rejected rather than clamped, because a box the model got
+    that wrong is not evidence of where the subject is.
+
+    ``honour_present`` is the watermark prompt's extra turn: it can answer
+    "there is no watermark" explicitly, which is a different fact from an
+    unparseable reply and must not be confused with one by the caller.
+    """
+    try:
+        start = raw.index('{')
+        parsed = json.loads(raw[start:raw.index('}', start) + 1])
+        if honour_present and 'present' in parsed and not parsed.get('present'):
+            return None
+        y1, x1, y2, x2 = (float(parsed[key]) for key in ('y1', 'x1', 'y2', 'x2'))
+    except (ValueError, KeyError, AttributeError, TypeError):
+        return None
+    x1, x2 = min(x1, x2), max(x1, x2)
+    y1, y2 = min(y1, y2), max(y1, y2)
+    if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
+        return None
+    return x1 / 1000.0, y1 / 1000.0, x2 / 1000.0, y2 / 1000.0
+
+
 def detect_head_bbox(image_bytes):
     """Return the primary head as normalized coordinates, or ``None``."""
     try:
@@ -34,42 +72,26 @@ def detect_head_bbox(image_bytes):
         prefer_json=True,
         fmt='json',
     )
-    try:
-        start = raw.index('{')
-        parsed = json.loads(raw[start:raw.index('}', start) + 1])
-        y1, x1, y2, x2 = (float(parsed[key]) for key in ('y1', 'x1', 'y2', 'x2'))
-    except (ValueError, KeyError, AttributeError, TypeError):
-        return None
-    x1, x2 = min(x1, x2), max(x1, x2)
-    y1, y2 = min(y1, y2), max(y1, y2)
-    if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
-        return None
-    return x1 / 1000.0, y1 / 1000.0, x2 / 1000.0, y2 / 1000.0
+    return _bbox_from_vision_json(raw)
 
 
 def parse_watermark_bbox(raw):
-    """Parse and margin-expand a vision watermark response."""
-    try:
-        start = raw.index('{')
-        parsed = json.loads(raw[start:raw.index('}', start) + 1])
-    except (ValueError, AttributeError, TypeError):
+    """Parse and margin-expand a vision watermark response.
+
+    The margin is this parser's own, not part of the shared decode: VLM
+    watermark boxes run tight, and an unexpanded box leaves a rim of the mark
+    behind after the crop or inpaint. A head box wants no such padding.
+    """
+    box = _bbox_from_vision_json(raw, honour_present=True)
+    if box is None:
         return None
-    if 'present' in parsed and not parsed.get('present'):
-        return None
-    try:
-        y1, x1, y2, x2 = (float(parsed[key]) for key in ('y1', 'x1', 'y2', 'x2'))
-    except (KeyError, TypeError, ValueError):
-        return None
-    x1, x2 = min(x1, x2), max(x1, x2)
-    y1, y2 = min(y1, y2), max(y1, y2)
-    if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
-        return None
+    x1, y1, x2, y2 = box
     margin = WATERMARK_BBOX_MARGIN
     return (
-        max(0.0, x1 / 1000.0 - margin),
-        max(0.0, y1 / 1000.0 - margin),
-        min(1.0, x2 / 1000.0 + margin),
-        min(1.0, y2 / 1000.0 + margin),
+        max(0.0, x1 - margin),
+        max(0.0, y1 - margin),
+        min(1.0, x2 + margin),
+        min(1.0, y2 + margin),
     )
 
 

@@ -52,24 +52,28 @@ class DHashIndex:
         for key in self._bands(value):
             self._buckets.setdefault(key, set()).add(position)
 
-    def nearest_within(self, value, radius=DEFAULT_MAX_DISTANCE):
-        try:
-            radius = int(radius)
-        except (TypeError, ValueError) as exc:
-            raise ValueError('dHash radius must be an integer from 0 to 8') from exc
-        if not 0 <= radius <= DEFAULT_MAX_DISTANCE:
-            raise ValueError('dHash radius must be between 0 and 8')
+    def nearest_within(self, value):
+        """Closest indexed hash within `DEFAULT_MAX_DISTANCE` bits, or (None, None).
+
+        The radius is fixed, not a knob. Eight is the largest distance the nine
+        bands above can answer EXACTLY (the pigeonhole argument in the class
+        docstring), so a caller-chosen larger radius would quietly return false
+        negatives, and a smaller one is a filter the caller can apply to the
+        distance this already returns. It used to be a parameter guarded by two
+        never-raised ValueErrors; no caller has ever passed it.
+        """
         candidates = set()
         for key in self._bands(value):
             candidates.update(self._buckets.get(key, ()))
         best = None
-        best_distance = radius + 1
+        best_distance = DEFAULT_MAX_DISTANCE + 1
         for position in sorted(candidates):
             payload, candidate = self._pairs[position]
             distance = hamming(value, candidate)
             if distance < best_distance:
                 best, best_distance = (payload, candidate), distance
-        return ((best, best_distance) if best is not None and best_distance <= radius
+        return ((best, best_distance)
+                if best is not None and best_distance <= DEFAULT_MAX_DISTANCE
                 else (None, None))
 
     def __bool__(self):

@@ -9,6 +9,23 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- The four features that run a heavy ML model in its own interpreter — face
+  similarity scoring, person masks, watermark inpainting and JoyCaption
+  captioning — now share one description of how the app talks to those workers,
+  instead of each restating the same stdin/stdout JSON protocol. The four copies
+  had already drifted, and one of them reported a dead worker as a silent empty
+  result rather than an error the user could see.
+- A crashed ML worker now reports its own last error line — the message that
+  actually names the problem — wherever it is reported at all, rather than in
+  only some of the four features.
+- Analysing an imported photo is faster: the exposure check reads the image
+  histogram instead of walking every pixel in Python, and the two quality
+  checks no longer make a full extra copy of the source image each. Scores are
+  unchanged.
+- The resolution tiers offered by the app now carry their display names
+  alongside their sizes, so adding a tier can no longer produce a capabilities
+  page that fails to load.
+
 - The in-app updater now writes every one of its crash-critical files — the
   update journal, the restart receipt, the private recovery bootstrap and its
   manifest, and the restart request — through a single write-then-rename
@@ -94,6 +111,14 @@ under **Unreleased** until a release is tagged.
   once per family instead of twice. The listing previously asked which families
   had checkpoints, then re-scanned each of those families to get the same list
   back.
+
+### Removed
+
+- Dead code in the analysis and ML-worker services: an error-detail helper that
+  always returned nothing (while its documentation promised a field the app
+  never sent), an unused interpreter lookup, an unreachable missing-file check,
+  and a search-radius setting on the duplicate-image index that no caller has
+  ever set and that could not have been widened without returning wrong answers.
 
 ### Fixed
 

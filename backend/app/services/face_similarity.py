@@ -1,13 +1,13 @@
 """Scoring de ressemblance faciale via InsightFace antelopev2, en SUBPROCESS dans un
-interprete DEDIE (insightface absent du venv Flask). Meme pattern que
-app/services/joycaption.py. CPU -> ne touche pas le GPU/ComfyUI."""
+interprete DEDIE (insightface absent du venv Flask). Le protocole subprocess/JSON
+lui-meme vit dans app/services/ml_worker.py. CPU -> ne touche pas le GPU/ComfyUI."""
 from __future__ import annotations
-import json
 import logging
 import os
-import subprocess
+import sys
 
 from .. import config as cfg
+from .ml_worker import run_json_worker
 
 logger = logging.getLogger(__name__)
 
@@ -16,20 +16,12 @@ _SCRIPT = str(cfg.BACKEND_DIR / 'infer' / 'face_score_infer.py')
 
 
 def _scoring_python() -> str:
-    import sys
     return cfg.get('face_scoring.python') or sys.executable
 
 
 def is_available() -> bool:
     from ..capabilities import probe_face_scoring
     return probe_face_scoring()['ok']
-
-
-def _stderr_tail(proc) -> str:
-    """Derniere ligne non vide de stderr — pour un crash Python c'est la ligne
-    `SomeError: ...` du traceback, exactement ce qu'un humain veut lire."""
-    return next((ln.strip() for ln in reversed((proc.stderr or '').splitlines())
-                 if ln.strip()), '')
 
 
 def score_dataset_faces(ref_path, image_paths, timeout: int = 900, ref_paths=None):
@@ -51,31 +43,13 @@ def score_dataset_faces(ref_path, image_paths, timeout: int = 900, ref_paths=Non
     for candidate in list(ref_paths or []) + [ref_path]:
         if candidate and os.path.isfile(candidate) and candidate not in refs:
             refs.append(candidate)
-    payload = json.dumps({"ref": ref_path, "refs": refs, "images": image_paths,
-                          "models_root": cfg.get('face_scoring.models_root') or None})
-    try:
-        proc = subprocess.run([_scoring_python(), _SCRIPT], input=payload,
-                              capture_output=True, text=True, encoding='utf-8',
-                              errors='replace', timeout=timeout,
-                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning('face_similarity: subprocess echec : %s', e)
-        return {}, {'kind': 'failed', 'detail': str(e)}
-    line = next((ln for ln in reversed((proc.stdout or '').splitlines())
-                 if ln.strip().startswith('{')), '')
-    if not line:
-        tail = _stderr_tail(proc)
-        logger.warning('face_similarity: pas de JSON (rc=%s) stderr=%s',
-                       proc.returncode, (proc.stderr or '')[-400:])
-        return {}, {'kind': 'failed',
-                    'detail': tail or f'scorer produced no output (rc={proc.returncode})'}
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError as e:
-        logger.warning('face_similarity: JSON illisible : %s', e)
-        return {}, {'kind': 'failed', 'detail': f'unreadable scorer output: {e}'}
-    if not isinstance(data, dict):
-        return {}, {'kind': 'failed', 'detail': 'invalid scorer response schema'}
+    data, error = run_json_worker(
+        _scoring_python(), _SCRIPT,
+        {"ref": ref_path, "refs": refs, "images": image_paths,
+         "models_root": cfg.get('face_scoring.models_root') or None},
+        timeout=timeout, logger=logger, label='face_similarity', noun='scorer')
+    if error is not None:
+        return {}, error
     if not data.get('ref_ok'):
         logger.warning('face_similarity: ref inutilisable : %s', data.get('error'))
         return {}, {'kind': 'ref_unusable',

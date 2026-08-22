@@ -20,12 +20,16 @@ _RATIOS = {
     "ultrawide": (21, 9),
 }
 
-# Tier -> target megapixels (the "size" knob; ratio comes from the format).
+# Tier -> (target megapixels, display label). The "size" knob; ratio comes from
+# the format. Label lives HERE rather than in the metadata builder below because
+# the two are one decision: a tier with no label used to be a KeyError raised
+# from /api/capabilities at serialization time, which is a long way from the
+# one-line edit that caused it.
 _TIERS = {
-    "fast": 0.7,
-    "standard": 1.0,
-    "hq": 1.3,
-    "max": 1.6,
+    "fast": (0.7, "Fast"),
+    "standard": (1.0, "Standard"),
+    "hq": (1.3, "HQ"),
+    "max": (1.6, "Max"),
 }
 DEFAULT_TIER = "standard"
 
@@ -46,7 +50,7 @@ def compute_tier_dims(aspect_ratio, resolution_tier=DEFAULT_TIER, max_long_side=
     than mathematically exact). Unknown values fall back to square/default.
     """
     rw, rh = _RATIOS.get(aspect_ratio, _RATIOS["square"])
-    mp = _TIERS.get(resolution_tier, _TIERS[DEFAULT_TIER])
+    mp = _TIERS.get(resolution_tier, _TIERS[DEFAULT_TIER])[0]
     r = rw / rh
     px = mp * 1_000_000
     h = math.sqrt(px / r)
@@ -67,9 +71,8 @@ def resolution_metadata():
         'version': 1,
         'default_tier': DEFAULT_TIER,
         'tiers': [
-            {'value': value, 'label': {'fast': 'Fast', 'standard': 'Standard',
-                                      'hq': 'HQ', 'max': 'Max'}[value]}
-            for value in _TIERS
+            {'value': value, 'label': label}
+            for value, (_mp, label) in _TIERS.items()
         ],
         'dimensions': {
             profile: {

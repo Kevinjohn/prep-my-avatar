@@ -360,6 +360,44 @@ Learned in pass 5.
   `config`, and `trash` — and those must *not* merge, because they differ in
   directory-fsync, chmod, and (for `trash._write_metadata`) being a per-file test
   seam in a hot move loop. Scope the dedup to where the copies actually agree.
+- **`import subprocess` is itself a test seam — the SIXTH sighting of the seam
+  lesson, and the first where the seam was an import rather than a call.** Pass 9
+  moved the subprocess/JSON worker protocol out of `face_similarity`, `person_mask`
+  and `joycaption` into `services/ml_worker.py`, which made each module's own
+  `import subprocess` dead — and instantly broke 14 tests patching
+  `'app.services.person_mask.subprocess.run'`. That string resolves through the
+  module attribute to the *global* subprocess module, so the patch still works
+  after the move; what breaks is only the lookup of the `subprocess` attribute on
+  a module that no longer imports it. The right fix is to repoint the patch at
+  `app.services.ml_worker.subprocess.run` — where the call now genuinely lives —
+  and say so in each test file's docstring. Keeping a dead `import subprocess
+  # noqa` to satisfy the patch string would have been a lie in the source.
+- **A module docstring that says "same pattern as X" is a finding, not a
+  signpost.** Three of the four ML worker modules said it in so many words. That
+  is the author telling you the duplication is deliberate *and* unmanaged: it had
+  drifted on the accented spelling of the log line, the exception grouping, the
+  log level, and — the one that cost a user-visible bug — whether a dead worker
+  came back as a structured error or a silent `{}`. When the code documents its
+  own copy, believe it and act.
+- **Share the mechanism, not the policy.** `ml_worker.run_json_worker` owns how to
+  run a worker and read its answer; it deliberately does NOT own what a valid
+  answer looks like or whether a failure is fatal. Those genuinely differ — a
+  missing person-mask is survivable, a broken face scorer must be shown — and each
+  caller kept its own schema validation and its own `(results, error)` vs `{}`
+  return. Four call sites collapsed and not one contract moved.
+- **The exception to a shared helper is worth a comment where it is not used.**
+  `watermark_lama.inpaint_batch` is the one caller that cannot use the shared
+  runner: it reads the worker's partial stdout after a `TimeoutExpired` so images
+  finished before the kill are still published. Left unexplained, that reads as
+  the one place somebody forgot to migrate. The note sits at the `subprocess.run`
+  that stayed.
+- **A default nobody passes is a claim you have to keep true.**
+  `DHashIndex.nearest_within(value, radius=8)` guarded its radius with two
+  `ValueError`s that never fired, for an argument none of the six call sites has
+  ever supplied. Eight is not a knob: it is the largest distance the nine bands
+  above can answer *exactly*, so a larger radius would silently return false
+  negatives and a smaller one is a filter the caller can apply to the distance
+  already returned. Deleting the parameter deleted the need to validate it.
 
 ### Carried-over findings
 
@@ -768,6 +806,114 @@ Verified in pass 4 and deliberately **skipped**, for the same reason.
   a public API change *and* `get` is a monkeypatch seam
   (`test_background_jobs.py:144` exercises the `touch → get` call edge as a
   stale-session race test). Take it together with the throttling change, not before.
+- **Verified in pass 9 and deferred. Every one of these is real; each was left
+  because its fix lands outside `analysis-quality`'s file set.**
+  - **Import decodes every photo at full resolution TWICE.** Measured on a 24 MP
+    JPEG: `import_analysis.analyse_image_bytes` decodes (94.8 ms), then
+    `image_processing.normalize_to_webp` / `face_crop_to_square_webp` decodes the
+    same bytes again (94.8 ms). Three further `Image.open`s are header-only and
+    free. At the 400-image batch cap that is **~38 s of pure waste per import,
+    ~29 % of the CPU import pass.** The fix is an optional `image=` parameter on
+    all three, with `face_dataset_service.import_images` decoding once and
+    threading it — so the change lives in `face_dataset_service.py`. Not blocked
+    by a seam: `test_dataset_service.py:167-176` patches
+    `svc.analyse_image_bytes` with `lambda *_a, **_kw`. **This is the same finding
+    the pass-1 ledger deferred; it now has numbers.**
+  - **A `crop=True` import loads and evicts the 8B vision model once per image.**
+    `image_processing.detect_head_bbox` calls `describe_image_ollama` without
+    `keep_alive`, so it defaults to 0 — while every other batch in the codebase
+    passes `face_dataset_service._VISION_BATCH_KEEPALIVE = '5m'` and unloads once
+    in a `finally`, which is exactly what `vision_ollama`'s own docstring
+    instructs. This is the single largest cost found in pass 9. The fix needs a
+    keyword-only `keep_alive` on `detect_head_bbox` **plus** a `partial(...)`
+    detector and a `finally: unload_vision_model()` in `import_images` — and it
+    must land together with the batching item below, because "end of batch" is
+    currently per image. Constraint from the seam map: the injected `detector` must
+    stay a one-positional-argument callable (`test_image_processing.py:31`).
+  - **`routes/datasets.py:487-499` calls `import_images` once per uploaded file.**
+    Each call re-runs `get_dataset`, a full `FaceDatasetImage` scan, an index
+    rebuild and its own `db.session.commit()` — O(N²) rows and 400 fsyncs for a
+    400-image import. Worse, `_existing_dhash_rows` re-decodes from disk every row
+    whose `perceptual_hash` is NULL and, per its own docstring, discards the
+    result; with 50 such rows that is 20,000 webp decodes (~3.5 min) on one
+    import. Two independent fixes: pass a generator of all uploads in ONE call
+    (the route-level fakes take `files` and never inspect it, so no seam breaks),
+    and write the backfilled hash to `row.perceptual_hash` so it is computed once
+    ever. Note the stale comment at `face_dataset_service.py:5203-5209` claiming
+    dHash "is NOT stored in a column" — the column exists and is written.
+  - **Exact-duplicate rejection runs after the expensive analysis, not after the
+    hash.** `face_dataset_service.py:3302` analyses (~130 ms), then `:3307` tests
+    `source_sha256` against `exact_hashes`. Only the 4.9 ms sha256 is needed to
+    reject. Re-importing an already-imported folder throws away ~52 s of computed
+    work. Same reordering applies at `_merge_training_images:3482-3490`.
+  - **Head-bbox detection base64s the FULL-RESOLUTION original to Ollama** —
+    ~21 MB of JSON per image, ~8.4 GB per batch. Every other vision pass sends the
+    stored 1024 px webp (~86× smaller), and the returned box is normalised 0-1000
+    so downscaling cannot change the answer. The decoded image is already in hand
+    inside `face_crop_to_square_webp`; folds naturally into the single-decode fix.
+  - **`analyze_corpus` re-analyses every row unconditionally**
+    (`face_dataset_service.py:3753-3770`) — ~56 s per click — despite
+    `ANALYSIS_VERSION` and `source_sha256` both being available to guard it.
+  - **The Ollama base URL default exists four times under two contracts.**
+    `config.py:46` (`DEFAULTS`, the real authority), `capabilities.py:357`,
+    `vision_ollama.py:27`, `ollama_control.py:29`. `ollama_control._url()`
+    rstrips; `vision_ollama._ollama_url()` does not and makes both its call sites
+    rstrip instead. Worse, `capabilities.py:107,185` treat a blank `ollama.url` as
+    "not configured" and show ✗ while the two services silently substitute the
+    default and keep working — one setting, two answers. Wants one
+    `config.ollama_url()`; two of the four sites are outside pass 9.
+  - **Each ML service's interpreter chain is written twice** — once in the wrapper
+    that runs the worker (`face_similarity._scoring_python`,
+    `person_mask._mask_python`, `watermark_lama.lama_python`), once in the probe
+    that decides it can (`capabilities.py:249,255,265`). `setup_installer.py:404`
+    already documents the correct pattern ("reuse the wrapper's OWN resolver … so
+    the install target and the later import can never drift apart") and applies it
+    to watermark only. The failure mode is a probe reporting ✓ against a different
+    interpreter than the subprocess launches. Fix belongs in `capabilities.py`.
+  - **`joycaption.is_available()` disagrees with `capabilities.py:583`.** The
+    other three ML services delegate `is_available()` to their `probe_*`;
+    joycaption inlines a weaker predicate, so the Settings badge and the caption
+    router can disagree. Needs a `probe_joycaption()` in `capabilities.py`.
+  - **bbox validation is on the deprecated path only.** `inpaint_watermark` (the
+    documented back-compat adapter) coerces, rejects non-finite, sorts corners and
+    clamps; `inpaint_watermarks` and `inpaint_batch` — the current API and the
+    common multi-image path — do none of it. So *user-drawn* manual boxes skip the
+    validation *auto-detected* boxes get. Moving the block up is a real behaviour
+    change on the unvalidated paths, so it is a deliberate decision, not a sweep
+    edit.
+  - **`inpaint_watermarks`/`inpaint_watermark` default `device='cpu'`** while
+    `config.py:95` sets `watermark.device: 'auto'` and `resolve_device()` exists to
+    honour it; `inpaint_batch` correctly makes `device` keyword-only and required.
+    The caller has grown a provably-dead workaround around the default:
+    `**({'device': device} if device != 'cpu' else {})` at
+    `face_dataset_service.py:5244,5247`.
+  - **The technical-quality weighting `0.42/0.23/0.35` is written three times** —
+    `import_analysis.py:104`, `face_dataset_service.py:6195`,
+    `src/avatar_prep/core.py:285`. `import_analysis` produces the metrics, so the
+    other two are consumers reimplementing its formula.
+  - **`import_analysis.py` and `src/avatar_prep/core.py` are near-copies that have
+    already drifted** — same thresholds, same reason strings, but `core.py` guards
+    the Pillow API with a `getdata()` fallback the backend does not, gates green on
+    face visibility where the backend does not, and did *not* get pass 9's
+    `_grey_thumbnail` fix. These gate two different products and may have to stay
+    two copies — but nothing currently says the divergence is intentional, and
+    that silence is the finding.
+  - **`import_analysis` emits `coverage_value: "unknown"`**, a constant belonging
+    to a DB column that `face_dataset_service` owns, in the one module whose stated
+    purpose is independence from that subsystem. Both insert sites route the
+    constant back out of the JSON blob.
+  - **`backend/infer/face_score_infer.py:85-86` is dead** — `if ref and ref not in
+    refs` can never fire, because `face_similarity` unconditionally appends
+    `ref_path` to `refs` before serialising (`test_face_scoring.py:201` pins the
+    invariant from the caller side).
+  - **The tier key list is written three times** (`resolution._TIERS`,
+    `lora_test_studio.RESOLUTION_TIERS` — whose comment admits the copy — and the
+    label map, which pass 9 folded into `_TIERS`), and `TEST_ASPECTS` exists in two
+    modules **sharing a name and disagreeing on type** (`set` in `studio_scoring`,
+    `dict` in `lora_test_studio`). The 8-ratio Generate list vs the studio's 5 is a
+    real product distinction and must stay separate.
+  - **Stale reference:** `utils/resolution.py:11` cites
+    `AspectRatioSelector.jsx`, which does not exist anywhere in `frontend/`.
 
 ## Passes
 
@@ -854,7 +1000,7 @@ Update after every pass. `blocked` needs a reason.
 | 6 | routes | done | `809669e` | +33 net (the helpers' own docstrings, which state the deduped rules). `_ok_or_404`/`_payload_or_404` name the "not found is a 404 with `{'error': 'not found'}`" contract that was restated at 19 sites across 2 blueprints — 2 look-alike sites deliberately left written out, and now visible as the only exceptions. `_map_klein_error` collapses the Klein-missing branch + its inline import from 4 handlers (kept in `datasets.py`, not `_common.py`: it starts downloads, which the Studio 409 refuses). `_head_crop_warning` names the guard-rail rule with both CTAs left caller-supplied, since the two user-visible strings had drifted and must stay drifted. `_probe_outbound_ip` shares the UDP-connect socket lifecycle between `_lan_ip`/`_tailscale_ip` with each probe's filter left at the caller. 5 redundant local re-imports of module-level names dropped; `dataset_train_checkpoints` no longer runs `get_dataset` twice per request. 4 traps + 3 skips and 4 carried findings recorded above; the efficiency lens found nothing inside this pass's file set. Gate 1740 passed / 1 skipped, ruff clean. |
 | 7 | scrape | done | `36230c0` | −65 net. `base.download_direct_media` names the fetch→content-type→atomic-write rule that Reddit and Sex.com had byte-identical (constants included); the other three copies keep their own media policy and are now documented as the trap they are. `gdl_source` stopped hand-rolling `atomic_write_bytes`, which sat imported by three siblings in the same package and was the only copy outside the atomicity test. `validators.is_bunkr_host` gives the rotating-TLD SSRF rule one home instead of three — while the two domain allowlists it serves stay deliberately separate. Dead: `_validate_media_file` + `_looks_like_image` (37 lines, and one of the two magic-byte tables went with them), `ValidationResult.to_dict`, netfetch's unused `COMFYUI_OUTPUT_DIR` shim. 8 traps recorded above, plus 3 lessons. Skipped with Codex's agreement: the ~100-line erome/picazor streaming downloader. Skipped on verification: the triple DNS resolution (the call chain is the security regression test). Surfaced, not decided: ~700 lines of `scrape/` are unreachable from production. Gate 1740 passed / 1 skipped, ruff clean. |
 | 8 | data-lifecycle | done | `cd65d00` | +76 net, but ~140 of the 355 added lines are docstrings recording why the traps must stay split — executable code is down. `updater._atomic_write_bytes`/`_atomic_write_json` replace five hand-written temp-fsync-rename copies in the module whose whole job is surviving an interruption; `_python_dependency_change`/`_frontend_dependency_change` stop the forward and rollback paths restating the same predicate (the third, `_frontend_source_change`, stays separate because the asymmetry is deliberate); `_installed_distributions`, a `fail()` epilogue in `git_update_status`, `DEFAULT_UPDATE_REPO` imported instead of hard-coded twice, and the frontend verification flattened to if/elif. `trash._undo_moves` unifies four rollback loops and fixed a real bug on the way: `send_paths_to_trash` marked every planned item `rolled_back` regardless of which moves actually reversed. Also `trash._make_private`, `_mark_unrestorable`, `_iter_file_sizes` (iterator shared, totals deliberately not). `integrity` materializes each table once, `_PHASH_RE` matches `_HASH_RE`'s strictness, dead re-checks removed. `background_jobs._loads` enforces shape at decode, `_terminal_error` unifies the message the two layered guards raise. `curation_history` resolves the dataset once instead of re-coercing at six sites. `dataset_activity._mint`/`_drop`. 5 lessons and 6 carried-over findings recorded above, including the O(N²) `touch` log write, updater's drifted output formatting, and the five-copy atomic-write rule. Gate 1740 passed / 1 skipped, ruff clean. |
-| 9 | analysis-quality | todo | — | |
+| 9 | analysis-quality | done | `7e2f2ab` | Net roughly flat, and again most of the added lines are docstrings stating rules that were previously restated in code. `services/ml_worker.py` gives the "run an ML worker in a dedicated interpreter, speak JSON over stdin/stdout" protocol one home; `face_similarity`, `person_mask`, `watermark_lama._run_lama_payload` and `joycaption` had all four written it out, three of them under a docstring literally saying "meme pattern que <sibling>", and it had drifted on the log wording, the exception grouping, the log level and — the one that cost a user-visible bug — whether a dead worker returned a structured error or a silent `{}`. Each caller keeps its own schema validation and its own fatality decision; `inpaint_batch` deliberately keeps its own call (it needs partial stdout after a timeout) and now says so. `_stderr_tail` went from two byte-identical copies to one. `image_processing._bbox_from_vision_json` backs both bbox parsers, which had three different exception tuples over one wire format. Dead: `ollama_control._stderr_tail` (a `return ''` stub whose docstring promised a `stderr` key the tests assert is absent), `watermark_lama._lama_python`, `_run_lama_payload`'s unreachable image-not-found guard, `_staged_image_path`'s unused default, `nearest_within(radius=)` and the two ValueErrors guarding it. Efficiency, in-scope: `_exposure_score` reads a 256-bin histogram instead of building a quarter-million-element Python list and running `statistics.mean` over it (22.1 ms → 7.3 ms per photo, arithmetic identical), `_grey_thumbnail` removes a full RGB copy and a second greyscale conversion per photo, and `inpaint_batch` no longer json-parses every stdout line twice on the success path. `_TIERS` carries its own display labels so a new tier can no longer be a `KeyError` raised out of `/api/capabilities`. 5 lessons and 17 carried-over findings recorded above — including the measured double decode on import (~29 % of the CPU import pass), the per-image 8B vision model reload, and the per-file `import_images` call that makes a 400-photo import O(N²). Gate 1740 passed / 1 skipped, ruff clean. |
 | 10 | dataset-components | todo | — | |
 | 11 | hooks-utils | todo | — | |
 | 12 | pages-shell | todo | — | |

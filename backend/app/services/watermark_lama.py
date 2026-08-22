@@ -1,7 +1,9 @@
 """Watermark inpainting via the local Big-LaMa adapter, run in a dedicated ML
-interpreter. Same subprocess pattern as
-person_mask.py / face_similarity.py. Le device est configurable (Auto/GPU/CPU) ;
-le routeur reserve la fenetre GPU uniquement quand CUDA est effectivement utilise.
+interpreter. Le protocole subprocess/JSON lui-meme vit dans
+app/services/ml_worker.py — sauf pour `inpaint_batch`, qui lit en plus le flux de
+progression ligne-a-ligne du worker et doit donc garder son propre appel (voir la
+note sur place). Le device est configurable (Auto/GPU/CPU) ; le routeur reserve
+la fenetre GPU uniquement quand CUDA est effectivement utilise.
 
 LaMa est NON-generatif : seuls les pixels du rectangle masque changent, le reste de
 l'image reste identique. Sert la V1 de la correction automatique des watermarks : les
@@ -20,12 +22,16 @@ import tempfile
 import time
 
 from .. import config as cfg
+from .ml_worker import run_json_worker, stderr_tail
 
 logger = logging.getLogger(__name__)
 
 # lama_infer.py vit dans backend/infer/ (pas app/services/).
 _SCRIPT = str(cfg.BACKEND_DIR / 'infer' / 'lama_infer.py')
 _cuda_probe = {'python': None, 'checked': 0.0, 'available': False}
+# Shown to the user by both entry points; named so the two cannot drift into
+# saying different things about the same missing install.
+_UNAVAILABLE_DETAIL = 'watermark inpainting is not installed (ML extras)'
 
 
 def lama_python() -> str:
@@ -34,10 +40,6 @@ def lama_python() -> str:
     # PUBLIC : le bouton « Install inpainting » (setup_installer) cible CE meme
     # resolveur, pour que l'install atterrisse la ou le wrapper importe ensuite.
     return cfg.get('watermark.python') or cfg.get('masks.python') or sys.executable
-
-
-# Back-compat alias (le nom prive etait le point d'entree historique).
-_lama_python = lama_python
 
 
 def is_available() -> bool:
@@ -76,41 +78,22 @@ def resolve_device(requested=None) -> str:
     return 'cuda' if available else 'cpu'
 
 
-def _stderr_tail(proc) -> str:
-    return next((ln.strip() for ln in reversed((proc.stderr or '').splitlines())
-                 if ln.strip()), '')
-
-
 def _run_lama_payload(payload, timeout: int = 300) -> tuple[bool, dict | None]:
-    """Execute le worker LaMa en preservant son protocole subprocess/JSON."""
-    image_path = payload.get('image_path')
-    if not image_path or not os.path.isfile(image_path):
-        return False, {'kind': 'failed', 'detail': 'image not found'}
+    """Execute le worker LaMa en preservant son protocole subprocess/JSON.
+
+    Le seul appelant est `_inpaint_staged`, qui vient de creer `image_path` via
+    mkstemp+copy2 : inutile de re-verifier son existence ici. Une source
+    reellement absente est deja rapportee par le `copy2` en amont
+    (« could not stage image: … »), avec le chemin fautif.
+    """
     if not is_available():
         return False, {'kind': 'unavailable',
-                       'detail': 'watermark inpainting is not installed (ML extras)'}
-    payload_json = json.dumps(payload)
-    try:
-        proc = subprocess.run([_lama_python(), _SCRIPT], input=payload_json,
-                              capture_output=True, text=True, encoding='utf-8',
-                              errors='replace', timeout=timeout,
-                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning('watermark_lama: subprocess echec : %s', e)
-        return False, {'kind': 'failed', 'detail': str(e)}
-    line = next((ln for ln in reversed((proc.stdout or '').splitlines())
-                 if ln.strip().startswith('{')), '')
-    if not line:
-        tail = _stderr_tail(proc)
-        logger.warning('watermark_lama: pas de JSON (rc=%s) stderr=%s',
-                       proc.returncode, (proc.stderr or '')[-400:])
-        return False, {'kind': 'failed',
-                       'detail': tail or f'inpainter produced no output (rc={proc.returncode})'}
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError as e:
-        logger.warning('watermark_lama: JSON illisible : %s', e)
-        return False, {'kind': 'failed', 'detail': f'unreadable inpainter output: {e}'}
+                       'detail': _UNAVAILABLE_DETAIL}
+    data, error = run_json_worker(
+        lama_python(), _SCRIPT, payload, timeout=timeout, logger=logger,
+        label='watermark_lama', noun='inpainter')
+    if error is not None:
+        return False, error
     if not data.get('ok'):
         detail = data.get('error') or 'inpaint failed'
         logger.warning('watermark_lama: echec : %s', detail)
@@ -118,12 +101,17 @@ def _run_lama_payload(payload, timeout: int = 300) -> tuple[bool, dict | None]:
     return True, None
 
 
-def _staged_image_path(image_path: str, output_path: str | None = None) -> str:
-    """Copy an image to a same-filesystem sibling for destructive ML work."""
+def _staged_image_path(image_path: str, output_path: str) -> str:
+    """Copy an image to a same-filesystem sibling for destructive ML work.
+
+    `output_path` is required: the staged file must carry the DESTINATION's
+    extension, because that is what tells the worker which encoder to use. Both
+    callers already know it (an in-place edit passes the source back in).
+    """
     source = Path(image_path)
     fd, staged = tempfile.mkstemp(
         prefix=f'.{source.name}.lama-',
-        suffix=Path(output_path or image_path).suffix,
+        suffix=Path(output_path).suffix,
         dir=source.parent,
     )
     os.close(fd)
@@ -168,9 +156,10 @@ def inpaint_watermarks(image_path, bboxes, timeout: int = 300, device: str = 'cp
                        output_path=None) -> tuple[bool, dict | None]:
     """Repeint en une passe LaMa les rectangles normalises de ``bboxes``.
 
-    L'image est modifiee en place. Le retour ``(ok, error)`` conserve le contrat
-    historique : ``error`` vaut ``None`` en cas de succes, sinon contient ``kind``
-    et ``detail``.
+    L'image source est modifiee en place, SAUF si ``output_path`` est fourni —
+    auquel cas la source n'est jamais touchee. Le retour ``(ok, error)`` conserve
+    le contrat historique : ``error`` vaut ``None`` en cas de succes, sinon
+    contient ``kind`` et ``detail``.
     """
     payload = {'image_path': str(image_path), 'bboxes': bboxes, 'device': device}
     return _inpaint_staged(payload, timeout=timeout, output_path=output_path)
@@ -201,6 +190,19 @@ def inpaint_watermark(image_path, bbox, timeout: int = 300, device: str = 'cpu',
         output_path=output_path)
 
 
+def _item_outcome(item: dict) -> tuple[bool, dict | None]:
+    """Read one per-image worker record into this module's ``(ok, error)`` pair.
+
+    The worker reports the same record twice — streamed as it finishes each
+    image, and again in the final summary — and both readers below used to
+    decode it separately. One decode means the streamed and summary paths can
+    never disagree about what the worker said.
+    """
+    if item.get('ok'):
+        return True, None
+    return False, {'kind': 'failed', 'detail': item.get('error') or 'inpaint failed'}
+
+
 def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
     """Run multiple image jobs in one worker so SimpleLama is loaded only once."""
     normalized = []
@@ -216,7 +218,7 @@ def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
     if not normalized:
         return {}
     if not is_available():
-        err = {'kind': 'unavailable', 'detail': 'watermark inpainting is not installed (ML extras)'}
+        err = {'kind': 'unavailable', 'detail': _UNAVAILABLE_DETAIL}
         return {job['image_path']: (False, err) for job in normalized}
     staged_by_original = {}
     try:
@@ -236,6 +238,10 @@ def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
     payload_json = json.dumps({'jobs': staged_jobs, 'device': device})
     proc = None
     interrupted_error = None
+    # Deliberately NOT ml_worker.run_json_worker: this is the only caller that
+    # needs the worker's partial stdout after a TimeoutExpired, so that images
+    # finished before the kill are still published. The shared runner returns an
+    # error and no output, which is right for everyone else and wrong here.
     try:
         proc = subprocess.run([lama_python(), _SCRIPT], input=payload_json,
                               capture_output=True, text=True, encoding='utf-8',
@@ -252,32 +258,32 @@ def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
     else:
         stdout = proc.stdout or ''
     lines = stdout.splitlines()
+    if interrupted_error is not None:
+        # Only the interrupted path replays the per-image progress stream, to
+        # keep whatever the worker managed to finish before it died. On the
+        # normal path the summary object below already says the same thing, so
+        # json-parsing every line again would be pure waste.
+        streamed = {}
+        for candidate in lines:
+            try:
+                item = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and item.get('type') == 'result':
+                streamed[str(item.get('image_path') or '')] = _item_outcome(item)
+        staged_results = {job['image_path']: streamed.get(
+            staged_by_original[job['image_path']], (False, interrupted_error))
+                          for job in normalized}
+        return _publish_batch_results(staged_results, staged_by_original, normalized)
     line = next((ln for ln in reversed(lines)
                  if ln.strip().startswith('{')), '')
     try:
         data = json.loads(line) if line else {}
     except json.JSONDecodeError:
         data = {}
-    streamed = {}
-    for candidate in lines:
-        try:
-            item = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(item, dict) or item.get('type') != 'result':
-            continue
-        path = str(item.get('image_path') or '')
-        err = None if item.get('ok') else {
-            'kind': 'failed', 'detail': item.get('error') or 'inpaint failed'}
-        streamed[path] = (bool(item.get('ok')), err)
-    if interrupted_error is not None:
-        staged_results = {job['image_path']: streamed.get(
-            staged_by_original[job['image_path']], (False, interrupted_error))
-                          for job in normalized}
-        return _publish_batch_results(staged_results, staged_by_original, normalized)
     if not isinstance(data, dict) or not data.get('ok'):
         detail = data.get('error') if isinstance(data, dict) else None
-        err = {'kind': 'failed', 'detail': detail or _stderr_tail(proc) or 'inpaint worker failed'}
+        err = {'kind': 'failed', 'detail': detail or stderr_tail(proc) or 'inpaint worker failed'}
         return _publish_batch_results(
             {job['image_path']: (False, err) for job in normalized},
             staged_by_original, normalized)
@@ -290,8 +296,7 @@ def inpaint_batch(jobs, *, device: str, timeout: int = 900) -> dict:
     by_path = {}
     for item in results:
         path = original_by_staged.get(str(item.get('image_path') or ''), '')
-        err = None if item.get('ok') else {'kind': 'failed', 'detail': item.get('error') or 'inpaint failed'}
-        by_path[path] = (bool(item.get('ok')), err)
+        by_path[path] = _item_outcome(item)
     staged_results = {
         job['image_path']: by_path.get(
             job['image_path'],
