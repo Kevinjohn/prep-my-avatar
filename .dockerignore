@@ -4,7 +4,7 @@ node_modules
 .python
 packaging/build
 packaging/dist
-frontend/dist
+# frontend/dist is a committed build artifact copied into the image; excluding it breaks the build.
 .pytest_cache
 code-reviews
 data/
