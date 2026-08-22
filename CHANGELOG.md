@@ -9,6 +9,24 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- Reddit and Sex.com now share one direct-media downloader instead of keeping
+  byte-identical copies of it, along with the content-type tables that decide
+  which formats are accepted and what extension a saved file gets. The three
+  other scrapers that do the same job keep their own tables, because each
+  deliberately accepts different formats — Civitai allows animation, the
+  gallery-dl base allows video, and the concept import excludes GIFs.
+- The gallery-dl scraper base now uses the shared atomic-write helper its
+  siblings already used, rather than its own copy of the same
+  write-to-temp-then-rename dance.
+- The rule that recognises Bunkr's rotating domains — a check that guards what
+  may be handed to an external downloader — is now written once instead of three
+  times. The two allowlists that use it stay separate on purpose: they gate
+  different tools with different exposure.
+- Removed unreachable scraper code: a media-file validator and its magic-byte
+  reader that nothing called, a serialiser on the URL validation result that
+  nothing called, and an unused config import. This also leaves one copy of the
+  image-signature table instead of two that had to be kept in step by hand.
+
 - The API's "not found" contract is now written once instead of nineteen times.
   Every route that answered a missing dataset, image or run with a 404 spelled
   out the same status-and-body pair by hand; that rule now lives in two named

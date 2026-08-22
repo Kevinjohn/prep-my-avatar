@@ -16,14 +16,6 @@ from urllib.parse import urlparse
 
 from flask import current_app
 
-# Only the yt-dlp *video* download path uses this; the concept bridge fetches
-# images via fetch_hardened_bytes and never touches it. Our config has no such
-# constant, so degrade gracefully instead of breaking the whole import.
-try:
-    from ..config import COMFYUI_OUTPUT_DIR
-except ImportError:  # pragma: no cover - our app resolves the output dir differently
-    COMFYUI_OUTPUT_DIR = None
-
 # Plafond de taille du téléchargement (vidéo driver — pas besoin de plus).
 MAX_DRIVER_BYTES = 200 * 1024 * 1024  # 200 Mo
 # Timeout mur du sous-processus yt-dlp.
@@ -241,29 +233,6 @@ def _download_with_ytdlp(url, dest_template):
     return True, None
 
 
-def _looks_like_image(path):
-    """True si `path` commence par une signature raster connue (jpg/png/gif/webp/avif).
-    PAS de SVG (peut embarquer du script). MIME/extension seuls sont falsifiables."""
-    try:
-        with open(path, 'rb') as f:
-            head = f.read(32)
-    except OSError:
-        return False
-    if len(head) < 12:
-        return False
-    if head[:3] == b'\xff\xd8\xff':                       # jpeg
-        return True
-    if head[:8] == b'\x89PNG\r\n\x1a\n':                  # png
-        return True
-    if head[:4] == b'GIF8':                               # gif
-        return True
-    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':     # webp
-        return True
-    if head[4:8] == b'ftyp' and head[8:12] in (b'avif', b'avis'):  # avif
-        return True
-    return False
-
-
 def download_via_ytdlp(url, dest_base):
     """Télécharge via yt-dlp dans le dossier de dest_base, garde le 1er fichier vidéo
     valide. Retourne (ok, filename|None, error|None). Ne lève jamais."""
@@ -390,8 +359,10 @@ def fetch_hardened_bytes(url, *, allowed_types, max_bytes, require_image_magic=F
     return True, bytes(data), ctype, 'ok'
 
 
-# Signatures raster acceptées par octets en mémoire (miroir de _looks_like_image,
-# qui lit depuis un fichier). PAS de SVG (peut embarquer du script).
+# Signatures raster acceptées, sur les 32 premiers octets. PAS de SVG (peut
+# embarquer du script) : content-type et extension sont tous deux falsifiables,
+# seul le contenu fait foi. Table UNIQUE — une signature ajoutée ici vaut pour
+# tout appelant, il n'y a plus de variante « depuis un fichier » à tenir à jour.
 def _bytes_look_like_image(head):
     if len(head) < 12:
         return False
@@ -406,21 +377,3 @@ def _bytes_look_like_image(head):
     if head[4:8] == b'ftyp' and head[8:12] in (b'avif', b'avis'):  # avif
         return True
     return False
-
-
-def _validate_media_file(path, *, allow_image=True):
-    """Valide qu'`path` est un vrai média par signature (magic bytes).
-
-    Retourne (ok, kind) où kind ∈ {'video','image'} en cas de succès, sinon
-    (False, None). Rejette HTML/SVG/zip/exe/raccourcis quelle que soit
-    l'extension de l'URL. `allow_image=False` => seules les vidéos passent
-    (chemin driver SCAIL, vidéo-only)."""
-    # On teste l'image AVANT la vidéo : _looks_like_video matche tout 'ftyp'
-    # (y compris AVIF) → sans cet ordre une image AVIF serait classée 'video'.
-    if _looks_like_image(path):
-        return (True, 'image') if allow_image else (False, None)
-    # Réutilise la validation vidéo durcie de l'upload (mp4/mov/webm/mkv/avi/gif/mpeg).
-    from ..upload.routes import _looks_like_video
-    if _looks_like_video(path):
-        return True, 'video'
-    return False, None

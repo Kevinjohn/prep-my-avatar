@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 from typing import Optional
+from urllib.parse import urlparse
 
 
 def atomic_write_bytes(destination, data: bytes) -> None:
@@ -31,6 +32,44 @@ def atomic_write_bytes(destination, data: bytes) -> None:
             pass
         Path(temporary).unlink(missing_ok=True)
         raise
+
+
+# Politique média des sources qui servent des photos et RIEN d'autre.
+IMAGE_MEDIA_TYPES = frozenset({'image/jpeg', 'image/jpg', 'image/png',
+                               'image/webp', 'image/gif'})
+IMAGE_CT_EXT = {'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
+                'image/webp': '.webp', 'image/gif': '.gif'}
+
+
+def download_direct_media(url, dest_base, *, label,
+                          allowed_types=IMAGE_MEDIA_TYPES, ct_ext=IMAGE_CT_EXT,
+                          default_ext='.jpg'):
+    """Fetch durci d'une URL média DIRECTE, publiée atomiquement. (ok, filename, error).
+
+    `allowed_types` / `ct_ext` / `default_ext` sont des ARGUMENTS et non des
+    constantes partagées : la politique média est un fait PAR SITE, pas une règle
+    globale. Civitai accepte l'animation et devine `.png` (son CDN sert surtout du
+    PNG) ; la base gallery-dl accepte la vidéo et devine `.bin`. Reddit et Sex.com
+    sont la SEULE paire dont les trois valeurs coïncident — d'où les défauts
+    ci-dessus. Unifier les autres ferait entrer un GIF ou un MP4 là où le site
+    refuse délibérément les deux.
+
+    `netfetch` est importé DANS le corps : ce module doit rester sans dépendance
+    vers le reste de `scrape` (cf. docstring du module) pour éviter un cycle."""
+    from ..netfetch import MAX_DRIVER_BYTES, fetch_hardened_bytes
+    ok, data, ctype, reason = fetch_hardened_bytes(
+        url, allowed_types=allowed_types, max_bytes=MAX_DRIVER_BYTES)
+    if not ok or not data:
+        return False, None, f'{label} : téléchargement échoué ({reason}).'
+    ct = (ctype or '').split(';', 1)[0].strip().lower()
+    ext = ct_ext.get(ct) or (os.path.splitext(urlparse(url).path)[1].lower() or default_ext)
+    dest_dir = os.path.dirname(dest_base)
+    filename = os.path.basename(dest_base) + ext
+    try:
+        atomic_write_bytes(os.path.join(dest_dir, filename), data)
+    except OSError as e:
+        return False, None, f"{label} : erreur d'écriture ({e})."
+    return True, filename, None
 
 
 @dataclass(frozen=True)

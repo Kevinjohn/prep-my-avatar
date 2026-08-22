@@ -36,7 +36,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 from ..validators import Platform
-from .base import Source, Capabilities, Match
+from .base import Source, Capabilities, Match, download_direct_media
 from .gdl_source import resolve_cookies
 from . import registry
 
@@ -76,11 +76,6 @@ _REDDIT_CAPS = Capabilities(
     media_kinds=frozenset({'image'}),
     own_downloader=True,   # download() dédié (fetch durci), cf. note : l'import concept
 )                          # télécharge en réalité les URLs directement (flux autonome).
-
-# Content-types servis par les CDN d'images reddit (pour download()).
-_MEDIA_TYPES = frozenset({'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'})
-_CT_EXT = {'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
-           'image/webp': '.webp', 'image/gif': '.gif'}
 
 
 # ---------------------------------------------------------------------------
@@ -453,22 +448,9 @@ class RedditSource(Source):
         """Télécharge une image reddit EN DIRECT (fetch durci). NB : le flux d'import
         concept télécharge en réalité les URLs lui-même (_download_scrape_item) ; ce
         download() n'est là que pour honorer le contrat Source si un autre appelant
-        l'emprunte."""
-        from ..netfetch import MAX_DRIVER_BYTES, fetch_hardened_bytes
-        ok, data, ctype, reason = fetch_hardened_bytes(
-            url, allowed_types=_MEDIA_TYPES, max_bytes=MAX_DRIVER_BYTES)
-        if not ok or not data:
-            return False, None, f'Reddit : téléchargement échoué ({reason}).'
-        ct = (ctype or '').split(';', 1)[0].strip().lower()
-        ext = _CT_EXT.get(ct) or (os.path.splitext(urlparse(url).path)[1].lower() or '.jpg')
-        dest_dir = os.path.dirname(dest_base)
-        filename = os.path.basename(dest_base) + ext
-        try:
-            from .base import atomic_write_bytes
-            atomic_write_bytes(os.path.join(dest_dir, filename), data)
-        except OSError as e:
-            return False, None, f"Reddit : erreur d'écriture ({e})."
-        return True, filename, None
+        l'emprunte. Les CDN d'images reddit ne servent que du raster → politique
+        média par défaut de `download_direct_media`."""
+        return download_direct_media(url, dest_base, label='Reddit')
 
 
 registry.register(RedditSource())
