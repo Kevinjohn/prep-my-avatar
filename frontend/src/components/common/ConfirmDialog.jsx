@@ -1,5 +1,5 @@
 import {
-  createContext, useCallback, useContext, useEffect, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
@@ -175,8 +175,10 @@ export function ConfirmDialogProvider({ children }) {
     queueRef.current = [];
   }, []);
 
+  const dialogActions = useMemo(() => ({ confirm, prompt }), [confirm, prompt]);
+
   return (
-    <ConfirmDialogContext.Provider value={{ confirm, prompt }}>
+    <ConfirmDialogContext.Provider value={dialogActions}>
       {children}
       {active?.kind === 'confirm' && (
         <ConfirmDialog key={active.id} request={active} onResolve={resolveActive} />

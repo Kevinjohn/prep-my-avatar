@@ -6,7 +6,8 @@
  * stack up via onChange([{filename, strength}]) so the generate handler can
  * forward it as `z_loras`. LoRA files live in ComfyUI/models/loras/z image/.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
+import { usePersistedPreference } from '../../hooks/usePersistedPreference';
 
 // Plage de strength par LoRA selon la famille :
 //  - Krea : 0..6, étendue à 20 pour les LoRA « utility » (ex. filter-bypass, sans
@@ -43,25 +44,24 @@ const normalizedConfig = (value) => {
   }));
 };
 
+const parseConfig = (value) => normalizedConfig(JSON.parse(value));
+const parseOpenGroups = (value) => JSON.parse(value) || {};
+
 export default function ZImageLoraConfig({ loras = [], onChange, zModel = '',
                                           isFavorite = null, onToggleFavorite = null,
                                           storageKey = 'zimageLoras_v1', label = 'Character / style LoRA', emptyHint,
                                           krea = false, batchToggle = false }) {
-  const [cfg, setCfg] = useState(() => {
-    try { return normalizedConfig(JSON.parse(localStorage.getItem(storageKey))); } catch { return {}; }
-  });
+  const { value: cfg, setValue: setCfg } = usePersistedPreference(
+    storageKey, {}, { parse: parseConfig, serialize: JSON.stringify },
+  );
   // Quels groupes de checkpoints (dataset) sont dépliés — persisté à part du cfg
   // (le cfg reste indexé par filename : aucune migration d'état de sélection).
-  const [openGroups, setOpenGroups] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(`${storageKey}_open`)) || {}; } catch { return {}; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(`${storageKey}_open`, JSON.stringify(openGroups)); } catch { /* ignore */ }
-  }, [openGroups, storageKey]);
+  const { value: openGroups, setValue: setOpenGroups } = usePersistedPreference(
+    `${storageKey}_open`, {}, { parse: parseOpenGroups, serialize: JSON.stringify },
+  );
   const toggleGroup = (key) => setOpenGroups((o) => ({ ...o, [key]: !o[key] }));
 
   useEffect(() => {
-    try { localStorage.setItem(storageKey, JSON.stringify(cfg)); } catch { /* ignore */ }
     const enabled = loras
       .filter((l) => cfg[l.filename]?.enabled)
       .map((l) => ({
@@ -72,7 +72,7 @@ export default function ZImageLoraConfig({ loras = [], onChange, zModel = '',
         ...(batchToggle ? { batch: !!cfg[l.filename]?.batch } : {}),
       }));
     onChange?.(enabled);
-  }, [cfg, loras, onChange, storageKey, batchToggle]);
+  }, [cfg, loras, onChange, batchToggle]);
 
   // Reconcile long-lived browser state with the current family's supported range.
   useEffect(() => {
@@ -91,7 +91,7 @@ export default function ZImageLoraConfig({ loras = [], onChange, zModel = '',
       }
       return changed ? next : current;
     });
-  }, [loras, krea]);
+  }, [loras, krea, setCfg]);
 
   // Favoris d'abord (pour le modèle courant) → repérage « d'un coup d'œil ».
   const favFirst = useMemo(() => {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, postJson } from '../../api/fetchClient'
-import { INPUT_CLASS, Card, StatusBadge, SecretField } from './primitives'
+import { INPUT_CLASS, Card, StatusBadge, SecretField, ToggleSwitch } from './primitives'
 
 const ENGINE_SECRETS = [
   { key: 'GEMINI_API_KEY', label: 'Gemini API key', testTarget: 'gemini', help: 'Powers the Nano Banana engine.' },
@@ -183,14 +183,10 @@ export default function EnginesSection(props) {
                 : 'Off (default): reference pixels and prompts stay on this computer; only local Klein can generate.'}
             </p>
           </div>
-          <button type="button" role="switch"
-            aria-checked={!!config.privacy?.allow_remote_generation}
-            aria-label="Allow third-party image generation"
+          <ToggleSwitch checked={!!config.privacy?.allow_remote_generation}
+            label="Allow third-party image generation"
             onClick={() => setField('privacy', 'allow_remote_generation', !config.privacy?.allow_remote_generation)}
-            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${config.privacy?.allow_remote_generation ? 'bg-emerald-500' : 'border border-border-strong bg-surface'}`}>
-            <span aria-hidden
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${config.privacy?.allow_remote_generation ? 'translate-x-5' : 'translate-x-0.5'}`} />
-          </button>
+          />
         </div>
       </Card>
 
