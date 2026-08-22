@@ -40,7 +40,7 @@ def studio_base_models():
         alts = lts.krea_alt_base_models()
         if not alts:
             return jsonify({'models': []})
-        out = [{'filename': '', 'label': 'Official – Krea 2 Turbo'}]
+        out = [{'filename': '', 'label': 'Official — Krea 2 Turbo'}]
         out += [{'filename': m, 'label': m.split('\\')[-1].rsplit('.', 1)[0]} for m in alts]
         return jsonify({'models': out})
     out = [{'filename': m, 'label': m.split('\\')[-1]} for m in get_zimage_models()]
