@@ -66,6 +66,8 @@ The safest first step is to import your photos, review them, and export a small 
 
 ## Install and launch
 
+See the repository's canonical [Installation and launch](https://github.com/Kevinjohn/prep-my-avatar#installation-and-launch) section for the supported installation routes.
+
 ### Windows: use the bundled launcher
 
 Clone or download the repository, then double-click **`start.bat`**. It creates the local Python environment, installs the core dependencies, starts the app, and opens it at:
@@ -208,6 +210,6 @@ Check these items:
 
 ## What to read next
 
-- **[Using the app](/guide/using-the-app)** — the detailed walkthrough for character, concept, and style datasets.
-- **[Building a good dataset](/guide/dataset-guide)** — why variety, captions, coverage, and identity checks matter.
-- **[Troubleshooting](/guide/troubleshooting)** — fixes for the most common setup and training problems.
+- **[Using the app](using-the-app.md)** — the detailed walkthrough for character, concept, and style datasets.
+- **[Building a good dataset](../DATASET_GUIDE.md)** — why variety, captions, coverage, and identity checks matter.
+- **[Troubleshooting](troubleshooting.md)** — fixes for the most common setup and training problems.

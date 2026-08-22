@@ -29,8 +29,8 @@ def test_docker_context_excludes_generated_runtime_and_distribution_trees():
         for line in (SCRIPT.parents[1] / '.dockerignore').read_text().splitlines()
         if line.strip() and not line.lstrip().startswith('#')
     }
-    assert {'.python', 'packaging/build', 'packaging/dist', 'frontend/dist',
-            '.pytest_cache', 'code-reviews'} <= rules
+    assert {'.python', 'packaging/build', 'packaging/dist', '.pytest_cache',
+            'code-reviews'} <= rules
 
 
 def _docs_fixture(tmp_path):

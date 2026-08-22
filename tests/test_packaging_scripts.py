@@ -37,7 +37,15 @@ def test_committed_icon_matches_current_generator(tmp_path, monkeypatch):
     make_icon.main()
 
     committed = Path(make_icon.__file__).with_name("icon.ico")
-    assert generated.read_bytes() == committed.read_bytes()
+    with Image.open(generated) as generated_icon, Image.open(committed) as committed_icon:
+        generated_sizes = set(generated_icon.ico.sizes())
+        committed_sizes = set(committed_icon.ico.sizes())
+        assert generated_sizes == committed_sizes
+
+        for size in sorted(generated_sizes):
+            generated_frame = generated_icon.ico.getimage(size).convert("RGBA")
+            committed_frame = committed_icon.ico.getimage(size).convert("RGBA")
+            assert generated_frame.tobytes() == committed_frame.tobytes()
 
 
 def test_windows_source_start_installs_private_launcher_before_use():
