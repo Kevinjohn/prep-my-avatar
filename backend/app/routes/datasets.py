@@ -13,15 +13,17 @@ from flask import (Blueprint, Response, request, jsonify, send_file,
                    send_from_directory, current_app, stream_with_context)
 
 from ..config import LOCAL_USER
+from .. import capabilities
 from .. import config as cfg
 from ..gpu_window import gpu_exclusive_vision_window
 from ..services import face_dataset_service as svc
 from ..services import lora_test_studio as lts
 from ..services.face_variations import (NSFW_VARIATION_CATALOG, VARIATION_CATALOG,
                                         is_nsfw_label, select_preset)
+from ..services.klein_edit_helper import KleinModelsMissing
 from ..utils.comfyui import KREA_ALLOWED_SAMPLERS, KREA_ALLOWED_SCHEDULERS, get_krea_loras
-from ._common import (_map_error, _require_comfyui, _studio_arch_mismatch_response,
-                      _studio_missing_response)
+from ._common import (_map_error, _ok_or_404, _payload_or_404, _require_comfyui,
+                      _studio_arch_mismatch_response, _studio_missing_response)
 
 bp = Blueprint('datasets', __name__, url_prefix='/api')
 
@@ -67,7 +69,7 @@ def dataset_set_fidelity(dataset_id):
     to apply), the composition target and the import crop default."""
     data = request.get_json(silent=True) or {}
     ok = svc.set_fidelity(LOCAL_USER, dataset_id, data.get('fidelity'))
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/train-type')
@@ -77,7 +79,7 @@ def dataset_set_train_type(dataset_id):
     before training is configured. Keeps the TrainingPanel and the grouped menu in sync."""
     data = request.get_json(silent=True) or {}
     ok = svc.set_train_type(LOCAL_USER, dataset_id, data.get('train_type'))
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/settings')
@@ -93,7 +95,7 @@ def dataset_update_settings(dataset_id):
             trigger_word=data.get('trigger_word'), concept_desc=data.get('concept_desc'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    return (jsonify(res), 200) if res else (jsonify({'error': 'not found'}), 404)
+    return _payload_or_404(res)
 
 
 @bp.get('/dataset/variations')
@@ -129,7 +131,7 @@ def dataset_get(dataset_id):
         '0', 'false', 'no',
     }
     payload = svc.dataset_payload(LOCAL_USER, dataset_id, include_images=include_images)
-    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+    return _payload_or_404(payload)
 
 
 @bp.get('/dataset/<int:dataset_id>/images')
@@ -143,7 +145,7 @@ def dataset_images(dataset_id):
             status=request.args.get('status'))
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
-    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+    return _payload_or_404(payload)
 
 
 @bp.get('/dataset/<int:dataset_id>/events')
@@ -245,17 +247,25 @@ def dataset_set_ref(dataset_id):
         # Tell the user WHY it didn't run — the usual cause on a fresh install is the
         # Ollama vision model not being pulled — and how to recover (Setup + Crop).
         # (Manual mode: the centered crop is the intended behavior, no warning.)
-        from .. import capabilities
-        model_ready = capabilities.probe_ollama_model()['ok']
-        resp['warning'] = (
-            "Auto head-crop needs the Ollama vision model, which isn't ready yet — "
-            'used a centered crop. Finish the Ollama step in Setup, then click Crop to re-center on the face.'
-            if not model_ready else
-            "Couldn't detect a face — used a centered crop. Use the Crop button to adjust it manually."
-        )
+        resp['warning'] = _head_crop_warning(
+            'Finish the Ollama step in Setup, then click Crop to re-center on the face.',
+            'Use the Crop button to adjust it manually.')
     if low_res_warning:
         resp['warning'] = f"{resp['warning']} {low_res_warning}" if resp.get('warning') else low_res_warning
     return jsonify(resp)
+
+
+def _head_crop_warning(setup_cta, adjust_cta):
+    """Why the auto head-crop fell back to a centered crop, by vision-model state.
+
+    GARDE-FOU : ne jamais livrer en silence un crop centré quand l'auto A été
+    demandé. Les deux appelants passent leur propre fin de phrase — la formulation
+    visible diffère entre l'upload et le re-crop — donc ce helper factorise la
+    RÈGLE (quel diagnostic pour quel état), pas le texte."""
+    if not capabilities.probe_ollama_model()['ok']:
+        return ("Auto head-crop needs the Ollama vision model, which isn't ready yet — "
+                f'used a centered crop. {setup_cta}')
+    return f"Couldn't detect a face — used a centered crop. {adjust_cta}"
 
 
 @bp.post('/dataset/<int:dataset_id>/ref/extra')
@@ -277,7 +287,7 @@ def dataset_add_extra_ref(dataset_id):
 def dataset_remove_extra_ref(dataset_id):
     data = request.get_json(silent=True) or {}
     ok = svc.remove_extra_ref(LOCAL_USER, dataset_id, data.get('filename') or '')
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/ref/crop')
@@ -288,7 +298,7 @@ def dataset_ref_crop(dataset_id):
                                 int(data['x']), int(data['y']), int(data['w']), int(data['h']))
     except (KeyError, ValueError, TypeError):
         return jsonify({'error': 'invalid crop box'}), 400
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/ref/recrop-auto')
@@ -306,14 +316,9 @@ def dataset_ref_recrop_auto(dataset_id):
         return jsonify({'error': 'no reference to re-crop'}), 400
     resp = {'ok': True, 'head_crop': head_detected}
     if not head_detected:
-        from .. import capabilities
-        model_ready = capabilities.probe_ollama_model()['ok']
-        resp['warning'] = (
-            "Auto head-crop needs the Ollama vision model, which isn't ready yet — "
-            'used a centered crop. Finish the Ollama step in Setup, then adjust with Crop.'
-            if not model_ready else
-            "Couldn't detect a face — used a centered crop. Use Crop to adjust it manually."
-        )
+        resp['warning'] = _head_crop_warning(
+            'Finish the Ollama step in Setup, then adjust with Crop.',
+            'Use Crop to adjust it manually.')
     return jsonify(resp)
 
 
@@ -352,7 +357,6 @@ def _klein_missing_response(missing, missing_nodes=None):
     ComfyUI first' message instead. Shared by the batch generate and the
     single-tile regenerate paths; `missing_nodes` = [{class_type, pack, url}] from
     klein_edit_helper.klein_missing_nodes (empty for the common models-only case)."""
-    from .. import capabilities, config as cfg
     from ..services import klein_edit_helper as keh
     missing = missing or []
     missing_nodes = missing_nodes or []
@@ -381,6 +385,20 @@ def _klein_missing_response(missing, missing_nodes=None):
                     'klein_missing': missing, 'downloading': started,
                     'needs_token': needs_token,
                     'klein_nodes_missing': missing_nodes}), 409
+
+
+def _map_klein_error(e):
+    """`_map_error` plus the one exception these routes add to the shared dispatcher.
+
+    `KleinModelsMissing` est une Exception nue, pas une PublicDomainError, donc elle
+    ne peut pas rejoindre `_map_error` dans `_common`. Elle est traitée ICI et non
+    là-bas parce que `_klein_missing_response` DÉCLENCHE des téléchargements en
+    arrière-plan — un effet de bord que `_studio_missing_response` refuse
+    explicitement pour ses assets sous licence. Les deux 409 se ressemblent ; ils
+    n'obéissent pas à la même règle."""
+    if isinstance(e, KleinModelsMissing):
+        return _klein_missing_response(e.missing)
+    return _map_error(e)
 
 
 def _autostart_optional_klein():
@@ -420,7 +438,6 @@ def dataset_generate(dataset_id):
             # API path (Gemini Nano Banana Pro or OpenAI ChatGPT gpt-image-2):
             # no GPU, rows filled by a background thread — the existing polling
             # UI tracks them.
-            from flask import current_app
             ids = svc.generate_variations_nanobanana(
                 current_app._get_current_object(), LOCAL_USER, dataset_id,
                 data.get('variations') or [], data.get('multiplier', 1),
@@ -443,10 +460,7 @@ def dataset_generate(dataset_id):
                                           lora_strength=data.get('lora_strength'))
             _autostart_optional_klein()  # bg-fetch the consistency LoRA if it's absent
     except Exception as e:
-        from ..services.klein_edit_helper import KleinModelsMissing
-        if isinstance(e, KleinModelsMissing):  # a required Klein model isn't installed
-            return _klein_missing_response(e.missing)
-        return _map_error(e)
+        return _map_klein_error(e)
     return jsonify({'ok': True, 'created': len(ids)})
 
 
@@ -518,7 +532,7 @@ def dataset_image_anchor(image_id):
         ok = svc.set_anchor_decision(LOCAL_USER, image_id, data.get('decision'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/image/<int:image_id>/coverage')
@@ -528,7 +542,7 @@ def dataset_image_coverage(image_id):
         ok = svc.set_image_coverage(LOCAL_USER, image_id, data)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/image/<int:image_id>/rights')
@@ -538,7 +552,7 @@ def dataset_image_rights(image_id):
         ok = svc.set_image_rights(LOCAL_USER, image_id, data)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/coverage-policy')
@@ -549,7 +563,7 @@ def dataset_coverage_policy(dataset_id):
             LOCAL_USER, dataset_id, data.get('profile'), data.get('targets'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/scrape-import')
@@ -575,10 +589,7 @@ def dataset_scrape_import(dataset_id):
         res = svc.scrape_import_urls(LOCAL_USER, dataset_id, items,
                                      rescue_small=rescue_small)
     except Exception as e:
-        from ..services.klein_edit_helper import KleinModelsMissing
-        if isinstance(e, KleinModelsMissing):
-            return _klein_missing_response(e.missing)
-        return _map_error(e)
+        return _map_klein_error(e)
     return jsonify({'ok': True, **res})
 
 
@@ -724,13 +735,13 @@ def dataset_image_status(image_id):
         ok = svc.set_image_status(LOCAL_USER, image_id, data.get('status'))
     except Exception as e:
         return _map_error(e)
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/delete')
 def dataset_delete(dataset_id):
     ok = svc.delete_dataset(LOCAL_USER, dataset_id)
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/<int:dataset_id>/cancel')
@@ -747,7 +758,7 @@ def dataset_image_delete(image_id):
         ok = svc.delete_image(LOCAL_USER, image_id)
     except Exception as e:
         return _map_error(e)
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/image/<int:image_id>/improve')
@@ -756,12 +767,9 @@ def dataset_image_improve(image_id):
     try:
         result = svc.improve_existing_image(LOCAL_USER, image_id)
     except Exception as e:
-        from ..services.klein_edit_helper import KleinModelsMissing
-        if isinstance(e, svc.KleinNodesMissing):
+        if isinstance(e, svc.KleinNodesMissing):  # nodes, not models: no download to start
             return _klein_missing_response(e.missing, e.missing_nodes)
-        if isinstance(e, KleinModelsMissing):
-            return _klein_missing_response(e.missing)
-        return _map_error(e)
+        return _map_klein_error(e)
     if result is None:
         return jsonify({'error': 'not found'}), 404
     return jsonify({'ok': True, **result})
@@ -793,7 +801,6 @@ def dataset_image_regenerate(image_id):
     engine = (data.get('engine') or '').strip() or None
     klein_model = (data.get('klein_model') or '').strip() or None
     try:
-        from flask import current_app
         # Klein node preflight (skip when the user explicitly picked an API engine,
         # which doesn't touch ComfyUI): surface a missing custom node as one 409
         # instead of a silent failed re-roll. Fail-open if /object_info is down;
@@ -814,10 +821,7 @@ def dataset_image_regenerate(image_id):
                                       engine=engine, klein_model=klein_model,
                                       app=current_app._get_current_object())
     except Exception as e:
-        from ..services.klein_edit_helper import KleinModelsMissing
-        if isinstance(e, KleinModelsMissing):
-            return _klein_missing_response(e.missing)  # auto-download, tell them to retry
-        return _map_error(e)
+        return _map_klein_error(e)
     if job_id is None:
         return jsonify({'error': 'not found'}), 404
     return jsonify({'ok': True, 'job_id': job_id})
@@ -973,7 +977,7 @@ def dataset_purge(dataset_id):
 def dataset_image_caption(image_id):
     data = request.get_json(silent=True) or {}
     ok = svc.set_image_caption(LOCAL_USER, image_id, data.get('caption', ''))
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.post('/dataset/image/<int:image_id>/crop')
@@ -987,7 +991,7 @@ def dataset_image_crop(image_id):
         ok = svc.crop_image(LOCAL_USER, image_id, *box)
     except Exception as e:
         return _map_error(e)
-    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+    return _ok_or_404(ok)
 
 
 @bp.get('/dataset/<int:dataset_id>/export')
@@ -1119,7 +1123,7 @@ def lora_test_status(dataset_id):
     payload = lts.studio_payload(
         LOCAL_USER, dataset_id, family=request.args.get('family'),
         run_id=request.args.get('run_id'))
-    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+    return _payload_or_404(payload)
 
 
 @bp.get('/dataset/<int:dataset_id>/lora-test/runs')
@@ -1130,7 +1134,7 @@ def lora_test_runs(dataset_id):
             cursor=request.args.get('cursor'), limit=request.args.get('limit', 20))
     except (TypeError, ValueError):
         return jsonify({'error': 'invalid pagination'}), 400
-    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+    return _payload_or_404(payload)
 
 
 @bp.post('/dataset/<int:dataset_id>/lora-test/run')

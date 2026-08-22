@@ -30,6 +30,26 @@ def _map_error(e: Exception):
     raise e
 
 
+def _ok_or_404(ok):
+    """The house shape for "acted on it, or there was nothing to act on".
+
+    La règle nommée ici est le CORPS du 404 (`{'error': 'not found'}`), pas le
+    choix de renvoyer 404 : les routes dont l'échec veut un autre statut ou un
+    autre corps restent écrites en clair (p.ex. le 400 `'invalid'` de
+    `dataset_lora_test_prompt_reorder`) — ce sont des règles différentes, pas des
+    orthographes différentes de celle-ci."""
+    return (jsonify({'ok': True}), 200) if ok else (jsonify({'error': 'not found'}), 404)
+
+
+def _payload_or_404(payload):
+    """`_ok_or_404` for routes that return the object they found.
+
+    Truthiness, donc un payload vide compte comme absent. Les routes qui doivent
+    distinguer « vide » de « absent » testent `is not None` elles-mêmes et
+    n'utilisent pas ce helper (p.ex. `dataset_training_feedback`)."""
+    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+
+
 def _require_comfyui():
     """None if ComfyUI is reachable, else the (body, status) 409 to return.
     Shared by studio.py and datasets.py's lora-test routes that actually enqueue

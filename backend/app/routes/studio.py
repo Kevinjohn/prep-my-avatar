@@ -15,8 +15,8 @@ from ..config import LOCAL_USER
 from ..domain_errors import DomainValidationError
 from ..services import lora_test_studio as lts
 from ..utils.comfyui import get_zimage_models
-from ._common import (_map_error, _require_comfyui, _studio_arch_mismatch_response,
-                      _studio_missing_response)
+from ._common import (_map_error, _payload_or_404, _require_comfyui,
+                      _studio_arch_mismatch_response, _studio_missing_response)
 
 bp = Blueprint('studio', __name__, url_prefix='/api/studio')
 
@@ -122,7 +122,7 @@ def studio_run():
 @bp.get('/run/<run_id>/status')
 def studio_run_status(run_id):
     payload = lts.studio_payload_run(LOCAL_USER, run_id)
-    return (jsonify(payload), 200) if payload else (jsonify({'error': 'not found'}), 404)
+    return _payload_or_404(payload)
 
 
 @bp.post('/run/<run_id>/cancel')
