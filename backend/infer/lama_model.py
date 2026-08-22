@@ -24,6 +24,8 @@ _DOWNLOAD_TIMEOUT = 60
 _CHUNK_SIZE = 1024 * 1024
 
 
+# This deliberate copy stays local because infer/ runs in a dedicated
+# interpreter where app.* is not importable.
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open('rb') as handle:

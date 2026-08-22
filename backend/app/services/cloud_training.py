@@ -9,7 +9,6 @@ completion must end in destroy_instance() -- enforced here (provision
 try/except), by the max-runtime cap (monitor, Task 6) and by boot
 reconciliation. The local training path is untouched: a cloud run never sets
 'training_in_progress', so local generation/captioning stay available."""
-import hashlib
 import json
 import logging
 import os
@@ -25,12 +24,13 @@ from sqlalchemy import or_
 from .. import config as cfg
 from ..extensions import db
 from ..models import CloudTrainingRun, TrainingRunRecord
+from ..utils.file_hashing import sha256_file
+from ..utils.time import utcnow
 from . import face_dataset_service as fds
 from . import gpu_speed
 from . import lora_training as lt
 from . import vast_client
 from .aitoolkit_remote import RemoteAiToolkit
-from ..utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,6 @@ def _capture_training_snapshot(user_id, dataset_id, destination):
     """Test seam around the immutable launch-time snapshot implementation."""
     from . import training_snapshot
     return training_snapshot.capture(user_id, dataset_id, destination)
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _reusable_run_snapshot(run, *, required=False):
@@ -555,10 +547,10 @@ def launch_cloud_training(user_id, dataset_id, steps=None, base_model='',
             resume_dir = staging / 'resume'
             resume_dir.mkdir(mode=0o700)
             copied_checkpoint = resume_dir / source_checkpoint.name
-            before_hash = _file_sha256(source_checkpoint)
+            before_hash = sha256_file(source_checkpoint)
             shutil.copy2(source_checkpoint, copied_checkpoint)
-            if (_file_sha256(copied_checkpoint) != before_hash
-                    or _file_sha256(source_checkpoint) != before_hash):
+            if (sha256_file(copied_checkpoint) != before_hash
+                    or sha256_file(source_checkpoint) != before_hash):
                 raise RuntimeError('resume checkpoint changed while it was copied')
             if os.name != 'nt':
                 try:

@@ -21,6 +21,7 @@ from functools import wraps
 
 from ..extensions import db
 from ..models import FaceDatasetImage, TrainingRunRecord
+from ..utils.file_hashing import sha256_file
 from ..utils.time import utcfromtimestamp
 from . import face_dataset_service as fds
 
@@ -50,11 +51,7 @@ def _file_hash(dataset_id, filename) -> str:
     try:
         from .. import config as cfg
         p = cfg.dataset_images_root() / str(dataset_id) / filename
-        digest = hashlib.sha256()
-        with p.open('rb') as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-                digest.update(chunk)
-        return digest.hexdigest()
+        return sha256_file(p)
     except OSError:
         return '-'
 
