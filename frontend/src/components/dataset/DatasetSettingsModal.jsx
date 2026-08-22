@@ -6,9 +6,10 @@
  * Changing the concept description is what drives the caption avoid-list, so editing
  * it resets that list; the parent's toast nudges a re-caption for existing captions.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 import { datasetIdentityComplete } from './datasetIdentityRules';
 
 const FIELD =
@@ -26,15 +27,7 @@ export default function DatasetSettingsModal({ d, busy, onSave, onClose }) {
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
 
-  useEffect(() => {
-    const closeOnEscape = (event) => {
-      if (event.key === 'Escape' && !busy && !submitting) onClose();
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => {
-      window.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [busy, onClose, submitting]);
+  useEscapeToClose(onClose, !busy && !submitting);
 
   const pending = busy || submitting;
   const canSave = datasetIdentityComplete({

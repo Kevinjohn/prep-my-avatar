@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { buildImageImprovementPairs } from '../../utils/imageImprovement';
 import { datasetImageUrl } from './datasetImageUrl';
+import { useInFlightIds } from '../../hooks/useInFlightIds';
 
 function Pane({ datasetId, image, label, onPreview, displayFilename = null, faceOverride = undefined,
   identityOverride = undefined, metricsOverride = undefined, usefulnessOverride = undefined }) {
@@ -55,19 +56,12 @@ const RECOMMENDATIONS = {
 export default function ImageImprovementReview({ images, datasetId, onResolve, onPreview }) {
   const pairs = useMemo(
     () => buildImageImprovementPairs(images).filter((pair) => !pair.resolved), [images]);
-  const [resolving, setResolving] = useState(() => new Set());
+  const { inFlight: resolving, run: chooseOnce } = useInFlightIds();
   if (!pairs.length) return null;
 
-  const choose = async (candidateId, choice) => {
-    if (resolving.has(candidateId)) return;
-    setResolving((current) => new Set(current).add(candidateId));
-    try { await onResolve(candidateId, choice); }
-    finally {
-      setResolving((current) => {
-        const next = new Set(current); next.delete(candidateId); return next;
-      });
-    }
-  };
+  const choose = (candidateId, choice) => chooseOnce(
+    candidateId, () => onResolve(candidateId, choice),
+  );
 
   return (
     <section className="flex flex-col gap-3 rounded-xl border border-cyan-400/40 bg-cyan-500/[0.05] p-3">

@@ -8,6 +8,11 @@ import { useVariationEngines } from './useVariationEngines'
 import { useShotPersistence } from './useShotPersistence'
 import { buildVariationLaunch, partitionExistingShots } from '../components/dataset/variationLaunch'
 import { applyShotPreset, deleteShotPreset, renameShotPreset, saveShotPreset } from '../utils/shotPresets'
+import { toggleInSet } from '../utils/selection'
+import { usePersistedPreference } from './usePersistedPreference'
+
+const parseBoolean = (value) => value === '1'
+const serializeBoolean = (value) => value ? '1' : '0'
 
 /** Owns catalog loading, shot selection, presets, engine state, and launch policy. */
 export function useVariationCatalogController({ onGenerate, bodyFidelity, recommendedIds,
@@ -31,12 +36,9 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
   const [klein, setKlein] = useState(null);
   // 🔞 NSFW mode — local Klein ONLY (the backend refuses NSFW on API engines).
   // Unlocks the uncensored body catalog + a free-prompt custom variation.
-  const [nsfwMode, setNsfwMode] = useState(() => {
-    try { return localStorage.getItem('datasetNsfwMode') === '1'; } catch { return false; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('datasetNsfwMode', nsfwMode ? '1' : '0'); } catch { /* ignore */ }
-  }, [nsfwMode]);
+  const { value: nsfwMode, setValue: setNsfwMode } = usePersistedPreference(
+    'datasetNsfwMode', false, { parse: parseBoolean, serialize: serializeBoolean },
+  );
   const [customPrompt, setCustomPrompt] = useState('');
   const [customFraming, setCustomFraming] = useState('body');
   // User-authored shot cards ("Add" under the free prompt): they live in their
@@ -177,9 +179,7 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
     }));
   }, [catalog, nsfwCatalog, customShots, customPresets]);
 
-  const toggle = (id) => setSelected((s) => {
-    const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n;
-  });
+  const toggle = (id) => setSelected((current) => toggleInSet(current, id));
 
   // Never wipe the current selection when the preset is unavailable (M6).
   // Toggle: re-clicking the ACTIVE preset (exact selection match) clears the

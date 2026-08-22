@@ -17,6 +17,19 @@ export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePat
       confirmLabel: actionLabel, tone: 'warning' }) ? refusal.flag : 'declined';
   };
 
+  const postWithConfirmableRetry = async (url, initialBody, actionLabel) => {
+    let body = initialBody;
+    let result = await postTrain(url, body);
+    while (result && result.ok === false) {
+      const flag = await confirmableRetryFlag(result.error, actionLabel);
+      if (!flag) break;
+      if (flag === 'declined') return null;
+      body = { ...body, [flag]: true };
+      result = await postTrain(url, body);
+    }
+    return result;
+  };
+
   // Pre-launch sanity gate (server preflight): blockers stop with a toast,
   // warnings open the interactive PreflightModal (lists WHICH captions leak /
   // WHICH pairs duplicate, editable/rejectable in place) and await the user's
@@ -112,16 +125,10 @@ export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePat
     const mode = await askResumeOrFresh();
     if (!mode) return;
     // Mise en file AVEC la base/variante choisie (sinon le job reprend la base persistée).
-    let body = trainingLaunchBody({ base, variant, trainType, masked, steps: stepsN,
+    const body = trainingLaunchBody({ base, variant, trainType, masked, steps: stepsN,
       mode, vaePath, tePath });
-    let d = await postTrain(`/api/dataset/${ds.currentId}/train/enqueue`, body);
-    while (d && d.ok === false) {
-      const flag = await confirmableRetryFlag(d.error, 'Queue anyway');
-      if (!flag) break;
-      if (flag === 'declined') { d = null; break; }  // the confirm WAS the answer
-      body = { ...body, [flag]: true };
-      d = await postTrain(`/api/dataset/${ds.currentId}/train/enqueue`, body);
-    }
+    const d = await postWithConfirmableRetry(
+      `/api/dataset/${ds.currentId}/train/enqueue`, body, 'Queue anyway');
     if (d && d.ok === false) { setEnqErr(d.error || 'enqueue refused'); toastTrainError(d, 'enqueue refused'); }
     else setEnqErr(null);
     refreshStatus();
@@ -154,16 +161,10 @@ export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePat
     if (!(await preflightOk())) return;
     const mode = await askResumeOrFresh();
     if (!mode) return;
-    let body = trainingLaunchBody({ base, variant, trainType, masked, steps: stepsN,
+    const body = trainingLaunchBody({ base, variant, trainType, masked, steps: stepsN,
       mode, vaePath, tePath }, { at: schedAt });
-    let d = await postTrain(`/api/dataset/${ds.currentId}/train/schedule`, body);
-    while (d && d.ok === false) {
-      const flag = await confirmableRetryFlag(d.error, 'Schedule anyway');
-      if (!flag) break;
-      if (flag === 'declined') { d = null; break; }  // the confirm WAS the answer
-      body = { ...body, [flag]: true };
-      d = await postTrain(`/api/dataset/${ds.currentId}/train/schedule`, body);
-    }
+    const d = await postWithConfirmableRetry(
+      `/api/dataset/${ds.currentId}/train/schedule`, body, 'Schedule anyway');
     if (d && d.ok === false) { setEnqErr(d.error || 'schedule refused'); toastTrainError(d, 'schedule refused'); }
     else { setEnqErr(null); setShowSched(false); }
     refreshStatus();
@@ -175,16 +176,10 @@ export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePat
   // retry that used to live inline in the button handler.
   const [cloudDialog, setCloudDialog] = useState(false);
   const launchCloud = async (gpuName) => {
-    let body = { variant, train_type: trainType, masked,
+    const body = { variant, train_type: trainType, masked,
       ...(stepsN ? { steps: stepsN } : {}), ...(gpuName ? { gpu_name: gpuName } : {}) };
-    let d = await postTrain(`/api/dataset/${ds.currentId}/train/cloud`, body);
-    while (d && d.ok === false) {
-      const flag = await confirmableRetryFlag(d.error, 'Train anyway');
-      if (!flag) break;
-      if (flag === 'declined') { d = null; break; }  // the confirm WAS the answer
-      body = { ...body, [flag]: true };
-      d = await postTrain(`/api/dataset/${ds.currentId}/train/cloud`, body);
-    }
+    const d = await postWithConfirmableRetry(
+      `/api/dataset/${ds.currentId}/train/cloud`, body, 'Train anyway');
     if (d && d.ok === false) {
       toastTrainError(d, 'Cloud training failed');
       return false;

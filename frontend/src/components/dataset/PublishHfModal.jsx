@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { safeJson, safePostJson as postJson } from '../../api/fetchClient';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 
 const FIELD =
   'px-3 py-1.5 rounded-lg bg-surface-raised border border-border text-content text-sm ' +
@@ -44,15 +45,7 @@ export default function PublishHfModal({ datasetId, onClose }) {
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
 
-  useEffect(() => {
-    const closeOnEscape = (event) => {
-      if (event.key === 'Escape' && phase !== 'publishing') onClose();
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => {
-      window.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [onClose, phase]);
+  useEscapeToClose(onClose, phase !== 'publishing');
 
   // Prefill <username>/<slug> from the token owner (best-effort).
   useEffect(() => {

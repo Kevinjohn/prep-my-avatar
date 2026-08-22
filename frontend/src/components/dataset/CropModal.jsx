@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 import { CROP_MIN_SIDE as MIN_SIDE, clampCropBox, clampRatioCropBox } from '../../utils/cropGeometry';
 
 /** @type {Array<[string, number | null]>} */
@@ -90,11 +91,7 @@ export default function CropModal({ imageUrl, onCancel, onConfirm, onReset = nul
   };
 
   // Escape closes; initial focus on Cancel.
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel]);
+  useEscapeToClose(onCancel);
   useEffect(() => { cancelRef.current?.focus(); }, []);
   // The overlay maps natural px -> displayed px via the live img rect: re-render
   // on window resize so it stays glued to the image.

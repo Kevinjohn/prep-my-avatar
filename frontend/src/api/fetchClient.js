@@ -176,9 +176,9 @@ export function safeDeleteJson(url) {
   });
 }
 
-export function postJson(url, body) {
+function jsonMutation(method, url, body) {
   return apiFetch(url, {
-    method: 'POST',
+    method,
     headers: {
       'Content-Type': 'application/json',
       'X-CSRFToken': getCsrfToken(),
@@ -187,15 +187,12 @@ export function postJson(url, body) {
   });
 }
 
+export function postJson(url, body) {
+  return jsonMutation('POST', url, body);
+}
+
 export function putJson(url, body) {
-  return apiFetch(url, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-CSRFToken': getCsrfToken(),
-    },
-    body: JSON.stringify(body),
-  });
+  return jsonMutation('PUT', url, body);
 }
 
 export function del(url) {

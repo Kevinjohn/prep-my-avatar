@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 import { displayLabel } from '../../utils/labels';
 import { datasetImageUrl } from './datasetImageUrl';
 
@@ -33,11 +34,7 @@ export default function DatasetLightbox({
   useBodyScrollLock(!!(img && img.filename));
 
   // Keyboard support: Escape closes, initial focus on the close button.
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  useEscapeToClose(onClose);
   useEffect(() => { closeRef.current?.focus(); }, []);
 
   if (!img || !img.filename) return null;

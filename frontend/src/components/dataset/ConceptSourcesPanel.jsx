@@ -17,6 +17,7 @@ import { safePostJson as postJson } from '../../api/fetchClient';
 import { useCapabilities } from '../../context/CapabilitiesContext';
 import InstallRunner from '../setup/InstallRunner';
 import { clearScraperScanState, loadScraperScanState, saveScraperScanState } from './scraperState';
+import { toggleInSet } from '../../utils/selection';
 
 const thumbFor = (it) =>
   `/api/scrape/thumb?url=${encodeURIComponent(it.thumbnail || it.url)}`;
@@ -134,13 +135,7 @@ export default function ConceptSourcesPanel({ datasetId, onImport, busy }) {
     runScan(0, built);
   }, [kw, sub, scanning, runScan]);
 
-  const toggle = (u) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(u)) next.delete(u); else next.add(u);
-      return next;
-    });
-  };
+  const toggle = (u) => setSelected((current) => toggleInSet(current, u));
 
   // Thumbnail failed → the source image is dead/expired. Hide it and un-select it.
   const markBroken = (u) => {

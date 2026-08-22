@@ -55,6 +55,29 @@ function proseHasWord(caption, tag) {
   }
 }
 
+function compileMatchers(tags, mode) {
+  return tags.map(normalizeTag).filter(Boolean).map((tag) => {
+    if (mode !== 'prose') return tag;
+    try {
+      return new RegExp(
+        `(?:^|[^\\p{L}\\p{N}])${escapeRegExp(tag)}(?=$|[^\\p{L}\\p{N}])`, 'iu');
+    } catch {
+      return tag;
+    }
+  });
+}
+
+function captionMatches(caption, matchers, mode) {
+  if (mode !== 'prose') {
+    const tokens = tokenizeTags(caption);
+    return matchers.some((tag) => tokens.includes(tag));
+  }
+  const normalized = (caption || '').normalize('NFC');
+  return matchers.some((matcher) => matcher instanceof RegExp
+    ? matcher.test(normalized)
+    : normalized.toLowerCase().includes(matcher));
+}
+
 /** Does this caption carry `tag` under the given match mode ('booru' | 'prose')? */
 export function captionHasTag(caption, tag, mode) {
   const needle = normalizeTag(tag);
@@ -73,10 +96,12 @@ export function captionHasTag(caption, tag, mode) {
  */
 export function filterImages(images, { excludes = [], includes = [], mode = 'booru' } = {}) {
   if (!excludes.length && !includes.length) return images || [];
+  const excludeMatchers = compileMatchers(excludes, mode);
+  const includeMatchers = compileMatchers(includes, mode);
   return (images || []).filter((img) => {
     const cap = img.caption || '';
-    if (excludes.some((t) => captionHasTag(cap, t, mode))) return false;
-    if (includes.length && !includes.some((t) => captionHasTag(cap, t, mode))) return false;
+    if (captionMatches(cap, excludeMatchers, mode)) return false;
+    if (includes.length && !captionMatches(cap, includeMatchers, mode)) return false;
     return true;
   });
 }

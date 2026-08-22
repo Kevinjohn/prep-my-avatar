@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { buildSmallImageRescuePairs } from '../../utils/smallImageRescue';
 import { datasetImageUrl } from './datasetImageUrl';
+import { useInFlightIds } from '../../hooks/useInFlightIds';
 
 function ImagePane({ datasetId, image, nonce, label, tone, fallback, onPreview }) {
   const url = datasetImageUrl(datasetId, image, nonce);
@@ -54,23 +55,13 @@ export default function SmallImageRescueReview({
     () => buildSmallImageRescuePairs(images).filter((pair) => !pair.resolved),
     [images],
   );
-  const [resolvingIds, setResolvingIds] = useState(() => new Set());
+  const { inFlight: resolvingIds, run: resolveOnce } = useInFlightIds();
 
   if (!pairs.length) return null;
 
-  const resolve = async (candidateId, choice) => {
-    if (resolvingIds.has(candidateId)) return;
-    setResolvingIds((current) => new Set(current).add(candidateId));
-    try {
-      await onResolve(candidateId, choice);
-    } finally {
-      setResolvingIds((current) => {
-        const next = new Set(current);
-        next.delete(candidateId);
-        return next;
-      });
-    }
-  };
+  const resolve = (candidateId, choice) => resolveOnce(
+    candidateId, () => onResolve(candidateId, choice),
+  );
 
   return (
     <section id="ds-curation-small-image-rescue"
