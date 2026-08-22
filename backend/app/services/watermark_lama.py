@@ -125,7 +125,8 @@ def _staged_image_path(image_path: str, output_path: str) -> str:
 
 def _publish_staged_image(staged: str, destination: str) -> None:
     """Durably publish completed pixels without exposing a partial overwrite."""
-    with open(staged, 'rb') as handle:
+    # Windows rejects fsync on a read-only descriptor with EBADF.
+    with open(staged, 'rb+') as handle:
         os.fsync(handle.fileno())
     os.replace(staged, destination)
 

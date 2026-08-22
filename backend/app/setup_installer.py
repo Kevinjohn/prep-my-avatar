@@ -41,6 +41,8 @@ from flask import current_app, has_app_context
 from . import capabilities
 from . import config as cfg
 
+_Thread = threading.Thread
+
 logger = logging.getLogger(__name__)
 
 # Fixed catalog of the Klein downloads (checked 2026-07-10): the three Comfy-Org/
@@ -544,7 +546,7 @@ def start(action) -> dict:
                 raise Precondition(
                     'could not create a durable setup job; no installer was started') from exc
         _runs[action] = run
-    threading.Thread(target=_execute_with_app, args=(app, action), daemon=True).start()
+    _Thread(target=_execute_with_app, args=(app, action), daemon=True).start()
     return status(action)
 
 

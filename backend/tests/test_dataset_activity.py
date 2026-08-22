@@ -10,7 +10,6 @@ indicator), the TTL purge, thread-safety across datasets, and the payload exposi
 import io
 import os
 import threading
-import time
 
 import pytest
 from PIL import Image
@@ -107,14 +106,14 @@ def test_two_datasets_are_independent():
     da.end(t2)
 
 
-def test_get_returns_latest_started_and_end_targets_only_its_token():
+def test_get_returns_latest_started_and_end_targets_only_its_token(monkeypatch):
     """When two batches overlap on one dataset (CPU pass beside a GPU pass), get()
     returns the most recently started one; ending it falls back to the earlier one —
     a stale end() from a crashed batch never wipes a newer indicator."""
     from app.services import dataset_activity as da
+    monkeypatch.setattr(da.time, 'monotonic', lambda: 1.0)
     da.reset()
     t1 = da.begin(7, 'watermark_clean', total=4)
-    time.sleep(0.002)
     t2 = da.begin(7, 'caption', total=9)
     assert da.get(7)['kind'] == 'caption'          # latest started wins
     da.end(t2)

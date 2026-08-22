@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 
@@ -102,7 +102,8 @@ def _restore_migration_snapshot(journal: dict) -> None:
         if snapshot.stat().st_size != expected_size \
                 or hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_hash:
             raise RecoveryError("migration database snapshot verification failed")
-        with sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(
+                f"file:{snapshot}?mode=ro", uri=True)) as connection:
             if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
                 raise RecoveryError("migration database snapshot integrity check failed")
         temporary = database.with_suffix(database.suffix + ".rollback.tmp")
