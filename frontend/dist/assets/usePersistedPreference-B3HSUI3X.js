@@ -1,0 +1,1 @@
+import{r as n}from"./index-S4ogGtD5.js";const u=t=>t,l=t=>String(t);function i(t,r,{parse:c=u,serialize:o=l}={}){const[e,a]=n.useState(()=>{try{const s=globalThis.localStorage.getItem(t);return s===null?r:c(s)}catch{return r}});return n.useEffect(()=>{try{globalThis.localStorage.setItem(t,o(e))}catch{}},[t,o,e]),{value:e,setValue:a}}export{i as u};

@@ -28,6 +28,17 @@ export function StatusBadge({ ok, okLabel = 'Configured', missingLabel = 'Not se
   )
 }
 
+export function ToggleSwitch({ checked, label, onClick }) {
+  return (
+    <button type="button" role="switch" aria-checked={checked} aria-label={label}
+      onClick={onClick}
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? 'bg-emerald-500' : 'border border-border-strong bg-surface'}`}>
+      <span aria-hidden
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : 'translate-x-0.5'}`} />
+    </button>
+  )
+}
+
 export function TestResult({ result }) {
   if (!result) return null
   return (

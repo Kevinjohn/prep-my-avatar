@@ -3,7 +3,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { postJson } from '../../api/fetchClient'
 import { restartTarget, waitForRestart } from '../../utils/restartReadiness'
 import { useToast } from '../common/Toast'
-import { INPUT_CLASS, Card } from './primitives'
+import { INPUT_CLASS, Card, ToggleSwitch } from './primitives'
 
 const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1']
 
@@ -105,13 +105,9 @@ export default function ServerSection({ config, setField, runtime, handleSave })
             Wi-Fi/LAN can reach it — e.g. from your phone — using the plain URL below.
           </p>
         </div>
-        <button type="button" role="switch" aria-checked={lan}
+        <ToggleSwitch checked={lan}
           onClick={() => setField('server', 'host', lan ? '127.0.0.1' : '0.0.0.0')}
-          aria-label="Available on the local network"
-          className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${lan ? 'bg-emerald-500' : 'bg-surface border border-border-strong'}`}>
-          <span aria-hidden
-            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${lan ? 'translate-x-5' : 'translate-x-0.5'}`} />
-        </button>
+          label="Available on the local network" />
       </div>
 
       {lan && (
@@ -126,13 +122,9 @@ export default function ServerSection({ config, setField, runtime, handleSave })
                   : 'Off: anyone who can reach this network address can use the app, its provider keys, datasets, and GPU. Use only on an explicitly trusted network.'}
               </p>
             </div>
-            <button type="button" role="switch" aria-checked={requireToken}
+            <ToggleSwitch checked={requireToken}
               onClick={() => setField('server', 'require_token', !requireToken)}
-              aria-label="Require an access token"
-              className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${requireToken ? 'bg-emerald-500' : 'bg-surface border border-border-strong'}`}>
-              <span aria-hidden
-                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${requireToken ? 'translate-x-5' : 'translate-x-0.5'}`} />
-            </button>
+              label="Require an access token" />
           </div>
 
           {requireToken && (
