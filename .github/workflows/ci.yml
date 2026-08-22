@@ -114,7 +114,7 @@ jobs:
       - name: Validate repository contracts
         run: python scripts/validate_repository_contracts.py
       - name: Validate GitHub Actions workflows
-        uses: raven-actions/actionlint@01fce4f43a270a612932cb1c64d40505fc1e4e9d # v2
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
 
   frontend:
     runs-on: ubuntu-latest
