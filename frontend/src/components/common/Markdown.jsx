@@ -9,7 +9,7 @@ import { markdownHeadingIds } from '../../utils/markdownHeadings';
    (aucun dangerouslySetInnerHTML : tout passe par des éléments React). */
 
 // ---- inline: **bold**, *italic*, `code`, [text](url) ----
-function renderInline(text, keyBase = 'i') {
+function renderInline(text, keyBase = 'i', resolveLink) {
   const out = [];
   // tokenise par priorité : code d'abord (son contenu est littéral), puis gras,
   // italique, lien. Regex global unique → un seul passage gauche→droite.
@@ -27,7 +27,10 @@ function renderInline(text, keyBase = 'i') {
       out.push(<em key={key}>{tok.slice(1, -1)}</em>);
     } else {
       const mm = tok.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      out.push(<a key={key} href={mm[2]} target="_blank" rel="noreferrer" className="text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300">{mm[1]}</a>);
+      const resolved = resolveLink?.(mm[2]);
+      out.push(resolved == null
+        ? <a key={key} href={mm[2]} target="_blank" rel="noreferrer" className="text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300">{mm[1]}</a>
+        : <a key={key} href={resolved} className="text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300">{mm[1]}</a>);
     }
     last = m.index + tok.length;
   }
@@ -100,16 +103,16 @@ function parseBlocks(md) {
   return blocks;
 }
 
-function renderBlock(b, idx, guide = false) {
+function renderBlock(b, idx, guide = false, resolveLink) {
   const key = `b${idx}`;
   switch (b.t) {
-          case 'h1': return <h1 key={key} className="m-0 mt-2 text-content font-bold text-2xl">{renderInline(b.body, key)}</h1>;
-          case 'h2': return <h2 key={key} id={guide ? undefined : b.headingId} className={`${guide ? 'text-xl' : 'mt-4 border-b border-border pb-1.5 text-lg'} m-0 scroll-mt-24 text-content font-bold`}>{renderInline(b.body, key)}</h2>;
-          case 'h3': return <h3 key={key} className="m-0 mt-2 text-content font-semibold text-base">{renderInline(b.body, key)}</h3>;
+          case 'h1': return <h1 key={key} className="m-0 mt-2 text-content font-bold text-2xl">{renderInline(b.body, key, resolveLink)}</h1>;
+          case 'h2': return <h2 key={key} id={guide ? undefined : b.headingId} className={`${guide ? 'text-xl' : 'mt-4 border-b border-border pb-1.5 text-lg'} m-0 scroll-mt-24 text-content font-bold`}>{renderInline(b.body, key, resolveLink)}</h2>;
+          case 'h3': return <h3 key={key} className="m-0 mt-2 text-content font-semibold text-base">{renderInline(b.body, key, resolveLink)}</h3>;
           case 'hr': return <hr key={key} className="border-border my-2" />;
           case 'quote': return (
             <blockquote key={key} className="m-0 rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-4 py-3 text-content text-sm leading-relaxed">
-              {renderInline(b.body, key)}
+              {renderInline(b.body, key, resolveLink)}
             </blockquote>
           );
           case 'code': return (
@@ -121,7 +124,7 @@ function renderBlock(b, idx, guide = false) {
                 <thead>
                   <tr className="bg-surface-raised">
                     {b.header.map((c, ci) => (
-                      <th key={ci} className="text-left px-3 py-2 text-content font-semibold border-b border-border whitespace-nowrap">{renderInline(c, `${key}h${ci}`)}</th>
+                      <th key={ci} className="text-left px-3 py-2 text-content font-semibold border-b border-border whitespace-nowrap">{renderInline(c, `${key}h${ci}`, resolveLink)}</th>
                     ))}
                   </tr>
                 </thead>
@@ -129,7 +132,7 @@ function renderBlock(b, idx, guide = false) {
                   {b.body.map((row, ri) => (
                     <tr key={ri} className={ri % 2 ? 'bg-surface' : ''}>
                       {row.map((c, ci) => (
-                        <td key={ci} className="px-3 py-2 text-content-muted align-top border-b border-border last:border-b-0">{renderInline(c, `${key}r${ri}c${ci}`)}</td>
+                        <td key={ci} className="px-3 py-2 text-content-muted align-top border-b border-border last:border-b-0">{renderInline(c, `${key}r${ri}c${ci}`, resolveLink)}</td>
                       ))}
                     </tr>
                   ))}
@@ -147,7 +150,7 @@ function renderBlock(b, idx, guide = false) {
                     return (
                       <li key={ii} className="list-none -ml-5 flex items-start gap-2">
                         <span aria-hidden className={`mt-0.5 grid place-items-center w-4 h-4 shrink-0 rounded border text-[0.625rem] ${task[1] === ' ' ? 'border-border-strong text-transparent' : 'border-emerald-400/60 bg-emerald-500/15 text-emerald-300'}`}>✓</span>
-                        <span>{renderInline(task[2], `${key}i${ii}`)}</span>
+                        <span>{renderInline(task[2], `${key}i${ii}`, resolveLink)}</span>
                       </li>
                     );
                   }
@@ -155,20 +158,20 @@ function renderBlock(b, idx, guide = false) {
                     return (
                       <li key={ii} className="flex gap-3 rounded-lg border border-border bg-app px-3 py-3 leading-relaxed">
                         <span aria-hidden className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-500/15 font-mono text-[0.6875rem] font-bold text-indigo-300">{String(ii + 1).padStart(2, '0')}</span>
-                        <span>{renderInline(it, `${key}i${ii}`)}</span>
+                        <span>{renderInline(it, `${key}i${ii}`, resolveLink)}</span>
                       </li>
                     );
                   }
-                  return <li key={ii}>{renderInline(it, `${key}i${ii}`)}</li>;
+                  return <li key={ii}>{renderInline(it, `${key}i${ii}`, resolveLink)}</li>;
                 })}
               </Tag>
             );
           }
-          default: return <p key={key} className="m-0 text-sm text-content-muted leading-relaxed">{renderInline(b.body, key)}</p>;
+          default: return <p key={key} className="m-0 text-sm text-content-muted leading-relaxed">{renderInline(b.body, key, resolveLink)}</p>;
   }
 }
 
-export default function Markdown({ source, variant = 'default' }) {
+export default function Markdown({ source, variant = 'default', resolveLink }) {
   /** @type {any[]} */
   const blocks = parseBlocks(source || '');
   const headingBlocks = blocks.filter((block) => block.t === 'h2');
@@ -190,7 +193,7 @@ export default function Markdown({ source, variant = 'default' }) {
       <div className="flex max-w-none flex-col gap-4">
         {intro.length > 0 && (
           <div className="flex flex-col gap-3 rounded-xl border border-indigo-400/20 bg-gradient-to-br from-indigo-500/10 via-surface to-surface px-4 py-4 sm:px-5">
-            {intro.map(({ block, index }) => renderBlock(block, index, true))}
+            {intro.map(({ block, index }) => renderBlock(block, index, true, resolveLink))}
           </div>
         )}
         {sections.map(({ heading, blocks: sectionBlocks, index }) => (
@@ -198,15 +201,15 @@ export default function Markdown({ source, variant = 'default' }) {
             className="scroll-mt-24 rounded-xl border border-border bg-surface px-4 py-4 shadow-sm shadow-black/10 sm:px-5 sm:py-5">
             <div className="mb-4 flex items-start gap-3 border-b border-border pb-3">
               <span aria-hidden className="mt-1 h-5 w-1 shrink-0 rounded-full bg-gradient-primary" />
-              {renderBlock(heading, index, true)}
+              {renderBlock(heading, index, true, resolveLink)}
             </div>
             <div className="flex flex-col gap-3">
-              {sectionBlocks.map(({ block, index: blockIndex }) => renderBlock(block, blockIndex, true))}
+              {sectionBlocks.map(({ block, index: blockIndex }) => renderBlock(block, blockIndex, true, resolveLink))}
             </div>
           </section>
         ))}
       </div>
     );
   }
-  return <div className="flex max-w-none flex-col gap-3">{blocks.map((b, idx) => renderBlock(b, idx))}</div>;
+  return <div className="flex max-w-none flex-col gap-3">{blocks.map((b, idx) => renderBlock(b, idx, false, resolveLink))}</div>;
 }

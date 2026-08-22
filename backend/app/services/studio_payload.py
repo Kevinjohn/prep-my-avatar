@@ -90,7 +90,7 @@ def studio_payload(runtime, user_id, dataset_id, family=None, run_id=None) -> di
         # z_model None → node 20 intact) reste en tête = défaut. Aucune alternative
         # sur disque → liste vide, le front cache le sélecteur (comportement historique).
         _alts = runtime.krea_alt_base_models()
-        z_models = ([{'value': '', 'label': 'Official – Krea 2 Turbo'}]
+        z_models = ([{'value': '', 'label': 'Official — Krea 2 Turbo'}]
                     + [{'value': m, 'label': runtime.basename(m).rsplit('.', 1)[0]} for m in _alts]
                     if _alts else [])
     else:

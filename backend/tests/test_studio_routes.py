@@ -104,7 +104,7 @@ def test_studio_base_models_krea_lists_official_then_alternatives(client, monkey
     resp = client.get('/api/studio/base-models?type=krea')
     assert resp.status_code == 200
     assert resp.get_json() == {'models': [
-        {'filename': '', 'label': 'Official – Krea 2 Turbo'},
+        {'filename': '', 'label': 'Official — Krea 2 Turbo'},
         {'filename': 'krea\\my_custom_krea.safetensors', 'label': 'my_custom_krea'},
     ]}
 

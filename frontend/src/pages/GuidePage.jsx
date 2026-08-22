@@ -24,6 +24,17 @@ export const CHAPTERS = [
 ]
 export const HELP_CHAPTER = { id: 'getting-help', num: '05', title: 'Getting help', description: 'Create a useful report and share the details needed to solve a problem.', source: gettingHelp, extra: 'diagnostic' }
 export const ALL_GUIDE_CHAPTERS = [...CHAPTERS, HELP_CHAPTER]
+export const GUIDE_DOCUMENT_ROUTES = Object.freeze({
+  'getting-started.md': '/guide/getting-started',
+  'using-the-app.md': '/guide/using-the-app',
+  '../DATASET_GUIDE.md': '/guide/dataset-guide',
+  'troubleshooting.md': '/guide/troubleshooting',
+  'getting-help.md': '/help',
+})
+export const resolveGuideLink = (href) => {
+  const route = GUIDE_DOCUMENT_ROUTES[href]
+  return route ? `#${route}` : null
+}
 
 export default function GuidePage({ helpOnly = false }) {
   const { section } = useParams()
@@ -82,7 +93,7 @@ export default function GuidePage({ helpOnly = false }) {
       : 'lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:items-start lg:gap-7 xl:grid-cols-[210px_minmax(0,1fr)_190px]'}>
       {!helpOnly && <aside>
         {/* Mobile: horizontal chapter chips */}
-        <nav aria-label="Guide chapters" className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-3 lg:hidden">
+        <nav tabIndex={0} aria-label="Guide chapters" className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-3 lg:hidden">
           {CHAPTERS.map((c) => navItem(c, true))}
         </nav>
         {/* Desktop: sticky numbered chapter rail */}
@@ -113,7 +124,7 @@ export default function GuidePage({ helpOnly = false }) {
         {headings.length > 0 && (
           <nav aria-label="On this page" className="mb-4 rounded-xl border border-border bg-surface p-3 xl:hidden">
             <p className="m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle">On this page</p>
-            <div className="flex gap-2 overflow-x-auto pb-0.5">
+            <div tabIndex={0} className="flex gap-2 overflow-x-auto pb-0.5">
               {headings.map((item) => (
                 <a key={item.id} href={`#${item.id}`} onClick={(event) => jumpToHeading(event, item.id)}
                   className="shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content">{item.title}</a>
@@ -122,7 +133,7 @@ export default function GuidePage({ helpOnly = false }) {
           </nav>
         )}
 
-        <Markdown source={chapter.source} variant="guide" />
+        <Markdown source={chapter.source} variant="guide" resolveLink={resolveGuideLink} />
 
         {chapter.extra === 'diagnostic' && (
           <div className="mt-6">

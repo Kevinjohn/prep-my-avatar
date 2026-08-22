@@ -130,9 +130,48 @@ test('Markdown renders semantic headings, links, lists and validated tables', as
   ].join('\n\n'), variant: 'guide' }))
   const headings = screen.getAllByRole('heading', { level: 2 })
   assert.deepEqual(headings.map((heading) => heading.closest('section')?.id), ['same', 'same-2'])
-  assert.equal(screen.getByRole('link', { name: 'Docs' }).getAttribute('href'), 'https://example.com')
+  const docsLink = screen.getByRole('link', { name: 'Docs' })
+  assert.equal(docsLink.getAttribute('href'), 'https://example.com')
+  assert.equal(docsLink.getAttribute('target'), '_blank')
+  assert.equal(docsLink.getAttribute('rel'), 'noreferrer')
   assert.ok(screen.getByRole('list'))
   assert.equal(screen.getAllByRole('row').length, 2)
+})
+
+test('Markdown resolves opted-in links as same-document navigation', async () => {
+  const { default: Markdown } = await server.ssrLoadModule('/src/components/common/Markdown.jsx')
+  render(React.createElement(Markdown, {
+    source: '[Guide](using-the-app.md) [Docs](https://example.com)',
+    resolveLink: (href) => href === 'using-the-app.md' ? '#/guide/using-the-app' : null,
+  }))
+  const guideLink = screen.getByRole('link', { name: 'Guide' })
+  assert.equal(guideLink.getAttribute('href'), '#/guide/using-the-app')
+  assert.equal(guideLink.hasAttribute('target'), false)
+  assert.equal(guideLink.hasAttribute('rel'), false)
+  const docsLink = screen.getByRole('link', { name: 'Docs' })
+  assert.equal(docsLink.getAttribute('target'), '_blank')
+  assert.equal(docsLink.getAttribute('rel'), 'noreferrer')
+})
+
+test('every guide link resolves to a chapter route or an absolute external URL', async () => {
+  const { ALL_GUIDE_CHAPTERS, GUIDE_DOCUMENT_ROUTES, resolveGuideLink } =
+    await server.ssrLoadModule('/src/pages/GuidePage.jsx')
+  const chapterRoutes = new Set(ALL_GUIDE_CHAPTERS.map((chapter) =>
+    chapter.id === 'getting-help' ? '/help' : `/guide/${chapter.id}`))
+  for (const route of Object.values(GUIDE_DOCUMENT_ROUTES)) {
+    assert.ok(chapterRoutes.has(route), `guide document maps to unknown route ${route}`)
+  }
+  const linkPattern = /\[[^\]]+\]\(([^)]+)\)/g
+  for (const chapter of ALL_GUIDE_CHAPTERS) {
+    for (const match of chapter.source.matchAll(linkPattern)) {
+      const href = match[1]
+      const resolved = resolveGuideLink(href)
+      assert.ok(
+        (resolved && chapterRoutes.has(resolved.slice(1))) || /^https?:\/\//.test(href),
+        `${chapter.id} has no in-app route for ${href}`,
+      )
+    }
+  }
 })
 
 test('every shipped guide chapter renders semantic content without axe violations', async () => {
