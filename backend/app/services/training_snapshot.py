@@ -10,19 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..models import FaceDatasetImage
+from ..utils.file_hashing import sha256_file
 from . import face_dataset_service as fds
 
 FORMAT = 'prep-my-avatar-training-snapshot'
 VERSION = 1
 MANIFEST_NAME = 'training-snapshot.json'
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open('rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _caption_hash(text) -> str:
@@ -98,10 +91,10 @@ def capture(user_id, dataset_id, destination) -> dict:
                     copied.chmod(0o600)
                 except OSError:
                     pass
-            copied_hash = _sha256(copied)
+            copied_hash = sha256_file(copied)
             after = source.stat()
             if ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
-                    or _sha256(source) != copied_hash):
+                    or sha256_file(source) != copied_hash):
                 raise RuntimeError(
                     f'dataset image changed while the training snapshot was captured: {row.filename}')
             source_checks.append((source, copied_hash, row.filename,
@@ -129,7 +122,7 @@ def capture(user_id, dataset_id, destination) -> dict:
                     f'dataset image changed while the training snapshot was captured: {filename}')
             if (source.is_symlink() or not source.is_file()
                     or (current.st_size, current.st_mtime_ns) != expected_stat
-                    or _sha256(source) != copied_hash):
+                    or sha256_file(source) != copied_hash):
                 raise RuntimeError(
                     f'dataset image changed while the training snapshot was captured: {filename}')
         db_session.expire_all()
@@ -220,7 +213,8 @@ def load(snapshot_dir) -> dict:
                 or not isinstance(content_hash, str) or len(content_hash) != 64):
             raise ValueError(f'training snapshot metadata check failed: {name}')
         path = raw_dir / name
-        if (path.is_symlink() or not path.is_file() or _sha256(path) != content_hash):
+        if (path.is_symlink() or not path.is_file()
+                or sha256_file(path) != content_hash):
             raise ValueError(f'training snapshot content check failed: {name}')
         expected_registry.append([image_id, caption_hash, content_hash])
     if manifest.get('registry_manifest') != expected_registry:

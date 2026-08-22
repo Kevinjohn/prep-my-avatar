@@ -14,6 +14,7 @@ from PIL import Image
 
 from ..job_queue import queue_manager
 from ..models import FaceDatasetImage
+from ..utils.file_hashing import sha256_file as _sha256_file
 from . import face_dataset_service as fds
 from . import lora_training as training
 from .lora_training import (
@@ -45,14 +46,6 @@ def _mask_fields(dataset_folder: str) -> dict:
 
 
 _EXPORTED_MANIFEST = '.training-manifest.json'
-
-
-def _sha256_file(path) -> str:
-    digest = hashlib.sha256()
-    with open(path, 'rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def export_registry_manifest(dataset_folder) -> list:
