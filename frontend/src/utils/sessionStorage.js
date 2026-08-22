@@ -1,3 +1,5 @@
+export const SETUP_REDIRECT_SESSION_KEY = 'lds_setup_redirected'
+
 export function readSession(key) {
   try {
     return window.sessionStorage.getItem(key)

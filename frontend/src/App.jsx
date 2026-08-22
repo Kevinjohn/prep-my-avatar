@@ -7,7 +7,9 @@ import { CapabilitiesProvider, useCapabilities } from './context/CapabilitiesCon
 import ErrorBoundary from './components/common/ErrorBoundary'
 import { ConfirmDialogProvider } from './components/common/ConfirmDialog'
 import { recommendedMet } from './hooks/useSetupSteps'
-import { readSession, removeSession, writeSession } from './utils/sessionStorage'
+import {
+  readSession, removeSession, SETUP_REDIRECT_SESSION_KEY, writeSession,
+} from './utils/sessionStorage'
 import { installUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard'
 
 // Route-level chunks keep the first app shell small. The dataset workspace is
@@ -22,6 +24,7 @@ const CloudRunsPage = lazy(() => import('./pages/CloudRunsPage'))
 
 const NAV_ITEM_BASE =
   'px-3 py-1.5 rounded-md text-sm font-medium no-underline transition-colors'
+const UPDATE_BANNER_DISMISSED_KEY = 'updateBannerDismissed'
 const navItemClass = ({ isActive }) =>
   `${NAV_ITEM_BASE} ${
     isActive ? 'bg-surface-raised text-content' : 'text-content-muted hover:text-content hover:bg-surface-raised'
@@ -48,7 +51,7 @@ function CheckUpdatesButton() {
         // The dot always lights up; the banner only surfaces if the user
         // hasn't dismissed it this session (manual checks clear the flag).
         if (d?.update_available
-            && readSession('updateBannerDismissed') !== '1') {
+            && readSession(UPDATE_BANNER_DISMISSED_KEY) !== '1') {
           window.dispatchEvent(new CustomEvent('lds:update-available', { detail: d }))
         }
       } catch { /* offline — the manual button stays available */ }
@@ -66,7 +69,7 @@ function CheckUpdatesButton() {
       const d = await apiFetch('/api/update/check?force=1')
       setAvailable(!!d?.update_available)
       if (d?.update_available) {
-        removeSession('updateBannerDismissed')     // re-show even if dismissed
+        removeSession(UPDATE_BANNER_DISMISSED_KEY)     // re-show even if dismissed
         window.dispatchEvent(new CustomEvent('lds:update-available', { detail: d }))
         toast.success(`Update available — v${d.latest || d.remote_sha || 'new'}`)
       } else if (d?.ok) {
@@ -174,6 +177,10 @@ function UpdateBanner() {
   const [error, setError] = useState(null)
   const [manualUrl, setManualUrl] = useState(null)
   const restartControllerRef = useRef(null)
+  const finishApplying = () => {
+    setApplying(false)
+    setPhase('')
+  }
   useEffect(() => () => restartControllerRef.current?.abort(), [])
   // A manual "Check for updates" (nav button) surfaces the banner even after it
   // was dismissed this session, or when the passive mount check found nothing yet.
@@ -195,7 +202,7 @@ function UpdateBanner() {
     }
     if (restartControllerRef.current === lifecycleController) restartControllerRef.current = null
     setError('The restarted server did not become reachable within two minutes. Reload or restart the app manually.')
-    setApplying(false); setPhase('')
+    finishApplying()
   }
 
   // One-click pull + restart, same backend action as the Settings card. A packaged
@@ -210,13 +217,13 @@ function UpdateBanner() {
       } else if (res.manual) {
         setManualUrl(res.url || info.url)
         setError('This build must be updated manually. Use the download link below.')
-        setApplying(false); setPhase('')
+        finishApplying()
       } else {
-        setApplying(false); setPhase('')
+        finishApplying()
         setError(res.reason || (res.ok ? null : 'Update failed'))
       }
     } catch (e) {
-      setApplying(false); setPhase('')
+      finishApplying()
       setError(e.message || 'Update failed')
     }
   }
@@ -264,7 +271,7 @@ function UpdateBanner() {
               </a>
             )}
             <button type="button"
-              onClick={() => { setInfo(null); writeSession('updateBannerDismissed', '1') }}
+              onClick={() => { setInfo(null); writeSession(UPDATE_BANNER_DISMISSED_KEY, '1') }}
               aria-label="Dismiss update notice"
               className="ml-auto px-1.5 text-content-subtle hover:text-content">✕</button>
           </>
@@ -273,9 +280,6 @@ function UpdateBanner() {
     </div>
   )
 }
-
-// sessionStorage key shared with SetupPage's "Skip setup" link (defense in depth).
-const SETUP_REDIRECT_KEY = 'lds_setup_redirected'
 
 /** Onboarding: a never-configured backend (no config.json yet) sends the
  * user straight to Settings instead of a workspace with nothing wired up.
@@ -291,8 +295,8 @@ function OnboardingRedirect() {
   const navigate = useNavigate()
   useEffect(() => {
     if (loading || error || caps.configured) return
-    if (readSession(SETUP_REDIRECT_KEY)) return
-    writeSession(SETUP_REDIRECT_KEY, '1')
+    if (readSession(SETUP_REDIRECT_SESSION_KEY)) return
+    writeSession(SETUP_REDIRECT_SESSION_KEY, '1')
     navigate('/setup', { replace: true })
   }, [loading, error, caps.configured, navigate])
   return null
