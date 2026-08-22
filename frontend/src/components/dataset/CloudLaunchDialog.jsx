@@ -3,14 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { safeJson } from '../../api/fetchClient';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
-
-const FAMILY_LABEL = {
-  zimage: 'Z-Image',
-  krea: 'Krea 2',
-  sdxl: 'SDXL',
-  flux: 'FLUX.1',
-  flux2klein: 'FLUX.2 Klein',
-};
+import { TRAINING_FAMILY_LABELS } from '../../utils/trainingFamilies';
 
 function formatDuration(minutes) {
   if (minutes == null) return '—';
@@ -135,7 +128,7 @@ export default function CloudLaunchDialog({
         )}
 
         <p className="m-0 text-content-subtle text-[0.6875rem]">
-          {(data?.steps ?? steps ?? '—')} steps · {FAMILY_LABEL[data?.family || trainType] || (data?.family || trainType)}
+          {(data?.steps ?? steps ?? '—')} steps · {TRAINING_FAMILY_LABELS[data?.family || trainType] || (data?.family || trainType)}
           {keptCount != null ? ` · ${keptCount} img` : ''}
           {budget > 0 ? ` · this month: $${spent.toFixed(2)} of $${budget.toFixed(2)}` : ''}
           {'. '}Time & cost are approximate; the pod is auto-terminated when done.

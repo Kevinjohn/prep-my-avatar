@@ -9,8 +9,8 @@ import os
 
 from .. import config as cfg
 from ..models import FaceDataset
+from ..utils.training_families import FAMILY_LABELS
 from ..utils.comfyui import (
-    FAMILY_LABELS,
     format_trained_lora_label,
     get_checkpoint_models,
     get_krea_loras,
@@ -108,7 +108,7 @@ def list_test_checkpoints(dataset, family=None) -> list[dict]:
         detected = training.detect_lora_arch(path) if path else None
         if training.lora_arch_conflicts(detected, family):
             entry["arch_mismatch"] = detected
-            entry["arch_label"] = training._LORA_ARCH_LABEL.get(detected, detected)
+            entry["arch_label"] = FAMILY_LABELS.get(detected, detected)
         checkpoints.append(entry)
     return checkpoints
 

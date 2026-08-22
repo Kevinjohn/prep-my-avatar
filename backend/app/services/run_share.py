@@ -27,9 +27,7 @@ from ..utils.time import utcnow
 from ..utils.redact import redact_user_paths
 from ..version import APP_VERSION
 from . import cloud_training as ct
-
-_FAMILY_LABEL = {'zimage': 'Z-Image', 'krea': 'Krea 2', 'sdxl': 'SDXL',
-                 'flux': 'FLUX.1', 'flux2klein': 'FLUX.2 Klein'}
+from ..utils.training_families import FAMILY_LABELS
 
 _NOT_RECORDED = 'not recorded on this run'
 
@@ -115,7 +113,7 @@ def _slug(s):
 
 
 def _family_label(fam):
-    return _FAMILY_LABEL.get(fam, fam or 'LoRA')
+    return FAMILY_LABELS.get(fam, fam or 'LoRA')
 
 
 def _variant_label(variant):

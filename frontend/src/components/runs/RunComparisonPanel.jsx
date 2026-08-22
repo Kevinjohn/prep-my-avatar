@@ -1,6 +1,4 @@
-const FAMILY_LABEL = {
-  zimage: 'Z-Image', krea: 'Krea 2', sdxl: 'SDXL', flux: 'FLUX.1', flux2klein: 'FLUX.2 Klein',
-};
+import { TRAINING_FAMILY_LABELS } from '../../utils/trainingFamilies';
 
 function duration(seconds) {
   if (!Number.isFinite(Number(seconds))) return '—';
@@ -60,7 +58,7 @@ function cost(run) {
 
 const ROWS = [
   ['Dataset', (run) => run.dataset_name || `#${run.dataset_id}`],
-  ['Run identity', (run) => `${FAMILY_LABEL[run.train_type] || run.train_type || 'LoRA'} · v${run.version || '?'} · ${run.source}`],
+  ['Run identity', (run) => `${TRAINING_FAMILY_LABELS[run.train_type] || run.train_type || 'LoRA'} · v${run.version || '?'} · ${run.source}`],
   ['Started', (run) => dateTime(run.created_at)],
   ['Outcome', (run) => `${run.status || 'recorded'}${run.error ? ` · ${run.error}` : ''}`],
   ['Target', (run) => `${run.steps ?? '—'} steps${run.masked == null ? ' · mask not recorded' : run.masked ? ' · masked' : ' · unmasked'}`],

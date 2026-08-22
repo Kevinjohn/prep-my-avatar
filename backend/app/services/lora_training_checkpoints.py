@@ -9,8 +9,9 @@ import sys
 
 from . import face_dataset_service as fds
 from . import lora_training as training
+from ..utils.training_families import FAMILY_LABELS
 from .lora_training import (
-    _LORA_ARCH_LABEL, _PERSISTED, _atomic_copy, _dest_base_tag,
+    _PERSISTED, _atomic_copy, _dest_base_tag,
     _output_dir, _run_name, _safe_trigger, _train_type,
     detect_lora_arch, lora_arch_conflicts,
 )
@@ -162,8 +163,8 @@ def import_checkpoint(user_id, dataset_id, filename, base_model=_PERSISTED, fami
     fam_target = _train_type(ds, family)
     detected = detect_lora_arch(os.path.join(run_dir, filename))
     if lora_arch_conflicts(detected, fam_target):
-        det_lbl = _LORA_ARCH_LABEL.get(detected, detected)
-        tgt_lbl = _LORA_ARCH_LABEL.get(fam_target, fam_target)
+        det_lbl = FAMILY_LABELS.get(detected, detected)
+        tgt_lbl = FAMILY_LABELS.get(fam_target, fam_target)
         raise ValueError(
             f'this file is a {det_lbl} LoRA — deploy it under the {det_lbl} '
             f'family, not {tgt_lbl}.')
@@ -275,7 +276,7 @@ def list_imported_checkpoints(user_id, dataset_id, family=None) -> list[dict]:
         detected = detect_lora_arch(os.path.join(dest_dir, fn))
         if lora_arch_conflicts(detected, fam):
             entry['arch_mismatch'] = detected
-            entry['arch_label'] = _LORA_ARCH_LABEL.get(detected, detected)
+            entry['arch_label'] = FAMILY_LABELS.get(detected, detected)
         out.append(entry)
     return out
 
