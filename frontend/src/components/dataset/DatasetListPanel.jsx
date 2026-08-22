@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
 import ShotIllustration from './ShotIllustration';
 import { useConfirmDialog } from '../common/ConfirmDialog';
+import { datasetImageUrl } from './datasetImageUrl';
+import { datasetIdentityComplete } from './datasetIdentityRules';
 
 // Fixed gradient palette for the dataset avatars — deterministic per name so a
 // dataset keeps its color across sessions (Tailwind needs literal class names).
@@ -131,7 +133,7 @@ function DatasetTile({ d, onOpen, onDelete }) {
         <div className="relative aspect-[4/3] bg-app/60">
           {d.ref_filename ? (
             <img
-              src={`/api/dataset/${d.id}/img/${encodeURIComponent(d.ref_filename)}`}
+              src={datasetImageUrl(d.id, d.ref_filename)}
               alt="" loading="lazy" aria-hidden="true"
               className="h-full w-full object-cover" />
           ) : (
@@ -208,17 +210,13 @@ function NewDatasetForm({ onCreate, onRestore, onClose }) {
   const [fidelity, setFidelity] = useState('face');
   const [submitting, setSubmitting] = useState(false);
   const concept = kind === 'concept';
-  // Style : esthétique globale absorbée par le LoRA — captions de contenu pur,
-  // PAS de trigger dans la config d'entraînement (champ facultatif ici, il ne sert
-  // qu'à nommer le run), pas de description à omettre, pas de fidélité visage.
+  // Style: a whole aesthetic the LoRA absorbs — captions describe content only,
+  // NO trigger in the training config (the field here is optional and only names
+  // the run), no description to omit, no face fidelity.
   const style = kind === 'style';
-  // Mirrors the server rule EXACTLY (POST /api/dataset/create): name is always
-  // required; trigger_word is required for character/concept (it's the token
-  // that summons them) but NOT for style (the server auto-generates a
-  // zsty_<id> placeholder — no trigger to type, as the field above says).
-  // Without this, an empty-trigger character/concept create used to reach the
-  // server with the button enabled and 400 silently (no toast, no feedback).
-  const canCreate = name.trim() && (!concept || conceptDesc.trim()) && (style || trigger.trim());
+  const canCreate = datasetIdentityComplete({
+    name, trigger, description: conceptDesc, isConcept: concept, isStyle: style,
+  });
   return (
     <div className="rounded-xl border border-border bg-surface p-3 flex flex-col gap-2.5">
       <div className="flex items-center justify-between gap-2">

@@ -11,6 +11,7 @@
 import { useRef } from 'react';
 import { useFocusTrap } from '../../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../../hooks/useBodyScrollLock';
+import { datasetImageUrl } from '../datasetImageUrl';
 
 export default function QuickVoteModal({ vote, datasetId, fmt }) {
   const ref = useRef(null);
@@ -36,7 +37,7 @@ export default function QuickVoteModal({ vote, datasetId, fmt }) {
         {vote.voteIdx + 1} / {vote.voteQueue.length} · {cur.label} · strength {fmt(cur.strength)}
         {cur.aspect ? ` · ${cur.aspect}` : ''}
       </div>
-      <img src={`/api/dataset/${datasetId}/img/${encodeURIComponent(cur.filename)}`}
+      <img src={datasetImageUrl(datasetId, cur)}
         alt={cur.label}
         className="max-w-[92vw] max-h-[64vh] object-contain rounded-lg border border-white/15" />
       <div className="text-content-subtle text-[0.625rem]">← swipe/left arrow = 👎 · right = 👍 → · Esc = close · ("skip" button to pass)</div>

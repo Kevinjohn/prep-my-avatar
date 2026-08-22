@@ -3,18 +3,16 @@ import Flux2KleinModelPicker from '../shared/Flux2KleinModelPicker';
 import ShotIllustration, { contextEmoji } from './ShotIllustration';
 import { displayLabel } from '../../utils/labels';
 import { useVariationCatalogController } from '../../hooks/useVariationCatalogController';
-import { DEFAULT_COVERAGE_TARGET as TARGET, FRAMING_COLOR, FRAMING_LABEL, PRESET_META } from './variationCatalogModel';
+import {
+  DEFAULT_COVERAGE_TARGET as TARGET, FRAMING_COLOR, FRAMING_LABEL, FRAMING_ORDER, PRESET_META,
+} from './variationCatalogModel';
 
-// Framing accent colors — shared by the section headers, the preset composition
-// bars and the legend so the same hue always means the same framing.
-// Training composition target (mirrors CompositionBar): used to highlight the
-// variation cards of the framings that are still missing — a visual quota.
 /** Mini stacked bar showing a preset's framing mix (face/bust/body/back). */
 function CompositionMiniBar({ counts, total }) {
   if (!total) return null;
   return (
     <span className="flex h-1.5 w-full rounded-full overflow-hidden bg-app/60" aria-hidden="true">
-      {['face', 'bust', 'body', 'back'].map((fr) => counts[fr] ? (
+      {FRAMING_ORDER.map((fr) => counts[fr] ? (
         <span key={fr} className={FRAMING_COLOR[fr]} style={{ width: `${(counts[fr] / total) * 100}%` }} />
       ) : null)}
     </span>
@@ -210,7 +208,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
             ＋ Save preset
           </button>
           <span className="ml-auto flex items-center gap-2 flex-wrap text-[0.625rem] text-content-subtle" aria-hidden="true">
-            {['face', 'bust', 'body', 'back'].map((fr) => (
+            {FRAMING_ORDER.map((fr) => (
               <span key={fr} className="flex items-center gap-1">
                 <span className={`w-2 h-2 rounded-full ${FRAMING_COLOR[fr]}`} />{FRAMING_LABEL[fr]}
               </span>
@@ -301,7 +299,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
 
       {/* Shot picker, grouped by framing with a quota progress bar per group. */}
       <div className="max-h-80 overflow-auto flex flex-col gap-2 pr-1">
-        {['face', 'bust', 'body', 'back'].map((fr) => {
+        {FRAMING_ORDER.map((fr) => {
           const have = (composition && composition[fr]) || 0;
           const target = Number(coverageTargets?.[fr] ?? TARGET[fr]);
           const missing = Math.max(0, target - have);
@@ -492,7 +490,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
             <select value={customFraming} onChange={(e) => setCustomFraming(e.target.value)}
               aria-label="Custom shot framing"
               className="bg-app/60 border border-border rounded px-1 py-1 text-[0.6875rem] text-content">
-              {['face', 'bust', 'body', 'back'].map((fr) => (
+              {FRAMING_ORDER.map((fr) => (
                 <option key={fr} value={fr}>{FRAMING_LABEL[fr]}</option>
               ))}
             </select>

@@ -28,6 +28,7 @@ import {
   deleteSelectedWatermarkRegion,
 } from '../../utils/watermarkRegions';
 import WatermarkRegionEditor from './WatermarkRegionEditor';
+import { datasetImageUrl } from './datasetImageUrl';
 
 // The action Clean WILL take, per backend route (watermark_route in the payload).
 const ROUTE_LABEL = {
@@ -61,7 +62,7 @@ const RECAP_ORDER = ['cleaned', 'dismissed', 'rejected', 'review', 'skipped', 'f
 const RECAP_WORD = { cleaned: 'cleaned', dismissed: 'dismissed', rejected: 'rejected',
   review: 'need review', skipped: 'skipped', failed: 'failed' };
 
-export function buildWatermarkRecap(outcomes) {
+function buildWatermarkRecap(outcomes) {
   const c = {};
   for (const k of Object.values(outcomes || {})) c[k] = (c[k] || 0) + 1;
   const parts = RECAP_ORDER.filter((k) => c[k]).map((k) => `${c[k]} ${RECAP_WORD[k]}`);
@@ -364,9 +365,7 @@ export default function WatermarkReviewLightbox({ datasetId, queue, caps, nonces
 
   const alt = item ? (displayLabel(item.variation_label) || 'dataset image') : '';
   const nonce = item ? (nonces[item.id] || 0) : 0;
-  const url = item && item.filename
-    ? `/api/dataset/${datasetId}/img/${encodeURIComponent(item.filename)}${nonce ? `?v=${nonce}` : ''}`
-    : null;
+  const url = datasetImageUrl(datasetId, item, nonce);
   const route = manual
     ? {
         icon: '🖌',

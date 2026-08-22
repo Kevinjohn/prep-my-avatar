@@ -6,6 +6,8 @@
  *
  * La clé `key={cell.id}` est posée par le PARENT (ResultCell) lors du `.map`.
  */
+import { datasetImageUrl } from '../datasetImageUrl';
+
 export default function ResultTile({ cell, row, strength, variant, datasetId, onRate, onOpen, fmt }) {
   return (
     <div className="flex flex-col gap-1 items-center">
@@ -33,7 +35,7 @@ export default function ResultTile({ cell, row, strength, variant, datasetId, on
         <button type="button" onClick={() => onOpen(cell)}
           title={`${row.label} @ ${fmt(strength)} (${variant.aspect || '—'}) seed ${cell.seed}${cell.batch_lora ? ` · + ${cell.batch_lora}` : ''} — open larger`}
           className="block p-0 m-0 border-0 bg-transparent cursor-pointer">
-          <img src={`/api/dataset/${datasetId}/img/${encodeURIComponent(cell.filename)}`}
+          <img src={datasetImageUrl(datasetId, cell)}
             alt={`${row.label} strength ${fmt(strength)} ${variant.aspect || ''} seed ${cell.seed}`} loading="lazy"
             className="w-20 h-28 object-cover rounded-md border border-border" />
         </button>

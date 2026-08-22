@@ -20,7 +20,8 @@ import CropModal from './CropModal';
 import DatasetLightbox from './DatasetLightbox';
 import DatasetSettingsModal from './DatasetSettingsModal';
 import PublishHfModal from './PublishHfModal';
-import WatermarkReviewLightbox, { buildWatermarkRecap } from './WatermarkReviewLightbox';
+import WatermarkReviewLightbox from './WatermarkReviewLightbox';
+import { datasetImageUrl } from './datasetImageUrl';
 import { useToast } from '../common/Toast';
 import { useConfirmDialog, usePromptDialog } from '../common/ConfirmDialog';
 import { useCapabilities } from '../../context/CapabilitiesContext';
@@ -53,6 +54,25 @@ const EMPTY_IMAGES = Object.freeze([]);
 // Style partagé des items du menu « ⋯ More » du header (actions secondaires).
 const MENU_ITEM = 'w-full flex items-center gap-2 text-left px-2.5 py-1.5 rounded-md text-sm text-content hover:bg-surface-raised disabled:opacity-40';
 
+// Flash the block the user was just sent to (gf-highlight, index.css) so the eye
+// finds it. The remove + forced reflow restarts the animation when the same
+// destination is chosen twice in a row. Both jump paths — the checklist's "Fix →"
+// and the URL-driven reveal — land the same way, so they flash the same way.
+// The " 12/64" suffix a running pass adds to its label. `kind` narrows it to one
+// pass, for buttons that only speak for themselves; the activity banner names
+// whatever is running and so passes none. A pass with no total shows no suffix.
+function activityProgress(activity, kind = null) {
+  if (!activity || (kind && activity.kind !== kind) || !activity.total) return '';
+  return ` ${activity.done}/${activity.total}`;
+}
+
+function flashLandingTarget(el) {
+  el.classList.remove('gf-highlight');
+  void el.offsetWidth;
+  el.classList.add('gf-highlight');
+  window.setTimeout(() => el.classList.remove('gf-highlight'), 1500);
+}
+
 export default function DatasetWorkspace({ ds, onBack }) {
   const navigate = useNavigate();
   const toast = useToast();
@@ -73,7 +93,14 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const [installInpaintOpen, setInstallInpaintOpen] = useState(false);  // panneau d'install LaMa
   const [checkpointCount, setCheckpointCount] = useState(0);
   const [checkpointHost, setCheckpointHost] = useState(null);
-  const [trainingNavigation, setTrainingNavigation] = useState({ ready: false, queueCount: 0 });
+  // The training panel re-reports this on every 10 s status poll, always as a
+  // fresh object. Only the two scalars below are ever read, so holding the old
+  // object when both are unchanged keeps an idle poll from re-rendering the
+  // whole workspace (and busting `navContext`, which depends on it).
+  const [trainingNavigation, setTrainingNavigationState] = useState({ ready: false, queueCount: 0 });
+  const setTrainingNavigation = useCallback((next) => setTrainingNavigationState(
+    (prev) => (prev.ready === next.ready && prev.queueCount === next.queueCount ? prev : next),
+  ), []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [publishHfOpen, setPublishHfOpen] = useState(false);
   // Grid tag-filter (session-only): tags whose images are hidden (exclude) or the
@@ -81,8 +108,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const [excludeTags, setExcludeTags] = useState([]);
   const [includeTags, setIncludeTags] = useState([]);
   const [searchParams, setSearchParams] = useSearchParams();
-  const navImages = d?.images || EMPTY_IMAGES;
-  const images = navImages;
+  const images = d?.images || EMPTY_IMAGES;
   const curationHistoryKey = useMemo(() => images.map((image) => [
     image.id, image.status, image.caption || '', image.anchor_decision || '',
     image.framing || '', JSON.stringify(image.coverage || {}),
@@ -91,23 +117,23 @@ export default function DatasetWorkspace({ ds, onBack }) {
   ].join(':')).join('|'), [images]);
   const navContext = useMemo(() => withDatasetImageSummary({
     kind: d?.kind || 'character',
-    hasSelectableImages: filterImageImprovementGrid(filterSmallImageRescueGrid(navImages))
+    hasSelectableImages: filterImageImprovementGrid(filterSmallImageRescueGrid(images))
       .some((image) => Boolean(image.filename)),
-    hasKeptImages: navImages.some((image) => image.status === 'keep'),
-    hasCaptionedKept: navImages.some(
+    hasKeptImages: images.some((image) => image.status === 'keep'),
+    hasCaptionedKept: images.some(
       (image) => image.status === 'keep' && Boolean((image.caption || '').trim()),
     ),
     hasLeakMetadata: Boolean(d?.caption_leak),
-    watermarkDetected: navImages.filter((image) => image.watermark_state === 'detected').length,
-    smallImageRescue: buildSmallImageRescuePairs(navImages).filter((pair) => !pair.resolved).length,
-    unused: navImages.filter((image) => (image.status === 'reject' || image.status === 'failed')
+    watermarkDetected: images.filter((image) => image.watermark_state === 'detected').length,
+    smallImageRescue: buildSmallImageRescuePairs(images).filter((pair) => !pair.resolved).length,
+    unused: images.filter((image) => (image.status === 'reject' || image.status === 'failed')
       && !isSmallImageRescueRow(image)).length,
     hfPublish: Boolean(caps.hf_publish),
     trainingVisible: Boolean(caps.training_visible),
     trainingStatusReady: !caps.training_visible || trainingNavigation.ready,
     trainingQueueCount: trainingNavigation.queueCount,
     studioVisible: Boolean(caps.studio_visible),
-  }, d?.image_summary), [d, navImages, caps.hf_publish, caps.training_visible,
+  }, d?.image_summary), [d, images, caps.hf_publish, caps.training_visible,
     caps.studio_visible, trainingNavigation]);
   const workspaceLocation = resolveWorkspaceLocation(searchParams, navContext);
   const section = workspaceLocation.section;
@@ -210,10 +236,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
           || destination.reveal === 'training-checkpoints')
           && (!(target instanceof HTMLDetailsElement) || !target.open)) return false;
       target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      target.classList.remove('gf-highlight');
-      void target.offsetWidth;
-      target.classList.add('gf-highlight');
-      window.setTimeout(() => target.classList.remove('gf-highlight'), 1500);
+      flashLandingTarget(target);
       if (focusRequestedRef.current) {
         const focusableSelector = [
           'button:not([disabled])', 'a[href]', 'input:not([disabled])',
@@ -291,38 +314,50 @@ export default function DatasetWorkspace({ ds, onBack }) {
     return () => cancelAnimationFrame(frame);
   }, [section, panel]);
 
+  // Every value here is a pure function of `images`, and every one of them is an
+  // array or a Set — a fresh identity on each render, handed to memoised children
+  // and to their own useMemos downstream. Deriving them once per image list is
+  // what makes those memos hit; computing them inline meant none of them ever did.
+  // Declared above the early return because it is a hook.
+  const pairs = useMemo(() => {
+    const rescue = buildSmallImageRescuePairs(images);
+    const unresolvedRescue = rescue.filter((pair) => !pair.resolved);
+    const improvement = buildImageImprovementPairs(images);
+    const unresolvedImprovement = improvement.filter((pair) => !pair.resolved);
+    // An unresolved pair is intentionally absent from the generic grid/bulk
+    // controls: only the atomic side-by-side resolver may decide it. Once resolved,
+    // the chosen keep + rejected counterpart return to the regular dataset view.
+    const unresolvedRescueIds = new Set(unresolvedRescue.flatMap(
+      (pair) => [pair.original.id, pair.candidate.id],
+    ));
+    const unresolvedImprovementIds = new Set(unresolvedImprovement.flatMap(
+      (pair) => pair.imageIds,
+    ));
+    const rescueGridImages = filterSmallImageRescueGrid(images);
+    return {
+      unresolvedRescuePairs: unresolvedRescue,
+      unresolvedRescueIds,
+      rescuePairIds: new Set(rescue.flatMap((pair) => [pair.original.id, pair.candidate.id])),
+      unresolvedImprovementPairs: unresolvedImprovement,
+      improvementPairIds: new Set(improvement.flatMap((pair) => pair.imageIds)),
+      unresolvedImprovementIds,
+      unresolvedExclusiveIds: new Set([...unresolvedRescueIds, ...unresolvedImprovementIds]),
+      reviewGridImages: filterImageImprovementGrid(rescueGridImages),
+    };
+  }, [images]);
+
   if (!d) return <p className="text-content-subtle text-sm">Loading…</p>;
 
-  const rescuePairs = buildSmallImageRescuePairs(images);
-  const unresolvedRescuePairs = rescuePairs.filter((pair) => !pair.resolved);
-  // An unresolved pair is intentionally absent from the generic grid/bulk
-  // controls: only the atomic side-by-side resolver may decide it. Once resolved,
-  // the chosen keep + rejected counterpart return to the regular dataset view.
-  const unresolvedRescueIds = new Set(unresolvedRescuePairs.flatMap(
-    (pair) => [pair.original.id, pair.candidate.id],
-  ));
-  const rescuePairIds = new Set(rescuePairs.flatMap(
-    (pair) => [pair.original.id, pair.candidate.id],
-  ));
-  const rescueGridImages = filterSmallImageRescueGrid(images);
-  const improvementPairs = buildImageImprovementPairs(images);
-  const unresolvedImprovementPairs = improvementPairs.filter((pair) => !pair.resolved);
-  const improvementPairIds = new Set(improvementPairs.flatMap(
-    (pair) => pair.imageIds,
-  ));
-  const unresolvedImprovementIds = new Set(unresolvedImprovementPairs.flatMap(
-    (pair) => pair.imageIds,
-  ));
-  const unresolvedExclusiveIds = new Set([
-    ...unresolvedRescueIds, ...unresolvedImprovementIds,
-  ]);
-  const reviewGridImages = filterImageImprovementGrid(rescueGridImages);
+  const {
+    unresolvedRescuePairs, unresolvedRescueIds, rescuePairIds, unresolvedImprovementPairs,
+    improvementPairIds, unresolvedImprovementIds, unresolvedExclusiveIds, reviewGridImages,
+  } = pairs;
   const rescueReviewCount = unresolvedRescuePairs.length;
-  // Dataset CONCEPT : on masque tout ce qui est identité/visage (référence, générateur
-  // de variations, analyse faciale, badge de fuite, composition, flux guidé) — il ne
-  // reste que import brut → curation → caption (inversée) → entraînement.
-  // 'style' suit le même chemin UI que concept : pas de référence/visage/composition,
-  // juste import brut → curation → caption (contenu pur, optionnelle) → entraînement.
+  // A CONCEPT dataset hides everything to do with identity/faces (reference, the
+  // variation generator, face analysis, the leak badge, composition, the guided
+  // flow) — what is left is raw import → curation → caption (inverted) → training.
+  // 'style' follows the same UI path as concept: no reference/face/composition,
+  // just raw import → curation → caption (content only, optional) → training.
   const concept = d.kind === 'concept' || d.kind === 'style';
   // Leak check is KIND-specific (see the caption-leak panel): character flags identity,
   // concept flags the caption NAMING the concept (must bind to the trigger), style never
@@ -397,12 +432,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       const b = el.querySelector('button:not([disabled])');
       if (b instanceof HTMLElement) b.focus({ preventScroll: true });
-      // Flash the landed-on block (gf-highlight, index.css) so the eye finds it.
-      // remove + reflow restarts the animation when the same step is clicked twice.
-      el.classList.remove('gf-highlight');
-      void el.offsetWidth;
-      el.classList.add('gf-highlight');
-      window.setTimeout(() => el.classList.remove('gf-highlight'), 1500);
+      flashLandingTarget(el);
     };
     requestAnimationFrame(attempt);
   };
@@ -487,7 +517,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
     ? `${act?.detail || `Captioning in progress — ${keptCaptioned}/${kept} captioned…`} ComfyUI is paused.`
     : (() => {
         if (act) {
-          const prog = act.total ? ` ${act.done}/${act.total}` : '';
+          const prog = activityProgress(act);
           // Passes that DON'T claim "ComfyUI is paused": the CPU ones, plus
           // 'generate' (engine-dependent — Nano Banana / ChatGPT don't touch
           // ComfyUI, and the Klein case is obvious from the tiles appearing).
@@ -805,7 +835,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
               ) : (
                 <DatasetGrid images={gridImages} datasetId={d.id} onStatus={ds.setStatus} onCaption={ds.setCaption}
                   onCrop={setCropImg} onDelete={ds.deleteImage}
-                  onRegenerate={(id, loraStrength, prompt) => ds.regenerate(id, loraStrength, prompt)} onView={setViewImg}
+                  onRegenerate={ds.regenerate} onView={setViewImg}
                   onBatch={ds.batchImages} busy={ds.busy}
                   nonces={ds.nonces} faceThresholds={d.face_thresholds}
                   exclusiveImageIds={unresolvedExclusiveIds}
@@ -949,7 +979,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
                     title={d.ref_filename ? "Scores each image's facial resemblance vs the reference (deletes nothing)" : "Set a reference photo first"}
                     className="px-3 py-1.5 rounded-lg bg-surface text-content text-sm disabled:opacity-40 border border-border scroll-mt-20">
                     {ds.analyzing
-                      ? `🎭 Analyzing…${act?.kind === 'analyze_faces' && act.total ? ` ${act.done}/${act.total}` : ''}`
+                      ? `🎭 Analyzing…${activityProgress(act, 'analyze_faces')}`
                       : '🎭 Analyze faces'}
                   </button>
                 )}
@@ -962,7 +992,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   title="Scans the kept images for overlaid watermarks/logos/URLs added on top of the photo (deletes nothing)"
                   className="px-3 py-1.5 rounded-lg bg-surface text-content text-sm disabled:opacity-40 border border-border">
                   {ds.watermarking
-                    ? `🧽 Scanning…${act?.kind === 'watermark_detect' && act.total ? ` ${act.done}/${act.total}` : ''}`
+                    ? `🧽 Scanning…${activityProgress(act, 'watermark_detect')}`
                     : '🧽 Find watermarks'}
                 </button>
                 {watermarkDetected > 0 && (
@@ -1239,7 +1269,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
                       </span>
                       {images.filter((i) => i.leak).map((img) => (
                         <div key={img.id} className="flex gap-2 items-start">
-                          <img src={`/api/dataset/${d.id}/img/${encodeURIComponent(img.filename)}`}
+                          <img src={datasetImageUrl(d.id, img)}
                             alt={img.variation_label || 'dataset image'} loading="lazy"
                             className="w-14 h-14 rounded-lg object-cover shrink-0 bg-black" />
                           <textarea defaultValue={img.caption || ''} rows={2}
@@ -1417,7 +1447,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
       </div>{/* /workspace grid */}
 
       {cropImg && cropImg.filename && (
-        <CropModal imageUrl={`/api/dataset/${d.id}/img/${encodeURIComponent(cropImg.filename)}`}
+        <CropModal imageUrl={datasetImageUrl(d.id, cropImg)}
           onCancel={() => setCropImg(null)}
           onConfirm={async (box) => { if (await ds.crop(cropImg.id, box)) setCropImg(null); }} />
       )}
@@ -1425,7 +1455,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
         // Feed the crop editor the full-frame ORIGINAL (when kept) so the box can widen
         // back out — not just tighten the already-cropped square. Legacy datasets with
         // no stored original fall back to the cropped ref (can only tighten, as before).
-        <CropModal imageUrl={`/api/dataset/${d.id}/img/${encodeURIComponent(d.ref_original_filename || d.ref_filename)}`}
+        <CropModal imageUrl={datasetImageUrl(d.id, d.ref_original_filename || d.ref_filename)}
           defaultAspect={1}
           onCancel={() => setRefCrop(false)}
           onConfirm={async (box) => { if (await ds.cropRef(box)) setRefCrop(false); }}
@@ -1465,8 +1495,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
           onReject={(id) => ds.setStatus(id, 'reject')}
           onClose={(recap) => {
             setReviewQueue(null);
-            const summary = recap || buildWatermarkRecap({});
-            if (summary) toast.success(`Review done — ${summary}`);
+            if (recap) toast.success(`Review done — ${recap}`);
           }} />
       )}
     </div>

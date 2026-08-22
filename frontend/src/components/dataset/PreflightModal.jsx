@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { datasetImageUrl } from './datasetImageUrl';
 
 export default function PreflightModal({ report, datasetId, ds, onResolve }) {
   const { warnings = [], leak_images: leaks = [], dup_pairs: dups = [] } = report || {};
@@ -27,7 +28,7 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
   const dialogRef = useRef(null);
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
-  const imgUrl = (fn) => `/api/dataset/${datasetId}/img/${encodeURIComponent(fn)}`;
+  const imgUrl = (fn) => datasetImageUrl(datasetId, fn);
 
   // Escape cancels, like dismissing a native confirm.
   useEffect(() => {

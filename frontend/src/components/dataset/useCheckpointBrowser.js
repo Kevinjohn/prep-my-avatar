@@ -34,10 +34,15 @@ export function useCheckpointBrowser({ dataset, baseInfo, visible, toast, onCoun
     }
   }, [base, dataset, onCountChange, toast, trainType]);
 
+  // Depend on WHETHER base info has loaded, not on the object: the panel replaces
+  // it every 4 s while a base conversion runs, and a conversion produces no
+  // checkpoints — so the object identity would re-list the checkpoint directory
+  // fifteen times a minute to learn nothing.
+  const baseInfoLoaded = !!baseInfo;
   useEffect(() => {
-    if (!visible || !dataset.currentId || !baseInfo) return;
+    if (!visible || !dataset.currentId || !baseInfoLoaded) return;
     setLoaded(false); refresh(base, trainType);
-  }, [base, trainType, dataset.currentId, baseInfo, visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [base, trainType, dataset.currentId, baseInfoLoaded, visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { trainType, setTrainType, base, setBase, checkpoints, imported,
     cloudCheckpoints, datasetState, diskUsage, loaded, refresh };

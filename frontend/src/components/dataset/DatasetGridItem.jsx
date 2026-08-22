@@ -1,10 +1,11 @@
 /** One curation tile: image + keep/reject + source/framing badges + caption + crop. */
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { displayLabel } from '../../utils/labels';
 import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
 import CaptionEditorDialog from './CaptionEditorDialog';
 import PromptEditPopover from './PromptEditPopover';
 import { useConfirmDialog } from '../common/ConfirmDialog';
+import { datasetImageUrl } from './datasetImageUrl';
 
 const STATUS_CLS = {
   keep: 'border-green-500',
@@ -59,10 +60,13 @@ const WATERMARK_BADGE = {
   failed: { icon: '⚠', cls: 'text-red-300', text: 'watermark', label: 'Watermark removal failed' },
 };
 
-export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete,
-                                          onRegenerate, onView, nonce = 0, faceThresholds,
-                                          selected = false, onToggleSelect, tileSize = 'M',
-                                          exclusiveLocked = false, busy = false }) {
+// Memoised: the grid mounts hundreds of these, and ticking one checkbox would
+// otherwise re-run every tile body. Every prop below is either a value or an
+// identity the grid holds stable across a selection change.
+function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete,
+                           onRegenerate, onView, nonce = 0, faceThresholds,
+                           selected = false, onToggleSelect, tileSize = 'M',
+                           exclusiveLocked = false, busy = false }) {
   const confirm = useConfirmDialog();
   const [cap, setCap] = useState(img.caption || '');
   const [captionEditorOpen, setCaptionEditorOpen] = useState(false);
@@ -83,9 +87,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
   // Qwen3-VL captioning pass) — useState's initial value alone would stay stale.
   useEffect(() => { if (!editingRef.current) setCap(img.caption || ''); }, [img.caption]);
   // `nonce` busts the browser cache after an in-place crop (same filename).
-  const url = img.filename
-    ? `/api/dataset/${datasetId}/img/${encodeURIComponent(img.filename)}${nonce ? `?v=${nonce}` : ''}`
-    : null;
+  const url = datasetImageUrl(datasetId, img, nonce);
   // Regenerate applies to generated tiles that are not mid-generation —
   // finished AND failed ones (failure recovery path) (F2).
   const isRescueDerived = isSmallImageRescueRow(img);
@@ -130,7 +132,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
             title="Inspect (zoom)"
             aria-label={`Inspect ${displayLabel(img.variation_label) || 'the image'} full screen`}
             className="block w-full h-full cursor-zoom-in">
-            <img src={url} alt={displayLabel(img.variation_label)} loading="lazy"
+            <img src={url} alt={displayLabel(img.variation_label)} loading="lazy" decoding="async"
               className={`w-full h-full ${imgFitCls}`} />
           </button>
         ) : (
@@ -303,3 +305,5 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
     </div>
   );
 }
+
+export default memo(DatasetGridItem);

@@ -3,6 +3,7 @@
 // corrigée : un modificateur d'opacité à 60 % sur `bg-surface` rendait un panneau
 // BLANC (surface = blanc) → on utilise `bg-surface-raised` (surface sombre surélevée).
 import { useState } from 'react';
+import { datasetImageUrl } from '../datasetImageUrl';
 
 export default function BestPerModelList({ items, breakdown, datasetId, onMemorize, fmt }) {
   const [open, setOpen] = useState(false); // replié par défaut (dépliable au besoin)
@@ -24,7 +25,7 @@ export default function BestPerModelList({ items, breakdown, datasetId, onMemori
         <div key={m.checkpoint} className="flex flex-col gap-0.5">
           <div className="flex items-center gap-2 flex-wrap text-[0.6875rem]">
             {m.filename
-              ? <img src={`/api/dataset/${datasetId}/img/${encodeURIComponent(m.filename)}`}
+              ? <img src={datasetImageUrl(datasetId, m)}
                   alt="" loading="lazy" className="w-8 h-10 object-cover rounded shrink-0" />
               : <span className="w-8 h-10 rounded bg-app/60 shrink-0" />}
             <span className="text-content font-medium truncate max-w-[150px]" title={m.label}>{m.label}</span>

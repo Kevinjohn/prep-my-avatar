@@ -2,6 +2,7 @@
 // Extrait behavior-preserving de LoraTestStudio.jsx (bloc « Prompts récents »),
 // + bouton 🗑 par preset (supprime le prompt et ses cellules/images de test).
 import { useConfirmDialog } from '../../common/ConfirmDialog';
+import { datasetImageUrl } from '../datasetImageUrl';
 
 export default function RecentPrompts({ items, datasetId, selectedPrompt, onPick, onDelete }) {
   const confirm = useConfirmDialog();
@@ -24,7 +25,7 @@ export default function RecentPrompts({ items, datasetId, selectedPrompt, onPick
                 className={`flex items-center gap-1.5 p-1 text-left min-w-0 ${
                   sel ? 'text-purple-200' : 'text-content-muted'}`}>
                 {pr.thumbnail
-                  ? <img src={`/api/dataset/${pr.thumb_dataset_id ?? datasetId}/img/${encodeURIComponent(pr.thumbnail)}`}
+                  ? <img src={datasetImageUrl(pr.thumb_dataset_id ?? datasetId, pr.thumbnail)}
                       alt="" loading="lazy"
                       className="w-8 h-10 object-cover rounded shrink-0" />
                   : <span className="w-8 h-10 rounded bg-app/60 shrink-0 flex items-center justify-center text-content-subtle">?</span>}

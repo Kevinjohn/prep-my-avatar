@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { FRAMING_LABEL } from './variationCatalogModel';
 
-const FRAME_LABELS = { face: 'Face', bust: 'Bust', body: 'Body', back: 'Back' };
 const STATE_LABELS = {
   covered: { icon: '✓', label: 'covered', cls: 'text-emerald-300 border-emerald-400/40 bg-emerald-500/10' },
   weak: { icon: '△', label: 'weak', cls: 'text-amber-300 border-amber-400/40 bg-amber-500/10' },
@@ -128,14 +128,14 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
           {framing.map((gap) => (
             <div key={gap.id} className="rounded-md border border-border bg-app/40 px-2 py-1.5">
               <div className="flex items-center justify-between gap-1">
-                <span className="text-[0.6875rem] font-semibold text-content">{FRAME_LABELS[gap.framing] || gap.framing}</span>
+                <span className="text-[0.6875rem] font-semibold text-content">{FRAMING_LABEL[gap.framing] || gap.framing}</span>
                 <StateBadge state={gap.state} />
               </div>
               <div className="mt-1 text-[0.625rem] text-content-muted">
                 {gap.have}/
                 <input type="number" min="0" max="100" value={targetDraft[gap.framing] ?? gap.target}
                   onChange={(event) => { targetsDirtyRef.current = true; setTargetDraft((current) => ({ ...current, [gap.framing]: Number(event.target.value) })); }}
-                  aria-label={`${FRAME_LABELS[gap.framing] || gap.framing} target`}
+                  aria-label={`${FRAMING_LABEL[gap.framing] || gap.framing} target`}
                   className="mx-0.5 w-10 rounded border border-border bg-surface px-1 text-center text-content" />
                 · {Math.max(0, (targetDraft[gap.framing] ?? gap.target) - gap.have)} needed
               </div>

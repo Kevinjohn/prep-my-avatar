@@ -232,6 +232,14 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   useEffect(() => {
     try { localStorage.setItem(TILE_SIZE_KEY, tileSize); } catch { /* ignore — private mode */ }
   }, [tileSize]);
+  // Stable identity, and declared before the early return for the same reason as
+  // `tileSize`. It is the one prop every tile receives that would otherwise change
+  // on a pure selection change, which is what lets the memoised tiles skip.
+  const toggle = useCallback((id) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  }), []);
 
   if (!images || !images.length) {
     return (
@@ -246,11 +254,6 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   const selectable = images.filter((i) => i.filename && !isSmallImageRescueRow(i) && !isExclusive(i));
   const renderedImages = images.slice(0, visibleCount);
   const ids = [...selected];
-  const toggle = (id) => setSelected((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
   const act = async (action) => {
     if (action === 'delete'
         && !(await confirm({

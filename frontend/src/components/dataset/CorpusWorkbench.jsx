@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCleanAdmissionCandidate, needsQualityReview } from '../../utils/corpusAdmission.js';
+import { FRAMING_ORDER } from './variationCatalogModel';
+import { datasetImageUrl } from './datasetImageUrl';
 
 const COVERAGE_OPTIONS = {
-  framing: ['face', 'bust', 'body', 'back', 'unknown'],
+  // 'unknown' is a corpus-only bucket: an imported photo nobody has classified yet.
+  framing: [...FRAMING_ORDER, 'unknown'],
   angle: ['front', 'three-quarter', 'profile', 'back', 'other'],
   expression: ['neutral', 'smile', 'laugh', 'serious', 'surprised', 'pensive', 'other'],
   lighting: ['daylight', 'indoor', 'studio', 'golden-hour', 'low-light', 'mixed', 'other'],
@@ -172,7 +175,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                 className={`relative aspect-square overflow-hidden rounded-lg border text-left ${active
                   ? 'border-indigo-300 ring-2 ring-indigo-400/40'
                   : 'border-border hover:border-content-subtle'}`}>
-                <img loading="lazy" alt="" src={`/api/dataset/${datasetId}/img/${encodeURIComponent(image.filename)}`}
+                <img loading="lazy" decoding="async" alt="" src={datasetImageUrl(datasetId, image)}
                   className="h-full w-full object-cover" />
                 <span className={`absolute left-1 top-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] ${decision === 'pinned'
                   ? 'text-emerald-300' : decision === 'excluded' ? 'text-rose-300' : 'text-white/80'}`}>

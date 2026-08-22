@@ -12,7 +12,7 @@ export default function TrainingAdvancedOptions(props) {
     advTimestepDefault, advTimestepSupported, advWarmup, advWarmupChoices, advancedOpen, base,
     baseBlocksTrain, baseConverted, baseInfo, baseLabel, comfyConfigured, concept,
     convertError, convertRunning, currentBases, customBase, customSupported, doPrepareBase,
-    hasInvalidStepsOverride, isCustomBase, keptCount, launchConfigReady, masked, maskedRembgMissing,
+    hasInvalidStepsOverride, baseSelected, keptCount, launchConfigReady, masked, maskedRembgMissing,
     needsConversion, openSched, preflightFloor, presetController, queued, recoSteps,
     samplePromptsText, saveAdv, saveSamplePrompts, schedAt, schedule, setAdvancedOpen,
     setBase, setCustomBase, setMasked, setSamplePromptsText, setSchedAt, setStepsOverride,
@@ -63,7 +63,7 @@ export default function TrainingAdvancedOptions(props) {
                 <option value={CUSTOM_BASE_SENTINEL}>Custom weights… (local file)</option>
               )}
             </select>
-            {trainType === 'zimage' && isCustomBase && (
+            {trainType === 'zimage' && baseSelected && (
               <select value={variant} onChange={(e) => setVariant(e.target.value)}
                 title="Base model variant (sets the de-distillation adapter + the sampler)"
                 className="px-2 py-1 rounded-lg border border-border bg-surface text-content text-[0.75rem]">

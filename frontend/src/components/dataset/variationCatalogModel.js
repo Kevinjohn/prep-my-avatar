@@ -1,8 +1,17 @@
+// The framing vocabulary, in the order it is always shown: coarse -> wide. Every
+// surface that lists framings — the composition bar, the coverage plan, the
+// catalog legend and its filter — reads this one array, so adding a fifth framing
+// is one edit rather than a hunt through five files that happened to agree.
+export const FRAMING_ORDER = ['face', 'bust', 'body', 'back']
 export const FRAMING_LABEL = { face: 'Face', bust: 'Bust', body: 'Body', back: 'Back' }
 export const FRAMING_COLOR = {
   face: 'bg-indigo-400', bust: 'bg-violet-400', body: 'bg-sky-400', back: 'bg-slate-400',
 }
+// Face-fidelity training target (~25 images). The body-fidelity variant lives in
+// CompositionBar, which is the only surface that offers the choice.
 export const DEFAULT_COVERAGE_TARGET = { face: 12, bust: 6, body: 6, back: 1 }
+/** A framing -> 0 map, for counting into. Fresh each call: callers mutate it. */
+export const emptyFramingCounts = () => Object.fromEntries(FRAMING_ORDER.map((k) => [k, 0]))
 export const PRESET_META = [
   { key: 'balanced_25', name: 'Balanced', hint: 'The all-round default: every framing covered in training proportions.' },
   { key: 'zimage_12', name: 'Z-Image 12', hint: 'Compact 12-shot set tuned for Z-Image LoRA training.' },
