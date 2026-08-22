@@ -8,6 +8,7 @@ import { useConfirmDialog, usePromptDialog } from '../components/common/ConfirmD
 import { usePersistedPreference } from '../hooks/usePersistedPreference';
 import TrainingProgress from '../components/dataset/TrainingProgress';
 import RunComparisonPanel from '../components/runs/RunComparisonPanel';
+import { writeDatasetCurrentId } from '../utils/datasetCurrentId';
 import { TRAINING_FAMILY_LABELS } from '../utils/trainingFamilies';
 
 /* Dedicated hub for cloud training runs across ALL datasets: watch the ones in
@@ -141,7 +142,7 @@ export default function CloudRunsPage() {
   }, [poll]);
 
   const openDataset = (id) => {
-    try { localStorage.setItem('datasetCurrentId', String(id)); } catch { /* ignore */ }
+    writeDatasetCurrentId(id);
     navigate('/datasets');
   };
 

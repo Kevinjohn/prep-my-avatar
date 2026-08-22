@@ -10,6 +10,9 @@ import { useToast } from '../components/common/Toast';
 import { serializeWatermarkRegions } from '../utils/watermarkRegions';
 import { summarizeScrapeImport } from '../utils/smallImageRescue';
 import { reuseUnchangedItems } from '../utils/reuseUnchangedItems';
+import {
+  clearDatasetCurrentId, readDatasetCurrentId, writeDatasetCurrentId,
+} from '../utils/datasetCurrentId';
 
 /**
  * Compose the 🧽 Clean summary toast from the server's counts — PURE (no React,
@@ -68,11 +71,7 @@ async function fetchImageWindow(datasetId, targetCount) {
 export function useDataset() {
   const toast = useToast();
   const [datasets, setDatasets] = useState([]);
-  // Persist the open dataset so a page reload returns to its workspace, not the list.
-  const [currentId, setCurrentId] = useState(() => {
-    try { const v = localStorage.getItem('datasetCurrentId'); return v ? Number(v) : null; }
-    catch { return null; }
-  });
+  const [currentId, setCurrentId] = useState(readDatasetCurrentId);
   const currentIdRef = useRef(currentId);
   currentIdRef.current = currentId;
   const [data, setData] = useState(null);
@@ -185,13 +184,13 @@ export function useDataset() {
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
-  // Persist the open dataset id + restore its workspace on mount/reload.
   useEffect(() => {
-    try {
-      if (currentId) localStorage.setItem('datasetCurrentId', String(currentId));
-      else localStorage.removeItem('datasetCurrentId');
-    } catch { /* ignore */ }
+    if (currentId) writeDatasetCurrentId(currentId);
+    else clearDatasetCurrentId();
   }, [currentId]);
+  // Mount only: restore the workspace the persisted id points at, so a reload —
+  // or an arrival from another page that wrote the id — lands on the dataset
+  // rather than the list.
   useEffect(() => { if (currentId) refresh(currentId); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Navbar title = home: closes the open workspace even when already on /datasets
   // (same-route NavLink clicks don't remount the page).

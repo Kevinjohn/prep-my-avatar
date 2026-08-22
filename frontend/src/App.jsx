@@ -10,6 +10,7 @@ import { recommendedMet } from './hooks/useSetupSteps'
 import {
   readSession, removeSession, SETUP_REDIRECT_SESSION_KEY, writeSession,
 } from './utils/sessionStorage'
+import { clearDatasetCurrentId } from './utils/datasetCurrentId'
 import { installUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard'
 
 // Route-level chunks keep the first app shell small. The dataset workspace is
@@ -107,9 +108,9 @@ function NavBar() {
   // nothing extra in the DOM.
   const [open, setOpen] = useState(false)
   const goHome = () => {
-    // Home = the datasets LIST: clear the persisted open dataset and tell
-    // the mounted page (same-route clicks don't remount) to close it.
-    try { localStorage.removeItem('datasetCurrentId'); } catch { /* ignore */ }
+    clearDatasetCurrentId()
+    // Tell the mounted page to close its workspace because a same-route
+    // NavLink click does not remount it.
     window.dispatchEvent(new CustomEvent('lds:home'))
     setOpen(false)
   }
