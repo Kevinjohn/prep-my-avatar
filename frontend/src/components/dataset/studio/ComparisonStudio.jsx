@@ -18,7 +18,8 @@ import { useToast } from '../../common/Toast';
 import { useStudioRun } from '../../../hooks/useStudioRun';
 import { useQuickVote } from '../../../hooks/useQuickVote';
 import { fmt } from '../../../utils/studioFormat';
-import { DEFAULT_STRENGTHS, FAMILY_LABELS } from './constants';
+import { TRAINING_FAMILY_LABELS } from '../../../utils/trainingFamilies';
+import { DEFAULT_STRENGTHS } from './constants';
 import StudioRunSetup from './StudioRunSetup';
 import StudioGenerationSettings from './StudioGenerationSettings';
 import StudioActionBar from './StudioActionBar';
@@ -160,7 +161,7 @@ export default function ComparisonStudio({ selection, baseModels = [], runType =
         {baseModels.length > 0 && (
           <div className="flex flex-col gap-1 rounded-lg border border-border bg-surface p-3">
             <span className="text-content-muted text-[0.625rem] uppercase">
-              Base model ({FAMILY_LABELS[runType] || 'Z-Image'})
+              Base model ({TRAINING_FAMILY_LABELS[runType] || 'Z-Image'})
             </span>
             <select
               value={selectedBase}
