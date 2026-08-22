@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { writeSession } from '../utils/sessionStorage'
+import { SETUP_REDIRECT_SESSION_KEY, writeSession } from '../utils/sessionStorage'
 import { useToast } from '../components/common/Toast'
 import { useConfirmDialog } from '../components/common/ConfirmDialog'
 import { useCapabilities } from '../context/CapabilitiesContext'
@@ -154,7 +154,7 @@ export default function SetupPage() {
     // skipping never bounces straight back to #/setup even in an edge case where
     // the guard effect hasn't run yet (e.g. this Link navigates before that effect
     // re-fires with fresh caps).
-    <Link to="/datasets" onClick={() => writeSession('lds_setup_redirected', '1')}
+    <Link to="/datasets" onClick={() => writeSession(SETUP_REDIRECT_SESSION_KEY, '1')}
       className="text-xs text-content-subtle underline hover:text-content">
       Skip setup — I'll do it later
     </Link>

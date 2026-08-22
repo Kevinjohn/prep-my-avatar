@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { readSession, removeSession, writeSession } from './sessionStorage.js'
+import {
+  readSession, removeSession, SETUP_REDIRECT_SESSION_KEY, writeSession,
+} from './sessionStorage.js'
 
 function withStorage(storage, callback) {
   const previous = globalThis.window
@@ -26,6 +28,10 @@ test('session helpers preserve ordinary browser storage behavior', () => {
     assert.equal(removeSession('seen'), true)
     assert.equal(readSession('seen'), null)
   })
+})
+
+test('setup redirect retains its established session key', () => {
+  assert.equal(SETUP_REDIRECT_SESSION_KEY, 'lds_setup_redirected')
 })
 
 test('session helpers contain denied reads and writes', () => {
