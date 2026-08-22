@@ -14,27 +14,29 @@ Clones the dataset fan-out mechanics exactly:
   - free (never debited) but hard-capped (MAX_TEST_IMAGES per run, one active
     run per dataset, refused while training/vision holds the GPU).
 
-Lifted from the parent project's app/services/lora_test_studio.py (1981
-lines) for LoRA Dataset Studio: SRC's module-level WORKFLOW_ZTURBO_PATH /
-WORKFLOW_HQ_PATH / WORKFLOW_KREA_TURBO_PATH constants become
-``cfg.BACKEND_DIR / 'workflows' / '<name>.json'`` accessors below;
-COMFYUI_OUTPUT_DIR becomes the live `_comfy_output_dir()` accessor (same
-pattern as klein_edit_helper). Single-user app: the ownership subsystem
-(`lora_ownership.filenames_owned_by_others`, cross-user `_run_owned` /
-`_owned_test_image` checks) is dropped - everything on disk that matches a
-dataset's trigger boundary IS that dataset's checkpoint, and every test-image
-row IS the local user's. `save_test_image_to_gallery` /
-`_studio_image_to_generation_settings` and the `GenerationLog`
-history-hiding stanza are dropped too - this app has no gallery/generator
-log to save into or hide from (`saved_to_gallery` isn't a column on our
-`LoraTestImage`).
+This module is the COORDINATOR. The work lives in siblings, and this file
+re-exports their entry points so routes, tests, and the sibling modules
+themselves reach one stable surface:
+  - ``studio_discovery``  - which checkpoints/bases exist for a dataset+family;
+  - ``studio_scoring``    - votes, rankings, feedback, best settings;
+  - ``studio_payload``    - the poll payloads;
+  - ``studio_lifecycle``  - cancel/resume;
+  - ``studio_cells`` / ``studio_launch`` / ``studio_storage`` - the launch path.
+Those siblings receive THIS module as their ``runtime`` argument, so a name they
+call resolves through this module's globals - which is what keeps
+``monkeypatch.setattr(lts, 'get_krea_models', ...)`` working. Anything extracted
+out of here must stay reachable as an attribute of this module for that reason.
+
+Workflow JSON is resolved live (``cfg.BACKEND_DIR / 'workflows' / '<name>.json'``),
+as is the ComfyUI output dir (`_comfy_output_dir()`), so a config change needs no
+reimport. Single-user app: `_run_owned` / `_owned_test_image` are deliberate
+no-ops kept as the single place a multi-user check would land.
 """
 from __future__ import annotations
 
 import functools
 import json
 import logging
-import math
 import os
 import random
 import re
@@ -122,13 +124,6 @@ TEST_ASPECTS_SDXL = {
     '4:3':  (1024, 768),
     '16:9': (1024, 576),
 }
-# Formats Studio → valeurs d'aspectRatio de Generate (miroir de
-# react-frontend/src/components/dataset/studio/constants.js:ASPECT_TO_GENERATE).
-_STUDIO_ASPECT_TO_GENERATE = {
-    '9:16': 'portrait', '3:4': 'portrait', '1:1': 'square',
-    '4:3': 'landscape', '16:9': 'landscape',
-}
-_MODE_LABEL_BY_FAMILY = {'zimage': 'Z-Image', 'krea': 'Krea 2 Turbo', 'sdxl': 'SDXL'}
 DEFAULT_ASPECT = '9:16'
 # Paliers de résolution (parité Generate) - mêmes clés que resolution.py/_TIERS. NULL =
 # table de formats fixe historique (comportement inchangé si le front n'envoie rien).
@@ -174,27 +169,11 @@ CFG_CHOICES = [1.0, 1.5, 2.0, 2.5, 3.0]
 STEPS_CHOICES = [6, 8, 10, 12, 16, 20, 24, 32, 40]
 
 
-def _basename(path: str) -> str:
-    """Basename tolerant to ComfyUI's backslash-relative LoRA paths."""
-    return (path or '').replace('\\', '/').rsplit('/', 1)[-1]
-
-
-def _wilson_lower_bound(likes: int, voted: int, z: float = 1.96) -> float:
-    """Borne basse de l'intervalle de Wilson (95%) sur le taux de 👍.
-
-    C'est la métrique de tri correcte pour « meilleure config d'après les votes » :
-    un compte brut (likes − dislikes) favorise les configs simplement TESTÉES plus
-    souvent ; le taux brut (likes/voted) favorise les configs à 1 seul vote. Wilson
-    combine taux ÉLEVÉ *et* confiance (nb de votes) : 2👍/2 (0.34) bat 6👍4👎 (0.31),
-    et 5👍/5 (0.57) bat 2👍/2 (0.34). 0.0 si aucun vote."""
-    if voted <= 0:
-        return 0.0
-    p = likes / voted
-    z2 = z * z
-    denom = 1.0 + z2 / voted
-    centre = p + z2 / (2 * voted)
-    margin = z * math.sqrt((p * (1 - p) + z2 / (4 * voted)) / voted)
-    return (centre - margin) / denom
+# Basename tolerant to ComfyUI's backslash-relative LoRA paths, and the Wilson
+# ranking metric: both OWNED by the sibling that uses them, aliased here because
+# this module is the runtime surface the payload/tests reach through.
+_basename = _discovery.basename
+_wilson_lower_bound = _scoring._wilson_lower_bound
 
 
 def identity_prompt(ds) -> str:
@@ -223,9 +202,6 @@ def _prompt_with_trigger(prompt, trigger_word):
 # --- Discovery ---------------------------------------------------------------
 
 FAMILIES = _discovery.FAMILIES
-_pool_for_family = _discovery.pool_for_family
-_trigger_token_match = _discovery.trigger_token_match
-_trigger_match_checkpoints = _discovery.list_test_checkpoints
 list_test_checkpoints = _discovery.list_test_checkpoints
 available_families = _discovery.available_families
 permanent_lora_candidates = _discovery.permanent_lora_candidates
@@ -334,14 +310,87 @@ def _check_final_cell_budget(total: int) -> None:
             'Reduce axes, base models, batch LoRAs, or images per config.')
 
 
+# Domaine des seeds ComfyUI : [1, 2^31-1]. Partagé par la validation d'entrée, la
+# dérivation des seeds d'un run et le repli du resume - ils DOIVENT s'accorder,
+# sinon un seed accepté à la création devient hors domaine au resume.
+SEED_MAX = 2**31 - 1
+
+
 def _validated_seed(seed) -> int:
     try:
-        value = int(seed) if seed is not None else random.randint(1, 2**31 - 1)
+        value = int(seed) if seed is not None else random.randint(1, SEED_MAX)
     except (TypeError, ValueError):
         raise ValueError(f'invalid seed: {seed!r}')
-    if not 1 <= value <= 2**31 - 1:
-        raise ValueError(f'seed out of range [1, {2**31 - 1}]: {value}')
+    if not 1 <= value <= SEED_MAX:
+        raise ValueError(f'seed out of range [1, {SEED_MAX}]: {value}')
     return value
+
+
+def _run_seed_series(seed, count) -> tuple[int, list[int]]:
+    """(count borné, seeds) d'un run. N seeds DISTINCTS, PARTAGÉS par toutes les
+    configs du run : c'est ce qui rend la comparaison équitable (deux configs jugées
+    sur le même bruit). Borné 1..4 images par config."""
+    try:
+        count = max(1, min(int(count or 1), 4))
+    except (TypeError, ValueError):
+        count = 1
+    return count, [1 + ((seed + i - 1) % SEED_MAX) for i in range(count)]
+
+
+def _base_model_pool(family, *, require=False) -> list:
+    """Pool de modèles de BASE d'une famille - la seule définition de cette règle.
+
+    SDXL → les checkpoints SDXL de Generate ; Krea → ``None`` EN TÊTE (= le UNET
+    câblé dans le node 20 du workflow, défaut historique et repli) puis les bases
+    Krea locales ; sinon les modèles Z-Image. Ce ``None`` de tête est le contrat :
+    une cellule Krea legacy (``z_model`` NULL) doit retomber sur le UNET câblé, jamais
+    sur un modèle arbitraire - un resume qui le perdrait re-générerait silencieusement
+    sur une autre base.
+
+    La POLITIQUE de pool vide reste chez l'appelant : la création refuse
+    (``require=True``), le resume se rabat et ne lève jamais en cours de run."""
+    if family == 'sdxl':
+        models = [m['filename'] for m in list_sdxl_base_models()]
+    elif family == 'krea':
+        models = [None] + get_krea_models()
+    else:
+        models = get_zimage_models()
+    if require and not models:
+        raise ValueError('no SDXL checkpoint available' if family == 'sdxl'
+                         else 'no Z-Image model available')
+    return models
+
+
+def _validated_permanent_loras(permanent_loras, run_family) -> list[dict]:
+    """LoRA « always-on » (style/utilitaire) appliqués à CHAQUE cellule (hors batch),
+    validés contre les candidats de la famille (anti path-injection) + strength clampé.
+    Une entrée hors whitelist est ignorée, pas une erreur."""
+    allowed = {c['filename'] for c in permanent_lora_candidates(run_family)}
+    out = []
+    for e in (permanent_loras or []):
+        fn = str((e or {}).get('filename') or '')
+        if fn not in allowed:
+            continue
+        out.append({'filename': fn, 'strength': _extra_lora_strength(e, run_family)})
+    return out
+
+
+def _krea_rebalance_value(run_family, rebalance, rebalance_strength):
+    """NSFW / texture rebalance (node 30) - Krea UNIQUEMENT (les autres familles n'ont
+    pas ce node). Encodage en UN seul FLOAT, PERSISTÉ sur la ligne et rejoué tel quel
+    par le resume - les deux chemins de création doivent donc l'encoder pareil :
+        rebalance=False   → 1.0 (OFF, passthrough SFW)
+        rebalance=True    → rebalance_strength clampé 1..8 (ON, défaut 4.0)
+        None / non-Krea   → None (défaut ON du workflow, node intact)"""
+    if run_family != 'krea' or rebalance is None:
+        return None
+    if not rebalance:
+        return 1.0
+    try:
+        return max(1.0, min(8.0, float(
+            rebalance_strength if rebalance_strength is not None else 4.0)))
+    except (TypeError, ValueError):
+        return 4.0
 
 
 def _extra_lora_strength(entry, run_family) -> float:
@@ -979,34 +1028,12 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
     if unknown:
         raise ValueError(f'unknown checkpoint(s) for this dataset: {unknown}')
 
-    # LoRA « always-on » (style/utilitaire) appliqués à CHAQUE cellule (hors batch).
-    # Validés contre les candidats de la famille (anti path-injection) + strength clamp.
-    perm_allowed = {c['filename'] for c in permanent_lora_candidates(run_family)}
-    extra_loras = []
-    for e in (permanent_loras or []):
-        fn = str((e or {}).get('filename') or '')
-        if fn not in perm_allowed:
-            continue
-        st = _extra_lora_strength(e, run_family)
-        extra_loras.append({'filename': fn, 'strength': st})
+    extra_loras = _validated_permanent_loras(permanent_loras, run_family)
     # Axe « ⚖ batch » : chaque config tourne une fois SANS puis une fois AVEC
     # chaque LoRA coché batch (les always-on ci-dessus s'appliquent partout).
     batch_axis = _batch_lora_axis(batch_loras, run_family)
 
-    # NSFW / texture rebalance (node 30) - Krea UNIQUEMENT (les autres familles n'ont pas
-    # ce node). Encodage en UN seul FLOAT, persisté → resume fidèle :
-    #   rebalance=False        → 1.0 (OFF, passthrough SFW)
-    #   rebalance=True         → rebalance_strength clampé 1..8 (ON, défaut 4.0)
-    #   None / non-Krea        → None (on laisse le défaut ON du workflow, node intact)
-    cell_rebalance = None
-    if run_family == 'krea' and rebalance is not None:
-        if rebalance:
-            try:
-                cell_rebalance = max(1.0, min(8.0, float(rebalance_strength if rebalance_strength is not None else 4.0)))
-            except (TypeError, ValueError):
-                cell_rebalance = 4.0
-        else:
-            cell_rebalance = 1.0
+    cell_rebalance = _krea_rebalance_value(run_family, rebalance, rebalance_strength)
 
     # Réglages de génération GLOBAUX du run (parité Generate), validés + gatés par famille.
     knobs = _sanitize_gen_knobs(
@@ -1019,20 +1046,7 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
         steps2_list = None
     cells = build_matrix(checkpoints, strengths, aspects, cfgs, steps_list, steps2_list)
 
-    # Pool de bases selon la FAMILLE : SDXL → checkpoints SDXL (de Generate), Krea →
-    # base fixe (UNET du workflow, pas d'axe de base), Z-Image → modèles Z-Image.
-    if run_family == 'sdxl':
-        models = [m['filename'] for m in list_sdxl_base_models()]
-        if not models:
-            raise ValueError('no SDXL checkpoint available')
-    elif run_family == 'krea':
-        # None en tête = UNET câblé du workflow (défaut historique et repli) ; les
-        # checkpoints Krea locaux deviennent un axe de base optionnel comme ailleurs.
-        models = [None] + get_krea_models()
-    else:
-        models = get_zimage_models()
-        if not models:
-            raise ValueError('no Z-Image model available')
+    models = _base_model_pool(run_family, require=True)
     # Modèle(s) de base - AXE de balayage optionnel (validés contre la whitelist).
     # z_models (liste) prioritaire ; sinon z_model unique (rétrocompat) ; sinon le 1er.
     # '' (entrée « Official » du picker Krea) ≡ None = défaut de la famille — mappé
@@ -1042,15 +1056,7 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
     valid_models = [m for m in _req_models if m in models] or [models[0]]
 
     seed = _validated_seed(seed)
-
-    # Nombre de générations par config (batch) : N seeds DISTINCTS, PARTAGÉS entre
-    # toutes les configs (comparaison équitable à seeds identiques). Borné 1..4.
-    try:
-        count = max(1, min(int(count or 1), 4))
-    except (TypeError, ValueError):
-        count = 1
-    _MAX = 2**31 - 1
-    seeds = [1 + ((seed + i - 1) % _MAX) for i in range(count)]  # distincts, dans [1, 2^31-1]
+    count, seeds = _run_seed_series(seed, count)
     _check_final_cell_budget(
         len(cells) * len(valid_models) * len(batch_axis) * len(seeds))
 
@@ -1143,50 +1149,16 @@ def create_comparison_run(user_id, selections, strengths, seed=None, prompt=None
     if len(fams) > 1:
         raise ValueError('a test run cannot mix multiple families (ZIT/SDXL/Krea)')
     run_type = (next(iter(fams), None) or 'zimage').lower()
-    if run_type == 'sdxl':
-        models = [m['filename'] for m in list_sdxl_base_models()]
-        if not models:
-            raise ValueError('no SDXL checkpoint available')
-    elif run_type == 'krea':
-        # None en tête = UNET câblé (node 20), repli des runs sans base explicite ;
-        # les checkpoints Krea locaux sont désormais sélectionnables.
-        models = [None] + get_krea_models()
-    else:
-        models = get_zimage_models()
-        if not models:
-            raise ValueError('no Z-Image model available')
+    models = _base_model_pool(run_type, require=True)
     z_model = z_model if (z_model and z_model in models) else models[0]
     seed = _validated_seed(seed)
-    try:
-        count = max(1, min(int(count or 1), 4))
-    except (TypeError, ValueError):
-        count = 1
-    _MAX = 2**31 - 1
-    seeds = [1 + ((seed + i - 1) % _MAX) for i in range(count)]
+    count, seeds = _run_seed_series(seed, count)
     common_prompt = (prompt or '').strip() or None
-    # LoRA « always-on » (style/utilitaire) validés contre la famille (anti path-injection),
-    # appliqués à CHAQUE cellule - même mécanique que create_run.
-    perm_allowed = {c['filename'] for c in permanent_lora_candidates(run_type)}
-    extra_loras = []
-    for e in (permanent_loras or []):
-        fn = str((e or {}).get('filename') or '')
-        if fn not in perm_allowed:
-            continue
-        st = _extra_lora_strength(e, run_type)
-        extra_loras.append({'filename': fn, 'strength': st})
+    extra_loras = _validated_permanent_loras(permanent_loras, run_type)
     # Axe « ⚖ batch » : chaque config tourne une fois SANS puis une fois AVEC
     # chaque LoRA coché batch (même mécanique que create_run).
     batch_axis = _batch_lora_axis(batch_loras, run_type)
-    # Rebalance Krea (node 30) - même encodage float que create_run (None=défaut, ≤1=OFF, >1=ON@force).
-    cell_rebalance = None
-    if run_type == 'krea' and rebalance is not None:
-        if rebalance:
-            try:
-                cell_rebalance = max(1.0, min(8.0, float(rebalance_strength if rebalance_strength is not None else 4.0)))
-            except (TypeError, ValueError):
-                cell_rebalance = 4.0
-        else:
-            cell_rebalance = 1.0
+    cell_rebalance = _krea_rebalance_value(run_type, rebalance, rebalance_strength)
     # Réglages de génération GLOBAUX (parité Generate), validés + gatés par famille.
     knobs = _sanitize_gen_knobs(
         run_type, negative=negative, sampler=sampler, scheduler=scheduler,
@@ -1287,8 +1259,6 @@ def resume_run(user_id, dataset_id=None, run_id=None, family=None):
 def _cleanup_output_file(filename, failed):
     return _storage.cleanup_output_file(_STORAGE_RUNTIME, filename, failed)
 
-_reserve_dataset_output = _storage.reserve_dataset_output
-_copy_output_into_reservation = _storage.copy_output_into_reservation
 
 def link_completed_test_image(job_id, filename, failed=False, reason=None):
     return _storage.link_completed_test_image(
@@ -1299,18 +1269,8 @@ def link_completed_test_image(job_id, filename, failed=False, reason=None):
 
 _owned_test_image = _scoring._owned_test_image
 rate_image = _scoring.rate_image
-_model_label = _scoring._model_label
-_checkpoint_version = _scoring._checkpoint_version
-_checkpoint_step = _scoring._checkpoint_step
-_json_object = _scoring._json_object
-_record_for_checkpoint = _scoring._record_for_checkpoint
 training_record_for_checkpoint = _scoring.training_record_for_checkpoint
-_normalized_extra_loras = _scoring._normalized_extra_loras
-_generation_config = _scoring._generation_config
-_representative_image = _scoring._representative_image
 cell_scores = _scoring.cell_scores
-model_net_scores = _scoring.model_net_scores
-_model_like_rates = _scoring._model_like_rates
 model_comparison = _scoring.model_comparison
 checkpoint_model_breakdown = _scoring.checkpoint_model_breakdown
 _feedback_for_records = _scoring._feedback_for_records
@@ -1319,12 +1279,10 @@ training_feedback = _scoring.training_feedback
 best_cell = _scoring.best_cell
 best_preset = _scoring.best_preset
 best_per_checkpoint = _scoring.best_per_checkpoint
-_best_map = _scoring._best_map
 _best_for_family = _scoring._best_for_family
 best_for_family = _best_for_family
 set_best_settings = _scoring.set_best_settings
 clear_best_settings = _scoring.clear_best_settings
-_matched_face_cohort = _scoring._matched_face_cohort
 score_faces = _scoring.score_faces
 face_ranking = _scoring.face_ranking
 
@@ -1352,7 +1310,6 @@ def delete_prompt(user_id, dataset_id, prompt) -> int:
     rows = LoraTestImage.query.filter_by(dataset_id=dataset_id, prompt=p).all()
     if not rows:
         return 0
-    from . import trash
     dataset_dir = Path(fds._dataset_dir(dataset_id)).resolve()
     paths = []
     seen_paths = set()

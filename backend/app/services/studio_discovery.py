@@ -113,17 +113,27 @@ def list_test_checkpoints(dataset, family=None) -> list[dict]:
     return checkpoints
 
 
-def available_families(dataset) -> list[dict]:
-    families = []
+def _families_with_checkpoints(dataset) -> list[tuple[dict, list[dict]]]:
+    """[(descripteur de famille, ses checkpoints)] pour les familles réellement
+    entraînées sur ce dataset.
+
+    Chaque `list_test_checkpoints` re-parcourt tout l'arbre loras/ : les appelants
+    qui veulent LA LISTE et pas seulement le compte passent par ici plutôt que de
+    relancer le scan famille par famille."""
+    found = []
     for family in FAMILIES:
-        count = len(list_test_checkpoints(dataset, family))
-        if count:
-            families.append({
+        checkpoints = list_test_checkpoints(dataset, family)
+        if checkpoints:
+            found.append(({
                 "family": family,
                 "label": FAMILY_LABELS.get(family, family),
-                "count": count,
-            })
-    return families
+                "count": len(checkpoints),
+            }, checkpoints))
+    return found
+
+
+def available_families(dataset) -> list[dict]:
+    return [descriptor for descriptor, _ in _families_with_checkpoints(dataset)]
 
 
 def permanent_lora_candidates(family) -> list[dict]:
@@ -167,17 +177,15 @@ def list_all_testable_checkpoints(user_id) -> list[dict]:
         .all()
     )
     for dataset in datasets:
-        for family in available_families(dataset):
-            checkpoints = list_test_checkpoints(dataset, family["family"])
-            if checkpoints:
-                result.append({
-                    "dataset_id": dataset.id,
-                    "dataset_name": dataset.name,
-                    "lora_label": dataset.trigger_word or dataset.name,
-                    "trigger_word": dataset.trigger_word,
-                    "family": family["family"],
-                    "family_label": family["label"],
-                    "train_type": family["family"],
-                    "checkpoints": checkpoints,
-                })
+        for family, checkpoints in _families_with_checkpoints(dataset):
+            result.append({
+                "dataset_id": dataset.id,
+                "dataset_name": dataset.name,
+                "lora_label": dataset.trigger_word or dataset.name,
+                "trigger_word": dataset.trigger_word,
+                "family": family["family"],
+                "family_label": family["label"],
+                "train_type": family["family"],
+                "checkpoints": checkpoints,
+            })
     return result
