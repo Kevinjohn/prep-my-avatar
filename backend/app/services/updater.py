@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -192,7 +193,8 @@ def record_migration_snapshot(database: Path, snapshot: Path,
         current = (_git(root, 'rev-parse', 'HEAD').stdout or '').strip()
         if current != journal.get('target'):
             raise OSError('update journal target does not match this checkout')
-        with sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True) as connection:
+        with closing(sqlite3.connect(
+                f'file:{snapshot}?mode=ro', uri=True)) as connection:
             if connection.execute('PRAGMA integrity_check').fetchone() != ('ok',):
                 raise OSError('migration snapshot failed SQLite integrity check')
         journal['migration_database_snapshot'] = {
@@ -222,7 +224,8 @@ def _restore_migration_snapshot(journal: dict) -> bool:
         if snapshot.stat().st_size != expected_size \
                 or hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_hash:
             return False
-        with sqlite3.connect(f'file:{snapshot}?mode=ro', uri=True) as connection:
+        with closing(sqlite3.connect(
+                f'file:{snapshot}?mode=ro', uri=True)) as connection:
             if connection.execute('PRAGMA integrity_check').fetchone() != ('ok',):
                 return False
         temporary = database.with_suffix(database.suffix + '.rollback.tmp')
@@ -535,8 +538,10 @@ def _verify_app_startup(root: Path, logs: list[str]) -> tuple[bool, str]:
             try:
                 # SQLite's backup API produces a transactionally consistent
                 # snapshot even while the live WAL-backed app is serving.
-                with sqlite3.connect(f'file:{live_database}?mode=ro', uri=True) as source:
-                    with sqlite3.connect(smoke_data / 'studio.db') as destination:
+                with closing(sqlite3.connect(
+                        f'file:{live_database}?mode=ro', uri=True)) as source:
+                    with closing(sqlite3.connect(
+                            smoke_data / 'studio.db')) as destination:
                         source.backup(destination)
             except sqlite3.Error as exc:
                 return False, f'Could not safely copy the current database: {exc}'

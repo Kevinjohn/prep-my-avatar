@@ -111,29 +111,34 @@ def test_boot_recovery_preserves_non_vision_gpu_lease(app):
         queue_manager._release_gpu_lease(token)
 
 
-def test_gpu_lease_acquisition_is_atomic_between_threads(app, monkeypatch):
+def test_gpu_lease_acquisition_is_atomic_between_threads(threaded_app, monkeypatch):
     from app.gpu_window import GpuBusyError, gpu_exclusive_vision_window
 
+    app = threaded_app
     monkeypatch.setattr('app.utils.comfyui.free_comfyui_vram', lambda: True)
     barrier = threading.Barrier(2)
     entered = []
     errors = []
+    unexpected = []
 
     def contender():
-        with app.app_context():
-            barrier.wait()
-            try:
+        try:
+            with app.app_context():
+                barrier.wait()
                 with gpu_exclusive_vision_window():
                     entered.append(threading.get_ident())
                     time.sleep(0.1)
-            except GpuBusyError:
-                errors.append(threading.get_ident())
+        except GpuBusyError:
+            errors.append(threading.get_ident())
+        except Exception as exc:
+            unexpected.append(exc)
 
     threads = [threading.Thread(target=contender) for _ in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    assert unexpected == []
     assert len(entered) == 1
     assert len(errors) == 1
 

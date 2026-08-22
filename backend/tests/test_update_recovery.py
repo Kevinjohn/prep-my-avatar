@@ -2,6 +2,7 @@ import json
 import hashlib
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -75,13 +76,13 @@ def test_recovery_restores_pre_migration_database_before_finishing_rollback(tmp_
     database = data / 'studio.db'
     snapshot = data / 'backups' / 'studio-pre-migration.db'
     snapshot.parent.mkdir()
-    with sqlite3.connect(snapshot) as connection:
+    with closing(sqlite3.connect(snapshot)) as connection, connection:
         connection.execute(
             'CREATE TABLE schema_migration (version INTEGER PRIMARY KEY)')
         connection.execute('INSERT INTO schema_migration VALUES (1)')
         connection.execute('CREATE TABLE user_data (value TEXT)')
         connection.execute("INSERT INTO user_data VALUES ('before')")
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             'CREATE TABLE schema_migration (version INTEGER PRIMARY KEY)')
         connection.execute('INSERT INTO schema_migration VALUES (999)')
@@ -93,7 +94,7 @@ def test_recovery_restores_pre_migration_database_before_finishing_rollback(tmp_
 
     assert update_recovery.recover(root, data) is True
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             'SELECT version FROM schema_migration').fetchall() == [(1,)]
         assert connection.execute('SELECT value FROM user_data').fetchone() == ('before',)

@@ -78,7 +78,8 @@ def _atomic_copy(source, destination) -> None:
     os.close(fd)
     try:
         shutil.copy2(source, temporary)
-        with open(temporary, 'rb') as handle:
+        # Windows rejects fsync on a read-only descriptor with EBADF.
+        with open(temporary, 'rb+') as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
         try:

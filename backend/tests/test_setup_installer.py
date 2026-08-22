@@ -290,7 +290,7 @@ def test_start_rejects_durable_duplicate_without_launching_worker(
     with app.app_context():
         background_jobs.create_or_get('setup', 'masks', {'action': 'masks'})
         monkeypatch.setattr(
-            setup_installer.threading, 'Thread',
+            setup_installer, '_Thread',
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError('duplicate must not launch a worker')))
         with pytest.raises(setup_installer.AlreadyRunning):

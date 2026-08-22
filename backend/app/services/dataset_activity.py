@@ -59,9 +59,10 @@ def _mint(dataset_id, kind, total, now, wall_now, **extra):
     The token grammar is a contract too — ``_dsid_of`` parses the dataset id back
     out of it, so the format lives in exactly one place.
     """
-    token = f'{dataset_id}:{kind}:{next(_counter)}'
+    sequence = next(_counter)
+    token = f'{dataset_id}:{kind}:{sequence}'
     entry = {'kind': kind, 'done': 0, 'total': int(total or 0),
-             'started_at': wall_now, '_started_order': now, '_touched': now,
+             'started_at': wall_now, '_started_order': sequence, '_touched': now,
              **extra}
     _active.setdefault(dataset_id, {})[token] = entry
     return token, entry

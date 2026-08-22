@@ -320,6 +320,7 @@ def test_probe_caches_for_30s_without_force(app, monkeypatch):
 def test_probe_force_bypasses_cache(app, monkeypatch):
     with app.app_context():
         from app import capabilities
+        monkeypatch.setattr(capabilities, '_clock', lambda: 1.0)
         with patch('app.capabilities._http_ok', return_value=False):
             capabilities.probe(force=True)
             monkeypatch.setenv('OPENAI_API_KEY', 'sk-new')

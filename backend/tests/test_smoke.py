@@ -196,6 +196,7 @@ def test_existing_database_is_backed_up_before_create_all_mutates_schema(
 
 def test_update_startup_records_real_migration_snapshot_and_recovery_reopens_it(
         tmp_path, monkeypatch):
+    from contextlib import closing
     import json
     import sqlite3
     import subprocess
@@ -227,7 +228,7 @@ def test_update_startup_records_real_migration_snapshot_and_recovery_reopens_it(
     data_dir = tmp_path / 'data'
     data_dir.mkdir()
     database = data_dir / 'studio.db'
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute('CREATE TABLE legacy_marker (value TEXT)')
         connection.execute("INSERT INTO legacy_marker VALUES ('before migration')")
     journal = data_dir / 'update-transaction.json'
@@ -257,7 +258,7 @@ def test_update_startup_records_real_migration_snapshot_and_recovery_reopens_it(
     snapshot = Path(metadata['snapshot'])
     assert snapshot.is_file()
     assert Path(metadata['database']) == database.resolve()
-    with sqlite3.connect(snapshot) as connection:
+    with closing(sqlite3.connect(snapshot)) as connection:
         assert connection.execute(
             'SELECT value FROM legacy_marker').fetchone() == ('before migration',)
         assert 'schema_migration' not in {
@@ -266,7 +267,7 @@ def test_update_startup_records_real_migration_snapshot_and_recovery_reopens_it(
 
     assert update_recovery.recover(root, data_dir) is True
     assert not journal.exists() and not snapshot.exists()
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             'SELECT value FROM legacy_marker').fetchone() == ('before migration',)
         assert connection.execute('PRAGMA integrity_check').fetchone() == ('ok',)

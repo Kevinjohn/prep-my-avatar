@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import tempfile
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -331,12 +332,14 @@ def _backup_database_before_migration() -> Path | None:
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        with sqlite3.connect(source) as src, sqlite3.connect(temporary) as dst:
+        with closing(sqlite3.connect(source)) as src, \
+                closing(sqlite3.connect(temporary)) as dst:
             src.backup(dst)
             result = dst.execute('PRAGMA integrity_check').fetchone()
             if result != ('ok',):
                 raise RuntimeError('pre-migration backup failed SQLite integrity check')
-        with temporary.open('rb') as handle:
+        # Windows rejects fsync on a read-only descriptor with EBADF.
+        with temporary.open('rb+') as handle:
             os.fsync(handle.fileno())
         temporary.replace(target)
         if os.name != 'nt':

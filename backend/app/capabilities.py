@@ -32,6 +32,7 @@ _CACHE_TTL = 30
 _clock = time.monotonic
 _cache = None
 _cache_ts = 0.0
+_cache_generation = 0
 _probe_lock = threading.Lock()
 
 _IMPORT_TTL = 600
@@ -502,16 +503,16 @@ def autodetect() -> dict:
 
 
 def probe(force=False) -> dict:
-    started = _clock()
+    generation = _cache_generation
     with _probe_lock:
-        return _probe_locked(force=force, request_started=started)
+        return _probe_locked(force=force, request_generation=generation)
 
 
-def _probe_locked(force=False, request_started=0.0) -> dict:
-    global _cache, _cache_ts
+def _probe_locked(force=False, request_generation=0) -> dict:
+    global _cache, _cache_ts, _cache_generation
     now = _clock()
     if (_cache is not None
-            and ((_cache_ts >= request_started) or
+            and ((_cache_generation != request_generation) or
                  (not force and (now - _cache_ts) < _CACHE_TTL))):
         return copy.deepcopy(_cache)
 
@@ -600,4 +601,5 @@ def _probe_locked(force=False, request_started=0.0) -> dict:
     }
 
     _cache, _cache_ts = caps, _clock()
+    _cache_generation += 1
     return copy.deepcopy(caps)

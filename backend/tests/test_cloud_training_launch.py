@@ -9,6 +9,15 @@ import pytest
 
 @pytest.fixture()
 def ct(app, monkeypatch):
+    return _configure_ct(monkeypatch)
+
+
+@pytest.fixture()
+def threaded_ct(threaded_app, monkeypatch):
+    return _configure_ct(monkeypatch)
+
+
+def _configure_ct(monkeypatch):
     monkeypatch.setenv('VAST_API_KEY', 'k-test')
     from app.services import cloud_training
     # never start the real monitor thread in launch tests
@@ -267,15 +276,20 @@ def test_launch_refuses_second_active_run(ct, app, seeded_dataset, monkeypatch):
 
 
 def test_simultaneous_launches_reserve_only_one_active_slot(
-        ct, app, seeded_dataset, monkeypatch):
+        threaded_ct, threaded_app, monkeypatch):
     from types import SimpleNamespace
 
     import threading
+    ct = threaded_ct
+    app = threaded_app
+    with app.test_client() as client:
+        seeded_dataset = client.post(
+            '/api/dataset/create',
+            json={'name': 'Lola', 'trigger_word': 'lola'},
+        ).get_json()['id']
     _fake_export(monkeypatch, ct)
-    # The default test database is one in-memory SQLite connection. Concurrent
-    # reads through that shared connection are unsupported on Windows and are
-    # outside this test's purpose; freeze the already-seeded row so only the
-    # admission critical section performs database work concurrently.
+    # Freeze the already-seeded row so only the admission critical section
+    # performs database work concurrently.
     with app.app_context():
         ds = ct.fds.get_dataset('local', seeded_dataset)
         frozen_ds = SimpleNamespace(**{
