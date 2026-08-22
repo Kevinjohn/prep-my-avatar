@@ -274,11 +274,34 @@ def build_readme(ds, count, license, nfaa) -> str:
     return redact_user_paths('\n'.join(fm + body))
 
 
+def _kept_images(dataset_id) -> list:
+    """The rows a publish is built from, in the order it numbers them."""
+    from ..models import FaceDatasetImage
+    return (FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
+            .order_by(FaceDatasetImage.id.asc()).all())
+
+
+def _staging_signature(ds, images):
+    """Everything the staged repo was derived from, in comparable form.
+
+    `build_publish_dir` takes this before staging and again after, and refuses
+    to publish when the two differ — an edit landing mid-stage would otherwise
+    ship a repo matching no state the dataset was ever in. The two reads have to
+    ask for the SAME fields for that to hold, so the field list lives here
+    instead of being written out at each end of the window."""
+    return (
+        (int(ds.revision or 0), ds.name, ds.trigger_word, ds.kind,
+         ds.train_type, ds.ref_filename) if ds is not None else None,
+        [(img.id, img.filename, img.caption, img.status, img.source,
+          img.generation_provenance, img.source_rights, img.coverage_json,
+          img.coverage_provenance) for img in images],
+    )
+
+
 def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa):
     """Populate `dest_dir` with the HF-ready dataset (images as-is + same-stem
     `.txt` + metadata.jsonl + README.md) and return {count, entries, readme,
     trigger}. `entries` is the metadata rows (also what tests assert on)."""
-    from ..models import FaceDatasetImage
     ds = fds.get_dataset(user_id, dataset_id)
     if not ds:
         raise HfPublishError('dataset_not_found', 'dataset not found')
@@ -286,17 +309,8 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
     if license not in LICENSE_CHOICES:
         raise HfPublishError('invalid_license', f'unsupported license: {license or "(empty)"}')
 
-    kept = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
-            .order_by(FaceDatasetImage.id.asc()).all())
-    initial_dataset = (
-        int(ds.revision or 0), ds.name, ds.trigger_word, ds.kind, ds.train_type,
-        ds.ref_filename,
-    )
-    initial_rows = [(
-        img.id, img.filename, img.caption, img.status, img.source,
-        img.generation_provenance, img.source_rights, img.coverage_json,
-        img.coverage_provenance,
-    ) for img in kept]
+    kept = _kept_images(dataset_id)
+    initial_signature = _staging_signature(ds, kept)
     entries = []
     stem = _safe_stem(ds)
     missing = []
@@ -371,20 +385,9 @@ def build_publish_dir(user_id, dataset_id, dest_dir, include_ref, license, nfaa)
     # The final signature check must use a new SQLite read snapshot.
     fds.db.session.commit()
     fds.db.session.expire_all()
-    current_ds = fds.get_dataset(user_id, dataset_id)
-    current_rows = (FaceDatasetImage.query
-                    .filter_by(dataset_id=dataset_id, status='keep')
-                    .order_by(FaceDatasetImage.id.asc()).all())
-    current_dataset = ((int(current_ds.revision or 0), current_ds.name,
-                        current_ds.trigger_word, current_ds.kind,
-                        current_ds.train_type, current_ds.ref_filename)
-                       if current_ds else None)
-    current_signature = [(
-        img.id, img.filename, img.caption, img.status, img.source,
-        img.generation_provenance, img.source_rights, img.coverage_json,
-        img.coverage_provenance,
-    ) for img in current_rows]
-    if current_dataset != initial_dataset or current_signature != initial_rows:
+    current_signature = _staging_signature(fds.get_dataset(user_id, dataset_id),
+                                           _kept_images(dataset_id))
+    if current_signature != initial_signature:
         raise HfPublishError(
             'dataset_changed', 'the dataset changed while it was staged; retry publish')
     return {'count': len(entries), 'entries': entries, 'readme': readme,

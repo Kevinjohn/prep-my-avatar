@@ -90,13 +90,16 @@ def list_checkpoints(user_id, dataset_id, base_model=_PERSISTED, family=None) ->
     # Provenance annotation: which dataset VERSION most plausibly produced
     # each file (newest registry record older than the file). Pre-feature
     # datasets have no records -> no annotation, shape unchanged otherwise.
+    if not out:
+        return out
     from . import checkpoint_registry
     ds = fds.get_dataset(user_id, dataset_id)
     fam = _train_type(ds, family) if ds else None
+    # One registry query for the whole folder, not one per checkpoint.
+    resolve = checkpoint_registry.mtime_resolver(dataset_id, fam)
     for c in out:
         try:
-            rec = checkpoint_registry.record_for_mtime(
-                dataset_id, fam, os.path.getmtime(os.path.join(run, c['filename'])))
+            rec = resolve(os.path.getmtime(os.path.join(run, c['filename'])))
         except OSError:
             rec = None
         if rec is not None:

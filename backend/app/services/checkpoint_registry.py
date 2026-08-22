@@ -74,6 +74,21 @@ def fingerprint_of(manifest, trigger='', kind='') -> str:
     return hashlib.sha256(blob.encode('utf-8')).hexdigest()
 
 
+def _fingerprint_candidates(manifest, trigger, kind):
+    """(fingerprint of this state, every stored form that means the same state).
+
+    SQLite never enforced the former VARCHAR(16) declaration, and `kind` was
+    once omitted for characters, so an unchanged dataset can already be on
+    record under a truncated or kind-less digest. Matching all three keeps its
+    human version across the upgrade; every new record stores the complete
+    SHA-256. Both the allocator and the drift check ask this question, so it is
+    stated once."""
+    fp = fingerprint_of(manifest, trigger, kind)
+    legacy_fp = fingerprint_of(
+        manifest, trigger, '' if kind == 'character' else kind)[:16]
+    return fp, (fp, fp[:16], legacy_fp)
+
+
 def manifest_diff(old, new) -> dict:
     """What changed between two manifests: image ids added/removed, captions
     edited, image files edited (same id, different content hash)."""
@@ -110,15 +125,10 @@ def register_launch(user_id, dataset_id, family, source, base_model='',
         manifest = manifest if manifest is not None else dataset_manifest(dataset_id)
         trigger = ds.trigger_word if trigger is None else trigger
         kind = (getattr(ds, 'kind', None) or 'character') if kind is None else kind
-        fp = fingerprint_of(manifest, trigger, kind)
-        legacy_fp = fingerprint_of(
-            manifest, trigger, '' if kind == 'character' else kind)[:16]
-        # SQLite never enforced the former VARCHAR(16) declaration. Match the
-        # legacy prefix once so upgrading an unchanged dataset keeps its human
-        # version; every new record stores the complete SHA-256.
+        fp, candidates = _fingerprint_candidates(manifest, trigger, kind)
         same = (TrainingRunRecord.query
                 .filter_by(dataset_id=dataset_id, family=family)
-                .filter(TrainingRunRecord.fingerprint.in_((fp, fp[:16], legacy_fp)))
+                .filter(TrainingRunRecord.fingerprint.in_(candidates))
                 .first())
         if same is not None:
             version = same.version
@@ -250,6 +260,33 @@ def stop_legacy_backfill(app, timeout=5) -> None:
     app.extensions.pop(marker, None)
 
 
+def mtime_resolver(dataset_id, family):
+    """Load this (dataset, family)'s records ONCE and return a callable that
+    answers `record_for_mtime` for any number of files.
+
+    Annotating a checkpoint folder asks the same question per file, and
+    `record_for_mtime` re-runs the whole query every time — one folder of N
+    checkpoints costs N identical queries. Callers with more than one file
+    should resolve through this instead."""
+    recs = (TrainingRunRecord.query
+            .filter_by(dataset_id=dataset_id, family=family)
+            .order_by(TrainingRunRecord.created_at.desc()).all())
+
+    def resolve(mtime_ts):
+        if not recs:
+            return None
+        try:
+            ts = utcfromtimestamp(mtime_ts)
+            for r in recs:
+                if r.created_at and r.created_at <= ts:
+                    return r
+        except (OverflowError, OSError, ValueError):
+            pass
+        return recs[-1]
+
+    return resolve
+
+
 def record_for_mtime(dataset_id, family, mtime_ts):
     """The run record a FILE most plausibly belongs to: the newest record
     created BEFORE the file was written (records are created at launch, files
@@ -258,19 +295,7 @@ def record_for_mtime(dataset_id, family, mtime_ts):
     newest (live sighting: yesterday's local checkpoints wore a ☁ chip
     because a cloud launch happened to be the latest record). None when
     nothing is registered."""
-    recs = (TrainingRunRecord.query
-            .filter_by(dataset_id=dataset_id, family=family)
-            .order_by(TrainingRunRecord.created_at.desc()).all())
-    if not recs:
-        return None
-    try:
-        ts = utcfromtimestamp(mtime_ts)
-        for r in recs:
-            if r.created_at and r.created_at <= ts:
-                return r
-    except (OverflowError, OSError, ValueError):
-        pass
-    return recs[-1]
+    return mtime_resolver(dataset_id, family)(mtime_ts)
 
 
 def dataset_state(user_id, dataset_id, family) -> dict:
@@ -282,9 +307,7 @@ def dataset_state(user_id, dataset_id, family) -> dict:
         return {'registered': False}
     manifest = dataset_manifest(dataset_id)
     kind = getattr(ds, 'kind', None) or 'character'
-    fp = fingerprint_of(manifest, ds.trigger_word, kind)
-    legacy_fp = fingerprint_of(
-        manifest, ds.trigger_word, '' if kind == 'character' else kind)[:16]
+    fp, candidates = _fingerprint_candidates(manifest, ds.trigger_word, kind)
     latest = latest_record(dataset_id, family)
     if latest is None:
         return {'registered': False, 'fingerprint': fp}
@@ -292,7 +315,7 @@ def dataset_state(user_id, dataset_id, family) -> dict:
         old = json.loads(latest.manifest or '[]')
     except ValueError:
         old = []
-    changed = latest.fingerprint not in (fp, fp[:16], legacy_fp)
+    changed = latest.fingerprint not in candidates
     return {'registered': True, 'version': latest.version,
             'fingerprint': fp, 'changed': changed,
             'diff': manifest_diff(old, manifest) if changed else None}

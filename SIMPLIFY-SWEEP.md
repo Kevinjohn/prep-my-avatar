@@ -159,6 +159,42 @@ Learned in pass 2.
   early can be edited while later files copy. Read the comment before deleting
   the second call.
 
+Learned in pass 3.
+
+- **Fan the lenses out BEFORE you start editing.** Pass 3 began applying early
+  findings while the altitude lens was still reading, and it reported "another
+  session has been editing these files concurrently" — it was seeing this
+  session's own working tree. The lenses read the tree, not a snapshot; a moving
+  tree produces confusing and occasionally alarming findings.
+- **When two lenses disagree, the one arguing *against* the extraction is
+  usually right.** Reuse proposed a `_hub_header` extraction and a shared
+  staging-scan helper; altitude showed each would add about as many lines as it
+  removed, and that the two staging scans sort on different keys. Both were cut
+  to the part that was genuinely one rule (a single regex constant). Reuse
+  optimises for "these look alike"; altitude asks whether there is a rule.
+- **A duplicated guard is worth extracting even at zero line saving, when the
+  two copies must agree by contract.** `gpu_tiers` and `launch_cloud_training`
+  each refused the same local-only families, and each derived the same offer
+  filters; a drift there means the picker offers a GPU class the launch then
+  rejects. The comment in `gpu_tiers` already asserted the invariant in prose —
+  that prose is the signal the rule wants a name.
+- **A guarded parse and an unguarded parse of the same field are not
+  duplicates.** `cloud_training` reads `train_params` at eleven sites: five had
+  a try/except+isinstance guard (deduped into `_run_params`), six deliberately
+  do not. Converting the unguarded six would have silently swallowed corruption
+  they currently surface. Check what each copy does on the error path before
+  calling them the same code.
+- **A shared helper can add a query that no caller previously made.** Batching
+  `record_for_mtime` into a `mtime_resolver` moved the query to the top of the
+  loop — which meant an empty checkpoint folder gained a query it never made
+  before, and `backfill_legacy_baselines` calls `list_checkpoints` per dataset ×
+  per train type precisely to test emptiness. The early return is part of the
+  fix, not tidying.
+- **Ask Codex when the choice is a product decision in disguise.** Twice in
+  pass 3 the technical argument was settled and the remaining question was not
+  (which of two drifted family labels is correct; whether an endpoint's
+  freshness contract may change). Both were deferred by consensus, correctly.
+
 ### Carried-over findings
 
 Real, verified, deferred because they fell outside their pass's scope. Fold each
@@ -183,14 +219,19 @@ into the pass named, rather than rediscovering it.
   `backend/infer/lama_model._sha256` are the same open-loop-digest with
   different chunk sizes. It spans passes 2, 3 and 9, so no single pass owns it;
   give it a small pass that adds one shared helper and deletes the other four.
-- **Pass 3 (`remote-training-publish`): N+1 registry query per checkpoint.**
-  `list_checkpoints` calls `checkpoint_registry.record_for_mtime` once per
-  checkpoint file. The fix needs a batch lookup on the `checkpoint_registry`
-  API, which is pass 3's file, so pass 2 left it alone.
-- **Pass 3 (`remote-training-publish`): `_FAMILY_LABEL` is hand-redeclared.**
-  `run_share.py:31` and `hf_publish.py:45` each carry their own copy of the
-  family-label map that `lora_training.py` already exports. Pass 2 removed the
-  dead in-file duplicate; these two are in pass 3's scope.
+- **Its own pass (`training-families`): the family-label map is written five
+  times, and has already drifted.** Pass 2 logged this as pass 3's, but pass 3
+  found it larger than recorded: `lora_training._FAMILY_LABEL`,
+  `run_share.py:31`, `hf_publish.py:45`, `utils/comfyui.FAMILY_LABELS` and the
+  frontend each carry a copy, and one already says `Krea 2 Turbo` where the
+  others say `Krea 2`. Codex and I agreed to defer: importing from
+  `utils/comfyui` inverts the dependency direction (it pulls in `requests`,
+  `subprocess`, `flask`, config), and picking the surviving label is a product
+  decision, not a refactor. Give it a small pass that adds a neutral
+  `training_families.py` and migrates all five consumers at once — the same
+  shape as the `file-hashing` pass.
+- ~~Pass 3: N+1 registry query per checkpoint.~~ **Done in pass 3**
+  (`checkpoint_registry.mtime_resolver`).
 
 Verified in pass 2 and deliberately **skipped** — recorded so they are not
 rediscovered and re-argued. Each fails a non-negotiable rather than being wrong.
@@ -206,6 +247,33 @@ rediscovered and re-argued. Each fails a non-negotiable rather than being wrong.
 - The `training_folder` ternary repeated 5× in `lora_training_config_builder`:
   nets −2 lines.
 - The 8 `_x_eff` getters sharing a lookup shape: marginal, low agent confidence.
+
+Verified in pass 3 and deliberately **skipped**, for the same reason.
+
+- Memoizing `checkpoint_registry._file_hash` on `(path, size, mtime_ns)` in
+  `dataset_state`: Codex consensus to defer, with a decisive disproof —
+  `test_manifest_hashes_exact_bytes_not_size_or_mtime` already covers a
+  same-size/same-mtime content replacement, which that cache key would miss. It
+  is a real performance problem, but the fix redefines what the endpoint
+  promises, so it needs its own change.
+- `_register_instance` recomputing `estimated_minutes` / `estimated_cost_usd`
+  after `_assert_projected_budget` already persisted them: genuinely redundant,
+  but removing it flips `estimated_cost_usd` from `None` to `0.0` for unpriced
+  offers — a persisted-field change in a billing path.
+- Routing `_download_intermediates` through `_fetch_checkpoint`: behaviour
+  change (short files would be deleted rather than left). The missing truncation
+  guard it exposes is a correctness gap and belongs to `/code-review`.
+- `fds._safe_json` re-implemented ~10× across `run_share`, `cloud_training` and
+  `checkpoint_registry`: the copies have drifted (`all_runs` lacks the
+  `isinstance` guard the Share-config renderer has), so unifying them decides a
+  semantic question rather than deleting a duplicate.
+- Throttling the per-poll `training.log` rewrite + fsync: the only cheap test is
+  the heuristic "equal length implies equal content", on a durability path.
+- Moving vast's `-p <port>` env-key encoding into `vast_client`: relocates the
+  knowledge rather than deleting it.
+- `_remote_basename` (4 one-liners), the `_hub_header` scalar keys, a shared
+  staging-scan helper, and `hf_publish`'s `_jobs` / `_lock` in-memory mirror
+  (architectural). All net roughly zero lines or exceed the pass.
 
 ## Passes
 
@@ -271,7 +339,7 @@ Update after every pass. `blocked` needs a reason.
 |---|---|---|---|---|
 | 1 | face-dataset-service | done | `790fea8` | −47 net. Dead migration helper, fan-out check ×4, VLM text cleanup ×7, ref-parse ×2, dead dHash branches. Deferred: double image decode on import (needs sibling-module API change), caption-pipeline merge, coverage-state classifier. |
 | 2 | lora-training-core | done | `b7e2143` | −18 net. Dead second `_FAMILY_LABEL`, `_trigger_boundary` and `_pid_alive` copies, ai-toolkit arch probe ×2, VAE/TE override rule ×2 (had drifted), queue launch block ×2, family dispatch ×4, dead store. Preflight now reads the stored dHash instead of re-decoding every image. Deferred: shared SHA-256 helper, checkpoint N+1, `_FAMILY_LABEL` in run_share/hf_publish. |
-| 3 | remote-training-publish | todo | — | |
+| 3 | remote-training-publish | done | `b741725` | +33 net (docstrings that state the deduped invariants). Offer filters ×2 and local-only-family guard ×2 (picker vs launch — must agree by contract), Retry/Continue relaunch ×2, publish staleness signature ×2, JSON-object response contract ×4 (vast) and ×2 (ai-toolkit), remote "already started" status set ×3, step-suffix regex ×4, `train_params` guarded parse ×5, legacy fingerprint rule ×2, `error_pod_kept` query ×2, `_dataset_name` in terms of `_dataset_names`, dead `reconcile_orphans(wait=)`. Efficiency: checkpoint N+1 fixed via `mtime_resolver`, plus 3 double-derivations. Deferred: family labels (own pass), `_file_hash` memoization, `_safe_json` ×10. |
 | 4 | generation-engines | todo | — | |
 | 5 | studio | todo | — | |
 | 6 | routes | todo | — | |
