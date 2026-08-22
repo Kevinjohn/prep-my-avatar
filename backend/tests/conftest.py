@@ -65,6 +65,31 @@ def app(tmp_path, monkeypatch):
     application.test_client_class = TrackingFlaskClient
     yield application
 
+
+@pytest.fixture()
+def threaded_app(tmp_path, monkeypatch):
+    """Use independent SQLite connections for tests that exercise threads."""
+    data_dir = tmp_path / 'data'
+    monkeypatch.setenv('LDS_DATA_DIR', str(data_dir))
+    monkeypatch.setenv('LDS_CONFIG', str(tmp_path / 'config.json'))
+    monkeypatch.setenv('LDS_ENV', str(tmp_path / '.env'))
+    import app.config as _cfg
+    monkeypatch.setattr(_cfg, 'ENV_PATH', tmp_path / '.env')
+    monkeypatch.setattr(_cfg, '_cache', None)
+    from app import create_app
+    from app.extensions import db
+    database_uri = f"sqlite:///{(data_dir / 'studio.db').as_posix()}"
+    application = create_app({
+        'TESTING': True,
+        'WTF_CSRF_ENABLED': False,
+        'SQLALCHEMY_DATABASE_URI': database_uri,
+    })
+    application.test_client_class = TrackingFlaskClient
+    yield application
+    with application.app_context():
+        db.session.remove()
+        db.engine.dispose()
+
 @pytest.fixture()
 def client(app):
     test_client = app.test_client()
