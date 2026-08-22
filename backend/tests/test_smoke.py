@@ -228,7 +228,7 @@ def test_update_startup_records_real_migration_snapshot_and_recovery_reopens_it(
     data_dir = tmp_path / 'data'
     data_dir.mkdir()
     database = data_dir / 'studio.db'
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute('CREATE TABLE legacy_marker (value TEXT)')
         connection.execute("INSERT INTO legacy_marker VALUES ('before migration')")
     journal = data_dir / 'update-transaction.json'
@@ -267,7 +267,7 @@ def test_update_startup_records_real_migration_snapshot_and_recovery_reopens_it(
 
     assert update_recovery.recover(root, data_dir) is True
     assert not journal.exists() and not snapshot.exists()
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             'SELECT value FROM legacy_marker').fetchone() == ('before migration',)
         assert connection.execute('PRAGMA integrity_check').fetchone() == ('ok',)

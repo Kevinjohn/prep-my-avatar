@@ -1,5 +1,7 @@
 """Self-updater service: git-behind status + apply (pull/deps). git is fully mocked —
 no network, no real pull, no restart (schedule_restart is never called here)."""
+from contextlib import closing
+
 import pytest
 import json
 import sqlite3
@@ -570,7 +572,7 @@ def test_startup_verification_uses_safe_copy_of_current_database(
     data = tmp_path / 'live-data'
     data.mkdir()
     database = data / 'studio.db'
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute('CREATE TABLE legacy_state (value TEXT)')
         connection.execute("INSERT INTO legacy_state VALUES ('preserved')")
 
@@ -578,7 +580,7 @@ def test_startup_verification_uses_safe_copy_of_current_database(
 
     def checked(_command, **kwargs):
         copied = __import__('pathlib').Path(kwargs['env']['LDS_DATA_DIR']) / 'studio.db'
-        with sqlite3.connect(copied) as connection:
+        with closing(sqlite3.connect(copied)) as connection, connection:
             observed['value'] = connection.execute(
                 'SELECT value FROM legacy_state').fetchone()[0]
             connection.execute("UPDATE legacy_state SET value = 'migrated-copy'")
@@ -589,7 +591,7 @@ def test_startup_verification_uses_safe_copy_of_current_database(
     logs = []
     assert _REAL_VERIFY_APP_STARTUP(tmp_path, logs) == (True, '')
     assert observed['value'] == 'preserved'
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         assert connection.execute('SELECT value FROM legacy_state').fetchone()[0] == 'preserved'
 
 
