@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { captionCharacterLabel, isCaptionSaveShortcut } from '../../utils/captionEditor';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 
 export default function CaptionEditorDialog({ initialCaption, imageUrl, imageLabel, onClose, onSave }) {
   const [draft, setDraft] = useState(initialCaption || '');
@@ -13,14 +14,8 @@ export default function CaptionEditorDialog({ initialCaption, imageUrl, imageLab
 
   useEffect(() => {
     textareaRef.current?.focus();
-    const closeOnEscape = (event) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => {
-      window.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [onClose]);
+  }, []);
+  useEscapeToClose(onClose);
 
   const save = () => onSave(draft);
 

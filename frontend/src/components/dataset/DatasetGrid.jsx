@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DatasetGridItem from './DatasetGridItem';
 import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
 import { useConfirmDialog } from '../common/ConfirmDialog';
+import { usePersistedPreference } from '../../hooks/usePersistedPreference';
+import { toggleInSet } from '../../utils/selection';
 
 const DEFAULT_GREEN = 0.50;
 const GRID_PAGE_SIZE = 80;
@@ -21,6 +23,7 @@ const AUTO_TRIAGE_HELP = [
 // L réduit les colonnes pour de vraies grandes tuiles (juger une composition
 // verticale/horizontale avant crop) ; S en ajoute pour un survol dense.
 const TILE_SIZE_KEY = 'datasetGridTileSize';
+const parseTileSize = (value) => (value === 'S' || value === 'M' || value === 'L' ? value : 'M');
 const TILE_SIZE_COLS = {
   S: 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-6',
   M: 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4',
@@ -223,23 +226,16 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   // Thumbnail size: a UI preference, not dataset data — persisted globally
   // (same lazy-init + effect pattern as `datasetGenerator` in VariationCatalog).
   // Runs before the early return below so hook order stays stable.
-  const [tileSize, setTileSize] = useState(() => {
-    try {
-      const v = localStorage.getItem(TILE_SIZE_KEY);
-      return v === 'S' || v === 'M' || v === 'L' ? v : 'M';
-    } catch { return 'M'; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(TILE_SIZE_KEY, tileSize); } catch { /* ignore — private mode */ }
-  }, [tileSize]);
+  const { value: tileSize, setValue: setTileSize } = usePersistedPreference(
+    TILE_SIZE_KEY, 'M', { parse: parseTileSize },
+  );
   // Stable identity, and declared before the early return for the same reason as
   // `tileSize`. It is the one prop every tile receives that would otherwise change
   // on a pure selection change, which is what lets the memoised tiles skip.
-  const toggle = useCallback((id) => setSelected((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  }), []);
+  const toggle = useCallback(
+    (id) => setSelected((current) => toggleInSet(current, id)),
+    [],
+  );
 
   if (!images || !images.length) {
     return (

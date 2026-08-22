@@ -82,13 +82,21 @@ correctness.
 
 ## Gates
 
-**Backend** (95 test files under `backend/tests`). Use the repo `.venv`
-interpreter explicitly — bare `python` does not resolve under pyenv on this
-machine, and `python3` is a 3.14 install without the dependencies:
+**Backend.** Use the repo `.venv` interpreter explicitly — bare `python` does
+not resolve under pyenv on this machine, and `python3` is a 3.14 install without
+the dependencies. Match all four checks run by CI:
 
 ```bash
 .venv/bin/python -m pytest backend/tests -q
+.venv/bin/python -m pytest backend/tests/test_infer_workers.py backend/tests/test_comfyui_object_info_contract.py -q
+PYTHONPATH=src .venv/bin/python -m pytest tests -q
+.venv/bin/ruff check backend
 ```
+
+CI installs the root package with `pip install -e .`; the local `.venv` does
+not have that editable install, so the root `tests/` suite requires
+`PYTHONPATH=src`. Use the pinned Ruff 0.14.10 from the `.venv` — an unpinned
+newer Ruff enables unrelated rules and produces a misleading failure set.
 
 Check the exit code directly rather than eyeballing piped output; `| tail` masks
 a failure as exit 0. Green baseline as of 2026-08-14: 1740 passed, 1 skipped.
@@ -99,7 +107,7 @@ suite. That is intended; do not silence it to get green.
 **Frontend** (from `frontend/`):
 
 ```bash
-npm run lint && npm run typecheck && npm run test && npm run build && npm run check:bundle
+pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run check:bundle
 ```
 
 Run only the side a pass actually touched. `check:bundle` matters on any pass

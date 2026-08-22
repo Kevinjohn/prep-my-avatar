@@ -4,9 +4,10 @@
  * offenders get fixed right at the confirm, not hunted down in the grid after.
  * Replaces the old blocking window.confirm: onResolve(true) = start anyway,
  * onResolve(false) = cancel. */
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 import { datasetImageUrl } from './datasetImageUrl';
 
 export default function PreflightModal({ report, datasetId, ds, onResolve }) {
@@ -31,13 +32,7 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
   const imgUrl = (fn) => datasetImageUrl(datasetId, fn);
 
   // Escape cancels, like dismissing a native confirm.
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape' && pendingActions === 0) onResolve(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onResolve, pendingActions]);
+  useEscapeToClose(() => onResolve(false), pendingActions === 0);
 
   const reject = async (id) => {
     setActionError('');

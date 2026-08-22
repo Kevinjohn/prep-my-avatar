@@ -5,6 +5,7 @@ import {
 } from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
 import { useConfirmDialog, usePromptDialog } from '../components/common/ConfirmDialog';
+import { usePersistedPreference } from '../hooks/usePersistedPreference';
 import TrainingProgress from '../components/dataset/TrainingProgress';
 import RunComparisonPanel from '../components/runs/RunComparisonPanel';
 
@@ -20,6 +21,8 @@ const FAMILY_LABEL = { zimage: 'Z-Image', krea: 'Krea 2', sdxl: 'SDXL', flux: 'F
 // (same lazy-init + effect pattern as `datasetGridTileSize` in DatasetGrid.jsx /
 // `datasetGenerator` in VariationCatalog.jsx). Default open = today's behavior.
 const RECENT_COLLAPSED_KEY = 'cloudRunsRecentCollapsed';
+const parseCollapsed = (value) => value === '1';
+const serializeCollapsed = (value) => value ? '1' : '0';
 
 const STATUS_STYLE = {
   done: 'text-emerald-300 border-emerald-400/40 bg-emerald-500/10',
@@ -108,12 +111,10 @@ export default function CloudRunsPage() {
   const pollRequest = useRef(0);
   const [stopping, setStopping] = useState({});     // run_id -> bool
   const [comparison, setComparison] = useState([]);
-  const [recentCollapsed, setRecentCollapsed] = useState(() => {
-    try { return localStorage.getItem(RECENT_COLLAPSED_KEY) === '1'; } catch { return false; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(RECENT_COLLAPSED_KEY, recentCollapsed ? '1' : '0'); } catch { /* ignore — private mode */ }
-  }, [recentCollapsed]);
+  const { value: recentCollapsed, setValue: setRecentCollapsed } = usePersistedPreference(
+    RECENT_COLLAPSED_KEY, false,
+    { parse: parseCollapsed, serialize: serializeCollapsed },
+  );
 
   const poll = useCallback(async () => {
     const requestId = ++pollRequest.current;

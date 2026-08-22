@@ -9,6 +9,7 @@ import { getJson, safePostJson as postJson, putJson } from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
 import { serializeWatermarkRegions } from '../utils/watermarkRegions';
 import { summarizeScrapeImport } from '../utils/smallImageRescue';
+import { reuseUnchangedItems } from '../utils/reuseUnchangedItems';
 
 /**
  * Compose the 🧽 Clean summary toast from the server's counts — PURE (no React,
@@ -137,12 +138,16 @@ export function useDataset() {
       const retainedTarget = loadedTargetRef.current;
       loadedTargetRef.current = retainHydratedImages
         ? Math.max(retainedTarget, page.images.length) : page.images.length;
-      setData((previous) => ({
-        ...result,
-        images: retainHydratedImages && previous?.id === dsId
-          && (previous.images || []).length > page.images.length
-          ? previous.images : page.images,
-      }));
+      setData((previous) => {
+        const previousImages = previous?.id === dsId ? previous.images : [];
+        return {
+          ...result,
+          images: retainHydratedImages
+            && (previousImages || []).length > page.images.length
+            ? previousImages
+            : reuseUnchangedItems(previousImages, page.images),
+        };
+      });
       if (!retainHydratedImages || retainedTarget <= page.images.length) {
         setImagePage({ hasMore: page.hasMore, nextCursor: page.nextCursor });
       }

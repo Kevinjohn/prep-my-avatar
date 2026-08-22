@@ -1,19 +1,17 @@
 import { useEffect, useState } from 'react'
 import { apiFetch } from '../api/fetchClient'
+import { usePersistedPreference } from './usePersistedPreference'
 
 /** Own persisted generator selection and settings/capability reconciliation. */
 export function useVariationEngines(caps) {
-  const [generator, setGenerator] = useState(() => {
-    try { return localStorage.getItem('datasetGenerator') || 'klein' } catch { return 'klein' }
-  })
+  const { value: generator, setValue: setGenerator } = usePersistedPreference(
+    'datasetGenerator', 'klein', { parse: (value) => value || 'klein' },
+  )
   const [enabledEngines, setEnabledEngines] = useState([])
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsError, setSettingsError] = useState(false)
   const [remoteAllowed, setRemoteAllowed] = useState(false)
   const [chatgptAuth, setChatgptAuth] = useState('auto')
-  useEffect(() => {
-    try { localStorage.setItem('datasetGenerator', generator) } catch { /* private mode */ }
-  }, [generator])
   useEffect(() => {
     let cancelled = false
     apiFetch('/api/settings').then((data) => {
@@ -38,7 +36,7 @@ export function useVariationEngines(caps) {
     if (currentAvailable || !settingsLoaded) return
     const first = nbAvailable ? 'nanobanana' : gptAvailable ? 'chatgpt' : klAvailable ? 'klein' : null
     if (first && first !== generator) setGenerator(first)
-  }, [currentAvailable, nbAvailable, gptAvailable, klAvailable, generator, settingsLoaded])
+  }, [currentAvailable, nbAvailable, gptAvailable, klAvailable, generator, setGenerator, settingsLoaded])
   const subscription = caps.chatgpt_subscription || {}
   const gptViaSub = chatgptAuth === 'subscription'
     || (chatgptAuth === 'auto' && !!subscription.connected)

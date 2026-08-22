@@ -8,9 +8,10 @@
  * Le rating ne tient AUCUN état local : on appelle `onRate(img.id, nouvelleNote)` et
  * c'est le parent (StudioShell) qui met à jour `img` ensuite.
  */
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { useFocusTrap } from '../../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../../hooks/useBodyScrollLock';
+import { useEscapeToClose } from '../../../hooks/useEscapeToClose';
 import { datasetImageUrl } from '../datasetImageUrl';
 
 export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt }) {
@@ -19,12 +20,7 @@ export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt })
   useBodyScrollLock(!!img);
 
   // Fermeture clavier : Échap (comme DatasetLightbox).
-  useEffect(() => {
-    if (!img) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [img, onClose]);
+  useEscapeToClose(onClose, Boolean(img));
 
   if (!img) return null;
 
