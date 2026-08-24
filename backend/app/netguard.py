@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import time
 
 from flask import jsonify, redirect, render_template_string, request, session
 
@@ -68,15 +69,31 @@ def install_network_guard(app):
         key = str(app.secret_key).encode('utf-8')
         return hmac.new(key, str(token).encode('utf-8'), hashlib.sha256).hexdigest()
 
+    # DBR-0003 (secmed): throttle token login attempts. A wrong guess costs a
+    # growing delay, so online guessing against the LAN endpoint is impractical
+    # even for short tokens. Per-process state; resets on restart (acceptable:
+    # tokens are ~192-bit, this is defense in depth).
+    login_failures = {'count': 0, 'until': 0.0}
+
     def remote_login():
         if request.method == 'GET':
             return render_template_string(_LOGIN_HTML, error=None)
+        now = time.monotonic()
+        if now < login_failures['until']:
+            retry = max(1, int(login_failures['until'] - now))
+            return render_template_string(
+                _LOGIN_HTML,
+                error=f'Too many attempts; wait {retry}s before trying again.'), 429
         expected = configured_token()
         presented = request.form.get('token', '')
         if expected and secrets.compare_digest(str(presented), str(expected)):
+            login_failures['count'] = 0
+            login_failures['until'] = 0.0
             session.clear()
             session[SESSION_FLAG] = token_fingerprint(expected)
             return redirect('/')
+        login_failures['count'] += 1
+        login_failures['until'] = now + min(2 ** min(login_failures['count'], 6), 60)
         return render_template_string(
             _LOGIN_HTML, error='Invalid access token.'), 403
 

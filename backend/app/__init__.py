@@ -511,6 +511,11 @@ def create_app(config_object=None):
         SQLALCHEMY_ENGINE_OPTIONS={'connect_args': {'check_same_thread': False}},
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE='Strict',
+        # DBR-0001 (secmed): the app serves plain HTTP on the LAN by design, so
+        # Secure is opt-in for deployments fronted by a TLS reverse proxy
+        # (set LDS_COOKIE_SECURE=1). Enabling it over plain HTTP breaks login
+        # by design — the cookie must never ride an unencrypted hop.
+        SESSION_COOKIE_SECURE=os.environ.get('LDS_COOKIE_SECURE') == '1',
         # Large local corpora and portable backups are intentionally supported.
         # FileStorage spools large parts to disk; the import route consumes them
         # in small batches instead of materialising the whole request as bytes.

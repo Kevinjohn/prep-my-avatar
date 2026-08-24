@@ -716,3 +716,30 @@ def test_backup_route_answers_404_for_missing_dataset(client):
     for path in ('/api/dataset/999999/backup', '/api/dataset/999999/export'):
         resp = client.get(path)
         assert resp.status_code == 404
+
+
+def test_dataset_img_route_refuses_symlink_escape(client, monkeypatch, tmp_path):
+    """secmed DBR-0004 regression: a symlink planted inside a dataset directory
+    must not be followed outside the dataset root."""
+    import os
+    from pathlib import Path as _P
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with client.application.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Symlink', 'symlink_guard')
+        secret = tmp_path / 'secret.txt'
+        secret.write_text('top secret')
+        dsdir = _P(svc._dataset_dir(ds.id))
+        dsdir.mkdir(parents=True, exist_ok=True)
+        link = dsdir / 'innocent.png'
+        try:
+            os.symlink(secret, link)
+        except OSError:
+            return  # platform without symlink support
+        # lexical traversal stays blocked
+        resp = client.get(f'/api/dataset/{ds.id}/img/../../secret.txt')
+        assert resp.status_code in (404, 500)
+        # symlink escape is now refused too
+        resp = client.get(f'/api/dataset/{ds.id}/img/innocent.png')
+        assert resp.status_code == 404
