@@ -698,3 +698,21 @@ def test_import_folder_route_reimport_dedupes(client, tmp_path):
     assert first['imported'] == 2
     again = client.post(f'/api/dataset/{ds_id}/import-folder', json={'path': str(src)}).get_json()
     assert again['imported'] == 0 and again['duplicates'] == 2
+
+
+def test_generate_rejects_non_object_variation_elements(client):
+    """DBR-0002 regression: a malformed variations payload answers 400, not a
+    500 AttributeError from deep inside generation."""
+    resp = client.post('/api/dataset/1/generate',
+                       json={'variations': ['not-an-object'], 'generator': 'klein'},
+                       content_type='application/json')
+    assert resp.status_code == 400
+    assert 'object' in resp.get_json().get('error', '')
+
+
+def test_backup_route_answers_404_for_missing_dataset(client):
+    """DBR-0003 regression: export/backup answer the house 404 for missing
+    datasets instead of a 400 validation error."""
+    for path in ('/api/dataset/999999/backup', '/api/dataset/999999/export'):
+        resp = client.get(path)
+        assert resp.status_code == 404

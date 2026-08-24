@@ -179,7 +179,11 @@ def test_watermark_preservation_failure_blocks_edit(tmp_path, monkeypatch):
     from app.services import face_dataset_service as svc
     image = tmp_path / 'image.webp'
     image.write_bytes(_png())
-    monkeypatch.setattr(svc.shutil, 'copy2', lambda *_args: (_ for _ in ()).throw(OSError('full')))
+    # DBR-0018: preservation now goes through _atomic_write_bytes (open+read);
+    # make that path fail to simulate a full disk.
+    def boom(_path, _data):
+        raise OSError('full')
+    monkeypatch.setattr(svc, '_atomic_write_bytes', boom)
     assert svc._preserve_original(str(image)) is False
     assert image.read_bytes() == _png()
 
@@ -2207,3 +2211,49 @@ def test_build_backup_zip_holds_generation_lock(app, monkeypatch):
         release.set()
         t.join(timeout=5)
         assert result.get('ok'), result
+
+
+def test_generate_variations_reserves_capacity_under_dataset_lock(app, monkeypatch):
+    """DBR-0016 regression: the Klein fan-out capacity check runs while holding
+    the dataset generation lock (atomic across entry points)."""
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'CapLock', 'caplock')
+        # the fan-out requires a reference before reaching the capacity check
+        from app.models import db
+        ds.ref_filename = 'ref.png'
+        from pathlib import Path
+        dsdir = Path(svc._dataset_dir(ds.id))
+        dsdir.mkdir(parents=True, exist_ok=True)
+        (dsdir / 'ref.png').write_bytes(b'x')
+        db.session.commit()
+        observed = []
+        real_check = svc._check_fanout_capacity
+
+        def spy(dataset_id, additional):
+            lock = svc._DATASET_GENERATION_LOCKS[hash((str(LOCAL_USER), dataset_id))
+                                                 % len(svc._DATASET_GENERATION_LOCKS)]
+            observed.append(lock.acquire(blocking=False))
+            if not observed[-1]:
+                return
+            lock.release()
+            return real_check(dataset_id, additional)
+
+        monkeypatch.setattr(svc, '_check_fanout_capacity', spy)
+        # generate_variations will fail on missing ref/comfy — the lock ordering
+        # is what we assert on: check runs only after the wrapper takes the lock,
+        # so by the time the spy runs, a non-blocking acquire must fail.
+        import app.services.klein_edit_helper as keh
+        monkeypatch.setattr(keh, 'klein_missing_assets', lambda: set())
+        def fake_enqueue(*a, **k):
+            raise RuntimeError('stop before enqueue')
+        monkeypatch.setattr(keh, 'enqueue_klein_edit', fake_enqueue)
+        try:
+            svc.generate_variations(LOCAL_USER, ds.id,
+                                    [{'prompt': 'x'}], 1, None)
+        except Exception:
+            pass
+        assert observed == [False], (
+            'capacity check must run inside the dataset generation lock')
