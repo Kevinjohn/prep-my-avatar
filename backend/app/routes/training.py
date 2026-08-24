@@ -21,7 +21,7 @@ from ..services import lora_training as lt
 from ..services import lora_test_studio as lts
 from ..services import zimage_convert as zc
 from ..utils.comfyui import get_zimage_models, get_checkpoint_models
-from ._common import _map_error
+from ._common import _map_error, serve_contained_file
 
 bp = Blueprint('training', __name__, url_prefix='/api')
 
@@ -333,11 +333,12 @@ def dataset_train_sample(dataset_id, filename):
         d = lt._samples_dir(LOCAL_USER, dataset_id, **kw)
     except Exception as e:
         return _map_error(e)
-    path = os.path.join(d, filename)
-    if not os.path.isfile(path):
+    # Same containment policy as dataset_image_file: a whitelisted basename can
+    # still be an escaping symlink planted in the samples dir.
+    contained = serve_contained_file(d, filename)
+    if contained is None:
         return jsonify({'error': 'not found'}), 404
-    from flask import send_file
-    return send_file(path, conditional=True)
+    return contained
 
 
 @bp.get('/dataset/<int:dataset_id>/train/preflight')
@@ -840,14 +841,18 @@ def dataset_train_cloud_stop():
 
 @bp.get('/dataset/<int:dataset_id>/train/cloud/sample/<path:filename>')
 def dataset_train_cloud_sample(dataset_id, filename):
-    from flask import send_from_directory, abort
+    from flask import abort
     # ?train_type= resolves THAT family's newest run (several families may
     # train the same dataset in parallel); absent -> plain newest, unchanged.
     run = ct.latest_run_for(dataset_id, request.args.get('train_type'))
     if not run or not run.staging_dir:
         abort(404)
-    # send_from_directory refuses path traversal by construction
-    return send_from_directory(os.path.join(run.staging_dir, 'samples'), filename)
+    # Contained serving (same policy as dataset_image_file): traversal refused,
+    # and planted symlinks that escape the samples directory are rejected.
+    contained = serve_contained_file(os.path.join(run.staging_dir, 'samples'), filename)
+    if contained is None:
+        abort(404)
+    return contained
 
 
 @bp.get('/dataset/<int:dataset_id>/train/cloud/checkpoint')

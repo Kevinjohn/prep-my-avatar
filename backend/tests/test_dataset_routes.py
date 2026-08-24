@@ -743,3 +743,35 @@ def test_dataset_img_route_refuses_symlink_escape(client, monkeypatch, tmp_path)
         # symlink escape is now refused too
         resp = client.get(f'/api/dataset/{ds.id}/img/innocent.png')
         assert resp.status_code == 404
+
+
+def test_dataset_img_route_malformed_paths_answer_404(client):
+    """Follow-up audit: percent-encoded NUL and other resolve()-breaking paths
+    answer the house 404, never a 500."""
+    resp = client.get('/api/dataset/1/img/%00.png')
+    assert resp.status_code == 404
+
+
+def test_dataset_img_route_directory_symlink_escape_refused(client, tmp_path):
+    """Follow-up audit: a symlinked *directory* inside the dataset dir must not
+    become a traversal hop."""
+    import os
+    from pathlib import Path as _P
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with client.application.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'SymDir', 'symdir_guard')
+        secret = tmp_path / 'secret.png'
+        secret.write_bytes(b'SECRET')
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        (outside / 'leak.png').write_bytes(b'LEAK')
+        dsdir = _P(svc._dataset_dir(ds.id))
+        dsdir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(outside, dsdir / 'sub')
+        except OSError:
+            return
+        resp = client.get(f'/api/dataset/{ds.id}/img/sub/leak.png')
+        assert resp.status_code == 404
