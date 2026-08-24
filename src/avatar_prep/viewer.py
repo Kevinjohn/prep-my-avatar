@@ -202,6 +202,19 @@ class ReviewHandler(SimpleHTTPRequestHandler):
         if parsed.path != "/api/review":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        # Defense in depth (DBR-0014): the viewer is a localhost-only tool with
+        # no session layer, so reject cross-origin POSTs (e.g. a malicious page
+        # in the user's browser firing requests at the local port).
+        origin = self.headers.get("Origin")
+        if origin:
+            try:
+                origin_host = urlparse(origin).hostname or ""
+            except ValueError:
+                origin_host = ""
+            allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+            if origin_host not in allowed_hosts:
+                self.send_error(HTTPStatus.FORBIDDEN, "cross-origin requests are not allowed")
+                return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 64 * 1024:

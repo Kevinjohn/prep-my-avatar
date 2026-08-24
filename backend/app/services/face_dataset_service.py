@@ -1823,6 +1823,12 @@ def crop_image(user_id, image_id, x, y, w, h):
             previous = handle.read()
     except OSError:
         return False
+    # DBR-0017: preserve the pre-crop pixels as a sibling .orig (same policy as
+    # watermark edits) so a destructive crop stays recoverable. Failure aborts
+    # the crop instead of losing the only copy.
+    if not _preserve_original(path):
+        logger.warning('crop: could not preserve original before crop %s', path)
+        return False
     ok, scale = _crop_resize_file(path, x, y, w, h)
     if ok:
         _clear_watermark_metadata(img)
@@ -2330,8 +2336,12 @@ def _build_backup_zip_locked(user_id, dataset_id, *, destination=None):
     dataset_root = Path(dsdir).resolve()
     written_arcnames = set()
     written_relatives = set()
+    # DBR-0019: the writer enforces the same file-count and byte ceilings its
+    # importer does, so a backup can never be emitted that the reader rejects.
+    total_bytes = 0
 
     def add_file(z, relative, arcname):
+        nonlocal total_bytes
         if not isinstance(relative, str) or not relative:
             return
         candidate = Path(dsdir) / relative
@@ -2347,7 +2357,13 @@ def _build_backup_zip_locked(user_id, dataset_id, *, destination=None):
         if (arcname in written_arcnames
                 or normalized_relative in written_relatives):
             return
+        size = candidate.stat().st_size
+        if len(written_arcnames) + 1 > _BACKUP_MAX_FILES:
+            raise ValueError(f'too many files to back up (max {_BACKUP_MAX_FILES})')
+        if total_bytes + size > _BACKUP_MAX_BYTES:
+            raise ValueError('dataset too large to back up (max 2 GB uncompressed)')
         z.write(candidate, arcname)
+        total_bytes += size
         written_arcnames.add(arcname)
         written_relatives.add(normalized_relative)
 
@@ -2597,6 +2613,10 @@ def _import_backup_archive(user_id, z, state):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         with z.open(info) as src, open(destination, 'wb') as dst:
             shutil.copyfileobj(src, dst, 1024 * 1024)
+            # DBR-0020: flush extracted bytes to disk before the metadata commit,
+            # so an acknowledged restore cannot reference files lost to a crash.
+            dst.flush()
+            os.fsync(dst.fileno())
         extracted[prefix].add(base)
     n_rows = 0
     restored_rows = []
@@ -4052,13 +4072,18 @@ def scrape_import_urls(user_id, dataset_id, items, rescue_small=False):
 
     # Capacity and model preflight happen once, after every quality/dedup filter,
     # but before creating a source/result pair. No small candidate => no Klein scan.
+    # The capacity check runs under the dataset generation lock so concurrent
+    # entry points cannot reserve beyond the cap together (DBR-0016).
     if rescue_candidates:
-        _check_fanout_capacity(dataset_id, len(rescue_candidates))
-        from .klein_edit_helper import (KLEIN_REQUIRED, KleinModelsMissing,
-                                        klein_missing_assets)
-        missing = klein_missing_assets()
-        if any(asset in missing for asset in KLEIN_REQUIRED):
-            raise KleinModelsMissing(missing)
+        lock = _DATASET_GENERATION_LOCKS[hash((str(user_id), dataset_id))
+                                         % len(_DATASET_GENERATION_LOCKS)]
+        with lock:
+            _check_fanout_capacity(dataset_id, len(rescue_candidates))
+            from .klein_edit_helper import (KLEIN_REQUIRED, KleinModelsMissing,
+                                            klein_missing_assets)
+            missing = klein_missing_assets()
+            if any(asset in missing for asset in KLEIN_REQUIRED):
+                raise KleinModelsMissing(missing)
 
     ids, failed = import_images(user_id, dataset_id, accepted, crop=False)
     if ids:
@@ -4973,7 +4998,11 @@ def _preserve_original(path) -> bool:
     if os.path.isfile(backup) and os.path.getsize(backup) > 0:
         return True
     try:
-        shutil.copy2(path, backup)
+        # DBR-0018: write the preservation copy atomically (temp file + rename)
+        # and fsync it, so a crash can never leave a truncated .orig behind that
+        # a later edit would trust as the recoverable original.
+        with open(path, 'rb') as handle:
+            _atomic_write_bytes(backup, handle.read())
         return os.path.isfile(backup) and os.path.getsize(backup) > 0
     except OSError as e:
         logger.warning('watermark: could not preserve original %s: %s', path, e)
@@ -5328,7 +5357,19 @@ def _sync_generate_activity(dataset_id):
 
 
 def generate_variations(user_id, dataset_id, variations, multiplier, klein_model,
-                        lora_strength=None):
+                        *args, **kwargs):
+    """Reserve the whole Klein fan-out under the dataset generation lock so the
+    capacity check + pending-row creation are atomic across entry points
+    (DBR-0016: the check at line ~5346 previously ran unlocked)."""
+    lock = _DATASET_GENERATION_LOCKS[hash((str(user_id), dataset_id))
+                                     % len(_DATASET_GENERATION_LOCKS)]
+    with lock:
+        return _generate_variations_locked(user_id, dataset_id, variations,
+                                           multiplier, klein_model, *args, **kwargs)
+
+
+def _generate_variations_locked(user_id, dataset_id, variations, multiplier,
+                                klein_model, lora_strength=None):
     """For each (variation x multiplier), enqueue a Klein edit of the reference
     and create a pending FaceDatasetImage. Returns the created image ids.
 
@@ -5408,10 +5449,19 @@ def generate_variations(user_id, dataset_id, variations, multiplier, klein_model
 
 
 def improve_existing_image(user_id, image_id):
-    """Serialize one source's improve request, including the queue hand-off."""
+    """Serialize one source's improve request, including the queue hand-off.
+
+    Takes the dataset generation lock in addition to the per-image lock so an
+    improve of one row can never run concurrently with a regenerate or fan-out
+    touching the same dataset (DBR-0021: previously independent lock domains)."""
+    img = db.session.get(FaceDatasetImage, image_id)
+    if img is None:
+        return None
+    ds_lock = _DATASET_GENERATION_LOCKS[hash((str(user_id), img.dataset_id))
+                                        % len(_DATASET_GENERATION_LOCKS)]
     lock = _IMAGE_IMPROVE_LOCKS[hash((str(user_id), image_id))
                                 % len(_IMAGE_IMPROVE_LOCKS)]
-    with lock:
+    with ds_lock, lock:
         return _improve_existing_image_locked(user_id, image_id)
 
 
@@ -5669,10 +5719,18 @@ def _commit_generated_replacement(img, filename, data, *, provenance_updates=Non
 
 def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=None,
                      engine=None, klein_model=None):
-    """Serialize regeneration of one row across request threads."""
+    """Serialize regeneration of one row across request threads.
+
+    The dataset generation lock is taken as well so a regenerate cannot overlap
+    an improve or fan-out on the same dataset (DBR-0021)."""
+    img = db.session.get(FaceDatasetImage, image_id)
+    if img is None:
+        return None
+    ds_lock = _DATASET_GENERATION_LOCKS[hash((str(user_id), img.dataset_id))
+                                        % len(_DATASET_GENERATION_LOCKS)]
     lock = _IMAGE_REGENERATE_LOCKS[hash((str(user_id), image_id))
                                    % len(_IMAGE_REGENERATE_LOCKS)]
-    with lock:
+    with ds_lock, lock:
         return _regenerate_image_locked(
             user_id, image_id, lora_strength=lora_strength, prompt=prompt,
             app=app, engine=engine, klein_model=klein_model)

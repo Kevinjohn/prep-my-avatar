@@ -8,6 +8,7 @@ fights ComfyUI for the single GPU.
 import json
 import tempfile
 import time
+import threading
 
 from flask import (Blueprint, Response, request, jsonify, send_file,
                    send_from_directory, current_app, stream_with_context)
@@ -26,6 +27,9 @@ from ._common import (_map_error, _ok_or_404, _payload_or_404, _require_comfyui,
                       _studio_arch_mismatch_response, _studio_missing_response)
 
 bp = Blueprint('datasets', __name__, url_prefix='/api')
+
+# DBR-0001: bound concurrent SSE subscribers (each pins a worker thread).
+_SSE_CLIENT_SLOTS = threading.BoundedSemaphore(64)
 
 _PRESET_NAMES = ('balanced_25', 'zimage_12', 'balanced_multiformat',
                  'face_focused', 'fullbody_focused', 'body_emphasis')
@@ -150,7 +154,11 @@ def dataset_images(dataset_id):
 
 @bp.get('/dataset/<int:dataset_id>/events')
 def dataset_events(dataset_id):
-    """SSE change signal for image revisions and long-running dataset activity."""
+    """SSE change signal for image revisions and long-running dataset activity.
+
+    Each subscriber pins one worker thread for the life of the stream, so the
+    number of concurrent streams is bounded (DBR-0001): beyond the cap the
+    stream ends with a 503 event instead of accumulating unbounded threads."""
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     try:
@@ -161,39 +169,49 @@ def dataset_events(dataset_id):
 
     @stream_with_context
     def stream():
-        last_revision = since
-        last_metadata_revision = None
-        last_activity = None
-        sent_initial = False
-        last_heartbeat = time.monotonic()
-        while True:
-            state = svc.dataset_change_state(LOCAL_USER, dataset_id)
-            if state is None:
-                yield 'event: deleted\ndata: {}\n\n'
-                break
-            activity_marker = json.dumps(
-                state.get('activity'), sort_keys=True, separators=(',', ':'))
-            changed = (not sent_initial or state['revision'] != last_revision
-                       or state.get('metadata_revision') != last_metadata_revision
-                       or activity_marker != last_activity)
-            if changed:
-                yield 'event: dataset\ndata: ' + json.dumps(state, separators=(',', ':')) + '\n\n'
-                sent_initial = True
-                last_revision = state['revision']
-                last_metadata_revision = state.get('metadata_revision')
-                last_activity = activity_marker
-                last_heartbeat = time.monotonic()
-                if once:
-                    break
-            elif time.monotonic() - last_heartbeat >= 15:
-                yield ': heartbeat\n\n'
-                last_heartbeat = time.monotonic()
-            time.sleep(1)
+        if not _SSE_CLIENT_SLOTS.acquire(blocking=False):
+            yield 'event: rejected\ndata: {"error": "too many live event streams"}\n\n'
+            return
+        try:
+            yield from _stream_events(dataset_id, since, once)
+        finally:
+            _SSE_CLIENT_SLOTS.release()
 
     return Response(stream(), mimetype='text/event-stream', headers={
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
     })
+
+
+def _stream_events(dataset_id, since, once):
+    last_revision = since
+    last_metadata_revision = None
+    last_activity = None
+    sent_initial = False
+    last_heartbeat = time.monotonic()
+    while True:
+        state = svc.dataset_change_state(LOCAL_USER, dataset_id)
+        if state is None:
+            yield 'event: deleted\ndata: {}\n\n'
+            break
+        activity_marker = json.dumps(
+            state.get('activity'), sort_keys=True, separators=(',', ':'))
+        changed = (not sent_initial or state['revision'] != last_revision
+                   or state.get('metadata_revision') != last_metadata_revision
+                   or activity_marker != last_activity)
+        if changed:
+            yield 'event: dataset\ndata: ' + json.dumps(state, separators=(',', ':')) + '\n\n'
+            sent_initial = True
+            last_revision = state['revision']
+            last_metadata_revision = state.get('metadata_revision')
+            last_activity = activity_marker
+            last_heartbeat = time.monotonic()
+            if once:
+                break
+        elif time.monotonic() - last_heartbeat >= 15:
+            yield ': heartbeat\n\n'
+            last_heartbeat = time.monotonic()
+        time.sleep(1)
 
 
 @bp.post('/dataset/<int:dataset_id>/ref')
@@ -418,6 +436,12 @@ def dataset_generate(dataset_id):
     if generator not in {'klein', *svc.API_ENGINES}:
         return jsonify({'error': f'unsupported generator: {generator}'}), 400
     variations = data.get('variations') or []
+    # DBR-0002: validate the payload shape before any engine path touches it —
+    # a malformed element (string/number instead of object) must answer a 400,
+    # not crash with an AttributeError deep in generation.
+    if not isinstance(variations, list) or any(
+            not isinstance(v, dict) for v in variations):
+        return jsonify({'error': 'each variation must be an object'}), 400
     # Route-level fail-closed: NSFW variations never reach an API engine — they
     # exist only on the local Klein path (the service re-checks, defense in depth).
     if generator in svc.API_ENGINES and any(
@@ -998,6 +1022,9 @@ def dataset_image_crop(image_id):
 def dataset_export(dataset_id):
     stream = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')
     try:
+        if not svc.get_dataset(LOCAL_USER, dataset_id):
+            stream.close()
+            return jsonify({'error': 'not found'}), 404   # DBR-0003: house 404
         svc.build_export_zip(LOCAL_USER, dataset_id, destination=stream)
     except ValueError as e:
         stream.close()
@@ -1015,6 +1042,9 @@ def dataset_backup(dataset_id):
     scores) — distinct from /export, the training-format ZIP."""
     stream = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')
     try:
+        if not svc.get_dataset(LOCAL_USER, dataset_id):
+            stream.close()
+            return jsonify({'error': 'not found'}), 404   # DBR-0003: house 404
         svc.build_backup_zip(LOCAL_USER, dataset_id, destination=stream)
     except ValueError as e:
         stream.close()

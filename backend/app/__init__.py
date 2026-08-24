@@ -534,7 +534,11 @@ def create_app(config_object=None):
             cur = dbapi_con.cursor()
             cur.execute('PRAGMA journal_mode=WAL')
             cur.execute('PRAGMA busy_timeout=5000')
-            cur.execute('PRAGMA synchronous=NORMAL')
+            # DBR-0004: synchronous=FULL makes every acknowledged commit durable
+            # across OS/power failure (NORMAL can lose recent commits on WAL). The
+            # write volume here is modest; correctness of acknowledged restores,
+            # captions and curation decisions outweighs the extra fsync cost.
+            cur.execute('PRAGMA synchronous=FULL')
             cur.execute('PRAGMA foreign_keys=ON')
             cur.close()
         from . import models  # noqa: F401
