@@ -2158,3 +2158,48 @@ def test_subscription_disconnect_never_falls_back_to_api_key(app, monkeypatch):
             row = svc.db.session.get(FaceDatasetImage, r.id)
             assert row.status == 'failed'
             assert 'connection lost' in row.fail_reason
+
+
+def test_build_backup_zip_holds_generation_lock(app, monkeypatch):
+    """DBR-0026 regression: build_backup_zip runs under the dataset generation
+    lock, so a concurrent generation on the same shard serializes behind it and
+    the archive reflects one coherent revision."""
+    import threading, time
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Backup lock', 'backup_lock')
+        real = svc._build_backup_zip_locked
+        entered = threading.Event()
+        release = threading.Event()
+
+        def spy(user_id, dataset_id, *, destination=None):
+            entered.set()
+            release.wait(timeout=5)
+            return real(user_id, dataset_id, destination=destination)
+
+        monkeypatch.setattr(svc, '_build_backup_zip_locked', spy)
+        result = {}
+
+        def run_backup():
+            with app.app_context():
+                try:
+                    svc.build_backup_zip(LOCAL_USER, ds.id)
+                    result['ok'] = True
+                except Exception as exc:  # noqa: BLE001
+                    result['err'] = exc
+
+        t = threading.Thread(target=run_backup)
+        t.start()
+        assert entered.wait(timeout=5)
+        # Same-shard concurrent mutation must block while backup holds the lock.
+        lock = svc._DATASET_GENERATION_LOCKS[hash((str(LOCAL_USER), ds.id))
+                                             % len(svc._DATASET_GENERATION_LOCKS)]
+        blocked = []
+        other = threading.Thread(
+            target=lambda: blocked.append(lock.acquire(timeout=0.3)))
+        other.start(); other.join()
+        assert blocked == [False], 'backup must hold the dataset generation lock'
+        release.set(); t.join(timeout=5)
+        assert result.get('ok'), result

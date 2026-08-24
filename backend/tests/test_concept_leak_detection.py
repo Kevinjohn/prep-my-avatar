@@ -296,3 +296,23 @@ def test_joycaption_does_not_restore_caption_removed_as_leak(app, monkeypatch):
         db.session.refresh(img)
         assert count == 0
         assert not img.caption
+
+
+def test_ollama_refine_loop_does_not_restore_all_forbidden_caption(app, monkeypatch):
+    """DBR-0022 regression: when leak enforcement empties the refined caption, the
+    refine loop must not fall back to the raw (fully leaking) caption."""
+    from app.services import vision_ollama
+    with app.app_context():
+        save_config({'captioning': {'backend': 'ollama'}})
+        ds, img = _leg_concept_with_image()
+
+        def fake_describe(image_bytes, prompt, **kw):
+            # every caption produced is entirely forbidden content
+            return 'leg behind head position'
+
+        monkeypatch.setattr(vision_ollama, 'describe_image_ollama', fake_describe)
+        monkeypatch.setattr(vision_ollama, 'unload_vision_model', lambda: None)
+        n = svc.caption_images(LOCAL_USER, ds.id)
+
+        db.session.refresh(img)
+        assert 'leg behind head' not in (img.caption or '').lower()

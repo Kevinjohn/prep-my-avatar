@@ -2277,7 +2277,19 @@ def build_backup_zip(user_id, dataset_id, *, destination=None):
     """Self-contained backup of one dataset: manifest.json (settings) +
     images.json (rows) + ref/ + images/ files. Ordinary rows without a file are
     skipped, but exclusive-review metadata rows are retained so their pair can
-    never become orphaned after restore."""
+    never become orphaned after restore.
+
+    Runs under the dataset's generation lock so rows and files represent one
+    coherent revision: concurrent generation/crop/import mutations for this
+    dataset are serialized out for the duration of the snapshot (DBR-0026).
+    """
+    lock = _DATASET_GENERATION_LOCKS[hash((str(user_id), dataset_id))
+                                     % len(_DATASET_GENERATION_LOCKS)]
+    with lock:
+        return _build_backup_zip_locked(user_id, dataset_id, destination=destination)
+
+
+def _build_backup_zip_locked(user_id, dataset_id, *, destination=None):
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
@@ -4548,8 +4560,11 @@ def _caption_concept(ds, force, backend, token=None):
                     auto_start_local=True, timeout=(10, 300))
                 cap = _clean_model_text(cap)
                 if cap:
+                    # DBR-0022: never fall back to the raw caption when the leak
+                    # enforcement emptied it — an all-forbidden caption must stay
+                    # blank rather than restore exactly the excluded content.
                     cap = _enforce_concept_omission(cap, leak_re, data, concept_desc,
-                                                    describe=describe_image_ollama) or cap
+                                                    describe=describe_image_ollama)
                 if _usable_caption(cap):
                     img.caption = cap[:CAPTION_MAX_CHARS]
                     db.session.commit()
