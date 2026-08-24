@@ -9,9 +9,10 @@ import json
 import tempfile
 import time
 import threading
+from pathlib import Path
 
 from flask import (Blueprint, Response, request, jsonify, send_file,
-                   send_from_directory, current_app, stream_with_context)
+                   current_app, stream_with_context)
 
 from ..config import LOCAL_USER
 from .. import capabilities
@@ -1138,7 +1139,16 @@ def dataset_publish_hf_status(dataset_id):
 def dataset_image_file(dataset_id, filename):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
-    return send_from_directory(svc._dataset_dir(dataset_id), filename)
+    dsdir = Path(svc._dataset_dir(dataset_id)).resolve()
+    # DBR-0004 (secmed): send_from_directory blocks lexical traversal but still
+    # FOLLOWS a final symlink planted inside the dataset directory. Resolve the
+    # real path first and refuse anything that escapes the dataset root.
+    candidate = (dsdir / filename).resolve()
+    if candidate != dsdir and dsdir not in candidate.parents:
+        return jsonify({'error': 'not found'}), 404
+    if not candidate.is_file():
+        return jsonify({'error': 'not found'}), 404
+    return send_file(candidate)
 
 
 # ---------------------------------------------------------------------------

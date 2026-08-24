@@ -1,0 +1,2 @@
+[console_scripts]
+avatar-prep = avatar_prep.cli:main

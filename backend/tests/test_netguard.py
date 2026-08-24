@@ -87,3 +87,17 @@ def test_escape_hatch_env(app, monkeypatch):
     c = app.test_client()
     c.put('/api/settings', json={'config': {'server': {'require_token': True}}})
     assert c.get('/api/health', environ_base=REMOTE).status_code == 200
+
+
+def test_remote_login_throttles_repeated_failures(app, monkeypatch):
+    """secmed DBR-0003 regression: consecutive bad tokens hit the 429 throttle."""
+    monkeypatch.setenv('LDS_ACCESS_TOKEN', 'correct-token')
+    c = app.test_client()
+    got429 = False
+    last = None
+    for _ in range(12):
+        last = c.post('/remote-login', data={'token': 'wrong'}, environ_base=REMOTE)
+        if last.status_code == 429:
+            got429 = True
+            break
+    assert got429, f'expected exponential backoff to engage, saw {last.status_code}'

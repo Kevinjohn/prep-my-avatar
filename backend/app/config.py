@@ -138,8 +138,12 @@ def _restrict_private_file(path: Path) -> None:
         return
     try:
         path.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        # Fail-open stays intentional for filesystems without POSIX perms, but
+        # the condition must be visible (secmed DBR-0002) instead of silent.
+        import logging
+        logging.getLogger(__name__).warning(
+            'could not restrict permissions on %s: %s', path, exc)
 
 
 def _write_private_text(path: Path, value: str) -> None:

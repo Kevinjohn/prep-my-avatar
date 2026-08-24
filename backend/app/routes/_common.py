@@ -1,5 +1,5 @@
 """Helpers shared by more than one route blueprint."""
-from flask import jsonify
+from flask import current_app, jsonify
 
 from .. import capabilities
 from ..domain_errors import PublicDomainError
@@ -13,8 +13,11 @@ def _map_error(e: Exception):
     if isinstance(e, GpuBusyError):
         return jsonify({'error': 'GPU busy', 'detail': str(e)}), 503
     if isinstance(e, PermissionError):
+        # DBR-0006 (secmed): OSError text embeds filesystem paths; do not echo
+        # them to clients. Keep a stable public message and log the detail.
+        current_app.logger.warning('permission error: %s', e)
         return jsonify({
-            'error': str(e),
+            'error': 'insufficient permissions for this operation',
             'code': getattr(e, 'code', 'permission_denied'),
         }), 403
     if isinstance(e, PublicDomainError):
