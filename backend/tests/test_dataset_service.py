@@ -2164,7 +2164,7 @@ def test_build_backup_zip_holds_generation_lock(app, monkeypatch):
     """DBR-0026 regression: build_backup_zip runs under the dataset generation
     lock, so a concurrent generation on the same shard serializes behind it and
     the archive reflects one coherent revision."""
-    import threading, time
+    import threading
     from app.services import face_dataset_service as svc
     from app.config import LOCAL_USER
 
@@ -2197,9 +2197,13 @@ def test_build_backup_zip_holds_generation_lock(app, monkeypatch):
         lock = svc._DATASET_GENERATION_LOCKS[hash((str(LOCAL_USER), ds.id))
                                              % len(svc._DATASET_GENERATION_LOCKS)]
         blocked = []
-        other = threading.Thread(
-            target=lambda: blocked.append(lock.acquire(timeout=0.3)))
-        other.start(); other.join()
+        def try_acquire():
+            blocked.append(lock.acquire(timeout=0.3))
+
+        other = threading.Thread(target=try_acquire)
+        other.start()
+        other.join()
         assert blocked == [False], 'backup must hold the dataset generation lock'
-        release.set(); t.join(timeout=5)
+        release.set()
+        t.join(timeout=5)
         assert result.get('ok'), result

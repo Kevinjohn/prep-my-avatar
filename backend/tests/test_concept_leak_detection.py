@@ -312,7 +312,7 @@ def test_ollama_refine_loop_does_not_restore_all_forbidden_caption(app, monkeypa
 
         monkeypatch.setattr(vision_ollama, 'describe_image_ollama', fake_describe)
         monkeypatch.setattr(vision_ollama, 'unload_vision_model', lambda: None)
-        n = svc.caption_images(LOCAL_USER, ds.id)
+        svc.caption_images(LOCAL_USER, ds.id)
 
         db.session.refresh(img)
         assert 'leg behind head' not in (img.caption or '').lower()
