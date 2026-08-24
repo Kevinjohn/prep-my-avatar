@@ -312,7 +312,18 @@ def restore_entry(entry_id, *, consume=True) -> dict:
             shutil.move(str(source), str(destination))
             restored.append((source, destination))
     except Exception:
-        _undo_moves(restored, what='trash restore')
+        undone = _undo_moves(restored, what='trash restore')
+        if len(undone) < len(restored):
+            # DBR-0011 (review 2): a partial unwind splits the payload between
+            # trash and original locations. Annotate the entry so inventory can
+            # surface the split instead of leaving a retry to silently skip
+            # targets that already exist.
+            try:
+                meta['partially_restored'] = True
+                _write_metadata(entry, meta)
+            except OSError:
+                logger.exception(
+                    'could not record partial restore state on %s', entry)
         raise
     if consume:
         try:

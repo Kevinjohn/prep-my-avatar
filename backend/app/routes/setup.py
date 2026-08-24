@@ -30,6 +30,14 @@ def start_install(action):
 
 @bp.get('/install/<action>/status')
 def install_status(action):
+    """Poll an install's structured phase progress.
+
+    Clients should poll at a modest fixed cadence (the UI uses ~1s) and stop on
+    any terminal state ('done' | 'failed' | 'cancelled'); the payload includes a
+    monotonically increasing phase index so consumers can also back off when
+    the index is unchanged. Polling is cheap (in-memory read), but there is no
+    server-side push channel — unbounded tight loops are pointless, not harmful.
+    """
     if action not in setup_installer.INSTALL_ACTIONS:
         return jsonify({'error': f'unknown action: {action}'}), 404
     return jsonify(setup_installer.status(action))

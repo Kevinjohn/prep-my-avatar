@@ -47,11 +47,17 @@ def is_available() -> bool:
     return probe_watermark_inpaint()['ok']
 
 
-def _cuda_available() -> bool:
-    """Probe CUDA in the same interpreter that runs LaMa (short cached subprocess)."""
+def _cuda_available(*, revalidate: bool = False) -> bool:
+    """Probe CUDA in the same interpreter that runs LaMa (short cached subprocess).
+
+    ``revalidate=True`` bypasses the 60s cache — DBR-0010 (review 2): a cached
+    'available' can diverge from runtime reality (driver reset, device lost),
+    so callers falling back after a CUDA failure must re-probe once before
+    settling on CPU."""
     python = lama_python()
     now = time.monotonic()
-    if _cuda_probe['python'] == python and now - _cuda_probe['checked'] < 60:
+    if (not revalidate and _cuda_probe['python'] == python
+            and now - _cuda_probe['checked'] < 60):
         return bool(_cuda_probe['available'])
     try:
         proc = subprocess.run(
@@ -97,6 +103,11 @@ def _run_lama_payload(payload, timeout: int = 300) -> tuple[bool, dict | None]:
     if not data.get('ok'):
         detail = data.get('error') or 'inpaint failed'
         logger.warning('watermark_lama: echec : %s', detail)
+        if str(payload.get('device') or '').lower() == 'cuda':
+            # DBR-0010 (review 2): a CUDA failure invalidates the cached probe
+            # so the next attempt re-detects instead of trusting a stale
+            # 'available' from before the driver/device state changed.
+            _cuda_probe.update(python=None, checked=0.0, available=False)
         return False, {'kind': 'failed', 'detail': detail}
     return True, None
 

@@ -525,9 +525,29 @@ def diagnostic():
     # copy-pasted into a public thread.
     _, log_lines = _log_tail_lines(80)
     log_lines = [_redact_user_paths(line) for line in log_lines]
+    # DBR-0009 (review 2): record detected external media tool versions so
+    # "works on my machine" download failures are diagnosable from the report.
+    try:
+        import yt_dlp as _ytdlp
+        ytdlp_version = str(getattr(_ytdlp.version, '__version__', '')) or None
+    except Exception:
+        ytdlp_version = None
+    import shutil as _shutil
+    ffmpeg_path = _shutil.which('ffmpeg')
+    if ffmpeg_path:
+        try:
+            import subprocess as _subprocess
+            ffmpeg_version = _subprocess.run(
+                ['ffmpeg', '-version'], capture_output=True, text=True,
+                timeout=5).stdout.split()[2]
+        except Exception:
+            ffmpeg_version = None
+    else:
+        ffmpeg_version = None
     return jsonify({
         'app_version': APP_VERSION,
         'git_sha': updater.current_sha(),
+        'external_tools': {'yt_dlp': ytdlp_version, 'ffmpeg': ffmpeg_version},
         'os': f'{platform.system()} {platform.release()}',
         'python': sys.version.split()[0],
         'secrets_present': _secret_presence(),
