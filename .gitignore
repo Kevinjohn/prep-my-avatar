@@ -37,3 +37,4 @@ code-reviews/
 
 # Windows OS noise.
 Thumbs.db
+*.egg-info/
