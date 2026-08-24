@@ -1480,3 +1480,17 @@ def test_inpaint_watermark_crash_reports_stderr_tail(app, monkeypatch):
                 fh.write(_img_bytes())
             ok, err = watermark_lama.inpaint_watermark(p, [0.1, 0.1, 0.2, 0.2])
             assert ok is False and err['kind'] == 'failed' and err['detail'] == 'ValueError: bad mask'
+
+
+def test_cuda_probe_invalidated_after_worker_failure(monkeypatch):
+    """Review-2 DBR-0010: a failed CUDA inpaint run must clear the cached probe
+    so the next attempt re-detects instead of trusting a stale 'available'."""
+    from app.services import watermark_lama as W
+
+    # isolate shared probe state so other tests aren't affected
+    monkeypatch.setattr(W, '_cuda_probe', dict(W._cuda_probe))
+    monkeypatch.setattr(W, 'is_available', lambda: True)
+    monkeypatch.setattr(W, 'run_json_worker', lambda *a, **k: ({'ok': False, 'error': 'CUDA error'}, None))
+    ok, err = W._run_lama_payload({'device': 'cuda'})
+    assert not ok
+    assert W._cuda_probe['checked'] == 0.0 and not W._cuda_probe['available']

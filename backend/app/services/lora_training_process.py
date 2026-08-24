@@ -20,8 +20,7 @@ from . import lora_training as training
 from .training_jobs import EffectiveTrainingJob
 from .lora_training import (
     MIN_FREE_GB_TRAIN, _PERSISTED,
-    _TRAINING_GPU_LEASE_TTL, _TRAIN_LAUNCH_LOCK, _TRAIN_STATE_TTL,
-    _aitoolkit_dir, _aitoolkit_supports_flux2klein, _aitoolkit_supports_krea,
+    _TRAINING_GPU_LEASE_TTL, _TRAIN_LAUNCH_LOCK, _aitoolkit_dir, _aitoolkit_supports_flux2klein, _aitoolkit_supports_krea,
     _datasets_dir, _default_variant_for, _effective_vae_te, _hf_home,
     _is_custom_weights,
     _jobs_dir, _mask_fields, _masks_dir,
@@ -432,14 +431,18 @@ def _launch_training(user_id, dataset_id, steps: int | None = None,
             'training_in_progress', True, ttl_seconds=None)
         queue_manager._set_system_state(
             'training_dataset_id', int(dataset_id), ttl_seconds=None)
+        # DBR-0006 (review 2): run-scoped metadata the UI reads for the WHOLE
+        # run — a TTL shorter than a multi-hour run made reads fall back to
+        # defaults mid-run. These keys are explicitly cleared on completion /
+        # failure, so no expiry is needed.
         queue_manager._set_system_state(
-            'training_train_type', _train_type(launch_ds), ttl_seconds=_TRAIN_STATE_TTL)
+            'training_train_type', _train_type(launch_ds), ttl_seconds=None)
         queue_manager._set_system_state(
             'training_base_model', getattr(launch_ds, 'train_base_model', None) or '',
-            ttl_seconds=_TRAIN_STATE_TTL)
+            ttl_seconds=None)
         # Step cible : sert à snapshotter le final en nom NUMÉROTÉ à la fin.
         queue_manager._set_system_state(
-            'training_target_step', int(steps), ttl_seconds=_TRAIN_STATE_TTL)
+            'training_target_step', int(steps), ttl_seconds=None)
         # HF_HOME routes base/adapter weights to the configured disk.
         env = dict(os.environ, HF_HOME=str(_hf_home()), PYTHONIOENCODING='utf-8')
         run_dir = _output_dir() / _run_name(launch_ds)
@@ -447,13 +450,11 @@ def _launch_training(user_id, dataset_id, steps: int | None = None,
         log_path = str(run_dir / 'training.log')
         checkpoint_dir = run_dir / f'lora_{_safe_trigger(launch_ds)}'
         queue_manager._set_system_state(
-            'training_log_path', log_path, ttl_seconds=_TRAIN_STATE_TTL)
+            'training_log_path', log_path, ttl_seconds=None)
         queue_manager._set_system_state(
-            'training_checkpoint_dir', str(checkpoint_dir),
-            ttl_seconds=_TRAIN_STATE_TTL)
+            'training_checkpoint_dir', str(checkpoint_dir), ttl_seconds=None)
         queue_manager._set_system_state(
-            'training_trigger', _safe_trigger(launch_ds),
-            ttl_seconds=_TRAIN_STATE_TTL)
+            'training_trigger', _safe_trigger(launch_ds), ttl_seconds=None)
         if Path(log_path).is_file():
             previous_log = run_dir / f'training-{launch_token}-previous.log'
             os.rename(log_path, previous_log)

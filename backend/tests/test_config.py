@@ -213,3 +213,28 @@ def test_failed_secret_write_keeps_runtime_and_disk_state(tmp_path, monkeypatch)
         config.delete_secrets(['OPENAI_API_KEY'])
     assert os.environ['OPENAI_API_KEY'] == 'old-value'
     assert config.ENV_PATH.read_text(encoding='utf-8') == original
+
+
+def test_secret_key_rotation_of_invalid_file_logs_warning(tmp_path, monkeypatch, caplog):
+    """Review-2 DBR-0005: regenerating a pre-existing invalid key must log a
+    warning — silent rotation invalidates all signed sessions invisibly."""
+    import logging
+    from app import config as cfg
+    monkeypatch.setattr(cfg, '_data_dir', lambda: tmp_path)
+    keyfile = tmp_path / 'secret_key'
+    keyfile.write_text('not-hex-at-all')
+    with caplog.at_level(logging.WARNING, logger='app.config'):
+        value = cfg.secret_key()
+    assert len(value) == 64
+    assert any('invalidated' in r.message for r in caplog.records)
+
+
+def test_secret_key_valid_file_does_not_warn_or_rotate(tmp_path, monkeypatch, caplog):
+    import logging
+    from app import config as cfg
+    monkeypatch.setattr(cfg, '_data_dir', lambda: tmp_path)
+    good = 'a' * 64
+    (tmp_path / 'secret_key').write_text(good)
+    with caplog.at_level(logging.WARNING, logger='app.config'):
+        assert cfg.secret_key() == good
+    assert not [r for r in caplog.records if 'invalidated' in r.message]

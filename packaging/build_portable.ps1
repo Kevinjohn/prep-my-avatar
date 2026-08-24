@@ -38,6 +38,18 @@ $Stage = Join-Path $Here "dist\$OutName"
 $Zip   = Join-Path $Here "dist\$OutName-win64.zip"
 $PythonRelease = '20260718'
 
+# DBR-0015 (review 2): explicit prerequisite probe — fail with an actionable
+# message instead of a confusing error deep inside a later step.
+foreach ($tool in @('python', 'tar')) {
+  if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+    throw "Build prerequisite missing: '$tool' is not on PATH. See .NOTES in this script header."
+  }
+}
+$psVersion = if ($PSVersionTable.PSVersion.Major -ge 5) { $PSVersionTable.PSVersion.Major } else { 0 }
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+  throw "Build prerequisite missing: PowerShell 5.1+ required, found $($PSVersionTable.PSVersion)."
+}
+
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
 Step 'Clean workspace'

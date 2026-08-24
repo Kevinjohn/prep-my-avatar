@@ -1108,6 +1108,12 @@ def create_run(user_id, dataset_id, checkpoints, strengths, seed=None, prompt=No
         dimensions=_aspect_dims,
         launch=lambda cell, cell_allowed: _launch_effective_cell(
             user_id, cell, cell_allowed),
+        # DBR-0007 (review 2): a mid-batch enqueue failure must surface as the
+        # same partial-launch contract the comparison path uses — already-
+        # enqueued cells keep their jobs and the route answers 503 'partial'
+        # instead of an opaque 500 with inconsistent grid state.
+        on_error=lambda error, completed: StudioPartialLaunch(
+            None, completed, str(error)[:400] or 'enqueue failed'),
     )
     logger.info(f"lora-test: run dataset {dataset_id} -> {len(ids)} cellule(s) "
                 f"({len(valid_models)} modèle(s)), base seed {seed} ×{count}")

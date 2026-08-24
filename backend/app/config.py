@@ -1,6 +1,7 @@
 """Config core: layered config.json over DEFAULTS, secrets in .env."""
 import copy
 import json
+import logging
 import os
 import secrets as _secrets
 import tempfile
@@ -400,12 +401,20 @@ def secret_key() -> str:
         d.mkdir(parents=True, exist_ok=True)
         f = d / 'secret_key'
         value = ''
-        if f.exists():
+        existed = f.exists()
+        if existed:
             try:
                 value = f.read_text(encoding='utf-8').strip()
             except OSError:
                 value = ''
         if len(value) != 64 or any(character not in '0123456789abcdef' for character in value):
+            if existed:
+                # DBR-0005 (review 2): rotating a pre-existing key silently
+                # invalidates every signed session — make that visible.
+                logging.getLogger(__name__).warning(
+                    'secret_key file at %s was unreadable or invalid; '
+                    'a new signing key was generated and existing sessions '
+                    'were invalidated', f)
             _write_private_text(f, _secrets.token_hex(32))
         _restrict_private_file(f)
         return f.read_text(encoding='utf-8').strip()

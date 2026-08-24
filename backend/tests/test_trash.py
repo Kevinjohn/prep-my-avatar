@@ -256,3 +256,38 @@ def test_empty_trash_hard_purges_dataset_graph_but_keeps_training_history(
         assert db.session.get(LoraTestImage, studio_id) is None
         assert db.session.get(TrainingRunRecord, history_id) is not None
         assert db.session.get(CloudTrainingRun, cloud_id) is not None
+
+
+def test_partial_restore_unwind_annotates_entry(tmp_path, monkeypatch):
+    """Review-2 DBR-0011: when a restore fails midway and the compensation can
+    only partly unwind, the entry metadata records 'partially_restored'."""
+    import json
+    from app.services import trash as T
+
+    entry = tmp_path / 'entry'
+    entry.mkdir()
+    (entry / 'a.txt').write_text('A')
+    (entry / 'b.txt').write_text('B')
+    meta = {'version': 1, 'kind': 'files', 'files': [
+        {'stored_name': 'a.txt', 'original_path': str(tmp_path / 'dest' / 'a.txt')},
+        {'stored_name': 'b.txt', 'original_path': str(tmp_path / 'dest' / 'b.txt')},
+    ]}
+    (entry / T._META_NAME).write_text(json.dumps(meta))
+    monkeypatch.setattr(T, '_entry_path', lambda _id: entry)
+
+    # restore of b fails, AND the compensation move of a back into trash also
+    # fails -> partial unwind (a sits at its original location, b stays trashed)
+    real_move = T.shutil.move
+    state = {'n': 0}
+    def flaky(src, dst):
+        state['n'] += 1
+        if str(src).endswith('b.txt') or state['n'] >= 3:
+            raise OSError('destination busy')
+        return real_move(src, dst)
+    monkeypatch.setattr(T.shutil, 'move', flaky)
+
+    import pytest
+    with pytest.raises(Exception):
+        T.restore_entry('whatever', consume=False)
+    updated = json.loads((entry / T._META_NAME).read_text())
+    assert updated.get('partially_restored') is True
