@@ -114,3 +114,63 @@ def _studio_arch_mismatch_response(e):
                     'studio_arch_mismatch': {'family': e.family,
                                              'detected': e.detected,
                                              'checkpoint': e.checkpoint}}), 409
+
+
+def serve_contained_file(root, filename):
+    """Resolve ``root/filename`` and serve it only if it stays inside ``root``.
+
+    Shared containment policy for every route that serves files from a
+    user-writable directory (dataset images, training samples): lexical
+    traversal is normalized away by resolve(), and planted symlinks (final
+    component or intermediate directory) are rejected when their resolved
+    target escapes the root. The file is opened with O_NOFOLLOW immediately
+    after the check and served from the already-open descriptor, shrinking —
+    though not eliminating on all platforms — the check/reopen race. Returns
+    a Flask response, or None when the path is invalid, missing, or escapes.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    from flask import current_app as _current_app, send_file as _send_file
+    try:
+        root_real = _Path(root).resolve()
+        candidate = (root_real / filename).resolve()
+        if not candidate.is_relative_to(root_real):
+            return None
+        flags = _os.O_RDONLY
+        if hasattr(_os, 'O_NOFOLLOW'):
+            flags |= _os.O_NOFOLLOW
+        fd = _os.open(candidate, flags)
+    except (OSError, ValueError, RuntimeError):
+        # missing file, symlink loop / escaping final link (O_NOFOLLOW),
+        # embedded NUL, unreadable — all answer the house 404
+        return None
+    try:
+        import stat as _stat
+        st = _os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            _os.close(fd)
+            return None
+
+        def _close(_err=None):
+            try:
+                _os.close(fd)
+            except OSError:
+                pass
+        import mimetypes as _mimetypes
+        mimetype = _mimetypes.guess_type(candidate.name)[0] or 'application/octet-stream'
+        response = _send_file(
+            _os.fdopen(fd, 'rb'), mimetype=mimetype, conditional=True,
+            download_name=candidate.name, last_modified=st.st_mtime)
+        response.call_on_close(_close)
+        return response
+    except Exception:
+        try:
+            _os.close(fd)
+        except OSError:
+            pass
+        _current_app.logger.exception('contained file serving failed for %s', filename)
+        return None
+
+
+# Backwards-friendly alias used by route modules.
+_serve_contained_file = serve_contained_file
