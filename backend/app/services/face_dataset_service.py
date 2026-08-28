@@ -2913,7 +2913,8 @@ def _dataset_image_payload(img, *, leak=False) -> dict:
     return {
         'id': img.id, 'filename': img.filename, 'source': img.source,
         'framing': img.framing, 'variation_label': img.variation_label,
-        'status': img.status, 'caption': img.caption, 'fail_reason': img.fail_reason,
+        'status': img.status, 'caption': img.caption,
+        'caption_origin': img.caption_origin, 'fail_reason': img.fail_reason,
         'parent_image_id': img.parent_image_id, 'derivation_kind': img.derivation_kind,
         'upscale_ratio': img.upscale_ratio, 'variation_prompt': img.variation_prompt,
         'leak': bool(leak), 'face_score': img.face_score, 'face_state': img.face_state,

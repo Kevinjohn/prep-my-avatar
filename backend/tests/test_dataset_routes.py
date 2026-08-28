@@ -179,7 +179,13 @@ def test_images_endpoint_is_cursor_paginated(client, app):
         for index in range(5):
             db.session.add(FaceDatasetImage(
                 dataset_id=ds_id, source='generated', status='pending',
-                variation_label=f'row-{index}'))
+                variation_label=f'row-{index}', caption=f'caption-{index}',
+                caption_origin=(
+                    'asserted' if index == 0 else
+                    'joycaption' if index == 1 else None),
+                caption_provenance=(
+                    '{"revision":"secret-model-revision"}' if index == 1 else None),
+            ))
         db.session.commit()
     first = client.get(f'/api/dataset/{ds_id}/images?limit=2').get_json()
     assert [row['variation_label'] for row in first['images']] == ['row-4', 'row-3']
@@ -189,6 +195,17 @@ def test_images_endpoint_is_cursor_paginated(client, app):
     assert [row['variation_label'] for row in second['images']] == ['row-2', 'row-1']
     assert {row['id'] for row in first['images']}.isdisjoint(
         {row['id'] for row in second['images']})
+    third = client.get(
+        f"/api/dataset/{ds_id}/images?limit=2&cursor={second['page']['next_cursor']}"
+    ).get_json()
+    paged = first['images'] + second['images'] + third['images']
+    full = client.get(f'/api/dataset/{ds_id}?include_images=1').get_json()['images']
+
+    assert [(row['id'], row['caption_origin']) for row in paged] == [
+        (row['id'], row['caption_origin']) for row in full]
+    assert [row['caption_origin'] for row in paged] == [None, None, None,
+                                                        'joycaption', 'asserted']
+    assert all('caption_provenance' not in row for row in paged + full)
 
 
 def test_images_endpoint_validates_cursor_and_status(client):
