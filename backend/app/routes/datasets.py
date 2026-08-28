@@ -650,12 +650,19 @@ def dataset_caption(dataset_id):
     data = request.get_json(silent=True) or {}
     try:
         force = _json_bool(data, 'force')
+        include_asserted = _json_bool(data, 'include_asserted')
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     mode = data.get('mode')  # 'prose' | 'booru' | None (None → auto selon train_type)
     try:
         with gpu_exclusive_vision_window(flag_ttl=1800):
-            n = svc.caption_images(LOCAL_USER, dataset_id, force=force, mode=mode)
+            n = svc.caption_images(
+                LOCAL_USER,
+                dataset_id,
+                force=force,
+                mode=mode,
+                include_asserted=include_asserted,
+            )
     except Exception as e:
         return _map_error(e)
     return jsonify({'ok': True, 'captioned': n})

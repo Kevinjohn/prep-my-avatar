@@ -194,6 +194,7 @@ def test_caption_images_backend_ollama_writes_and_truncates(app, monkeypatch):
         refreshed = svc.db.session.get(FaceDatasetImage, img.id)
         assert refreshed.caption
         assert len(refreshed.caption) <= svc.CAPTION_MAX_CHARS
+        assert refreshed.caption_origin == 'ollama'
 
 
 def test_caption_images_allows_slow_local_inference(app, monkeypatch):

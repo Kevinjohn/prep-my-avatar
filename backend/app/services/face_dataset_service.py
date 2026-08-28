@@ -32,9 +32,11 @@ from . import dataset_activity
 from . import curation_history
 from . import image_processing
 from . import trash
-from .caption_origin import (CAPTION_FIELDS, ORIGINS, clear_caption, copy_caption,
-                             replace_human_caption, set_caption,
-                             set_human_caption, validate_replacement)
+from .caption_origin import (CAPTION_FIELDS, ORIGINS, caption_tuple,
+                             caption_tuple_clause, clear_caption, copy_caption,
+                             model_caption_values, replace_human_caption, set_caption,
+                             set_human_caption, unprotected_clause,
+                             validate_replacement)
 from .import_analysis import analyse_image_bytes, analysis_json, parse_analysis
 from .perceptual_hash import (DHashIndex as _DHashIndex, dhash as _dhash,
                               hamming as _hamming)  # noqa: F401 - _hamming is a test seam
@@ -4440,7 +4442,56 @@ def _enforce_concept_omission(caption, leak_re, image_bytes, concept_desc, descr
     return caption
 
 
-def _caption_concept(ds, force, backend, token=None):
+def _caption_candidates(dataset_id, *, force, include_asserted):
+    """Return eligible image ids, paths, and planned caption tuples."""
+    query = FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
+    if not force:
+        query = query.filter(
+            (FaceDatasetImage.caption.is_(None)) | (FaceDatasetImage.caption == ''))
+    elif not include_asserted:
+        query = query.filter(unprotected_clause(FaceDatasetImage))
+    candidates = []
+    for image in query.all():
+        path = _img_path(image) if image.filename else None
+        if path and os.path.exists(path):
+            candidates.append((image.id, path, caption_tuple(image)))
+    return candidates
+
+
+def _persist_inference_caption(image_id, planned, text, *, engine, provenance=None):
+    """Reload, compare, and atomically persist one still-current model result."""
+    db.session.expire_all()
+    image = db.session.get(FaceDatasetImage, image_id)
+    if (image is None or image.status != 'keep'
+            or caption_tuple(image) != planned):
+        return False
+    values = model_caption_values(text, engine=engine, provenance=provenance)
+    updated = (FaceDatasetImage.query
+               .filter_by(id=image_id, status='keep')
+               .filter(caption_tuple_clause(FaceDatasetImage, planned))
+               .update(values, synchronize_session=False))
+    if updated != 1:
+        db.session.rollback()
+        return False
+    db.session.commit()
+    return True
+
+
+def _read_caption_input(image_id, planned, path):
+    """Read pixels only while the planned row is still eligible and unchanged."""
+    db.session.expire_all()
+    image = db.session.get(FaceDatasetImage, image_id)
+    if (image is None or image.status != 'keep'
+            or caption_tuple(image) != planned):
+        return None
+    try:
+        with open(path, 'rb') as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _caption_concept(ds, force, backend, token=None, include_asserted=False):
     """Concept caption pipeline (INVERTED logic): describe everything INCLUDING identity
     but OMIT the recurring act so it binds to the trigger. JoyCaption is literal (it NAMES
     the act/fluids/watermark) -> its drafts are REFINED by Qwen, then every caption passes
@@ -4455,11 +4506,8 @@ def _caption_concept(ds, force, backend, token=None):
     # legs/knees/feet…") that overrides it. Byte-identical to the old prompt for non-body
     # concepts. This is the generation-side half of the leg_behind fix.
     cap_prompt = caption_prompt_for_concept(concept_desc)
-    q = FaceDatasetImage.query.filter_by(dataset_id=ds.id, status='keep')
-    if not force:
-        q = q.filter((FaceDatasetImage.caption.is_(None)) | (FaceDatasetImage.caption == ''))
-    todo = [(img, _img_path(img)) for img in q.all() if img.filename]
-    todo = [(img, p) for img, p in todo if p and os.path.exists(p)]
+    todo = _caption_candidates(
+        ds.id, force=force, include_asserted=include_asserted)
     if not todo:
         return 0
     # Total for the persistent progress indicator (token owned by the caller).
@@ -4477,7 +4525,7 @@ def _caption_concept(ds, force, backend, token=None):
             if is_available():
                 dataset_activity.progress(
                     token, detail=f'Loading JoyCaption model and captioning {len(todo)} images…')
-                jc = caption_images_joycaption([p for _, p in todo], prompt=cap_prompt)
+                jc = caption_images_joycaption([p for _, p, _ in todo], prompt=cap_prompt)
                 jc_provenance = getattr(jc, 'provenance', {})
             elif backend == 'joycaption':
                 raise RuntimeError('JoyCaption backend is not available - check the ai-toolkit folder in Settings')
@@ -4486,34 +4534,33 @@ def _caption_concept(ds, force, backend, token=None):
         except Exception as e:
             logger.warning('caption concept: JoyCaption indisponible (%s)', e)
         still = []
-        for img, p in remaining:
+        for image_id, p, planned in remaining:
             cap = _clean_model_text(jc.get(p))
             if cap:
-                refine_targets.append((img, p, cap))
+                refine_targets.append((image_id, p, cap, planned))
             else:
-                still.append((img, p))
+                still.append((image_id, p, planned))
         remaining = still
     # 2a) Backend 'joycaption' forced: no Qwen. Store Joy drafts scrubbed mechanically
     #     (leak_re from the desc words only) - respects "no Ollama fallback".
     if backend == 'joycaption':
         leak_re = _concept_terms_re(_fallback_concept_terms(concept_desc))
-        for img, p, joycap in refine_targets:
+        for image_id, p, joycap, planned in refine_targets:
             dataset_activity.bump(token)
-            try:
-                with open(p, 'rb') as fh:
-                    data = fh.read()
-            except OSError:
-                data = b''
+            data = _read_caption_input(image_id, planned, p)
+            if data is None:
+                continue
             final = _enforce_concept_omission(joycap, leak_re, data, concept_desc)
             if _usable_caption(final):
-                img.caption = final[:CAPTION_MAX_CHARS]
-                img.caption_provenance = json.dumps(jc_provenance.get(p)) \
+                provenance = json.dumps(jc_provenance.get(p)) \
                     if jc_provenance.get(p) else None
-                db.session.commit()
-                n += 1
-            elif force and (img.caption or ''):
-                img.caption = ''
-                db.session.commit()
+                if _persist_inference_caption(
+                        image_id, planned, final[:CAPTION_MAX_CHARS],
+                        engine='joycaption', provenance=provenance):
+                    n += 1
+            elif force:
+                _persist_inference_caption(
+                    image_id, planned, None, engine='joycaption')
         return n
     # 2b) Qwen passes ('auto'/'ollama'): refine Joy drafts, direct-caption the rest, all
     #     enforced. One model load -> unload once at the end.
@@ -4528,10 +4575,11 @@ def _caption_concept(ds, force, backend, token=None):
         leak_re = _concept_terms_re(_get_concept_terms(ds, image_path=sample,
                                                        describe=describe_image_ollama))
         try:
-            for img, p, joycap in refine_targets:
+            for image_id, p, joycap, planned in refine_targets:
                 dataset_activity.bump(token)
-                with open(p, 'rb') as fh:
-                    data = fh.read()
+                data = _read_caption_input(image_id, planned, p)
+                if data is None:
+                    continue
                 refined = ''
                 try:
                     refined = describe_image_ollama(
@@ -4544,10 +4592,13 @@ def _caption_concept(ds, force, backend, token=None):
                 refined = _clean_model_text(refined)
                 if _refine_output_ok(refined, joycap):
                     final = refined
+                    origin = 'ollama'
                 else:
                     # Unusable refine (reasoning trace / loop) -> direct Qwen caption
                     # (natively omits the concept), else keep the Joy draft.
-                    logger.info('caption concept: refine rejected -> direct Qwen (image %s)', img.id)
+                    logger.info(
+                        'caption concept: refine rejected -> direct Qwen (image %s)',
+                        image_id)
                     alt = ''
                     try:
                         alt = describe_image_ollama(data, cap_prompt, num_predict=2000,
@@ -4557,6 +4608,7 @@ def _caption_concept(ds, force, backend, token=None):
                         alt = ''
                     alt = _clean_model_text(alt)
                     final = alt or joycap
+                    origin = 'ollama' if alt else 'joycaption'
                 final = _enforce_concept_omission(final, leak_re, data, concept_desc,
                                                   describe=describe_image_ollama)
                 if not _usable_caption(final):
@@ -4564,21 +4616,25 @@ def _caption_concept(ds, force, backend, token=None):
                     # prose), scrubbed of any leak; leave blank if even that fails.
                     final = _enforce_concept_omission(joycap, leak_re, data, concept_desc,
                                                       describe=describe_image_ollama)
+                    origin = 'joycaption'
                     if not _usable_caption(final):
                         # force=re-do-all: overwrite any stale pre-fix caption with blank
                         # (trigger-only is valid for a concept LoRA) rather than retain it.
-                        if force and (img.caption or ''):
-                            img.caption = ''
-                            db.session.commit()
-                        logger.info('caption concept: no usable caption for image %s -> left blank', img.id)
+                        if force:
+                            _persist_inference_caption(
+                                image_id, planned, None, engine='ollama')
+                        logger.info(
+                            'caption concept: no usable caption for image %s -> left blank',
+                            image_id)
                         continue
-                img.caption = final[:CAPTION_MAX_CHARS]
-                db.session.commit()
-                n += 1
-            for img, p in remaining:
+                if _persist_inference_caption(
+                        image_id, planned, final[:CAPTION_MAX_CHARS], engine=origin):
+                    n += 1
+            for image_id, p, planned in remaining:
                 dataset_activity.bump(token)
-                with open(p, 'rb') as fh:
-                    data = fh.read()
+                data = _read_caption_input(image_id, planned, p)
+                if data is None:
+                    continue
                 cap = describe_image_ollama(
                     data, cap_prompt, num_predict=2000,
                     keep_alive=_VISION_BATCH_KEEPALIVE,
@@ -4591,22 +4647,25 @@ def _caption_concept(ds, force, backend, token=None):
                     cap = _enforce_concept_omission(cap, leak_re, data, concept_desc,
                                                     describe=describe_image_ollama)
                 if _usable_caption(cap):
-                    img.caption = cap[:CAPTION_MAX_CHARS]
-                    db.session.commit()
-                    n += 1
+                    if _persist_inference_caption(
+                            image_id, planned, cap[:CAPTION_MAX_CHARS], engine='ollama'):
+                        n += 1
                 else:
-                    if force and (img.caption or ''):
-                        img.caption = ''
-                        db.session.commit()
-                    logger.info('caption concept: no usable direct caption for image %s -> left blank', img.id)
+                    if force:
+                        _persist_inference_caption(
+                            image_id, planned, None, engine='ollama')
+                    logger.info(
+                        'caption concept: no usable direct caption for image %s -> left blank',
+                        image_id)
         finally:
             unload_vision_model()  # libère la VRAM pour ComfyUI en fin de batch
     return n
 
 
-def caption_images(user_id, dataset_id, force=False, mode=None):
-    """Caption les images gardees. Defaut: seulement celles SANS caption ; force=True
-    re-capte TOUTES les gardees (ecrase) - pour rejouer apres un changement de prompt.
+def caption_images(user_id, dataset_id, force=False, mode=None, include_asserted=False):
+    """Caption kept images. By default only blanks are processed. ``force=True``
+    also refreshes machine and legacy-unknown captions while sparing non-empty
+    asserted text; ``include_asserted=True`` is the explicit overwrite opt-out.
     Chaque caption passe par drop_identity_sentences (retire une eventuelle phrase
     d'identite isolee).
 
@@ -4635,7 +4694,13 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
         logger.info('captioning started: dataset=%s backend=%s force=%s kind=concept',
                     dataset_id, backend, force)
         try:
-            n = _caption_concept(ds, force, backend, token=token)
+            n = _caption_concept(
+                ds,
+                force,
+                backend,
+                token=token,
+                include_asserted=include_asserted,
+            )
             logger.info('captioning finished: dataset=%s backend=%s captioned=%s elapsed=%.1fs',
                         dataset_id, backend, n, time.monotonic() - started)
             return n
@@ -4666,16 +4731,12 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
         base_cleaner = drop_identity_tags if mode == 'booru' else drop_identity_sentences
         def cleaner(text):
             return base_cleaner(text, body=body)
-    q = FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
-    if not force:
-        q = q.filter((FaceDatasetImage.caption.is_(None)) | (FaceDatasetImage.caption == ''))
-    rows = q.all()
-    todo = [(img, _img_path(img)) for img in rows if img.filename]
-    todo = [(img, p) for img, p in todo if p and os.path.exists(p)]
+    todo = _caption_candidates(
+        dataset_id, force=force, include_asserted=include_asserted)
     if not todo:
         return 0
     # Persistent progress indicator (survives a page reload): 'recaption' when force
-    # overwrites existing captions, else 'caption'. try/finally guarantees end() runs
+    # admits existing captions, else 'caption'. try/finally guarantees end() runs
     # even if the vision pass raises → no phantom "Captioning…" spinner after a crash.
     token = dataset_activity.begin(
         dataset_id, 'recaption' if force else 'caption', total=len(todo),
@@ -4699,7 +4760,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
                         detail=f'Loading JoyCaption model and captioning {len(todo)} images…')
                     # Consigne « ne décris pas le visage » → les traits se lient au trigger,
                     # pas aux mots de la caption (deep-research 2026-06-14).
-                    jc = caption_images_joycaption([p for _, p in todo], prompt=cap_prompt)
+                    jc = caption_images_joycaption([p for _, p, _ in todo], prompt=cap_prompt)
                     jc_provenance = getattr(jc, 'provenance', {})
                 elif backend == 'joycaption':
                     # Explicit choice, explicit failure: a user who forced 'joycaption' in
@@ -4711,22 +4772,23 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
             except Exception as e:
                 logger.warning('caption_images: JoyCaption indisponible (%s)', e)
             still = []
-            for img, p in remaining:
+            for image_id, p, planned in remaining:
                 cap = _clean_model_text(jc.get(p))
                 if cap:
                     cleaned = cleaner(cap)
                     if _usable_caption(cleaned):
-                        img.caption = cleaned[:CAPTION_MAX_CHARS]
-                        img.caption_provenance = json.dumps(jc_provenance.get(p)) \
+                        provenance = json.dumps(jc_provenance.get(p)) \
                             if jc_provenance.get(p) else None
-                        db.session.commit()
-                        n += 1
-                    elif force and (img.caption or ''):
-                        img.caption = ''
-                        db.session.commit()
+                        if _persist_inference_caption(
+                                image_id, planned, cleaned[:CAPTION_MAX_CHARS],
+                                engine='joycaption', provenance=provenance):
+                            n += 1
+                    elif force:
+                        _persist_inference_caption(
+                            image_id, planned, None, engine='joycaption')
                     dataset_activity.bump(token)   # this image is handled
                 else:
-                    still.append((img, p))
+                    still.append((image_id, p, planned))
             remaining = still
             dataset_activity.progress(
                 token, detail=f'JoyCaption finished; {len(remaining)} image(s) remaining…')
@@ -4742,25 +4804,29 @@ def caption_images(user_id, dataset_id, force=False, mode=None):
             except ImportError:
                 raise RuntimeError('vision (Ollama) service not configured/available yet')
             try:
-                for index, (img, p) in enumerate(remaining, 1):
+                for index, (image_id, p, planned) in enumerate(remaining, 1):
                     dataset_activity.progress(
                         token,
                         detail=f'Captioning with Ollama — image {index}/{len(remaining)}…')
-                    with open(p, 'rb') as fh:
-                        cap = describe_image_ollama(
-                            fh.read(), cap_prompt, num_predict=2000,
-                            keep_alive=_VISION_BATCH_KEEPALIVE,
-                            auto_start_local=(index == 1), timeout=(10, 300))
+                    data = _read_caption_input(image_id, planned, p)
+                    if data is None:
+                        dataset_activity.bump(token)
+                        continue
+                    cap = describe_image_ollama(
+                        data, cap_prompt, num_predict=2000,
+                        keep_alive=_VISION_BATCH_KEEPALIVE,
+                        auto_start_local=(index == 1), timeout=(10, 300))
                     cap = _clean_model_text(cap)
                     if cap:
                         cleaned = cleaner(cap)
                         if _usable_caption(cleaned):
-                            img.caption = cleaned[:CAPTION_MAX_CHARS]
-                            db.session.commit()
-                            n += 1
-                        elif force and (img.caption or ''):
-                            img.caption = ''
-                            db.session.commit()
+                            if _persist_inference_caption(
+                                    image_id, planned, cleaned[:CAPTION_MAX_CHARS],
+                                    engine='ollama'):
+                                n += 1
+                        elif force:
+                            _persist_inference_caption(
+                                image_id, planned, None, engine='ollama')
                     dataset_activity.bump(token)   # image handled (captioned or not)
             finally:
                 unload_vision_model()  # libère la VRAM pour ComfyUI en fin de batch

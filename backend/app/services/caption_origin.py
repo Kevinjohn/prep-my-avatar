@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 
 ASSERTED = "asserted"
 JOYCAPTION = "joycaption"
@@ -33,6 +33,20 @@ def set_caption(
     row.caption_origin = origin if has_text else None
     row.caption_provenance = provenance if has_text else None
     return row
+
+
+def caption_tuple(row) -> tuple[str | None, str | None, str | None]:
+    """Return the complete concurrency token for one stored caption."""
+    return row.caption, row.caption_origin, row.caption_provenance
+
+
+def caption_tuple_clause(model, planned):
+    """Build a NULL-safe SQL predicate for an exact planned caption tuple."""
+    clauses = []
+    for field, value in zip(CAPTION_FIELDS, planned, strict=True):
+        column = getattr(model, field)
+        clauses.append(column.is_(None) if value is None else column == value)
+    return and_(*clauses)
 
 
 def _normalize_text(text: str | None, max_chars: int | None = None) -> str | None:
@@ -117,13 +131,31 @@ def set_model_caption(
     provenance: str | None = None,
 ):
     """Store model text with the actual engine, never an unresolved policy name."""
-    origin = engine_origin(engine)
-    return set_caption(
-        row,
+    values = model_caption_values(
         text,
-        origin=origin,
-        provenance=provenance if origin == JOYCAPTION else None,
+        engine=engine,
+        provenance=provenance,
     )
+    for field, value in values.items():
+        setattr(row, field, value)
+    return row
+
+
+def model_caption_values(
+    text: str | None,
+    *,
+    engine: str | None,
+    provenance: str | None = None,
+) -> dict[str, str | None]:
+    """Return the complete persisted tuple for one inference result."""
+    origin = engine_origin(engine)
+    has_text = bool(str(text or "").strip())
+    return {
+        "caption": text,
+        "caption_origin": origin if has_text else None,
+        "caption_provenance": (
+            provenance if has_text and origin == JOYCAPTION else None),
+    }
 
 
 def unprotected_clause(model):

@@ -72,3 +72,4 @@ def test_forced_joycaption_persists_per_caption_provenance(app, tmp_path, monkey
         assert json.loads(persisted.caption_provenance) == {
             'provider': 'joycaption', 'revision': 'b' * 40, 'seed': 91,
         }
+        assert persisted.caption_origin == 'joycaption'
