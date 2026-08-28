@@ -612,6 +612,62 @@ def test_real_historical_managed_table_fixtures_upgrade(
         assert upgraded_matrix['invalid_test_rating'] is False
 
 
+def test_caption_origin_migration_preserves_legacy_caption_and_is_retry_safe(app):
+    from sqlalchemy import text
+    import app as app_module
+    from app.extensions import db
+
+    with app.app_context():
+        db.session.execute(text(
+            "INSERT INTO face_dataset "
+            "(id, user_id, name, trigger_word, kind, coverage_profile, created_at, updated_at) "
+            "VALUES (9400, 'local', 'legacy', 'person', 'character', 'balanced', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+        db.session.execute(text(
+            "INSERT INTO face_dataset_image "
+            "(id, dataset_id, status, source, caption, caption_provenance) "
+            "VALUES (9401, 9400, 'keep', 'upload', :caption, :provenance)"
+        ), {"caption": "  Legacy caption, byte-for-byte.  ", "provenance": '{"model":"old"}'})
+        db.session.commit()
+
+        _rebuild_as_historical_table(
+            db,
+            "face_dataset_image",
+            epoch=17,
+            omitted=("caption_origin",),
+        )
+        db.session.execute(text("DELETE FROM schema_migration WHERE version >= 18"))
+        db.session.commit()
+
+        app_module._apply_schema_migrations()
+        columns = {
+            row[1]: row
+            for row in db.session.execute(text("PRAGMA table_info(face_dataset_image)"))
+        }
+        caption, origin, provenance = db.session.execute(text(
+            "SELECT caption, caption_origin, caption_provenance "
+            "FROM face_dataset_image WHERE id = 9401"
+        )).one()
+        assert columns["caption_origin"][2].upper() == "VARCHAR(16)"
+        assert columns["caption_origin"][3] == 0
+        assert (caption, origin, provenance) == (
+            "  Legacy caption, byte-for-byte.  ",
+            None,
+            '{"model":"old"}',
+        )
+        assert db.session.execute(text(
+            "SELECT name FROM schema_migration WHERE version = 18"
+        )).scalar_one() == "caption authorship"
+
+        db.session.execute(text("DELETE FROM schema_migration WHERE version = 18"))
+        db.session.commit()
+        app_module._apply_schema_migrations()
+        assert db.session.execute(text(
+            "SELECT COUNT(*) FROM schema_migration WHERE version = 18"
+        )).scalar_one() == 1
+
+
 def test_failed_migration_transaction_can_be_retried(app, monkeypatch):
     from sqlalchemy import text
     import app as app_module

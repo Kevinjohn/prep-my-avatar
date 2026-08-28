@@ -153,6 +153,9 @@ class FaceDatasetImage(db.Model):
     variation_label = db.Column(String(120), nullable=True)
     status = db.Column(String(10), nullable=False, default='pending')  # pending|keep|reject|failed|trashed
     caption = db.Column(Text, nullable=True)                    # WITHOUT the trigger word
+    # NULL means authorship was never recorded; asserted/joycaption/ollama are
+    # assigned only by the centralized caption mutation contract.
+    caption_origin = db.Column(String(16), nullable=True)
     caption_provenance = db.Column(Text, nullable=True)         # JSON model/revision/seed
     job_id = db.Column(String(36), nullable=True, index=True)
     variation_prompt = db.Column(String(500), nullable=True)    # RAW catalog prompt (regenerate)

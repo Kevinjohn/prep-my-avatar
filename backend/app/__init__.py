@@ -102,6 +102,9 @@ _MIGRATIONS = (
     (17, 'durable cloud remote submission phase', (
         ('cloud_training_run', 'remote_submission_phase', 'VARCHAR(16)'),
     )),
+    (18, 'caption authorship', (
+        ('face_dataset_image', 'caption_origin', 'VARCHAR(16)'),
+    )),
 )
 
 
