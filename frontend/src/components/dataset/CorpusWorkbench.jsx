@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCleanAdmissionCandidate, needsQualityReview } from '../../utils/corpusAdmission.js';
+import {
+  technicalAnalysisCounts,
+  technicalAnalysisState,
+} from '../../utils/technicalAnalysis.js';
 import { FRAMING_ORDER } from './variationCatalogModel';
 import { datasetImageUrl } from './datasetImageUrl';
 
@@ -45,6 +49,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
   showAnchors = true, showCoverage = true }) {
   const imported = useMemo(() => images.filter((image) => image.source === 'import'
     && image.filename && !reviewPairIds.has(image.id)), [images, reviewPairIds]);
+  const analysisCounts = useMemo(() => technicalAnalysisCounts(imported), [imported]);
   const selectedIds = useMemo(() => new Set(anchorPlan?.selected_import_ids || []), [anchorPlan]);
   const duplicateRoots = useMemo(() => new Set(imported.map((image) => image.duplicate_of_id).filter(Boolean)), [imported]);
   const [filter, setFilter] = useState('all');
@@ -98,6 +103,10 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
   ));
   const redPending = pending.filter((image) => image.training_usefulness === 'red'
     || image.analysis?.face?.quality === 'red');
+  const selectedAnalysis = technicalAnalysisState(selected?.analysis);
+  const refreshTitle = `Re-runs CPU-local technical analysis with bokeh-aware sharpness scoring. ${
+    analysisCounts.outdated} outdated and ${analysisCounts.missing} not analyzed. `
+    + 'Face analysis, coverage, rights, and review decisions are preserved.';
 
   return (
     <section id="ds-corpus-review" tabIndex={-1}
@@ -113,9 +122,10 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
           </p>
         </div>
         <div className="ml-auto flex flex-wrap gap-1.5">
-          <button type="button" onClick={onAnalyze} disabled={busy}
+          <button type="button" onClick={onAnalyze} disabled={busy} title={refreshTitle}
             className="rounded-lg border border-border bg-surface-raised px-2.5 py-1.5 text-xs font-semibold text-content disabled:opacity-40">
-            📐 Refresh local analysis
+            📐 Refresh local analysis{analysisCounts.outdated
+              ? ` (${analysisCounts.outdated} outdated)` : ''}
           </button>
           {showCoverage && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
             title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up Ollama vision, or classify images manually below'}
@@ -134,6 +144,8 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
         {showAnchors && <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />}
         <Stat label="near-duplicates" value={summary.near_duplicates || 0} tone={summary.near_duplicates ? 'warn' : ''} />
         <Stat label="needs coverage" value={summary.unclassified || 0} tone={summary.unclassified ? 'warn' : 'good'} />
+        {!!analysisCounts.outdated && <Stat label="outdated analysis" value={analysisCounts.outdated} tone="warn" />}
+        {!!analysisCounts.missing && <Stat label="not analyzed" value={analysisCounts.missing} tone="warn" />}
       </div>
 
       {!!pending.length && onBatch && (
@@ -201,6 +213,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               </p>
               <p className="m-0 mt-0.5 text-[0.625rem] text-content-subtle">
                 technical {selected.training_usefulness || 'unknown'}
+                {` · analysis ${selectedAnalysis.label}`}
                 {selected.analysis?.face?.quality ? ` · face pixels ${selected.analysis.face.quality}` : ' · face pixels not checked'}
                 {selected.face_state === 'scorable' && selected.face_score != null
                   ? ` · identity ${selected.face_score.toFixed(3)}`

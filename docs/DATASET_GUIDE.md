@@ -90,6 +90,15 @@ analysis and face analysis first. The latter measures the detected face crop —
 sharpness, exposure, detection confidence, size, pose, face count and identity
 similarity — rather than letting a crisp background disguise a soft face.
 
+The Corpus workbench labels local technical analysis as **not analyzed** when no
+technical pass exists, **outdated** for the older whole-frame scoring, and
+**current** for version 2 or newer. Version 2 measures sharpness region by region,
+so a focused subject against a deliberately blurred background is not penalized
+as though the whole photo were soft. Analysis is never upgraded merely by opening
+or viewing a dataset. Use **Refresh local analysis** explicitly to apply the
+bokeh-aware score; the refresh preserves face analysis, coverage, source-rights,
+and review decisions.
+
 Pin several strong, accepted photos with different angles and expressions. The
 face scorer uses the primary/additional references plus up to four pinned photos
 as a small identity centroid, which is more reliable than one reference frame.
