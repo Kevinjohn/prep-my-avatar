@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { LAZY_PAGE_RELOAD_KEY, loadLazyModule } from './lazyPage.js'
@@ -83,4 +84,21 @@ test('successful imports still resolve when clearing storage is denied', async (
     ),
     module,
   )
+})
+
+test('every routed page uses one-shot lazy recovery', () => {
+  const app = readFileSync(new URL('../App.jsx', import.meta.url), 'utf8')
+  const pages = [
+    'DatasetPage',
+    'StudioPage',
+    'SettingsPage',
+    'SetupPage',
+    'GuidePage',
+    'CloudRunsPage',
+  ]
+
+  for (const page of pages) {
+    assert.match(app, new RegExp(`const ${page} = lazyPage\\(`))
+  }
+  assert.doesNotMatch(app, /\blazy\(/)
 })

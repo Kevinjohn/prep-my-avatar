@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { HashRouter, Routes, Route, Navigate, Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { apiFetch, postJson } from './api/fetchClient'
 import { restartTarget, waitForRestart } from './utils/restartReadiness'
@@ -12,16 +12,17 @@ import {
 } from './utils/sessionStorage'
 import { clearDatasetCurrentId } from './utils/datasetCurrentId'
 import { installUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard'
+import { lazyPage } from './utils/lazyPage'
 
 // Route-level chunks keep the first app shell small. The dataset workspace is
 // intentionally its own chunk because its training/curation tools dominate the
 // bundle, while Setup, Settings and Runs are visited independently.
-const DatasetPage = lazy(() => import('./pages/DatasetPage'))
-const StudioPage = lazy(() => import('./pages/StudioPage'))
-const SettingsPage = lazy(() => import('./pages/SettingsPage'))
-const SetupPage = lazy(() => import('./pages/SetupPage'))
-const GuidePage = lazy(() => import('./pages/GuidePage'))
-const CloudRunsPage = lazy(() => import('./pages/CloudRunsPage'))
+const DatasetPage = lazyPage(() => import('./pages/DatasetPage'))
+const StudioPage = lazyPage(() => import('./pages/StudioPage'))
+const SettingsPage = lazyPage(() => import('./pages/SettingsPage'))
+const SetupPage = lazyPage(() => import('./pages/SetupPage'))
+const GuidePage = lazyPage(() => import('./pages/GuidePage'))
+const CloudRunsPage = lazyPage(() => import('./pages/CloudRunsPage'))
 
 const NAV_ITEM_BASE =
   'px-3 py-1.5 rounded-md text-sm font-medium no-underline transition-colors'
