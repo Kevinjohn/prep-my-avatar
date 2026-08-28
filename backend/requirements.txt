@@ -5,6 +5,7 @@ SQLAlchemy==2.0.45
 Werkzeug==3.1.6
 requests==2.33.0
 python-dotenv==1.2.2
+PyYAML==6.0.3
 Pillow==12.3.0
 psutil==7.2.2
 huggingface-hub==1.23.0   # Publish dataset to the HF Hub (pure-python, light): HfApi + upload_folder
