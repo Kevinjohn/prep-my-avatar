@@ -6,6 +6,7 @@ import CaptionEditorDialog from './CaptionEditorDialog';
 import PromptEditPopover from './PromptEditPopover';
 import { useConfirmDialog } from '../common/ConfirmDialog';
 import { datasetImageUrl } from './datasetImageUrl';
+import { captionAttributionState } from '../../utils/captionOrigin';
 
 const STATUS_CLS = {
   keep: 'border-green-500',
@@ -76,6 +77,7 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
   // the draft (C1) — the server value only syncs in when nobody is typing.
   const editingRef = useRef(false);
   const captionSaveRef = useRef(0);
+  const attribution = captionAttributionState(img.caption, img.caption_origin, cap);
   const saveCaption = async (nextCaption) => {
     const request = ++captionSaveRef.current;
     setCap(nextCaption);
@@ -264,22 +266,36 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
       )}
       {img.status === 'keep' && (
         <div className="m-1.5 mt-0 flex flex-col gap-1">
-          <div className="flex items-center justify-end gap-1">
-            <button type="button" onClick={() => setCaptionEditorOpen(true)}
-              title="Open a larger caption editor"
-              aria-label="Expand caption editor"
-              className="rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] text-content-muted hover:text-content">
-              ⛶ Expand
-            </button>
-            {cap && (
-              <button type="button"
-                onClick={() => { editingRef.current = false; saveCaption(''); }}
-                title="Delete this image's caption (then “Caption” regenerates it via JoyCaption)"
-                aria-label="Delete this image's caption"
-                className="rounded border border-red-500/40 bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/25">
-                🗑 Caption
+          <div className="flex items-center justify-between gap-1">
+            {attribution && (attribution.kind === 'draft' || attribution.known) ? (
+              <span title={attribution.title} aria-label={attribution.short}
+                className={`min-w-0 truncate rounded border px-1.5 py-0.5 text-[10px] ${
+                  attribution.kind === 'draft'
+                    ? 'border-amber-400/40 bg-amber-500/10 text-amber-200'
+                    : attribution.key === 'asserted'
+                      ? 'border-indigo-400/40 bg-indigo-500/10 text-indigo-200'
+                      : 'border-border bg-surface text-content-muted'
+                }`}>
+                {attribution.chip}
+              </span>
+            ) : <span />}
+            <div className="flex items-center justify-end gap-1">
+              <button type="button" onClick={() => setCaptionEditorOpen(true)}
+                title="Open a larger caption editor"
+                aria-label="Expand caption editor"
+                className="rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] text-content-muted hover:text-content">
+                ⛶ Expand
               </button>
-            )}
+              {cap && (
+                <button type="button"
+                  onClick={() => { editingRef.current = false; saveCaption(''); }}
+                  title="Delete this image's caption (then “Caption” regenerates it via JoyCaption)"
+                  aria-label="Delete this image's caption"
+                  className="rounded border border-red-500/40 bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/25">
+                  🗑 Caption
+                </button>
+              )}
+            </div>
           </div>
           <textarea value={cap} onChange={(e) => setCap(e.target.value)}
             onFocus={() => { editingRef.current = true; }}
@@ -293,7 +309,8 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
         </div>
       )}
       {captionEditorOpen && (
-        <CaptionEditorDialog initialCaption={cap} imageUrl={url}
+        <CaptionEditorDialog initialCaption={cap} savedCaption={img.caption || ''}
+          captionOrigin={img.caption_origin} imageUrl={url}
           imageLabel={displayLabel(img.variation_label)}
           onClose={() => setCaptionEditorOpen(false)}
           onSave={(nextCaption) => {

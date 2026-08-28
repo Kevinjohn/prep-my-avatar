@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { captionCharacterLabel, isCaptionSaveShortcut } from '../../utils/captionEditor';
+import { captionAttributionState } from '../../utils/captionOrigin';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 
-export default function CaptionEditorDialog({ initialCaption, imageUrl, imageLabel, onClose, onSave }) {
+export default function CaptionEditorDialog({ initialCaption, savedCaption = initialCaption,
+                                              captionOrigin, imageUrl, imageLabel,
+                                              onClose, onSave }) {
   const [draft, setDraft] = useState(initialCaption || '');
   const textareaRef = useRef(null);
   const dialogRef = useRef(null);
+  const attribution = captionAttributionState(savedCaption, captionOrigin, draft);
   useFocusTrap(dialogRef, true);
   useBodyScrollLock(true);
 
@@ -52,6 +56,17 @@ export default function CaptionEditorDialog({ initialCaption, imageUrl, imageLab
                 {captionCharacterLabel(draft)}
               </span>
             </div>
+            {attribution && (
+              <div role="status" aria-live="polite"
+                className={`rounded-lg border px-3 py-2 text-xs ${
+                  attribution.kind === 'draft'
+                    ? 'border-amber-400/40 bg-amber-500/10 text-amber-100'
+                    : 'border-border bg-surface-raised text-content-muted'
+                }`}>
+                <p className="m-0 font-semibold text-content">{attribution.short}</p>
+                <p className="m-0 mt-0.5 leading-5">{attribution.title}</p>
+              </div>
+            )}
             <textarea id="expanded-caption" ref={textareaRef} value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {

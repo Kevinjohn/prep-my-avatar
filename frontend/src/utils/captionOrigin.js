@@ -50,6 +50,23 @@ export function captionOriginTooltipLine(caption, origin) {
   return captionOriginInfo(origin).short;
 }
 
+export function captionAttributionState(savedCaption, origin, draft = savedCaption) {
+  const saved = String(savedCaption || '');
+  const current = String(draft || '');
+  if (current !== saved) {
+    return {
+      kind: 'draft',
+      key: 'unsaved',
+      chip: 'Unsaved edit',
+      short: 'Unsaved edit',
+      title: 'Save this edit to record it as your caption.',
+      known: true,
+    };
+  }
+  if (!saved.trim()) return null;
+  return { kind: 'saved', ...captionOriginInfo(origin) };
+}
+
 export function captionRewriteCounts(images) {
   const counts = {
     blank: 0,
