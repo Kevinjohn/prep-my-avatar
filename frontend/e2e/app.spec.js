@@ -7,6 +7,71 @@ async function openDatasets(page) {
   await expect(page.getByRole('heading', { name: 'Datasets', level: 1 })).toBeVisible();
 }
 
+async function postJson(page, path, body) {
+  return page.evaluate(async ({ requestPath, requestBody }) => {
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    const response = await fetch(requestPath, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': match ? decodeURIComponent(match[1]) : '',
+      },
+      body: JSON.stringify(requestBody),
+    });
+    return { status: response.status, body: await response.json() };
+  }, { requestPath: path, requestBody: body });
+}
+
+async function importSolidImage(page, datasetId, filename, colour) {
+  return page.evaluate(async ({ id, name, rgb }) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext('2d');
+    context.fillStyle = `rgb(${rgb.join(',')})`;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    const data = new FormData();
+    data.append('files', blob, name);
+    data.append('crop', '0');
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    data.append('csrf_token', match ? decodeURIComponent(match[1]) : '');
+    const response = await fetch(`/api/dataset/${id}/import`, {
+      method: 'POST', credentials: 'include', body: data,
+    });
+    return { status: response.status, body: await response.json() };
+  }, { id: datasetId, name: filename, rgb: colour });
+}
+
+async function seedImportedDataset(page, name, imageCount = 1) {
+  const created = await postJson(page, '/api/dataset/create', {
+    name, trigger_word: `z_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+  });
+  expect(created.status).toBe(200);
+  const datasetId = created.body.id;
+  const imageIds = [];
+  for (let index = 0; index < imageCount; index += 1) {
+    const imported = await importSolidImage(
+      page, datasetId, `fixture-${index}.png`,
+      index % 2 ? [30, 160, 220] : [220, 90, 40],
+    );
+    expect(imported.status).toBe(200);
+    expect(imported.body.imported).toBe(1);
+  }
+  const payload = await page.evaluate(async (id) => (
+    fetch(`/api/dataset/${id}?include_images=1`).then((response) => response.json())
+  ), datasetId);
+  for (const image of payload.images) {
+    imageIds.push(image.id);
+    const kept = await postJson(page, `/api/dataset/image/${image.id}/status`, {
+      status: 'keep',
+    });
+    expect(kept.status).toBe(200);
+  }
+  return { datasetId, imageIds };
+}
+
 async function accessibilityViolations(page) {
   await page.addScriptTag({ content: axe.source });
   const result = await page.evaluate(async () => window.axe.run(document, {
@@ -52,6 +117,147 @@ test('dataset flow, destructive dialog focus, and accessibility', async ({ page 
   await deleteButton.click();
   await page.getByRole('button', { name: 'Move to trash', exact: true }).click();
   await expect(page.getByRole('heading', { name: datasetName, level: 1 })).toHaveCount(0);
+});
+
+test('re-caption protects authored captions until the explicit override', async ({ page }, testInfo) => {
+  const suffix = `${testInfo.project.name}-${testInfo.retry}`;
+  await openDatasets(page);
+  const { datasetId, imageIds } = await seedImportedDataset(
+    page, `Recaption ${suffix}`, 2,
+  );
+  for (const [index, imageId] of imageIds.entries()) {
+    const saved = await postJson(page, `/api/dataset/image/${imageId}/caption`, {
+      caption: index ? 'machine fixture' : 'my carefully edited caption',
+    });
+    expect(saved.status).toBe(200);
+  }
+
+  let secondOrigin = 'joycaption';
+  const captionBodies = [];
+  await page.route(`**/api/dataset/${datasetId}/**`, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === 'POST' && pathname === `/api/dataset/${datasetId}/caption`) {
+      captionBodies.push(request.postDataJSON());
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: true, captioned: secondOrigin === 'asserted' ? 2 : 1 }) });
+      return;
+    }
+    if (request.method() === 'GET' && pathname === `/api/dataset/${datasetId}/images`) {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.images = body.images.map((image) => (
+        image.id === imageIds[1] ? { ...image, caption_origin: secondOrigin } : image
+      ));
+      await route.fulfill({ response, json: body });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.evaluate((id) => localStorage.setItem('datasetCurrentId', String(id)), datasetId);
+  await page.goto('/#/datasets?section=captions');
+  // Hash-only navigation keeps the already-mounted dataset hook alive; reload
+  // once so it reads the seeded hand-off value exactly as a reopened tab does.
+  await page.reload();
+  const recaption = page.getByRole('button', { name: /Re-caption/ });
+  const override = page.getByRole('checkbox', { name: /Also replace captions I wrote \(1\)/ });
+  await expect(recaption).toBeEnabled();
+  await expect(override).not.toBeChecked();
+
+  await recaption.click();
+  let dialog = page.getByRole('alertdialog', { name: 'Re-caption 1 kept images?' });
+  await expect(dialog).toContainText('1 machine-written');
+  await expect(dialog).toContainText('spare the 1 caption you wrote');
+  await dialog.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => captionBodies.length).toBe(1);
+  expect(captionBodies[0]).toEqual({ force: true, mode: 'prose' });
+  await expect(override).not.toBeChecked();
+
+  await override.check();
+  await recaption.click();
+  dialog = page.getByRole('alertdialog', { name: 'Replace 2 caption entries?' });
+  await expect(dialog).toContainText('also replace the 1 caption you wrote');
+  await dialog.getByRole('button', { name: 'Continue' }).click();
+  const danger = page.getByRole('alertdialog', { name: 'Replace your captions too?' });
+  await expect(danger).toContainText('cannot be undone as one batch');
+  await danger.getByRole('button', { name: 'Replace my captions' }).click();
+  await expect.poll(() => captionBodies.length).toBe(2);
+  expect(captionBodies[1]).toEqual({
+    force: true, mode: 'prose', include_asserted: true,
+  });
+  await expect(override).not.toBeChecked();
+
+  secondOrigin = 'asserted';
+  await page.reload();
+  await expect(page.getByRole('checkbox', {
+    name: /Also replace captions I wrote \(2\)/,
+  })).not.toBeChecked();
+  await expect(recaption).toBeDisabled();
+  await expect(recaption).toHaveAttribute('title', /Every existing caption is yours/);
+});
+
+test('outdated analysis refreshes explicitly and preserves review evidence', async ({ page }, testInfo) => {
+  const suffix = `${testInfo.project.name}-${testInfo.retry}`;
+  await openDatasets(page);
+  const { datasetId, imageIds } = await seedImportedDataset(page, `Analysis ${suffix}`);
+  const coverage = await postJson(page, `/api/dataset/image/${imageIds[0]}/coverage`, {
+    framing: 'face', angle: 'front', expression: 'neutral', lighting: 'studio',
+    pose: 'headshot', background: 'plain', occlusion: 'none',
+  });
+  expect(coverage.status).toBe(200);
+
+  let legacy = true;
+  let analyzeCalls = 0;
+  await page.route(`**/api/dataset/${datasetId}/**`, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === 'POST'
+        && pathname === `/api/dataset/${datasetId}/corpus/analyze`) {
+      analyzeCalls += 1;
+      legacy = false;
+      const response = await route.fetch();
+      await route.fulfill({ response });
+      return;
+    }
+    if (request.method() === 'GET' && pathname === `/api/dataset/${datasetId}/images`) {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.images = body.images.map((image) => ({
+        ...image,
+        analysis: {
+          ...image.analysis,
+          analysis_version: legacy ? 1 : 2,
+          face: { quality: 'green', face_sharpness: 81 },
+        },
+      }));
+      await route.fulfill({ response, json: body });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.evaluate((id) => localStorage.setItem('datasetCurrentId', String(id)), datasetId);
+  await page.goto('/#/datasets?section=add');
+  await page.reload();
+  const refresh = page.getByRole('button', {
+    name: '📐 Refresh local analysis (1 outdated)', exact: true,
+  });
+  await expect(refresh).toBeVisible();
+  expect(analyzeCalls).toBe(0);
+  await expect(page.getByText(/analysis outdated/)).toBeVisible();
+  await expect(page.getByText(/face pixels green/)).toBeVisible();
+  await expect(page.getByLabel('lighting')).toHaveValue('studio');
+  await expect(refresh).toHaveAttribute('title', /bokeh-aware sharpness scoring/);
+
+  await refresh.click();
+  await expect.poll(() => analyzeCalls).toBe(1);
+  await expect(page.getByRole('button', {
+    name: '📐 Refresh local analysis', exact: true,
+  })).toBeVisible();
+  await expect(page.getByText(/analysis current/)).toBeVisible();
+  await expect(page.getByText(/face pixels green/)).toBeVisible();
+  await expect(page.getByLabel('lighting')).toHaveValue('studio');
 });
 
 test('direct Studio route renders its capability-gated destination', async ({ page }) => {
