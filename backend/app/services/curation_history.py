@@ -9,9 +9,10 @@ from functools import wraps
 from ..extensions import db
 from ..models import CurationEvent, FaceDataset, FaceDatasetImage
 from ..utils.time import utcnow
+from .caption_origin import CAPTION_FIELDS, set_caption
 
 _UNDO_FIELDS = {
-    'status', 'caption', 'anchor_decision', 'coverage_json', 'framing',
+    'status', *CAPTION_FIELDS, 'anchor_decision', 'coverage_json', 'framing',
     'coverage_value', 'coverage_provenance', 'variation_label', 'source_rights',
     'watermark_state', 'watermark_bbox', 'watermark_regions',
 }
@@ -46,6 +47,8 @@ def record(user_id, image: FaceDatasetImage, action: str, before: dict, after: d
     before = {k: v for k, v in before.items() if k in _UNDO_FIELDS}
     after = {k: v for k, v in after.items() if k in _UNDO_FIELDS}
     changed = {key for key in before | after if before.get(key) != after.get(key)}
+    if changed.intersection(CAPTION_FIELDS):
+        changed.update(key for key in CAPTION_FIELDS if key in before or key in after)
     if not changed:
         return None
     before = {key: before.get(key) for key in sorted(changed)}
@@ -185,7 +188,16 @@ def undo(user_id, dataset_id, *, event_id=None) -> dict | None:
         changes.append((event, image, before))
     now = utcnow()
     for event, image, before in changes:
+        if 'caption' in before:
+            set_caption(
+                image,
+                before['caption'],
+                origin=before.get('caption_origin'),
+                provenance=before.get('caption_provenance'),
+            )
         for field, value in before.items():
+            if field in CAPTION_FIELDS:
+                continue
             setattr(image, field, value)
         event.reverted_at = now
     db.session.commit()

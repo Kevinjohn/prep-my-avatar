@@ -28,6 +28,8 @@ def _source(svc, image_cls, user_id, *, filename='source.png', derivation_kind=N
         status='keep',
         framing='body',
         caption='full body, outdoor light',
+        caption_origin='joycaption',
+        caption_provenance='{"provider":"joycaption","revision":"abc"}',
         variation_label='Imported low-resolution image',
         variation_prompt='original prompt',
         derivation_kind=derivation_kind,
@@ -73,6 +75,7 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
         original_values = {
             field: getattr(source, field)
             for field in ('filename', 'source', 'framing', 'caption',
+                          'caption_origin', 'caption_provenance',
                           'variation_label', 'variation_prompt', 'derivation_kind',
                           'job_id', 'parent_image_id')
         }
@@ -97,6 +100,8 @@ def test_improve_existing_image_is_non_destructive_and_uses_metadata_profile(
         assert candidate.derivation_kind not in svc._SMALL_IMAGE_DERIVATIONS
         assert candidate.framing == source.framing
         assert candidate.caption == source.caption
+        assert candidate.caption_origin == source.caption_origin
+        assert candidate.caption_provenance == source.caption_provenance
         assert candidate.variation_prompt == svc.KLEIN_IMAGE_IMPROVE_PROMPT
         assert candidate.variation_label.startswith('Klein reconstruction')
         assert candidate.job_id == queued[0]['job_id']

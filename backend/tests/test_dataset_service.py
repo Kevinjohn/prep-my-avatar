@@ -519,9 +519,13 @@ def test_batch_keep_and_clear_caption(app):
         rows = FaceDatasetImage.query.filter(FaceDatasetImage.id.in_(ids)).all()
         assert all(r.status == 'keep' for r in rows)
         rows[0].caption = 'a caption'
+        rows[0].caption_origin = 'joycaption'
+        rows[0].caption_provenance = '{"revision":"abc"}'
         svc.db.session.commit()
         assert svc.batch_image_action(LOCAL_USER, ds.id, [ids[0]], 'clear_caption') == 1
-        assert svc.db.session.get(FaceDatasetImage, ids[0]).caption is None
+        cleared = svc.db.session.get(FaceDatasetImage, ids[0])
+        assert (cleared.caption, cleared.caption_origin,
+                cleared.caption_provenance) == (None, None, None)
 
 
 def test_batch_delete_hides_rows_and_moves_files_to_trash(app):
@@ -577,10 +581,15 @@ def test_replace_captions_text_mode(app):
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Rc', 'rc')
         ids = _seed_captioned(svc, ds.id, ['a woman in a red dress', 'a red car', 'no match'])
+        machine = svc.db.session.get(FaceDatasetImage, ids[0])
+        machine.caption_origin = 'joycaption'
+        machine.caption_provenance = '{"revision":"abc"}'
+        svc.db.session.commit()
         n = svc.replace_in_captions(LOCAL_USER, ds.id, 'red', 'blue', mode='text')
         assert n == 2
         caps = [svc.db.session.get(FaceDatasetImage, i).caption for i in ids]
         assert caps == ['a woman in a blue dress', 'a blue car', 'no match']
+        assert (machine.caption_origin, machine.caption_provenance) == ('asserted', None)
 
 
 def test_replace_captions_tag_mode_removes_cleanly(app):
@@ -738,6 +747,42 @@ def test_backup_roundtrip_restores_everything(app):
         assert os.path.isfile(os.path.join(svc._dataset_dir(restored.id), 'a.webp'))
 
 
+def test_backup_roundtrip_preserves_asserted_and_machine_caption_tuples(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Caption tuples', 'caption_tuples')
+        root = Path(svc._dataset_dir(ds.id))
+        provenance = '{"provider":"joycaption","revision":"abc","seed":7}'
+        rows = [
+            FaceDatasetImage(
+                dataset_id=ds.id, filename='asserted.webp', source='import', status='keep',
+                caption='written by a person', caption_origin='asserted'),
+            FaceDatasetImage(
+                dataset_id=ds.id, filename='machine.webp', source='import', status='keep',
+                caption='written by a model', caption_origin='joycaption',
+                caption_provenance=provenance),
+        ]
+        for row in rows:
+            root.joinpath(row.filename).write_bytes(_png())
+        svc.db.session.add_all(rows)
+        svc.db.session.commit()
+
+        restored = svc.import_backup_zip(
+            LOCAL_USER, svc.build_backup_zip(LOCAL_USER, ds.id))
+        tuples = {
+            (row.caption, row.caption_origin, row.caption_provenance)
+            for row in FaceDatasetImage.query.filter_by(dataset_id=restored.id).all()
+        }
+
+        assert tuples == {
+            ('written by a person', 'asserted', None),
+            ('written by a model', 'joycaption', provenance),
+        }
+
+
 def test_backup_roundtrip_preserves_optional_watermark_regions_and_accepts_legacy(app):
     import os
     from app.services import face_dataset_service as svc
@@ -779,6 +824,8 @@ def test_backup_roundtrip_preserves_optional_watermark_regions_and_accepts_legac
         legacy_restored = svc.import_backup_zip(LOCAL_USER, legacy.getvalue())
         legacy_img = FaceDatasetImage.query.filter_by(dataset_id=legacy_restored.id).one()
         assert legacy_img.watermark_regions is None
+        assert legacy_img.caption_origin is None
+        assert legacy_img.caption_provenance is None
 
 
 def test_backup_import_rejects_garbage_and_traversal(app):
@@ -1198,6 +1245,9 @@ def test_regeneration_clears_all_watermark_metadata(app, monkeypatch):
         img.watermark_state = 'detected'
         img.watermark_bbox = '[0.1, 0.1, 0.2, 0.2]'
         img.watermark_regions = '[[0.1, 0.1, 0.2, 0.2]]'
+        img.caption = 'machine caption'
+        img.caption_origin = 'joycaption'
+        img.caption_provenance = '{"provider":"joycaption","revision":"abc"}'
         svc.db.session.commit()
 
         svc.regenerate_image(LOCAL_USER, img.id)
@@ -1205,6 +1255,8 @@ def test_regeneration_clears_all_watermark_metadata(app, monkeypatch):
         row = svc.db.session.get(FaceDatasetImage, img.id)
         replacement_filename = row.filename
         assert replacement_filename and replacement_filename != 'old.webp'
+        assert (row.caption, row.caption_origin, row.caption_provenance) == (
+            None, None, None)
         assert not os.path.exists(old_path)
         entry = next(item for item in trash.list_entries()
                      if item['kind'] == 'regenerated_image')
@@ -1212,6 +1264,10 @@ def test_regeneration_clears_all_watermark_metadata(app, monkeypatch):
         svc.db.session.refresh(row)
         assert os.path.exists(old_path)
         assert row.filename == 'old.webp'
+        assert (row.caption, row.caption_origin, row.caption_provenance) == (
+            'machine caption', 'joycaption',
+            '{"provider":"joycaption","revision":"abc"}',
+        )
         assert (row.watermark_state, row.watermark_bbox, row.watermark_regions) == (
             'detected', '[0.1, 0.1, 0.2, 0.2]', '[[0.1, 0.1, 0.2, 0.2]]',
         )

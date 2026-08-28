@@ -21,6 +21,14 @@ def _dataset_with_images(client, app, count=2):
 
 def test_single_status_and_caption_edits_are_audited_and_undoable(client, app):
     dataset_id, (image_id, _) = _dataset_with_images(client, app)
+    machine_provenance = '{"provider":"joycaption","revision":"abc"}'
+    with app.app_context():
+        from app.models import FaceDatasetImage
+        row = db.session.get(FaceDatasetImage, image_id)
+        row.caption = 'machine caption'
+        row.caption_origin = 'joycaption'
+        row.caption_provenance = machine_provenance
+        db.session.commit()
     assert client.post(f'/api/dataset/image/{image_id}/status',
                        json={'status': 'keep'}).status_code == 200
     assert client.post(f'/api/dataset/image/{image_id}/caption',
@@ -30,6 +38,16 @@ def test_single_status_and_caption_edits_are_audited_and_undoable(client, app):
         f'/api/dataset/{dataset_id}/curation/history').get_json()
     assert [row['action'] for row in history['events'][:2]] == [
         'caption', 'status:keep']
+    assert history['events'][0]['before'] == {
+        'caption': 'machine caption',
+        'caption_origin': 'joycaption',
+        'caption_provenance': machine_provenance,
+    }
+    assert history['events'][0]['after'] == {
+        'caption': 'new caption',
+        'caption_origin': 'asserted',
+        'caption_provenance': None,
+    }
     assert history['can_undo'] is True
 
     assert client.post(f'/api/dataset/{dataset_id}/curation/undo', json={}).get_json()[
@@ -37,7 +55,9 @@ def test_single_status_and_caption_edits_are_audited_and_undoable(client, app):
     with app.app_context():
         from app.models import FaceDatasetImage
         row = db.session.get(FaceDatasetImage, image_id)
-        assert row.caption is None and row.status == 'keep'
+        assert (row.caption, row.caption_origin, row.caption_provenance) == (
+            'machine caption', 'joycaption', machine_provenance)
+        assert row.status == 'keep'
 
     client.post(f'/api/dataset/{dataset_id}/curation/undo', json={})
     with app.app_context():

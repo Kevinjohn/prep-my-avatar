@@ -669,6 +669,8 @@ def test_import_folder_route_images_captions_and_nonimage(client, app, tmp_path)
         assert all(r.status == 'keep' and r.source == 'import' for r in rows)
         captioned = [r for r in rows if r.caption]
         assert len(captioned) == 1 and captioned[0].caption == 'a red patterned square'
+        assert captioned[0].caption_origin == 'asserted'
+        assert captioned[0].caption_provenance is None
         # the caption landed on the RED image (a.png), not the blue one
         with Image.open(os.path.join(svc._dataset_dir(ds_id), captioned[0].filename)) as im:
             r, _g, b = im.convert('RGB').resize((1, 1)).getpixel((0, 0))

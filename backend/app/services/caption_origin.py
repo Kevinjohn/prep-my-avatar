@@ -9,6 +9,7 @@ JOYCAPTION = "joycaption"
 OLLAMA = "ollama"
 ENGINES = (JOYCAPTION, OLLAMA)
 ORIGINS = (ASSERTED, *ENGINES)
+CAPTION_FIELDS = ("caption", "caption_origin", "caption_provenance")
 
 
 def engine_origin(engine: str | None) -> str | None:
@@ -34,9 +35,78 @@ def set_caption(
     return row
 
 
-def set_human_caption(row, text: str | None):
+def _normalize_text(text: str | None, max_chars: int | None = None) -> str | None:
+    normalized = (text or "").strip()
+    if max_chars is not None:
+        normalized = normalized[:max_chars]
+    return normalized or None
+
+
+def set_human_caption(row, text: str | None, *, max_chars: int | None = None):
     """Store user-authored text and discard provenance from any prior model text."""
-    return set_caption(row, text, origin=ASSERTED)
+    return set_caption(row, _normalize_text(text, max_chars), origin=ASSERTED)
+
+
+def clear_caption(row):
+    """Clear caption text and every piece of metadata that describes it."""
+    return set_caption(row, None, origin=None)
+
+
+def copy_caption(target, source):
+    """Copy an unchanged caption tuple between rows."""
+    return set_caption(
+        target,
+        source.caption,
+        origin=source.caption_origin,
+        provenance=source.caption_provenance,
+    )
+
+
+def validate_replacement(find: str | None, mode: str = "text") -> str:
+    """Validate and normalize one manual caption replacement request."""
+    if mode not in ("text", "tag"):
+        raise ValueError("invalid mode")
+    normalized = (find or "").strip() if mode == "tag" else (find or "")
+    if not normalized:
+        raise ValueError("find is required")
+    return normalized
+
+
+def replace_human_caption(
+    row,
+    find: str,
+    replacement: str | None,
+    *,
+    mode: str = "text",
+    max_chars: int | None = None,
+) -> bool:
+    """Apply one manual text/tag replacement and stamp the resulting tuple."""
+    find = validate_replacement(find, mode)
+    old = row.caption or ""
+    if mode == "text":
+        new = old.replace(find, replacement or "")
+    else:
+        tags = [tag.strip() for tag in old.split(",")]
+        out = []
+        seen = set()
+        for tag in tags:
+            if not tag:
+                continue
+            new_tag = (
+                (replacement or "").strip()
+                if tag.lower() == find.lower()
+                else tag
+            )
+            if not new_tag or new_tag.lower() in seen:
+                continue
+            seen.add(new_tag.lower())
+            out.append(new_tag)
+        new = ", ".join(out)
+    new = _normalize_text(new, max_chars)
+    if new == row.caption:
+        return False
+    set_human_caption(row, new, max_chars=max_chars)
+    return True
 
 
 def set_model_caption(

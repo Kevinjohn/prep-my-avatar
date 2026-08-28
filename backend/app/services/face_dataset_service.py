@@ -32,6 +32,9 @@ from . import dataset_activity
 from . import curation_history
 from . import image_processing
 from . import trash
+from .caption_origin import (CAPTION_FIELDS, ORIGINS, clear_caption, copy_caption,
+                             replace_human_caption, set_caption,
+                             set_human_caption, validate_replacement)
 from .import_analysis import analyse_image_bytes, analysis_json, parse_analysis
 from .perceptual_hash import (DHashIndex as _DHashIndex, dhash as _dhash,
                               hamming as _hamming)  # noqa: F401 - _hamming is a test seam
@@ -1770,11 +1773,11 @@ def set_image_caption(user_id, image_id, caption):
     if not img:
         return False
     from . import curation_history
-    before = curation_history.snapshot(img, ('caption',))
-    img.caption = (caption or '').strip()[:CAPTION_MAX_CHARS] or None
+    before = curation_history.snapshot(img, CAPTION_FIELDS)
+    set_human_caption(img, caption, max_chars=CAPTION_MAX_CHARS)
     curation_history.record(
         user_id, img, 'caption', before,
-        curation_history.snapshot(img, ('caption',)))
+        curation_history.snapshot(img, CAPTION_FIELDS))
     db.session.commit()
     return True
 
@@ -1987,8 +1990,15 @@ def restore_regenerated_image(user_id, entry_id):
             })
     restored = trash.restore_entry(entry_id, consume=False)
     try:
+        if 'caption' in previous:
+            set_caption(
+                img,
+                previous['caption'],
+                origin=previous.get('caption_origin'),
+                provenance=previous.get('caption_provenance'),
+            )
         for field in _REPLACEMENT_STATE_FIELDS:
-            if field in previous:
+            if field not in CAPTION_FIELDS and field in previous:
                 setattr(img, field, previous[field])
         img.job_id = None
         img.fail_reason = None
@@ -2265,7 +2275,7 @@ _BACKUP_NAME_RE = re.compile(
 # Champs snapshotés tels quels par ligne image (job_id/klein_model exclus : liés
 # à la machine source — un backup restauré ne peut pas « regénérer »).
 _BACKUP_IMG_FIELDS = ('filename', 'source', 'framing', 'variation_label', 'status',
-                      'caption', 'variation_prompt', 'face_score', 'face_state',
+                      *CAPTION_FIELDS, 'variation_prompt', 'face_score', 'face_state',
                       'watermark_state', 'watermark_bbox', 'watermark_regions',
                       'parent_image_id', 'derivation_kind',
                       'fail_reason', 'source_name', 'original_filename',
@@ -2558,6 +2568,8 @@ def _import_backup_archive(user_id, z, state):
             raise ValueError('invalid image source in backup')
         if meta.get('framing') not in (None, 'face', 'bust', 'body', 'back', 'unknown'):
             raise ValueError('invalid image framing in backup')
+        if meta.get('caption_origin') not in (None, *ORIGINS):
+            raise ValueError('invalid caption origin in backup')
         if meta.get('training_usefulness') not in (None, 'green', 'amber', 'red'):
             raise ValueError('invalid image usefulness in backup')
         if meta.get('coverage_value') not in (None, 'green', 'amber', 'unknown'):
@@ -2648,7 +2660,8 @@ def _import_backup_archive(user_id, z, state):
         if derivation == KLEIN_IMAGE_IMPROVE and not parent_valid and not fn:
             continue   # metadata-only orphan has neither source nor recoverable pixels
         values = {f: meta.get(f) for f in _BACKUP_IMG_FIELDS
-                  if f not in ('filename', 'parent_image_id', 'duplicate_of_id')}
+                  if f not in ('filename', 'parent_image_id', 'duplicate_of_id',
+                               *CAPTION_FIELDS)}
         if derivation == KLEIN_IMAGE_IMPROVE and not parent_valid:
             # Old releases allowed deleting a reconstruction source independently.
             # Preserve the surviving pixels as an ordinary generated row so the
@@ -2676,6 +2689,12 @@ def _import_backup_archive(user_id, z, state):
         img = FaceDatasetImage(dataset_id=ds.id,
                                **values,
                                filename=fn)
+        set_caption(
+            img,
+            meta.get('caption'),
+            origin=meta.get('caption_origin'),
+            provenance=meta.get('caption_provenance'),
+        )
         db.session.add(img)
         restored_rows.append((img, meta))
         n_rows += 1
@@ -2730,11 +2749,7 @@ def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
       case-insensitively (keeping first occurrence / original casing).
 
     Returns the number of captions actually changed."""
-    if mode not in ('text', 'tag'):
-        raise ValueError('invalid mode')
-    find = (find or '').strip() if mode == 'tag' else (find or '')
-    if not find:
-        raise ValueError('find is required')
+    find = validate_replacement(find, mode)
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return 0
@@ -2745,28 +2760,12 @@ def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
     batch_id = curation_history.new_batch_id()
     changed = 0
     for img in rows:
-        old = img.caption or ''
-        if mode == 'text':
-            new = old.replace(find, replace or '')
-        else:
-            tags = [t.strip() for t in old.split(',')]
-            out, seen = [], set()
-            for t in tags:
-                if not t:
-                    continue
-                nt = (replace or '').strip() if t.lower() == find.lower() else t
-                if not nt or nt.lower() in seen:
-                    continue
-                seen.add(nt.lower())
-                out.append(nt)
-            new = ', '.join(out)
-        new = new.strip()[:CAPTION_MAX_CHARS] or None
-        if new != img.caption:
-            before = curation_history.snapshot(img, ('caption',))
-            img.caption = new
+        before = curation_history.snapshot(img, CAPTION_FIELDS)
+        if replace_human_caption(
+                img, find, replace, mode=mode, max_chars=CAPTION_MAX_CHARS):
             curation_history.record(
                 user_id, img, f'caption_replace:{mode}', before,
-                curation_history.snapshot(img, ('caption',)), batch_id=batch_id)
+                curation_history.snapshot(img, CAPTION_FIELDS), batch_id=batch_id)
             changed += 1
     if changed:
         db.session.commit()
@@ -2808,13 +2807,13 @@ def batch_image_action(user_id, dataset_id, image_ids, action):
                 n += 1
         return n
     from . import curation_history
-    fields = ('caption',) if action == 'clear_caption' else (
+    fields = CAPTION_FIELDS if action == 'clear_caption' else (
         'status', 'watermark_state', 'watermark_bbox', 'watermark_regions')
     batch_id = curation_history.new_batch_id()
     for img in rows:
         before = curation_history.snapshot(img, fields)
         if action == 'clear_caption':
-            img.caption = None
+            clear_caption(img)
         else:
             # Never resurrect a failed generation into keep/reject — the tile has
             # no file; regenerate is the only way out of 'failed'.
@@ -3580,8 +3579,9 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
             coverage_value=analysis.get('coverage_value'),
             perceptual_hash=f'{fp:016x}' if fp is not None else None,
             duplicate_of_id=duplicate_of_id,
-            caption=cap,
         )
+        if cap:
+            set_human_caption(img, cap, max_chars=CAPTION_MAX_CHARS)
         db.session.add(img)
         try:
             db.session.flush()
@@ -5548,7 +5548,6 @@ def _improve_existing_image_locked(user_id, image_id):
         # that supplied these fields. Do not attach known-stale framing/caption to
         # the reconstruction; it can be classified/captioned after admission.
         framing=None if source_was_cropped else img.framing,
-        caption=None if source_was_cropped else img.caption,
         variation_label=label, variation_prompt=stored_prompt,
         generation_engine='klein',
         generation_anchor_ids=_generation_anchor_ids_json(anchors),
@@ -5556,6 +5555,10 @@ def _improve_existing_image_locked(user_id, image_id):
         generation_gap_ids=json.dumps(['klein_image_improve']),
         job_id=str(uuid.uuid4()),
     )
+    if source_was_cropped:
+        clear_caption(candidate)
+    else:
+        copy_caption(candidate, img)
     previous_source_status = img.status
     db.session.add(candidate)
     # Suspend the source's training admission while its correlated replacement
@@ -5595,7 +5598,7 @@ def _improve_existing_image_locked(user_id, image_id):
 
 
 _REPLACEMENT_STATE_FIELDS = (
-    'filename', 'caption', 'status', 'klein_model', 'generation_anchor_ids',
+    'filename', *CAPTION_FIELDS, 'status', 'klein_model', 'generation_anchor_ids',
     'generation_anchor_metadata', 'generation_engine', 'generation_gap_ids',
     'generation_provenance', 'analysis_json', 'training_usefulness',
     'coverage_value', 'coverage_json', 'coverage_provenance', 'source_rights',
@@ -5638,8 +5641,15 @@ def _final_generation_provenance(img, updates=None):
 def _restore_replacement_after_failure(img, reason):
     previous = _replacement_previous(img)
     if previous:
+        if 'caption' in previous:
+            set_caption(
+                img,
+                previous['caption'],
+                origin=previous.get('caption_origin'),
+                provenance=previous.get('caption_provenance'),
+            )
         for field in _REPLACEMENT_STATE_FIELDS:
-            if field in previous:
+            if field not in CAPTION_FIELDS and field in previous:
                 setattr(img, field, previous[field])
         img.job_id = None
         img.fail_reason = reason
@@ -5685,7 +5695,7 @@ def _commit_generated_replacement(img, filename, data, *, provenance_updates=Non
                     'label': img.variation_label or old_path.name,
                 })
         img.filename = safe_name
-        img.caption = None
+        clear_caption(img)
         img.status = 'pending'
         img.job_id = None
         img.fail_reason = None
