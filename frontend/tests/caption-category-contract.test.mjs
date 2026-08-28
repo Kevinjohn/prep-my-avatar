@@ -37,7 +37,21 @@ test('caption guidance is specific to character, concept and style datasets', ()
 })
 
 test('re-caption confirmation explains the correct category rule', () => {
-  assert.match(recaptionConfirmation('character', 4), /identity/i)
-  assert.match(recaptionConfirmation('concept', 4), /concept/i)
-  assert.match(recaptionConfirmation('style', 4), /style|aesthetic/i)
+  const counts = {
+    blank: 1, machine: 2, asserted: 1, unrecorded: 1, unknown: 1,
+    rewrite: 5, spared: 1, rewriteWithAsserted: 6,
+  }
+  const ordinary = recaptionConfirmation('character', counts)
+  assert.match(ordinary, /2 machine-written/i)
+  assert.match(ordinary, /1 author-not-recorded/i)
+  assert.match(ordinary, /1 unknown-origin/i)
+  assert.match(ordinary, /1 blank/i)
+  assert.match(ordinary, /spare the 1 caption you wrote/i)
+  assert.match(ordinary, /identity/i)
+  assert.match(recaptionConfirmation('concept', counts), /concept/i)
+  assert.match(recaptionConfirmation('style', counts), /style|aesthetic/i)
+
+  const override = recaptionConfirmation('character', counts, true)
+  assert.match(override, /also replace the 1 caption you wrote/i)
+  assert.doesNotMatch(override, /spare the 1 caption/i)
 })

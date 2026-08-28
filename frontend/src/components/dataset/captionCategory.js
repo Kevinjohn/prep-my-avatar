@@ -54,11 +54,24 @@ export function captionCategoryCopy(kind = 'character', mode = 'prose') {
   }
 }
 
-export function recaptionConfirmation(kind = 'character', count = 0) {
+export function recaptionConfirmation(kind = 'character', counts = {}, includeAsserted = false) {
   const rule = kind === 'concept'
     ? 'The new captions will describe the scene while leaving the recurring concept unspoken.'
     : kind === 'style'
       ? 'The new captions will describe image content while leaving the aesthetic/style unspoken.'
       : 'The new captions will describe the scene without describing the character identity.'
-  return `Re-captioning overwrites the ${count} existing caption(s). ${rule} Continue?`
+  const machine = Number(counts.machine) || 0
+  const asserted = Number(counts.asserted) || 0
+  const unrecorded = Number(counts.unrecorded) || 0
+  const unknown = Number(counts.unknown) || 0
+  const blank = Number(counts.blank) || 0
+  const rewrite = includeAsserted
+    ? (Number(counts.rewriteWithAsserted) || 0)
+    : (Number(counts.rewrite) || 0)
+  const authorship = `${machine} machine-written, ${unrecorded} author-not-recorded, `
+    + `${unknown} unknown-origin, and ${blank} blank`
+  const assertedRule = includeAsserted
+    ? ` It will also replace the ${asserted} caption${asserted === 1 ? '' : 's'} you wrote.`
+    : ` It will spare the ${asserted} caption${asserted === 1 ? '' : 's'} you wrote.`
+  return `This run will process ${rewrite} kept image${rewrite === 1 ? '' : 's'}: ${authorship}.${assertedRule} ${rule} Continue?`
 }

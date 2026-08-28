@@ -16,6 +16,7 @@ import ImageImprovementReview from './ImageImprovementReview';
 import CurationHistory from './CurationHistory';
 import CaptionToolsBar from './CaptionToolsBar';
 import { recaptionConfirmation } from './captionCategory';
+import { captionRewriteCounts } from '../../utils/captionOrigin';
 import CropModal from './CropModal';
 import DatasetLightbox from './DatasetLightbox';
 import DatasetSettingsModal from './DatasetSettingsModal';
@@ -87,6 +88,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const [refCrop, setRefCrop] = useState(false);
   const [viewImg, setViewImg] = useState(null);
   const [captionMode, setCaptionMode] = useState(null);   // null → défaut auto selon train_type
+  const [replaceAsserted, setReplaceAsserted] = useState(false);
   const [showLeaks, setShowLeaks] = useState(false);       // liste dépliée des captions qui fuient
   const [scraperOpen, setScraperOpen] = useState(false);
   const [captionToolsOpen, setCaptionToolsOpen] = useState(false);
@@ -109,8 +111,16 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const [includeTags, setIncludeTags] = useState([]);
   const [searchParams, setSearchParams] = useSearchParams();
   const images = d?.images || EMPTY_IMAGES;
+  const recaptionCounts = useMemo(() => captionRewriteCounts(images), [images]);
+  useEffect(() => {
+    setReplaceAsserted(false);
+  }, [d?.id]);
+  useEffect(() => {
+    if (!recaptionCounts.asserted) setReplaceAsserted(false);
+  }, [recaptionCounts.asserted]);
   const curationHistoryKey = useMemo(() => images.map((image) => [
-    image.id, image.status, image.caption || '', image.anchor_decision || '',
+    image.id, image.status, image.caption || '', image.caption_origin || '',
+    image.anchor_decision || '',
     image.framing || '', JSON.stringify(image.coverage || {}),
     JSON.stringify(image.coverage_provenance || {}),
     JSON.stringify(image.source_rights || {}),
@@ -378,11 +388,37 @@ export default function DatasetWorkspace({ ds, onBack }) {
   const keptCaptioned = summary.kept_captioned
     ?? images.filter((i) => i.status === 'keep' && Boolean((i.caption || '').trim())).length;
   const keptUncaptioned = kept - keptCaptioned;
+  // Style de caption : défaut AUTO (SDXL booru-native → booru tags ; sinon prose), surchargé par le sélecteur.
+  const effCaptionMode = captionMode || (d.train_type === 'sdxl' ? 'booru' : 'prose');
+  const recaptionableExisting = recaptionCounts.rewrite - recaptionCounts.blank;
+  const startRecaption = async () => {
+    const includeAsserted = replaceAsserted;
+    try {
+      if (!(await confirm({
+        title: includeAsserted
+          ? `Replace ${recaptionCounts.rewriteWithAsserted} caption entries?`
+          : `Re-caption ${recaptionCounts.rewrite} kept images?`,
+        message: recaptionConfirmation(
+          d.kind || 'character', recaptionCounts, includeAsserted),
+        confirmLabel: 'Continue',
+        tone: 'warning',
+      }))) return;
+      if (includeAsserted && !(await confirm({
+        title: 'Replace your captions too?',
+        message: `This will overwrite ${recaptionCounts.asserted} caption${
+          recaptionCounts.asserted === 1 ? '' : 's'} you wrote or corrected. This cannot be undone as one batch.`,
+        confirmLabel: 'Replace my captions',
+        tone: 'danger',
+      }))) return;
+      if (includeAsserted) await ds.recaption(effCaptionMode, true);
+      else await ds.recaption(effCaptionMode);
+    } finally {
+      setReplaceAsserted(false);
+    }
+  };
   // Overlaid watermarks still awaiting removal → drives the "🧽 Clean (N)" button.
   const watermarkDetected = summary.watermark_detected
     ?? images.filter((i) => i.watermark_state === 'detected').length;
-  // Style de caption : défaut AUTO (SDXL booru-native → booru tags ; sinon prose), surchargé par le sélecteur.
-  const effCaptionMode = captionMode || (d.train_type === 'sdxl' ? 'booru' : 'prose');
   // ── Grid tag-filter (session-only) ──────────────────────────────────────────
   // A tag is toggled in its list and mutually excluded from the other (a tag can't
   // be both hidden and isolated). Match mode follows the caption style so booru
@@ -1114,16 +1150,12 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
                   {ds.captioning ? `✨ ${keptCaptioned}/${kept} captioned…` : '✨ Caption the kept ones'}
                 </button>
-                <button type="button" disabled={ds.busy || !keptCaptioned}
-                  onClick={async () => {
-                    if (await confirm({
-                      title: `Replace ${keptCaptioned} existing caption${keptCaptioned === 1 ? '' : 's'}?`,
-                      message: recaptionConfirmation(d.kind || 'character', keptCaptioned),
-                      confirmLabel: 'Re-caption all',
-                      tone: 'warning',
-                    })) ds.recaption(effCaptionMode);
-                  }}
-                  title={isConcept
+                <button type="button"
+                  disabled={ds.busy || (!recaptionableExisting && !replaceAsserted)}
+                  onClick={startRecaption}
+                  title={!recaptionableExisting && recaptionCounts.asserted
+                    ? 'Every existing caption is yours. Select the explicit override to replace them.'
+                    : isConcept
                     ? "Re-generates every caption while keeping the recurring concept unspoken"
                     : isStyle
                       ? "Re-generates every caption as content-only text without naming the aesthetic"
@@ -1131,6 +1163,15 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   className="px-3 py-1.5 rounded-lg bg-surface text-content text-sm disabled:opacity-40 border border-border">
                   🔄 Re-caption
                 </button>
+                {recaptionCounts.asserted > 0 && (
+                  <label className="flex items-center gap-1.5 rounded-lg border border-indigo-400/30 bg-indigo-500/10 px-2 py-1.5 text-xs text-indigo-100">
+                    <input type="checkbox" checked={replaceAsserted}
+                      onChange={(event) => setReplaceAsserted(event.target.checked)}
+                      disabled={ds.busy}
+                      className="h-3.5 w-3.5 accent-indigo-500" />
+                    Also replace captions I wrote ({recaptionCounts.asserted})
+                  </label>
+                )}
                 {/* Caption-leak badge — KIND-aware. character: identity words
                     (hair/face/skin); concept: the caption NAMING the concept (must bind to
                     the trigger, not the words); style: not applicable (the subjects'

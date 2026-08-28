@@ -605,13 +605,16 @@ export function useDataset() {
     }
   }), [wrap, currentId, refresh, toast]);
 
-  // Re-caption FORCÉ : ré-écrit TOUTES les captions des gardées (après changement de
-  // prompt). Handler séparé de `caption` car onClick passe l'event en argument — un
-  // `force` positionnel sur `caption` serait toujours truthy.
-  const recaption = useCallback((mode) => wrap(async () => {
+  // A forced batch normally spares asserted captions. The second argument is set
+  // only after the workspace's separate destructive override confirmation.
+  const recaption = useCallback((mode, includeAsserted = false) => wrap(async () => {
     setCaptioning(true);
     try {
-      const d = await postJson(`/api/dataset/${currentId}/caption`, { force: true, ...(mode ? { mode } : {}) });
+      const d = await postJson(`/api/dataset/${currentId}/caption`, {
+        force: true,
+        ...(mode ? { mode } : {}),
+        ...(includeAsserted ? { include_asserted: true } : {}),
+      });
       if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
       toast.success(`${d.captioned} re-captioned`);
       await refresh();
