@@ -7,8 +7,26 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+import avatar_prep.core as prototype_core
+import backend.app.services.import_analysis as backend_import_analysis
 from avatar_prep.cli import build_parser
-from avatar_prep.core import ImageRecord, crop_box, export_packs, ingest, load_records, mark_duplicates
+from avatar_prep.core import (
+    ImageRecord,
+    crop_box,
+    export_packs,
+    ingest,
+    load_records,
+    mark_duplicates,
+    sharpness_score,
+)
+from backend.app.services.import_analysis import _sharpness_score as backend_sharpness_score
+from backend.tests.test_import_analysis import (
+    _artifact_speck_fixture,
+    _bokeh_fixture,
+    _ordinary_sharp_fixture,
+    _small_fixture,
+    _uniform_blur_fixture,
+)
 from avatar_prep.viewer import VIEWER_HTML, _validate_review_patch, write_viewer
 
 
@@ -18,6 +36,37 @@ class CoreTests(unittest.TestCase):
         draw = ImageDraw.Draw(image)
         draw.rectangle((size[0] // 4, size[1] // 5, size[0] * 3 // 4, size[1] * 4 // 5), outline=(255, 255, 255), width=10)
         image.save(path, quality=95)
+
+    def test_sharpness_scoring_matches_backend_on_shared_contract(self) -> None:
+        for constant in (
+            "_SHARPNESS_THUMBNAIL_SIDE",
+            "_LAPLACIAN",
+            "_LAPLACIAN_NEG",
+            "_LAPLACIAN_SCALE",
+            "_SHARPNESS_TILE_GRID",
+            "_SHARPNESS_TILE_MIN_SIDE",
+            "_SHARPNESS_PERCENTILE",
+            "_SHARPNESS_SCORE_SCALE",
+        ):
+            with self.subTest(constant=constant):
+                self.assertEqual(
+                    getattr(prototype_core, constant),
+                    getattr(backend_import_analysis, constant),
+                )
+        fixtures = (
+            _bokeh_fixture,
+            _uniform_blur_fixture,
+            _artifact_speck_fixture,
+            _ordinary_sharp_fixture,
+            _small_fixture,
+        )
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture.__name__):
+                image = fixture()
+                self.assertEqual(
+                    sharpness_score(image),
+                    backend_sharpness_score(image),
+                )
 
     def test_ingest_creates_manifest_crops_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -36,6 +85,10 @@ class CoreTests(unittest.TestCase):
             write_viewer(output)
             self.assertEqual(len(records), 2)
             self.assertTrue((output / "manifest.json").exists())
+            self.assertEqual(
+                json.loads((output / "manifest.json").read_text())["version"],
+                1,
+            )
             self.assertTrue((output / "reports" / "coverage-report.md").exists())
             self.assertTrue((output / "reports" / "index.html").exists())
             self.assertTrue((output / records[0].crops["square"]).exists())

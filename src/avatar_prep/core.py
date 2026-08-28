@@ -17,6 +17,19 @@ from PIL import Image, ImageFilter, ImageOps, ImageStat
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
 
+# The prototype is distributed as a standalone package and cannot import the
+# Flask application's service module. Keep this deliberately duplicated focus
+# contract in exact parity with backend/app/services/import_analysis.py; the
+# cross-package synthetic tests fail on any algorithm or constant drift.
+_SHARPNESS_THUMBNAIL_SIDE = 768
+_LAPLACIAN = (0, 1, 0, 1, -4, 1, 0, 1, 0)
+_LAPLACIAN_NEG = tuple(-coefficient for coefficient in _LAPLACIAN)
+_LAPLACIAN_SCALE = 4
+_SHARPNESS_TILE_GRID = 8
+_SHARPNESS_TILE_MIN_SIDE = 32
+_SHARPNESS_PERCENTILE = 0.90
+_SHARPNESS_SCORE_SCALE = 13.5
+
 DEFAULT_TARGETS = ("flux2", "krea2", "sdxl")
 
 VIEW_TARGETS = {
@@ -86,13 +99,82 @@ def bounded_score(value: float) -> int:
     return max(0, min(100, round(value)))
 
 
+def _histogram_moments(histogram: list[int]) -> tuple[float, float]:
+    total = sum(histogram)
+    if not total:
+        return 0.0, 0.0
+    mean = sum(value * count for value, count in enumerate(histogram)) / total
+    mean_square = (
+        sum(value * value * count for value, count in enumerate(histogram)) / total
+    )
+    return mean, mean_square
+
+
+def _laplacian_variance(
+    positive: Image.Image, negative: Image.Image, box: tuple[int, int, int, int]
+) -> float:
+    positive_mean, positive_square = _histogram_moments(
+        positive.crop(box).histogram()
+    )
+    negative_mean, negative_square = _histogram_moments(
+        negative.crop(box).histogram()
+    )
+    mean = _LAPLACIAN_SCALE * (positive_mean - negative_mean)
+    mean_square = _LAPLACIAN_SCALE**2 * (
+        positive_square + negative_square
+    )
+    return max(0.0, mean_square - mean * mean)
+
+
+def _sharpness_tile_boxes(
+    box: tuple[int, int, int, int],
+) -> list[tuple[int, int, int, int]]:
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    columns = max(
+        1, min(_SHARPNESS_TILE_GRID, width // _SHARPNESS_TILE_MIN_SIDE)
+    )
+    rows = max(1, min(_SHARPNESS_TILE_GRID, height // _SHARPNESS_TILE_MIN_SIDE))
+    xs = [left + round(index * width / columns) for index in range(columns + 1)]
+    ys = [top + round(index * height / rows) for index in range(rows + 1)]
+    return [
+        (xs[column], ys[row], xs[column + 1], ys[row + 1])
+        for row in range(rows)
+        for column in range(columns)
+    ]
+
+
+def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if not 0 < percentile <= 1:
+        raise ValueError("percentile must be in (0, 1]")
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1)
+    return ordered[index]
+
+
 def sharpness_score(image: Image.Image) -> int:
-    thumbnail = ImageOps.grayscale(image.copy())
-    thumbnail.thumbnail((768, 768))
-    edges = thumbnail.filter(ImageFilter.FIND_EDGES)
-    variance = ImageStat.Stat(edges).var[0]
-    # This is a conservative heuristic, not a face-quality measurement.
-    return bounded_score(math.sqrt(max(variance, 0)) * 3.2)
+    thumbnail = ImageOps.grayscale(image)
+    thumbnail.thumbnail((_SHARPNESS_THUMBNAIL_SIDE, _SHARPNESS_THUMBNAIL_SIDE))
+    width, height = thumbnail.size
+    if width < 3 or height < 3:
+        return 0
+    interior = (1, 1, width - 1, height - 1)
+    positive = thumbnail.filter(
+        ImageFilter.Kernel((3, 3), _LAPLACIAN, scale=_LAPLACIAN_SCALE)
+    )
+    negative = thumbnail.filter(
+        ImageFilter.Kernel((3, 3), _LAPLACIAN_NEG, scale=_LAPLACIAN_SCALE)
+    )
+    regional_variance = _nearest_rank_percentile(
+        [
+            _laplacian_variance(positive, negative, tile)
+            for tile in _sharpness_tile_boxes(interior)
+        ],
+        _SHARPNESS_PERCENTILE,
+    )
+    return bounded_score(math.sqrt(regional_variance) * _SHARPNESS_SCORE_SCALE)
 
 
 def exposure_score(image: Image.Image) -> int:
