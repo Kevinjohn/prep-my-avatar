@@ -1,0 +1,1124 @@
+commit 32e87ff7d5d3d00a8e9280d203dea7199e04bd83
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Mon Aug 24 12:28:04 2026 +0200
+
+    feat(gallery): the 🖼 Gallery page — every generated image, one feed
+    
+    A sixth workspace: everything the app ever rendered (Test Studio cells,
+    canvas previews, comparison runs, ✨ improvements) across every dataset,
+    newest first, cursor-paged, filterable (dataset / renders / improved /
+    liked). Built for the phone as much as the desktop: 2→6 grid columns,
+    finger-sized controls, and the shared viewer gains OPTIONAL ‹ › browsing
+    (buttons + arrow keys) that the three existing hosts do not mount.
+    
+    The verbs are the ones the other galleries already ship, reused: the ONE
+    improve handler (with this feed's own toast address), the checkpoint
+    panel's Select/delete guard rails, the lineage-named download and the
+    selection ZIP through the same URL builder, widened by an app scope.
+    
+    Contract tests pin the addresses, the opt-in chevrons (in the DOM), the
+    nav gate and the probe markers.
+---
+ docs/guide/using-the-app.md                        |  36 ++
+ frontend/src/App.jsx                               |  15 +-
+ .../components/shared/GeneratedImageLightbox.jsx   |  51 ++-
+ .../shared/RepairDialog.brush.contract.test.js     |  14 +-
+ frontend/src/help/topics/pages.js                  |   8 +
+ frontend/src/hooks/useCanvasImageImprove.js        |  16 +-
+ frontend/src/pages/GalleryPage.jsx                 | 409 +++++++++++++++++++++
+ frontend/src/utils/appGallery.js                   |  89 +++++
+ frontend/src/utils/appGallery.test.js              |  98 +++++
+ frontend/src/utils/galleryDownload.js              |   7 +-
+ frontend/src/whatsNew.js                           |  36 +-
+ frontend/src/whatsNew.test.js                      |   2 +-
+ frontend/tests/gallery-page-contract.test.mjs      | 101 +++++
+ frontend/tests/help-registry-contract.test.mjs     |   2 +-
+ 14 files changed, 865 insertions(+), 19 deletions(-)
+
+diff --git a/docs/guide/using-the-app.md b/docs/guide/using-the-app.md
+index 30c2b4a1..a3aab992 100644
+--- a/docs/guide/using-the-app.md
++++ b/docs/guide/using-the-app.md
+@@ -258,6 +258,42 @@ Two things still take the GPU exclusively and are not queued behind anything:
+ a training run, and a vision pass (captioning, framing, face analysis). While
+ one of those is running, new generations wait for it and the app says so.
+ 
++## The Gallery (every image you generated)
++
++**🖼 Gallery** in the top bar is one feed of everything the app ever rendered —
++Test Studio cells, Canvas previews, comparison runs and ✨ Upscale & improve
++results — across every dataset at once, newest first. The per-checkpoint
++galleries answer "what did this training produce"; this page answers "what did
++I make".
++
++Narrow it from the row above the grid: one dataset, **Renders** or
++**✨ Improved** only, or **👍 Liked** — the images you rated up in the Test
++Studio. The count always names what the grid is actually showing, and **Load
++more** states how many are left.
++
++Tap any image to open the viewer — the same one the Canvas uses, with
++everything the picture was made from: seed (copyable), checkpoint, base model,
++sampler, CFG, the always-on LoRAs it was generated with, and the full prompt.
++The **‹ ›** buttons (or the ← → keys) walk the feed without closing it; tap
++the picture to put the details away, double-tap to magnify.
++
++From the viewer you can also:
++
++- **⬇ Download** — the file lands under a name that still says which dataset,
++  run, step and seed made it.
++- **✨ Upscale & improve** — Klein (re-renders detail; sharper, but skin can
++  shift) or SeedVR2 (upscales and keeps the look). The result arrives at the
++  top of this gallery as its own ✨ image; the original is untouched. The
++  amber note under the buttons is where the Klein instruction is edited in
++  place, the Klein model is chosen, and a **LoRA preset** can be chained into
++  every improve — all app-wide, the same values Settings shows.
++
++**Select** at the bottom turns on selection mode: tap the misses, then
++**🗑 Delete** (files go to the recycle bin or the app Trash — and the rows
++leave the Test Studio too, which the confirmation says before anything is
++armed), or **⬇ ZIP** to download the picked images as one archive under their
++lineage names.
++
+ ## Recover a paused Test Studio batch
+ 
+ If ComfyUI drops while Test Studio is processing a batch, the affected tile says
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index cd2aadaa..c0e84a8e 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -27,6 +27,7 @@ const SetupPage = lazyPage(() => import('./pages/SetupPage'))
+ const GuidePage = lazyPage(() => import('./pages/GuidePage'))
+ const CloudRunsPage = lazyPage(() => import('./pages/CloudRunsPage'))
+ const CanvasPage = lazyPage(() => import('./pages/CanvasPage'))
++const GalleryPage = lazyPage(() => import('./pages/GalleryPage'))
+ import { recommendedMet } from './hooks/useSetupSteps'
+ import { HelpModeProvider, useHelpMode, TipHost } from './help/HelpMode'
+ import HeaderMenu from './components/common/HeaderMenu'
+@@ -219,6 +220,16 @@ function NavBar() {
+       {caps.studio_visible && (
+         <NavLink to="/studio" className={navItemClass} onClick={() => setOpen(false)}>Test Studio</NavLink>
+       )}
++      {/* 🖼 Gallery — every generated image, one feed. Last: it is where the
++          OUTPUT of the other workspaces accumulates, so it reads as the shelf
++          at the end of the row. Visible whenever any surface that generates
++          is: renders can outlive a broken ComfyUI, so the training gates keep
++          it reachable even while the studio gate is down. */}
++      {(caps.studio_visible || caps.cloud_training || caps.training_visible) && (
++        <NavLink to="/gallery" className={navItemClass} onClick={() => setOpen(false)}>
++          <span className="inline-flex items-center gap-1"><span aria-hidden>🖼</span> Gallery</span>
++        </NavLink>
++      )}
+     </>
+   )
+ 
+@@ -451,7 +462,8 @@ function PageLoading() {
+ 
+ function Shell() {
+   const { pathname } = useLocation();
+-  const wideWorkspaceRoute = pathname === '/canvas' || pathname === '/bank';
++  const wideWorkspaceRoute = pathname === '/canvas' || pathname === '/bank'
++    || pathname === '/gallery';
+   /* 🖼 THE BOARD IS THE WHOLE SCREEN. The canvas is not a document with a
+      picture in it — it is a surface you pan and zoom, and every pixel the page
+      keeps for itself is a pixel of board you have to pan to reach. So `/canvas`
+@@ -546,6 +558,7 @@ function AppInner() {
+             <Route path="/dataset/studio/:id" element={<StudioPage />} />
+             <Route path="/cloud" element={<CloudRunsPage />} />
+             <Route path="/canvas" element={<CanvasPage />} />
++            <Route path="/gallery" element={<GalleryPage />} />
+             <Route path="/settings" element={<SettingsPage />} />
+             <Route path="/settings/:section" element={<SettingsPage />} />
+             <Route path="/setup" element={<SetupPage />} />
+diff --git a/frontend/src/components/shared/GeneratedImageLightbox.jsx b/frontend/src/components/shared/GeneratedImageLightbox.jsx
+index 692b8077..cd0c1be8 100644
+--- a/frontend/src/components/shared/GeneratedImageLightbox.jsx
++++ b/frontend/src/components/shared/GeneratedImageLightbox.jsx
+@@ -189,7 +189,14 @@ export default function GeneratedImageLightbox({ img, alt, actions = null,
+   /* ✦ Repair one detail instead of regenerating the whole picture
+      (.samexit, Discord). Absent = the button is not drawn, so a surface that
+      has no route for it shows nothing rather than a dead control. */
+-  onRepair = null, onRepairUndo = null }) {
++  onRepair = null, onRepairUndo = null,
++  /* ‹ › Walk the host's list without closing the viewer — the 🖼 Gallery's
++     whole browsing loop. Same contract as every optional action here: absent =
++     not drawn, so the three hosts that show ONE picture render exactly what
++     they always did. The host passes null AT the ends rather than a disabled
++     flag, for the same reason — a chevron that cannot go anywhere is not
++     drawn, never greyed. */
++  onPrev = null, onNext = null }) {
+   const dialogRef = useRef(null);
+   const closeRef = useRef(null);
+   /* ONE reading of "are the facts on screen", used by the panel, the pane and
+@@ -236,13 +243,19 @@ export default function GeneratedImageLightbox({ img, alt, actions = null,
+     // before it closes the viewer, so the key never throws away the render you
+     // were in the middle of inspecting.
+     const onKey = (e) => {
+-      if (e.key !== 'Escape' || repairOpen) return;
++      if (repairOpen) return;
++      // ← → walk the list even while magnified: the zoom resets with the new
++      // picture anyway (resetKey follows img), so making the user un-zoom
++      // first would add a step that buys nothing.
++      if (e.key === 'ArrowLeft' && onPrev) { onPrev(); return; }
++      if (e.key === 'ArrowRight' && onNext) { onNext(); return; }
++      if (e.key !== 'Escape') return;
+       if (zoom.zoomed) { zoom.reset(); return; }
+       onClose?.();
+     };
+     window.addEventListener('keydown', onKey);
+     return () => window.removeEventListener('keydown', onKey);
+-  }, [img, onClose, repairOpen, zoom]);
++  }, [img, onClose, repairOpen, zoom, onPrev, onNext]);
+   useEffect(() => { if (img) closeRef.current?.focus(); }, [img]);
+   /* Folding the details resizes the frame under a held zoom, and a view that
+      was legally at its edge before is a strip of backdrop afterwards. Settle
+@@ -259,9 +272,21 @@ export default function GeneratedImageLightbox({ img, alt, actions = null,
+   const blocks = imagePromptBlocks(img);
+   const label = alt || 'Generated image';
+ 
++  // The ‹ › chevrons pin to the OVERLAY, like ✕ — inside the zoom pane they
++  // would feed the pan/tap gesture machinery a press that meant "next". The
++  // right one steps clear of the facts column in the split shape, so it always
++  // sits over the PICTURE's edge; the widths mirror FACTS_PANEL_CLASS plus a
++  // 1rem gutter.
++  const NAV_BTN_CLASS = 'absolute top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 '
++    + 'items-center justify-center rounded-full bg-white/10 text-2xl leading-none '
++    + 'text-white hover:bg-white/20';
++  const NAV_NEXT_POS = showFacts
++    ? 'right-2 md:landscape:right-[21rem] lg:landscape:right-[25rem] xl:landscape:right-[28rem]'
++    : 'right-2';
++
+   return (
+     <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={label}
+-      data-testid="generated-image-lightbox"
++      data-testid="generated-image-lightbox" data-probe-layer
+       onClick={onClose}
+       // ⚠️ /95, not an arbitrary /92: Tailwind only emits the opacities in its
+       // scale, so bg-black/92 compiled to NOTHING and the board behind stayed at
+@@ -315,6 +340,24 @@ export default function GeneratedImageLightbox({ img, alt, actions = null,
+         </button>
+       )}
+ 
++      {/* ‹ › — drawn only where there IS somewhere to go (see the prop note). */}
++      {onPrev && (
++        <button type="button" data-testid="lightbox-prev"
++          onClick={(e) => { e.stopPropagation(); onPrev(); }}
++          title="Previous image (←)" aria-label="Previous image"
++          className={`${NAV_BTN_CLASS} left-2`}>
++          <span aria-hidden>‹</span>
++        </button>
++      )}
++      {onNext && (
++        <button type="button" data-testid="lightbox-next"
++          onClick={(e) => { e.stopPropagation(); onNext(); }}
++          title="Next image (→)" aria-label="Next image"
++          className={`${NAV_BTN_CLASS} ${NAV_NEXT_POS}`}>
++          <span aria-hidden>›</span>
++        </button>
++      )}
++
+       <div ref={paneRef} {...zoom.handlers}
+         className={(showFacts ? IMAGE_PANE_CLASS : IMAGE_PANE_CLASS_BARE) + ' touch-none'}
+         /* A press on the backdrop still closes the viewer, which is the way out
+diff --git a/frontend/src/components/shared/RepairDialog.brush.contract.test.js b/frontend/src/components/shared/RepairDialog.brush.contract.test.js
+index 421f31c1..117d0039 100644
+--- a/frontend/src/components/shared/RepairDialog.brush.contract.test.js
++++ b/frontend/src/components/shared/RepairDialog.brush.contract.test.js
+@@ -164,10 +164,14 @@ test('Escape peels one layer, not two', () => {
+   assert.match(lightbox, /if \(repairOpen\) return;/);
+   /* The generated-image viewer now has THREE rungs, not two, and the order is
+      the order the layers were put on: the ✦ Repair dialog stands the viewer's
+-     listener down entirely, then a magnified picture is put back, then the
+-     viewer closes. Escape must never throw away the render you were in the
+-     middle of inspecting to get you out of a viewer you did not ask to leave. */
+-  assert.match(generated, /if \(e\.key !== 'Escape' \|\| repairOpen\) return;/);
++     listener down entirely (FIRST — before the ‹ › arrows too, or the keys
++     would walk the feed under an open zone editor), then a magnified picture
++     is put back, then the viewer closes. Escape must never throw away the
++     render you were in the middle of inspecting to get you out of a viewer
++     you did not ask to leave. */
++  assert.match(generated, /if \(repairOpen\) return;/);
++  assert.match(generated,
++    /if \(repairOpen\) return;[^]{0,400}if \(e\.key === 'ArrowLeft' && onPrev\)/);
+   assert.match(generated, /if \(zoom\.zoomed\) \{ zoom\.reset\(\); return; \}/);
+   assert.match(generated, /if \(zoom\.zoomed\) \{ zoom\.reset\(\); return; \}[^]{0,40}onClose\?\.\(\);/);
+ });
+@@ -176,5 +180,5 @@ test('the guards are re-read when the dialog opens, not captured stale', () => {
+   // A listener registered once with repairOpen=false would keep closing forever.
+   assert.match(review, /doDismiss, doReject, repairOpen\]\);/);
+   assert.match(lightbox, /panelOpen, closePanel, repairOpen\]\);/);
+-  assert.match(generated, /\}, \[img, onClose, repairOpen, zoom\]\);/);
++  assert.match(generated, /\}, \[img, onClose, repairOpen, zoom, onPrev, onNext\]\);/);
+ });
+diff --git a/frontend/src/help/topics/pages.js b/frontend/src/help/topics/pages.js
+index 21bd4403..3fa59d2e 100644
+--- a/frontend/src/help/topics/pages.js
++++ b/frontend/src/help/topics/pages.js
+@@ -31,6 +31,14 @@ export const PAGE_TOPICS = [
+      'reuse analysis', 'skip prior analysis', 'face score', 'score not kept',
+      'start fresh', 'fresh analysis', 'reanalyze', 're-analyze'],
+     '/datasets?section=export&panel=to-bank', 'using-the-app', 'a-bank-and-a-dataset-never-share-files'),
++  { id: 'page-gallery', kind: 'page', title: 'Gallery (every generated image)',
++    keywords: ['gallery', 'generated', 'generated images', 'all images', 'feed',
++      'every image', 'history', 'browse renders', 'renders', 'improved',
++      'liked', 'filter', 'load more', 'newest', 'lightbox', 'viewer',
++      'next image', 'previous image', 'arrows', 'download', 'zip', 'archive',
++      'delete generated', 'select', 'improve from gallery', 'upscale from gallery'],
++    guide: { chapter: 'using-the-app', anchor: 'the-gallery-every-image-you-generated' },
++    app: { route: '/gallery' } },
+   { id: 'page-bank', kind: 'page', title: 'Image bank (triage)',
+     keywords: ['bank', 'triage', 'import', 'folder', 'browse', 'choose folder', 'path',
+       'telegram', 'duplicates', 'blurry', 'quality', 'cluster', 'person', 'sort',
+diff --git a/frontend/src/hooks/useCanvasImageImprove.js b/frontend/src/hooks/useCanvasImageImprove.js
+index 2d2714ad..75752b70 100644
+--- a/frontend/src/hooks/useCanvasImageImprove.js
++++ b/frontend/src/hooks/useCanvasImageImprove.js
+@@ -21,8 +21,15 @@ import { improveEngine } from '../utils/improveEngines';
+    Nothing on either surface moves when the pass is queued — the improvement
+    arrives minutes later as its own row of the checkpoint's gallery — so the
+    toast NAMES where it will appear (canvasImproveLaunchMessage). A bare
+-   "started" would read as a dead click on both screens. */
+-export function useCanvasImageImprove() {
++   "started" would read as a dead click on both screens.
++
++   `launchMessage` lets a host whose delivery address DIFFERS say its own —
++   the 🖼 Gallery page's result lands at the head of the very feed the user is
++   looking at, so promising "this checkpoint's gallery" there would send them
++   somewhere else to find a picture already in front of them. The ROUTE is not
++   configurable, on purpose: the address of the toast may vary by host, the
++   address of the request may not. */
++export function useCanvasImageImprove({ launchMessage = null } = {}) {
+   const toast = useToast();
+   return useCallback(async (imageId, engineId) => {
+     try {
+@@ -34,9 +41,10 @@ export function useCanvasImageImprove() {
+       }
+       // The engine the SERVER echoes names the toast, so a stale tab cannot
+       // claim the wrong pass ran.
+-      toast.success(canvasImproveLaunchMessage(improveEngine(d.engine).label));
++      const say = launchMessage || canvasImproveLaunchMessage;
++      toast.success(say(improveEngine(d.engine).label));
+     } catch (err) {
+       toast.error(err?.message || 'Could not start the improvement');
+     }
+-  }, [toast]);
++  }, [toast, launchMessage]);
+ }
+diff --git a/frontend/src/pages/GalleryPage.jsx b/frontend/src/pages/GalleryPage.jsx
+new file mode 100644
+index 00000000..02b345c2
+--- /dev/null
++++ b/frontend/src/pages/GalleryPage.jsx
+@@ -0,0 +1,409 @@
++import { useCallback, useEffect, useRef, useState } from 'react';
++import { apiFetch, postJson } from '../api/fetchClient';
++import GeneratedImageLightbox from '../components/shared/GeneratedImageLightbox';
++import { useCanvasImageImprove } from '../hooks/useCanvasImageImprove';
++import { canImproveCanvasImage } from '../utils/canvasImprove';
++import { imageFactsLine } from '../utils/generatedImageFacts';
++import {
++  allGalleryImageIds, galleryActionBar, galleryDeleteConfirmation,
++  galleryDeleteSummary, pruneGallerySelection, toggleGalleryImage,
++} from '../utils/gallerySelection';
++import {
++  galleryZipPlanUrl, galleryZipUrl, planNotice, zipButtonState,
++} from '../utils/galleryDownload';
++import {
++  GALLERY_KINDS, datasetFilterOptions, galleryEmptyMessage, galleryFeedUrl,
++  galleryImproveLaunchMessage, gallerySummaryLine, mergeGalleryPage,
++} from '../utils/appGallery';
++
++/* 🖼 THE GALLERY — every image the app ever generated, one feed.
++
++   The checkpoint and run galleries answer "what did THIS training produce";
++   this page answers "what did I make", across every dataset and surface at
++   once. Same rows, same lightbox, same improve handler as the ◉ Canvas — the
++   page adds no second implementation of anything, which is the whole design:
++   the feed URL, the merge rule and every sentence live in utils/appGallery.js
++   where `node --test` reads them, and the verbs (✨ improve, ⬇ download,
++   🗑 delete, ZIP) are the ones the other galleries already ship.
++
++   Browsing is the loop this page owns, so the viewer gains ‹ › navigation
++   (GeneratedImageLightbox's onPrev/onNext — buttons AND arrow keys) instead of
++   the open-close-open-next dance the per-checkpoint galleries get away with.
++
++   🗑 Deletion follows the panel's own guard rails: Select mode, then a pick,
++   then a confirmation that names where the files land — and the rows leave the
++   Test Studio too, which the confirmation says before the click. The ZIP is a
++   SELECTION: this feed can span thousands of images, and "download everything"
++   is a request the backend deliberately refuses to infer from a missing
++   parameter. */
++
++const FILTER_BTN =
++  'min-h-10 lg:min-h-0 rounded-md border px-2.5 py-1 text-[0.75rem] font-medium transition-colors';
++
++export default function GalleryPage() {
++  const [filters, setFilters] = useState({ datasetId: '', kind: '', liked: false });
++  const [feed, setFeed] = useState({
++    images: [], count: 0, hasMore: false, nextBeforeId: null, datasets: [],
++    deleteMode: null,
++  });
++  const [status, setStatus] = useState('loading');   // loading | ready | error
++  const [error, setError] = useState(null);
++  const [loadingMore, setLoadingMore] = useState(false);
++  const [zoomIndex, setZoomIndex] = useState(null);
++  const [picking, setPicking] = useState(false);
++  const [selected, setSelected] = useState(() => new Set());
++  const [confirming, setConfirming] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [notice, setNotice] = useState(null);
++  const [zipping, setZipping] = useState(false);
++  const alive = useRef(true);
++  useEffect(() => () => { alive.current = false; }, []);
++
++  const improveImage = useCanvasImageImprove({
++    // Its own address: the result lands at the head of THIS feed, and the
++    // shared wording would send the user to a checkpoint gallery to find it.
++    launchMessage: galleryImproveLaunchMessage,
++  });
++
++  const applyPage = useCallback((d, { append }) => {
++    setFeed((cur) => ({
++      images: append ? mergeGalleryPage(cur.images, d.images) : (d.images || []),
++      count: d.count || 0,
++      hasMore: !!d.has_more,
++      nextBeforeId: d.next_before_id ?? null,
++      datasets: d.datasets || [],
++      deleteMode: d.delete_mode || null,
++    }));
++    // A refresh that no longer lists an image must not leave it armed. A page
++    // APPENDED to the feed retires nothing, so the selection stands.
++    if (!append) {
++      setSelected((cur) => pruneGallerySelection(cur, d.images || []));
++    }
++  }, []);
++
++  const load = useCallback((f) => {
++    setStatus('loading');
++    setError(null);
++    setZoomIndex(null);
++    return apiFetch(galleryFeedUrl(f))
++      .then((d) => {
++        if (!alive.current) return;
++        applyPage(d, { append: false });
++        setStatus('ready');
++      })
++      .catch((e) => {
++        if (!alive.current) return;
++        setStatus('error');
++        setError(e?.message || 'Could not load the gallery');
++      });
++  }, [applyPage]);
++
++  useEffect(() => { load(filters); }, [filters, load]);
++
++  const loadMore = useCallback(() => {
++    if (loadingMore || !feed.hasMore || feed.nextBeforeId == null) return;
++    setLoadingMore(true);
++    apiFetch(galleryFeedUrl(filters, { beforeId: feed.nextBeforeId }))
++      .then((d) => { if (alive.current) applyPage(d, { append: true }); })
++      .catch((e) => {
++        if (alive.current) {
++          setNotice({ kind: 'error', text: e?.message || 'Could not load more images' });
++        }
++      })
++      .finally(() => { if (alive.current) setLoadingMore(false); });
++  }, [filters, feed.hasMore, feed.nextBeforeId, loadingMore, applyPage]);
++
++  const setFilter = (patch) => {
++    setPicking(false);
++    setSelected(new Set());
++    setNotice(null);
++    setFilters((f) => ({ ...f, ...patch }));
++  };
++
++  const images = feed.images;
++  const zoom = zoomIndex != null ? images[zoomIndex] ?? null : null;
++
++  const runDelete = useCallback(async () => {
++    if (busy) return;
++    const ids = [...selected];
++    setBusy(true);
++    try {
++      const res = await postJson('/api/gallery/images/delete', { image_ids: ids });
++      setNotice({ kind: 'ok', text: galleryDeleteSummary(res) });
++      setConfirming(false);
++      setPicking(false);
++      setSelected(new Set());
++      // The feed is a cursor over ids — removing the deleted rows locally keeps
++      // every loaded page and the scroll position, where a full reload would
++      // throw both away to learn what this answer already says.
++      const gone = new Set(ids.filter((i) => !(res.skipped || [])
++        .some((s) => s.id === i)));
++      setFeed((cur) => ({
++        ...cur,
++        images: cur.images.filter((img) => !gone.has(img.id)),
++        count: Math.max(0, cur.count - (res.rows_removed || 0)),
++      }));
++    } catch (e) {
++      setNotice({ kind: 'error', text: e?.message || 'Could not delete these images' });
++    } finally {
++      setBusy(false);
++    }
++  }, [selected, busy]);
++
++  const runZip = useCallback(async () => {
++    if (zipping || selected.size === 0) return;
++    const ids = [...selected];
++    setZipping(true);
++    setNotice(null);
++    try {
++      let plan = null;
++      try {
++        plan = await apiFetch(galleryZipPlanUrl({ kind: 'app' }, ids));
++      } catch { plan = null; }
++      const said = planNotice(plan);
++      if (said) setNotice({ kind: said.kind, text: said.text });
++      if (said?.blocked) return;
++      const a = document.createElement('a');
++      a.href = galleryZipUrl({ kind: 'app' }, ids);
++      document.body.appendChild(a);
++      a.click();
++      a.remove();
++    } finally {
++      setZipping(false);
++    }
++  }, [selected, zipping]);
++
++  const bar = galleryActionBar({
++    status, picking, imageCount: images.length,
++    selectedCount: selected.size, busy,
++  });
++  const confirmation = galleryDeleteConfirmation(selected.size, feed.deleteMode);
++  // Selection-only on this page (see the header): outside Select mode there is
++  // no ZIP button at all, so `totalCount` is the picks and never the feed.
++  const zipBtn = zipButtonState({
++    picking, selectedCount: selected.size,
++    totalCount: picking ? selected.size : 0, busy: zipping,
++  });
++
++  const kindBtnClass = (active) => `${FILTER_BTN} ${active
++    ? 'border-indigo-300 bg-indigo-500/30 text-white'
++    : 'border-border text-content-muted hover:text-content hover:border-indigo-400/50'}`;
++
++  return (
++    <div className="space-y-3">
++      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
++        <h1 className="m-0 text-lg font-bold text-content"><span aria-hidden>🖼</span> Gallery</h1>
++        <p className="m-0 text-content-muted text-[0.75rem]">
++          {status === 'ready'
++            ? gallerySummaryLine({ count: feed.count, shown: images.length })
++            : ''}
++        </p>
++      </header>
++
++      {/* The filter rail. One row that wraps: on a phone the selects stack,
++          nothing overflows sideways. */}
++      <div data-probe-panel="gallery-filters"
++        className="flex flex-wrap items-center gap-2">
++        <label className="flex min-w-0 items-center gap-1.5 text-[0.75rem] text-content-muted">
++          <span className="sr-only">Dataset</span>
++          <select value={filters.datasetId}
++            onChange={(e) => setFilter({ datasetId: e.target.value })}
++            aria-label="Show one dataset's images"
++            className="min-h-10 lg:min-h-0 min-w-0 max-w-full rounded-md border border-border bg-surface-raised px-2 py-1 text-[0.75rem] text-content focus:outline-none focus:border-primary/60">
++            {datasetFilterOptions(feed.datasets,
++              feed.datasets.reduce((n, d) => n + (d.count || 0), 0))
++              .map((o) => (
++                <option key={o.value} value={o.value}>{o.label}</option>
++              ))}
++          </select>
++        </label>
++        <div role="group" aria-label="Filter by kind" className="flex flex-wrap gap-1">
++          {GALLERY_KINDS.map((k) => (
++            <button key={k.id} type="button"
++              aria-pressed={filters.kind === k.id}
++              onClick={() => setFilter({ kind: k.id })}
++              className={kindBtnClass(filters.kind === k.id)}>
++              {k.label}
++            </button>
++          ))}
++        </div>
++        <button type="button" aria-pressed={filters.liked}
++          onClick={() => setFilter({ liked: !filters.liked })}
++          title="Only the images you rated 👍"
++          className={kindBtnClass(filters.liked)}>
++          <span aria-hidden>👍</span> Liked
++        </button>
++      </div>
++
++      {notice && (
++        <p role={notice.kind === 'ok' ? undefined : 'alert'}
++          className={`m-0 rounded-lg border px-2 py-1.5 text-[0.6875rem] ${
++            notice.kind === 'error'
++              ? 'border-rose-400/50 bg-rose-500/10 text-rose-100'
++              : notice.kind === 'warn'
++                ? 'border-amber-400/40 bg-amber-500/10 text-amber-100'
++                : 'border-emerald-400/40 bg-emerald-500/10 text-emerald-100'}`}>
++          {notice.text}
++        </p>
++      )}
++
++      {status === 'loading' && (
++        <p className="m-0 text-content-subtle text-[0.75rem]">Loading…</p>
++      )}
++      {status === 'error' && (
++        <p className="m-0 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-amber-100 text-[0.75rem]">
++          {error}
++        </p>
++      )}
++      {status === 'ready' && images.length === 0 && (
++        <p className="m-0 text-content-muted text-[0.8125rem]">
++          {galleryEmptyMessage(filters)}
++        </p>
++      )}
++
++      {images.length > 0 && (
++        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
++          {images.map((img, idx) => {
++            const isPicked = selected.has(img.id);
++            return (
++              <div key={img.id} className="relative">
++                <button type="button"
++                  data-testid={picking ? 'gallery-pick' : 'gallery-zoom'}
++                  onClick={() => (picking
++                    ? setSelected((cur) => toggleGalleryImage(cur, img.id))
++                    : setZoomIndex(idx))}
++                  aria-pressed={picking ? isPicked : undefined}
++                  title={picking
++                    ? (isPicked ? 'Selected — tap to unselect' : 'Tap to select')
++                    : imageFactsLine(img)}
++                  className={`block aspect-square w-full overflow-hidden rounded-md border ${isPicked
++                    ? 'border-rose-400 ring-2 ring-rose-400/70'
++                    : 'border-border hover:border-indigo-400/60'}`}>
++                  <img src={img.url} alt={imageFactsLine(img) || 'Generated image'}
++                    loading="lazy"
++                    className={`h-full w-full object-cover ${isPicked ? 'opacity-60' : ''}`} />
++                </button>
++                {picking && (
++                  <span aria-hidden
++                    className={`pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full border text-[0.75rem] ${isPicked
++                      ? 'border-rose-300 bg-rose-500 text-white'
++                      : 'border-white/60 bg-black/50 text-transparent'}`}>✓</span>
++                )}
++                {img.rating === 1 && (
++                  <span aria-hidden className="pointer-events-none absolute right-0.5 top-0.5 text-[0.625rem]">👍</span>
++                )}
++                {img.rating === -1 && (
++                  <span aria-hidden className="pointer-events-none absolute right-0.5 top-0.5 text-[0.625rem]">👎</span>
++                )}
++                {img.derivation_kind && (
++                  /* BOTTOM-left: top-right is the verdict's corner and the
++                     selection tick owns top-left while picking. */
++                  <span aria-hidden title="Upscale & improve result"
++                    className="pointer-events-none absolute bottom-0.5 left-1 text-[0.625rem]">✨</span>
++                )}
++              </div>
++            );
++          })}
++        </div>
++      )}
++
++      {feed.hasMore && status === 'ready' && (
++        <div className="flex justify-center">
++          <button type="button" data-testid="gallery-load-more"
++            onClick={loadMore} disabled={loadingMore}
++            className="min-h-10 rounded-md border border-border px-4 py-1.5 text-[0.8125rem] text-content-muted hover:border-indigo-400/50 hover:text-content disabled:opacity-50">
++            {loadingMore ? 'Loading…' : `Load more (${feed.count - images.length} left)`}
++          </button>
++        </div>
++      )}
++
++      {/* The action bar — sticky, so Select/Delete stay reachable however far
++          the grid has been scrolled; same guard rails as the checkpoint panel
++          (galleryActionBar decides when it exists at all). */}
++      {bar.shown && (
++        <div data-testid="gallery-action-bar" data-probe-chrome="gallery-bar"
++          className="sticky bottom-0 z-30 -mx-3 flex flex-wrap items-center gap-2 border-t border-border bg-surface-overlay px-3 py-2 sm:-mx-4 sm:px-4">
++          <button type="button" data-testid="gallery-select-toggle"
++            onClick={() => { setPicking((v) => !v); setSelected(new Set()); setNotice(null); }}
++            aria-pressed={bar.togglePressed}
++            aria-label={picking ? 'Leave selection mode' : 'Select images to delete or download'}
++            title={picking ? 'Leave selection mode' : 'Select images to delete or download'}
++            className={`min-h-10 lg:min-h-0 shrink-0 rounded-md border px-3 py-1.5 text-[0.75rem] font-semibold ${picking
++              ? 'border-indigo-300 bg-indigo-500/40 text-white'
++              : 'border-indigo-400/70 bg-indigo-500/15 text-indigo-200 hover:bg-indigo-500/25'}`}>
++            <span aria-hidden>{picking ? '✓' : '☑'}</span> {bar.toggleLabel}
++          </button>
++          {picking && zipBtn.shown && (
++            <button type="button" data-testid="gallery-download-zip"
++              onClick={runZip} disabled={zipBtn.disabled} title={zipBtn.title}
++              className="min-h-10 lg:min-h-0 shrink-0 rounded-md border border-border px-2.5 py-1.5 text-content-muted text-[0.75rem] hover:border-indigo-400/50 hover:text-content disabled:opacity-40">
++              {zipBtn.label}
++            </button>
++          )}
++          {bar.showsDelete && (
++            <>
++              <span className="text-content-muted text-[0.6875rem] tabular-nums">
++                {selected.size} selected
++              </span>
++              <button type="button"
++                onClick={() => setSelected(selected.size === images.length
++                  ? new Set() : allGalleryImageIds(images))}
++                className="min-h-10 lg:min-h-0 rounded-md border border-border px-2 py-1.5 text-content-muted text-[0.6875rem] hover:text-content">
++                {bar.selectAllLabel}
++              </button>
++              <button type="button" data-testid="gallery-delete"
++                disabled={bar.deleteDisabled}
++                onClick={() => setConfirming(true)}
++                className="ml-auto min-h-10 lg:min-h-0 rounded-md border border-rose-500/50 px-3 py-1.5 text-[0.75rem] text-rose-300 disabled:opacity-40 hover:bg-rose-500/10">
++                🗑 Delete{selected.size ? ` (${selected.size})` : ''}
++              </button>
++            </>
++          )}
++        </div>
++      )}
++
++      {confirming && (
++        <div role="dialog" aria-modal="true" aria-label="Confirm deletion"
++          data-testid="gallery-confirm" data-probe-layer
++          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-3">
++          <div className="w-full max-w-sm rounded-xl border border-border bg-surface-overlay p-4 shadow-xl">
++            <h4 className="m-0 mb-2 text-sm font-semibold text-content">{confirmation.title}</h4>
++            <ul className="m-0 mb-3 list-disc space-y-1 pl-4 text-content-muted text-[0.75rem]">
++              {confirmation.lines.map((line) => <li key={line}>{line}</li>)}
++            </ul>
++            {confirmation.destructive && (
++              <p className="m-0 mb-3 rounded-lg border border-rose-400/40 bg-rose-500/10 px-2 py-1.5 text-rose-100 text-[0.6875rem]">
++                This cannot be undone.
++              </p>
++            )}
++            <div className="flex flex-wrap justify-end gap-2">
++              <button type="button" autoFocus onClick={() => setConfirming(false)}
++                className="rounded-md border border-border px-3 py-2 text-content-muted text-[0.75rem] hover:text-content">
++                Cancel
++              </button>
++              <button type="button" data-testid="gallery-confirm-delete"
++                disabled={busy} onClick={runDelete}
++                className="rounded-md border border-rose-500/60 bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-100 disabled:opacity-40 hover:bg-rose-500/25">
++                {busy ? 'Deleting…' : `Delete ${selected.size}`}
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++
++      {/* 🔍 The shared viewer, with ‹ › because browsing is this page's loop.
++          Handlers are null AT the ends, so the chevron that cannot go anywhere
++          is not drawn. ✨ improve is the canvas handler with the Gallery's own
++          toast address; withheld for a row that cannot take it, so the refusal
++          is read before the click. `dataset_id` travels for Klein's note. */}
++      <GeneratedImageLightbox
++        img={zoom} alt={zoom ? imageFactsLine(zoom) || 'Generated image' : undefined}
++        onClose={() => setZoomIndex(null)}
++        onImprove={canImproveCanvasImage(zoom) ? improveImage : undefined}
++        datasetId={zoom?.dataset_id ?? null}
++        onPrev={zoomIndex > 0 ? () => setZoomIndex(zoomIndex - 1) : null}
++        onNext={zoomIndex != null && zoomIndex < images.length - 1
++          ? () => setZoomIndex(zoomIndex + 1) : null} />
++    </div>
++  );
++}
+diff --git a/frontend/src/utils/appGallery.js b/frontend/src/utils/appGallery.js
+new file mode 100644
+index 00000000..8cb123b4
+--- /dev/null
++++ b/frontend/src/utils/appGallery.js
+@@ -0,0 +1,89 @@
++/* 🖼 The Gallery page's decidable half — which page of the feed a click asks
++ * for, how two pages merge, and what the screen says about it. JSX-free on
++ * purpose: `node --test` cannot parse JSX, and these are the decisions worth
++ * pinning (the grid around them is layout).
++ *
++ * The feed itself is /api/gallery/images (services/cloud_training.app_gallery):
++ * every image the app ever generated, newest first, cursor-paginated. The rows
++ * are the SAME shape the checkpoint/run galleries publish, which is what lets
++ * the page reuse GeneratedImageLightbox, the improve hook and the selection
++ * utilities without a translation layer.
++ */
++
++/** One page of the feed — mirrors the backend's APP_GALLERY_PAGE. */
++export const GALLERY_PAGE_LIMIT = 60;
++
++/** The kind filter's three positions, in display order. Ids are the QUERY
++ *  values the backend accepts — '' means "no filter", never a fourth kind. */
++export const GALLERY_KINDS = [
++  { id: '', label: 'All' },
++  { id: 'renders', label: 'Renders' },
++  { id: 'improved', label: '✨ Improved' },
++];
++
++/** The feed URL for one page. `beforeId` is the cursor from the previous
++ *  page's `next_before_id` — null asks for the head of the feed. */
++export function galleryFeedUrl({ datasetId = '', kind = '', liked = false } = {},
++  { beforeId = null, limit = GALLERY_PAGE_LIMIT } = {}) {
++  const p = new URLSearchParams();
++  p.set('limit', String(limit));
++  if (beforeId != null) p.set('before_id', String(beforeId));
++  if (datasetId !== '' && datasetId != null) p.set('dataset_id', String(datasetId));
++  if (kind) p.set('kind', kind);
++  if (liked) p.set('liked', '1');
++  return `/api/gallery/images?${p.toString()}`;
++}
++
++/** Append a page to the feed, dropping ids already on screen. The cursor makes
++ *  an overlap impossible between two pages of ONE read — this guards the other
++ *  case: a refresh of page 1 landing over a feed that already holds it. */
++export function mergeGalleryPage(existing, incoming) {
++  const seen = new Set((existing || []).map((i) => i.id));
++  const fresh = (incoming || []).filter((i) => !seen.has(i.id));
++  return fresh.length ? [...(existing || []), ...fresh] : (existing || []);
++}
++
++/** True when any filter narrows the feed — the empty state depends on it. */
++export function galleryFiltered({ datasetId = '', kind = '', liked = false } = {}) {
++  return !!(datasetId !== '' && datasetId != null) || !!kind || !!liked;
++}
++
++/** The line above the grid. States the cut whenever the grid shows fewer than
++ *  the scope holds — a partial feed that looks complete is the lie every other
++ *  gallery here refuses. */
++export function gallerySummaryLine({ count = 0, shown = 0 } = {}) {
++  if (!count) return '';
++  if (shown >= count) return `${count} image${count > 1 ? 's' : ''}, newest first.`;
++  return `Showing the newest ${shown} of ${count} — Load more below.`;
++}
++
++/** What an empty grid says. Two different answers on purpose: "you filtered
++ *  everything away" is fixed by the filters, "nothing was ever generated" is
++ *  fixed somewhere else entirely, and one wording for both misleads whoever
++ *  is holding the wrong problem. */
++export function galleryEmptyMessage(filters) {
++  return galleryFiltered(filters)
++    ? 'No image matches these filters — clear them to see the whole feed.'
++    : 'Nothing generated yet — renders from the Test Studio and the ◉ Canvas '
++      + 'land here as soon as you make some.';
++}
++
++/** The dataset picker's options: All first, then every dataset holding at
++ *  least one generated image, each carrying its count. */
++export function datasetFilterOptions(datasets, totalCount = 0) {
++  const list = Array.isArray(datasets) ? datasets : [];
++  return [
++    { value: '', label: `All datasets (${totalCount})` },
++    ...list.map((d) => ({ value: String(d.id), label: `${d.name} (${d.count})` })),
++  ];
++}
++
++/** What the toast says once an improve is queued FROM the Gallery. Its own
++ *  wording, because the canvas one promises "this checkpoint's gallery" — true
++ *  there, and a wrong address here, where the result lands in the very feed
++ *  the user is looking at (a new ✨ row at its head). */
++export function galleryImproveLaunchMessage(engineLabel) {
++  return `${engineLabel || 'Improve'} started — the result arrives at the top `
++    + 'of this gallery as its own ✨ image, next to everything else. '
++    + 'The original is left untouched.';
++}
+diff --git a/frontend/src/utils/appGallery.test.js b/frontend/src/utils/appGallery.test.js
+new file mode 100644
+index 00000000..84f99600
+--- /dev/null
++++ b/frontend/src/utils/appGallery.test.js
+@@ -0,0 +1,98 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++
++import {
++  GALLERY_KINDS, GALLERY_PAGE_LIMIT, datasetFilterOptions, galleryEmptyMessage,
++  galleryFeedUrl, galleryFiltered, galleryImproveLaunchMessage,
++  gallerySummaryLine, mergeGalleryPage,
++} from './appGallery.js';
++import { galleryZipPlanUrl, galleryZipUrl } from './galleryDownload.js';
++
++// --- the feed URL: what one click actually asks for --------------------------
++
++test('the head of the feed carries only the limit', () => {
++  assert.equal(galleryFeedUrl(), `/api/gallery/images?limit=${GALLERY_PAGE_LIMIT}`);
++});
++
++test('every filter and the cursor land in the query', () => {
++  assert.equal(
++    galleryFeedUrl({ datasetId: '7', kind: 'improved', liked: true },
++      { beforeId: 123, limit: 30 }),
++    '/api/gallery/images?limit=30&before_id=123&dataset_id=7&kind=improved&liked=1');
++});
++
++test('the All positions add no parameter — the backend must see no filter', () => {
++  const url = galleryFeedUrl({ datasetId: '', kind: '', liked: false });
++  assert.ok(!url.includes('dataset_id') && !url.includes('kind') && !url.includes('liked'));
++});
++
++test('the kind filter offers exactly the three backend positions', () => {
++  assert.deepEqual(GALLERY_KINDS.map((k) => k.id), ['', 'renders', 'improved']);
++});
++
++// --- merging pages ------------------------------------------------------------
++
++test('a new page appends after the feed and a duplicate id is dropped', () => {
++  const page1 = [{ id: 9 }, { id: 8 }];
++  const merged = mergeGalleryPage(page1, [{ id: 8 }, { id: 7 }]);
++  assert.deepEqual(merged.map((i) => i.id), [9, 8, 7]);
++});
++
++test('a page with nothing new returns the SAME array — no wasted re-render', () => {
++  const page1 = [{ id: 9 }];
++  assert.equal(mergeGalleryPage(page1, [{ id: 9 }]), page1);
++});
++
++// --- what the screen says ------------------------------------------------------
++
++test('the summary states the cut whenever the grid shows fewer than the scope', () => {
++  assert.equal(gallerySummaryLine({ count: 3, shown: 3 }), '3 images, newest first.');
++  assert.equal(gallerySummaryLine({ count: 120, shown: 60 }),
++    'Showing the newest 60 of 120 — Load more below.');
++  assert.equal(gallerySummaryLine({ count: 0, shown: 0 }), '');
++});
++
++test('an empty grid names the RIGHT problem — filters or no renders at all', () => {
++  assert.match(galleryEmptyMessage({}), /Nothing generated yet/);
++  assert.match(galleryEmptyMessage({ kind: 'improved' }), /No image matches these filters/);
++  assert.equal(galleryFiltered({}), false);
++  assert.equal(galleryFiltered({ liked: true }), true);
++  assert.equal(galleryFiltered({ datasetId: '3' }), true);
++});
++
++test('the dataset picker opens on All and carries every count', () => {
++  const opts = datasetFilterOptions(
++    [{ id: 3, name: 'Nova', count: 2 }, { id: 5, name: 'Vega', count: 1 }], 3);
++  assert.deepEqual(opts, [
++    { value: '', label: 'All datasets (3)' },
++    { value: '3', label: 'Nova (2)' },
++    { value: '5', label: 'Vega (1)' },
++  ]);
++});
++
++test('the improve toast names THIS feed, not a checkpoint gallery', () => {
++  const msg = galleryImproveLaunchMessage('Klein');
++  assert.match(msg, /^Klein started/);
++  assert.match(msg, /top of this gallery/);
++  assert.match(msg, /original is left untouched/);
++  assert.ok(!msg.includes('checkpoint'));
++});
++
++// --- the app-wide ZIP scope ----------------------------------------------------
++
++test('the app scope builds the gallery ZIP URLs, selection attached', () => {
++  assert.equal(galleryZipUrl({ kind: 'app' }, [4, 5]),
++    '/api/gallery/images/zip?ids=4,5');
++  assert.equal(galleryZipPlanUrl({ kind: 'app' }, [4, 5]),
++    '/api/gallery/images/zip/plan?ids=4,5');
++  // An empty selection STAYS an empty selection — the backend refuses it;
++  // degrading it to "no parameter" would ask for an accidental everything.
++  assert.equal(galleryZipUrl({ kind: 'app' }, []), '/api/gallery/images/zip?ids=');
++});
++
++test('the record-scoped ZIP URLs are unchanged by the new scope', () => {
++  assert.equal(galleryZipUrl({ kind: 'run', recordId: 9 }),
++    '/api/train/run/9/images/zip');
++  assert.equal(galleryZipUrl({ recordId: 9, step: 500 }, [1]),
++    '/api/train/checkpoint/9/500/images/zip?ids=1');
++});
+diff --git a/frontend/src/utils/galleryDownload.js b/frontend/src/utils/galleryDownload.js
+index 2cad0b67..5514ec8e 100644
+--- a/frontend/src/utils/galleryDownload.js
++++ b/frontend/src/utils/galleryDownload.js
+@@ -30,7 +30,12 @@ export const ZIP_SCOPE_ALL = 'all';
+ export const ZIP_SCOPE_SELECTION = 'selection';
+ 
+ function scopePath(target) {
+-  if (!target || target.recordId == null) return null;
++  if (!target) return null;
++  // The app-wide 🖼 Gallery: no record to scope by. Its ZIP routes are
++  // selection-ONLY (the backend refuses a missing `ids`), so callers there
++  // always pass one.
++  if (target.kind === 'app') return '/api/gallery/images';
++  if (target.recordId == null) return null;
+   const rid = target.recordId;
+   // Same rule as galleryScope(): no step means the whole run.
+   return (target.kind === 'run' || target.step == null)
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index 044037f5..15a0eb86 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -82,6 +82,38 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
+ 
+ // Newest first. Prepend new waves at the top.
+ export const WHATS_NEW = [
++  {
++    id: '2026-08-24-gallery-page',
++    date: '2026-08-24',
++    title: 'A Gallery of everything you ever generated',
++    blurb:
++      '🖼 Gallery in the top bar is one feed of every image the app made — Test '
++      + 'Studio cells, Canvas previews, comparison runs and ✨ improvements — '
++      + 'across every dataset, newest first, with filters (dataset, renders vs '
++      + 'improved, 👍 liked). The viewer walks the feed with ‹ › or the arrow '
++      + 'keys, shows everything a picture was made from, and carries the '
++      + 'actions you already know: ⬇ Download under its lineage name, ✨ '
++      + 'Upscale & improve (result lands at the top of the feed), and a Select '
++      + 'mode to 🗑 delete misses or ⬇ ZIP a pick. Built for the phone as much '
++      + 'as the desktop.',
++    to: '/gallery',
++  },
++  {
++    id: '2026-08-24-improve-lora-preset',
++    date: '2026-08-24',
++    title: 'Upscale & improve can now chain your LoRA presets',
++    blurb:
++      'The ✨ pass ran with its instruction and nothing else — your generation '
++      + 'LoRA presets (Settings ▸ Engines) never applied to it. The improve '
++      + 'note now has a LoRA preset picker next to the instruction editor: '
++      + 'pick one and every Klein improve chains it after the consistency '
++      + 'LoRA — the single pass, the 🔄 re-run and the batch alike, in every '
++      + 'dataset (it is app-wide, like the instruction, and the panel says '
++      + 'so). SeedVR2 stays a pure restoration. A renamed or deleted preset '
++      + 'quietly runs as None, never a blocked pass — and the result records '
++      + 'which LoRAs actually ran in its details.',
++    to: '/datasets?section=images',
++  },
+   {
+     id: '2026-08-24-bank-forgets-missing-images',
+     date: '2026-08-24',
+@@ -696,8 +728,8 @@ export function markAllSeen(storage, entries = WHATS_NEW) {
+ 
+ // Param-less top-level routes (mirror App.jsx <Routes>).
+ const TOP_LEVEL_ROUTES = new Set([
+-  '/datasets', '/bank', '/video-bank', '/studio', '/cloud', '/canvas', '/guide',
+-  '/help', '/setup',
++  '/datasets', '/bank', '/video-bank', '/studio', '/cloud', '/canvas', '/gallery',
++  '/guide', '/help', '/setup',
+ ]);
+ 
+ const SETTINGS_IDS = new Set(SETTINGS_SECTIONS.map((s) => s.id));
+diff --git a/frontend/src/whatsNew.test.js b/frontend/src/whatsNew.test.js
+index c449a959..34939382 100644
+--- a/frontend/src/whatsNew.test.js
++++ b/frontend/src/whatsNew.test.js
+@@ -220,7 +220,7 @@ test('seed section/panel targets resolve against the LIVE navigation registries'
+ 
+ test('isValidTarget accepts good routes and rejects malformed ones', () => {
+   for (const ok of [
+-    '/datasets', '/studio', '/cloud', '/guide', '/help', '/setup',
++    '/datasets', '/studio', '/cloud', '/gallery', '/guide', '/help', '/setup',
+     '/settings/engines', '/settings/maintenance', '/guide/using-the-app',
+     '/datasets?section=scrape&panel=scan', '/datasets?section=add',
+     '/setup?step=quality', '/setup?step=comfyui',
+diff --git a/frontend/tests/gallery-page-contract.test.mjs b/frontend/tests/gallery-page-contract.test.mjs
+new file mode 100644
+index 00000000..5b8e9ff5
+--- /dev/null
++++ b/frontend/tests/gallery-page-contract.test.mjs
+@@ -0,0 +1,101 @@
++/**
++ * 🖼 The Gallery page — the wiring that would fail SILENTLY if it drifted.
++ *
++ * Two halves. The DOM half mounts the shared lightbox and proves the ‹ ›
++ * chevrons are an opt-in: drawn when a handler exists, absent when it is null
++ * (the ends of the feed) — the three older hosts pass nothing and must render
++ * exactly what they always did. The source half pins the page's addresses:
++ * the feed, the delete and the ZIP all live under /api/gallery, and the
++ * improve goes through the ONE shared handler with the Gallery's own toast —
++ * a page that quietly re-derived any of those would fail only in production.
++ */
++import assert from 'node:assert/strict'
++import test from 'node:test'
++import fs from 'node:fs'
++
++import { createElement, renderToStaticMarkup } from './support/mountJsx.mjs'
++
++const { default: GeneratedImageLightbox } =
++  await import('../src/components/shared/GeneratedImageLightbox.jsx')
++
++const page = fs.readFileSync(
++  new URL('../src/pages/GalleryPage.jsx', import.meta.url), 'utf8')
++const app = fs.readFileSync(
++  new URL('../src/App.jsx', import.meta.url), 'utf8')
++
++const row = { id: 4211, dataset_id: 7, url: '/api/dataset/7/img/x.png', step: 2500 }
++
++// ---- the chevrons are an opt-in, proved in the DOM --------------------------
++
++test('both chevrons render when the host can go both ways', () => {
++  const html = renderToStaticMarkup(createElement(GeneratedImageLightbox, {
++    img: row, alt: 'x', onClose: () => {}, onPrev: () => {}, onNext: () => {},
++  }))
++  assert.match(html, /data-testid="lightbox-prev"/)
++  assert.match(html, /data-testid="lightbox-next"/)
++  assert.match(html, /aria-label="Previous image"/)
++  assert.match(html, /aria-label="Next image"/)
++})
++
++test('an END of the feed loses its chevron instead of greying it', () => {
++  const html = renderToStaticMarkup(createElement(GeneratedImageLightbox, {
++    img: row, alt: 'x', onClose: () => {}, onPrev: null, onNext: () => {},
++  }))
++  assert.doesNotMatch(html, /data-testid="lightbox-prev"/)
++  assert.match(html, /data-testid="lightbox-next"/)
++})
++
++test('a host that passes nothing renders NO navigation — the three old hosts', () => {
++  const html = renderToStaticMarkup(createElement(GeneratedImageLightbox, {
++    img: row, alt: 'x', onClose: () => {},
++  }))
++  assert.doesNotMatch(html, /lightbox-prev|lightbox-next/)
++})
++
++// ---- the page's addresses ---------------------------------------------------
++
++test('feed, delete and ZIP all live under /api/gallery — via the shared builders', () => {
++  assert.match(page, /galleryFeedUrl\(/)
++  assert.match(page, /postJson\('\/api\/gallery\/images\/delete'/)
++  // The ZIP goes through the SAME URL builder the checkpoint panel uses, with
++  // the app scope — a second builder would be a second answer to "which ids".
++  assert.match(page, /galleryZipUrl\(\{ kind: 'app' \}/)
++  assert.match(page, /galleryZipPlanUrl\(\{ kind: 'app' \}/)
++  // …and no other endpoint is called by hand.
++  const called = [...page.matchAll(/(?:postJson|apiFetch)\(\s*(?:`([^`]+)`|'([^']+)')/g)]
++    .map((m) => m[1] || m[2]).filter((u) => u.startsWith('/'))
++  assert.deepEqual(called, ['/api/gallery/images/delete'])
++})
++
++test('improve is the ONE shared handler, gated and re-addressed for this feed', () => {
++  assert.match(page, /useCanvasImageImprove\(\{/, 'the shared hook, with options')
++  assert.match(page, /launchMessage: galleryImproveLaunchMessage/)
++  assert.match(page, /onImprove=\{canImproveCanvasImage\(zoom\) \? improveImage : undefined\}/)
++  assert.doesNotMatch(page, /\/improve`/, 'the page restates the improve route')
++})
++
++test('the viewer walks the feed and stops AT the ends', () => {
++  assert.match(page, /onPrev=\{zoomIndex > 0/)
++  assert.match(page, /zoomIndex < images\.length - 1/)
++})
++
++// ---- the app shell ----------------------------------------------------------
++
++test('the route exists and the nav gates it like the other generation surfaces', () => {
++  assert.match(app, /path="\/gallery" element=\{<GalleryPage \/>\}/)
++  assert.match(app,
++    /\(caps\.studio_visible \|\| caps\.cloud_training \|\| caps\.training_visible\) && \(\s*<NavLink to="\/gallery"/)
++  // Wide like Bank: a grid page reads better on the 1800-px measure.
++  assert.match(app, /pathname === '\/gallery'/)
++})
++
++// ---- the probe can see it ---------------------------------------------------
++
++test('the responsive probe finds the page by attribute, never by class', () => {
++  assert.match(page, /data-probe-panel="gallery-filters"/)
++  assert.match(page, /data-probe-chrome="gallery-bar"/)
++  assert.match(page, /data-probe-layer/, 'the delete confirmation is a layer')
++  const lightbox = fs.readFileSync(
++    new URL('../src/components/shared/GeneratedImageLightbox.jsx', import.meta.url), 'utf8')
++  assert.match(lightbox, /data-probe-layer/, 'the shared viewer is a layer')
++})
+diff --git a/frontend/tests/help-registry-contract.test.mjs b/frontend/tests/help-registry-contract.test.mjs
+index 5cb03b39..e168d3fa 100644
+--- a/frontend/tests/help-registry-contract.test.mjs
++++ b/frontend/tests/help-registry-contract.test.mjs
+@@ -42,7 +42,7 @@ const anchorsFor = (chapterId) => {
+ 
+ const SETTINGS_IDS = new Set(SETTINGS_SECTIONS.map((s) => s.id))
+ const WORKSPACE_IDS = new Set(WORKSPACE_SECTIONS.map((s) => s.id))
+-const STATIC_ROUTES = new Set(['/datasets', '/bank', '/video-bank', '/setup', '/settings', '/studio', '/cloud', '/canvas', '/help'])
++const STATIC_ROUTES = new Set(['/datasets', '/bank', '/video-bank', '/setup', '/settings', '/studio', '/cloud', '/canvas', '/gallery', '/help'])
+ 
+ // route ∈ {static} OR /settings/<settings-id> OR /setup?step=<setup-step-id>
+ //         OR /datasets?section=<ws-id>[&panel=<panel>]

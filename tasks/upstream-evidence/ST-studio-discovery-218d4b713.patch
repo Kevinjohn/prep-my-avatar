@@ -1,0 +1,283 @@
+commit 218d4b7134d20b93840f18fb374cbefc1fd02dd1
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Tue Aug 25 22:16:00 2026 +0200
+
+    fix(studio): Klein, FLUX.1 and Anima LoRAs are found where they were deployed
+    
+    Deploying a FLUX.2 Klein LoRA wrote it to loras/flux2klein and every later
+    "is it deployed?" looked in loras/z image, so the answer was always no: the
+    Canvas badge never flipped, the Generate sidebar said "not deployed yet", and
+    "deploy then generate" reported success and instantly failed, on a file that
+    was sitting on disk the whole time. Undeploy listed it correctly, which is
+    what made the report so precise (GitHub #52, lunchingfriar).
+    
+    The cause was three tables naming the same set of families and drifting:
+    lora_training._FAMILY_SUBDIR (six), face_dataset_service.TRAIN_TYPES (six),
+    and lora_test_studio.FAMILIES (three). Klein deploy support landed a month
+    ago and updated the first two. Nothing failed, because _pool_for_family's
+    final `return` handed every unknown family the Z-Image pool: a wrong folder
+    reads exactly like an empty one, and an empty one reads as "nothing is
+    deployed". FLUX.1 and Anima were in the same hole and nobody had noticed.
+    
+    - FAMILIES gains flux, flux2klein and anima, which also puts them in the
+      Test Studio family picker they were missing from for the same reason.
+    - get_family_loras() reads a family's own folders through _lora_family_dirs,
+      the same table the deploy accessors write through, so the two cannot point
+      at different places again. It also picks up the extra loras roots from
+      extra_model_paths.yaml, which the hand-written getters never did.
+    - The silent fallback is gone: an unknown family returns [] instead of
+      another family's pool. No family at all still means Z-Image.
+    - test_family_pool_parity.py pins the three tables together and refuses a
+      shared pool. Verified to fail against the pre-fix FAMILIES.
+    
+    Reported by lunchingfriar (GitHub #52), who reinstalled ComfyUI to rule out
+    his own machine before filing.
+---
+ backend/app/services/lora_test_studio.py | 32 +++++++++++--
+ backend/app/utils/comfyui.py             | 60 +++++++++++++++++++++++
+ backend/tests/test_family_pool_parity.py | 81 ++++++++++++++++++++++++++++++++
+ frontend/src/whatsNew.js                 | 15 ++++++
+ 4 files changed, 183 insertions(+), 5 deletions(-)
+
+diff --git a/backend/app/services/lora_test_studio.py b/backend/app/services/lora_test_studio.py
+index 20120686..a8441056 100644
+--- a/backend/app/services/lora_test_studio.py
++++ b/backend/app/services/lora_test_studio.py
+@@ -60,7 +60,8 @@ from . import lora_training as lt
+ from ..job_queue import GPU_ARBITER_LOCK, queue_manager
+ from ..utils.comfyui import (FAMILY_LABELS, KREA_ALLOWED_SAMPLERS, KREA_ALLOWED_SCHEDULERS,
+                              KREA_ALLOWED_WEIGHT_DTYPES, apply_optimal_sampler_params,
+-                             family_of_lora, format_trained_lora_label, get_krea_loras,
++                             family_of_lora, format_trained_lora_label, get_family_loras,
++                             get_krea_loras,
+                              get_krea_models, get_sdxl_loras, get_zimage_loras,
+                              get_zimage_models, inject_krea2t_enhancer,
+                              load_workflow_local, resolve_checkpoint_ckpt_name)
+@@ -524,18 +525,39 @@ def _prompt_with_triggers(prompt, trigger_words):
+ # --- Discovery ---------------------------------------------------------------
+ # Familles testables, dans l'ordre d'affichage du sélecteur. Libellés = source
+ # unique partagée avec le label de LoRA (app.utils.comfyui.FAMILY_LABELS).
+-FAMILIES = ('zimage', 'sdxl', 'krea')
++#
++# CETTE LISTE DOIT COUVRIR TOUTE FAMILLE DÉPLOYABLE, et un test de contrat
++# (test_family_pool_parity.py) le vérifie contre lora_training._FAMILY_SUBDIR.
++# Elle est restée à trois pendant qu'on ajoutait le déploiement FLUX.1, FLUX.2
++# Klein et Anima, et le prix a été payé par l'utilisateur : un LoRA Klein était
++# écrit dans loras/flux2klein puis relu dans loras/z image, donc « déployé »
++# répondait NON pour toujours, le badge ne basculait jamais et Generate refusait
++# un fichier posé sur le disque (GitHub #52). La famille était aussi absente du
++# sélecteur du Test Studio, via available_families().
++FAMILIES = ('zimage', 'sdxl', 'krea', 'flux', 'flux2klein', 'anima')
+ 
+ 
+ def _pool_for_family(family: str) -> list[dict]:
+-    """Pool de LoRA d'une famille : SDXL → loras/sdxl, Krea → loras/krea, sinon
+-    loras/z image. Source unique du branchement par pipeline."""
++    """Pool de LoRA d'une famille : SDXL → loras/sdxl, Krea → loras/krea,
++    Z-Image → loras/z image, et toute autre famille déployable via son propre
++    dossier (get_family_loras, qui lit la table de _FAMILY_SUBDIR).
++
++    Le défaut n'était PAS la famille manquante, c'était le `return` final : une
++    famille inconnue retombait silencieusement sur le pool Z-Image au lieu de
++    dire qu'elle ne savait pas. Un mauvais dossier se lit comme un dossier vide,
++    et un dossier vide se lit comme « rien n'est déployé » — trois écrans plus
++    loin, sans un mot d'erreur. Une famille hors table renvoie donc [] désormais,
++    et le test de contrat garantit qu'aucune famille déployable n'y tombe."""
+     f = (family or 'zimage').lower()
+     if f == 'sdxl':
+         return get_sdxl_loras()
+     if f == 'krea':
+         return get_krea_loras()
+-    return get_zimage_loras()
++    if f == 'zimage':
++        return get_zimage_loras()
++    if f in FAMILIES:
++        return get_family_loras(f)
++    return []
+ 
+ 
+ def _trigger_token_match(norm: str, trigger: str) -> bool:
+diff --git a/backend/app/utils/comfyui.py b/backend/app/utils/comfyui.py
+index fc9bc7c8..f46d2c30 100644
+--- a/backend/app/utils/comfyui.py
++++ b/backend/app/utils/comfyui.py
+@@ -2188,6 +2188,66 @@ def get_krea_loras():
+     return out
+ 
+ 
++def get_family_loras(family: str) -> list[dict]:
++    """Deployed LoRAs of `family`, for the families that have no hand-written
++    getter above: FLUX.1, FLUX.2 Klein and Anima.
++
++    Same row shape as the three getters above, and the same reason to exist —
++    but it reads the family's folders from `lora_training._lora_family_dirs`,
++    the SAME table the deploy accessors write through, instead of hardcoding a
++    folder name. That is the whole point: a family whose LoRAs are written to
++    `loras/flux2klein` was being looked for in `loras/z image`, because the pool
++    dispatcher had no branch for it and fell through to Z-Image. Deploy said
++    "done" (it was), every later "is it deployed?" said no, and Generate refused
++    a checkpoint sitting right there on disk (GitHub #52, lunchingfriar — Klein;
++    FLUX.1 and Anima were silently in the same hole).
++
++    Reading through `_lora_family_dirs` also picks up the other roots ComfyUI
++    searches (extra_model_paths.yaml), which the folder-walking getters above do
++    not. Empty list when nothing is configured or readable — never raises: this
++    feeds a picker, and a broken read must read as "no LoRA", not as a 500."""
++    fam = (family or '').lower()
++    out = []
++    try:
++        from ..services.lora_training import _lora_family_dirs
++        dirs = _lora_family_dirs(fam)
++    except Exception as e:      # noqa: BLE001 — an unreadable root is not a crash
++        logger.error(f"get_family_loras({fam}) could not resolve its folders: {e}")
++        return out
++    seen = set()
++    for d in dirs:
++        try:
++            if not os.path.isdir(d):
++                continue
++            sub = os.path.basename(os.path.normpath(d))
++            for f in sorted(os.listdir(d)):
++                if not f.lower().endswith('.safetensors'):
++                    continue
++                if not os.path.isfile(os.path.join(d, f)):
++                    continue
++                # LoraLoader form, and de-duplicated by it: the same file name
++                # under two roots is ONE entry for ComfyUI, which resolves it by
++                # this relative name against whichever root holds it.
++                rel = os.path.join(sub, f)
++                key = os.path.normcase(rel)
++                if key in seen:
++                    continue
++                seen.add(key)
++                triggers = _extract_klein_triggers(f)
++                grp, stp = trained_lora_group(f, fam)
++                out.append({
++                    'filename': rel,
++                    'displayName': format_trained_lora_label(f, fam) or _clean_klein_lora_label(f),
++                    'triggerWord': triggers[0]['prompt'] if triggers else None,
++                    'triggerWords': triggers,
++                    'group': grp,
++                    'step': stp,
++                })
++        except OSError as e:
++            logger.error(f"get_family_loras({fam}) could not read {d}: {e}")
++    return out
++
++
+ def _clean_flux2_klein_model_label(filename: str) -> str:
+     """Make a Flux 2 Klein model filename human-readable for a picker dropdown.
+ 
+diff --git a/backend/tests/test_family_pool_parity.py b/backend/tests/test_family_pool_parity.py
+new file mode 100644
+index 00000000..d4fc7d11
+--- /dev/null
++++ b/backend/tests/test_family_pool_parity.py
+@@ -0,0 +1,81 @@
++"""Every deployable family must be testable, and must read its OWN folder.
++
++GitHub #52 (lunchingfriar): a Klein LoRA trained in the cloud deployed fine,
++Undeploy listed it with the right folder and file name, and every "is it
++deployed?" answer was still no. Deploy wrote `loras/flux2klein`; the pool
++dispatcher had no branch for that family and fell through to `loras/z image`,
++where the file will never be. The badge never flipped, and Generate refused a
++checkpoint sitting on disk. FLUX.1 and Anima were in the same hole, silently.
++
++The bug was not a missing `if`. It was THREE tables describing the same set of
++families, drifting apart with nothing to notice:
++
++  * lora_training._FAMILY_SUBDIR   which folder each family deploys to
++  * face_dataset_service.TRAIN_TYPES  which family a dataset may be trained as
++  * lora_test_studio.FAMILIES      which families the studio can see
++
++Deploy support for FLUX.2 Klein landed 2026-07-29 and the first two tables were
++updated; the third was not, and nothing failed for a month. These tests are the
++thing that would have failed on that commit.
++"""
++from app.services import lora_test_studio as studio
++from app.services import lora_training as lt
++from app.services import face_dataset_service as fds
++
++
++def test_every_deployable_family_is_a_testable_family():
++    """A family the app can deploy TO must be a family the app can look IN."""
++    deployable = set(lt._FAMILY_SUBDIR)
++    testable = set(studio.FAMILIES)
++    missing = sorted(deployable - testable)
++    assert not missing, (
++        f'{missing} can be deployed but not seen: lora_test_studio.FAMILIES is '
++        'missing them, so their LoRAs read as never deployed and they never '
++        'appear in the Test Studio family picker (GitHub #52)')
++
++
++def test_the_three_family_tables_agree():
++    """No family may exist in one table and not the others."""
++    assert set(studio.FAMILIES) == set(lt._FAMILY_SUBDIR) == set(fds.TRAIN_TYPES)
++
++
++def test_every_family_reads_a_pool_of_its_own(monkeypatch):
++    """The failure mode was a SHARED pool, not an empty one: Klein quietly got
++    Z-Image's folder, so its answers were wrong rather than absent. Pin that each
++    family resolves to its own distinct folder."""
++    seen = {}
++
++    def fake_dirs(fam):
++        return [f'/loras/{lt._FAMILY_SUBDIR[fam]}']
++    monkeypatch.setattr(lt, '_lora_family_dirs', fake_dirs)
++
++    for fam in studio.FAMILIES:
++        folder = lt._FAMILY_SUBDIR[fam]
++        assert folder not in seen, (
++            f'{fam} and {seen.get(folder)} both read {folder!r}: one of them is '
++            'looking in the other one\'s folder')
++        seen[folder] = fam
++
++
++def test_an_unknown_family_reads_nothing_rather_than_z_image():
++    """The silent fallback IS the bug. An unknown family used to be handed the
++    Z-Image pool, so a wrong folder read exactly like an empty one and nothing
++    said so. It must now answer "no LoRA" honestly."""
++    assert studio._pool_for_family('not-a-family') == []
++
++
++def test_the_default_family_is_still_z_image():
++    """...but no family at all keeps meaning Z-Image, which is what every caller
++    that omits it has always relied on."""
++    calls = []
++    import app.utils.comfyui as cu
++    original = cu.get_zimage_loras
++    try:
++        cu.get_zimage_loras = lambda: calls.append('zimage') or []
++        studio.get_zimage_loras = cu.get_zimage_loras
++        assert studio._pool_for_family(None) == []
++        assert studio._pool_for_family('') == []
++        assert calls == ['zimage', 'zimage']
++    finally:
++        cu.get_zimage_loras = original
++        studio.get_zimage_loras = original
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index d4bab8eb..e1d2caf7 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -82,6 +82,21 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
+ 
+ // Newest first. Prepend new waves at the top.
+ export const WHATS_NEW = [
++  {
++    id: '2026-08-26-klein-loras-report-as-deployed',
++    date: '2026-08-26',
++    title: 'Klein, FLUX.1 and Anima LoRAs finally report as deployed',
++    blurb:
++      'Deploying a FLUX.2 Klein LoRA worked, and then nothing believed it: the '
++      + 'button never flipped to Deployed, Generate said the checkpoint was not '
++      + 'deployed yet, and "deploy then generate" went green and instantly red. '
++      + 'The file was written to the Klein folder and looked for in the Z-Image '
++      + 'one, because the studio only knew three families while the app deploys '
++      + 'six. Klein, FLUX.1 and Anima now read their own folders, and they also '
++      + 'appear in the Test Studio family picker, where they were missing for '
++      + 'the same reason. Reported by lunchingfriar.',
++    to: '/canvas',
++  },
+   {
+     id: '2026-08-25-selection-stops-tinting',
+     date: '2026-08-25',

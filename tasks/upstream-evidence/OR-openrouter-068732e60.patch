@@ -1,0 +1,1440 @@
+commit 068732e60d8a0c39f352c4e0f5069c54c3f33cda
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Sun Jul 26 10:10:08 2026 +0200
+
+    feat(engines): OpenRouter as a third image engine — one key for the same models
+    
+    Generating a dataset required an account per provider: a Gemini key for Nano
+    Banana, an OpenAI key (or a ChatGPT plan) for ChatGPT. People who already pay
+    for OpenRouter — one account and one balance fronting most providers — had no
+    way in at all. Requested by jqs (GitHub #13).
+    
+    OpenRouter's image API (POST /api/v1/images) serves the very models the two
+    existing engines call directly: google/gemini-3-pro-image (Nano Banana's) and
+    openai/gpt-image-2 (ChatGPT's), plus Seedream, FLUX and others, and it takes
+    reference images through `input_references`. So this is not a lesser
+    substitute — it changes who bills you, not what the pictures look like.
+    
+    Strictly additive. `nanobanana` and `chatgpt` behave exactly as before; the new
+    engine id and its `ORFace` filename tag are appended, never a rename or a
+    reorder, because both are persisted (dataset rows, filenames on disk).
+    
+    - services/openrouter.py: generate_variation() on the existing engine contract
+      (refs + prompt + aspect_ratio -> bytes|None), OPENROUTER_API_KEY in
+      SECRET_KEYS so it inherits presence-only exposure.
+    - engines.openrouter_model, free text, default google/gemini-3-pro-image: the
+      catalogue moves fast and a retired slug must never require a release.
+      Nothing caps the reference count either — models accept 1 to 16 and that
+      ceiling drifts, so every reference is sent and a refusal REPORTS the count
+      instead of the app silently dropping some.
+    - Fails loudly, always. No key / rejected key / no credits / unknown model /
+      rate limit each get their own message carrying OpenRouter's own words, and
+      none of them ever falls back to another engine — being billed somewhere you
+      did not choose is worse than a failed row. The four causes that would refuse
+      every remaining row identically stop the batch, reusing the machinery the
+      ChatGPT quota stop already uses, instead of paying for the same refusal once
+      per image. A None return is reserved for a genuine 200-without-image refusal.
+    - The key is a secret end to end: Authorization header only, never in a log
+      line, an exception, a diagnostic or the settings payload. Locked by tests.
+    - UI: fourth engine card (fuchsia, naming the model it will bill), OpenRouter
+      key + model fields in Settings and in the Setup wizard, capability probe,
+      help-registry topics, What's new, settings-reference.
+    
+    NOT VERIFIED AGAINST THE REAL SERVICE. There is no OpenRouter key or credit
+    here, so nothing in this change has ever exchanged a byte with OpenRouter: the
+    request shape and the response parsing come from their published API docs, and
+    every test stubs the transport. Whoever enables this engine first is the first
+    to exercise it for real. That is precisely why every failure path is named and
+    noisy rather than quietly degraded — a wrong assumption here should announce
+    itself, not look like a bad prompt.
+    
+    Backend 2525 tests green, frontend 759 green.
+---
+ backend/app/capabilities.py                        |  12 +
+ backend/app/config.py                              |  14 +-
+ backend/app/routes/settings.py                     |   3 +-
+ backend/app/services/face_dataset_service.py       |  19 +-
+ backend/app/services/openrouter.py                 | 231 +++++++++++
+ backend/tests/test_capabilities.py                 |   3 +-
+ backend/tests/test_openrouter_engine.py            | 440 +++++++++++++++++++++
+ docs/guide/settings-reference.md                   |  32 +-
+ frontend/src/components/common/diagnosticFormat.js |   2 +-
+ frontend/src/components/common/promptOverride.js   |  14 +-
+ .../src/components/dataset/VariationCatalog.jsx    |  57 ++-
+ frontend/src/components/dataset/engineSelection.js |  26 +-
+ .../src/components/settings/EnginesSection.jsx     |  37 ++
+ frontend/src/components/settings/registry.js       |   4 +-
+ frontend/src/context/CapabilitiesContext.jsx       |   2 +-
+ frontend/src/help/helpRegistry.js                  |  12 +-
+ frontend/src/hooks/useSetupSteps.js                |  12 +-
+ frontend/src/pages/SetupPage.jsx                   |  10 +-
+ frontend/src/whatsNew.js                           |   8 +
+ 19 files changed, 899 insertions(+), 39 deletions(-)
+
+diff --git a/backend/app/capabilities.py b/backend/app/capabilities.py
+index 545906a5..00550177 100644
+--- a/backend/app/capabilities.py
++++ b/backend/app/capabilities.py
+@@ -87,6 +87,16 @@ def probe_openai() -> dict:
+     return {'ok': key or sub, 'detail': ' + '.join(parts) if parts else 'key missing'}
+ 
+ 
++def probe_openrouter() -> dict:
++    """OpenRouter engine readiness. Presence of the key only — same contract as
++    probe_gemini. Deliberately NOT a live call: verifying the key would mean an
++    authenticated request on every capability poll, and OpenRouter bills per
++    request; a key that is set but out of credits is reported at generation time,
++    with the provider's own words."""
++    ok = bool(cfg.secret('OPENROUTER_API_KEY'))
++    return {'ok': ok, 'detail': 'key set' if ok else 'key missing'}
++
++
+ def probe_comfyui() -> dict:
+     api_url = (cfg.get('comfyui.api_url') or '').rstrip('/')
+     if not api_url:
+@@ -911,6 +921,7 @@ def probe(force=False) -> dict:
+     aitoolkit = probe_aitoolkit()
+     gemini = probe_gemini()
+     openai_ = probe_openai()
++    openrouter_ = probe_openrouter()
+     face_scoring = probe_face_scoring()
+     masks = probe_masks()
+     bank_scoring = probe_bank_scoring()
+@@ -974,6 +985,7 @@ def probe(force=False) -> dict:
+         'engines': {
+             'nanobanana': gemini['ok'],
+             'chatgpt': openai_['ok'],
++            'openrouter': openrouter_['ok'],
+             'klein': klein_ready,
+         },
+         'chatgpt_subscription': {
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 8df663fe..222e676e 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -28,8 +28,8 @@ load_dotenv(ENV_PATH)
+ # REDDIT_CLIENT_ID / CIVITAI_API_KEY / PEXELS_API_KEY: scraping credentials
+ # (Settings > Scraping & sources). Sources read their env var at request time,
+ # and set_secrets() stamps os.environ on save, so changes apply without restart.
+-SECRET_KEYS = ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'HF_TOKEN', 'VAST_API_KEY',
+-               'REDDIT_CLIENT_ID', 'CIVITAI_API_KEY', 'PEXELS_API_KEY')
++SECRET_KEYS = ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'HF_TOKEN',
++               'VAST_API_KEY', 'REDDIT_CLIENT_ID', 'CIVITAI_API_KEY', 'PEXELS_API_KEY')
+ 
+ DEFAULTS = {
+     # host: '127.0.0.1' = this machine only ; '0.0.0.0' = reachable from the LAN
+@@ -60,10 +60,16 @@ DEFAULTS = {
+                   # Explicit interpreter for installs without venv/.venv
+                   # (conda, uv, system python). Empty = auto-detect.
+                   'python': ''},
+-    'engines': {'default': 'chatgpt', 'enabled': ['nanobanana', 'chatgpt', 'klein'],
++    'engines': {'default': 'chatgpt',
++                'enabled': ['nanobanana', 'chatgpt', 'openrouter', 'klein'],
+                 # chatgpt_auth: 'auto' = subscription when connected, else API key.
+                 'chatgpt_auth': 'auto',            # auto|api|subscription
+-                'chatgpt_subscription_model': 'gpt-5.4-mini'},   # Codex router model (image model is gpt-image-2 regardless)
++                'chatgpt_subscription_model': 'gpt-5.4-mini',   # Codex router model (image model is gpt-image-2 regardless)
++                # OpenRouter reaches the SAME upstream models as the two other
++                # API engines through one account, so the slug is free text: its
++                # catalogue moves fast and a renamed/retired model must never
++                # require a new release. Default = the Nano Banana weights.
++                'openrouter_model': 'google/gemini-3-pro-image'},
+     'captioning': {'backend': 'auto'},                         # auto|joycaption|ollama|none
+     'training': {'default_family': 'zimage'},
+     # Cloud GPU training (vast.ai). Everything has a sane default: the only
+diff --git a/backend/app/routes/settings.py b/backend/app/routes/settings.py
+index 5c7ef94f..d10e8059 100644
+--- a/backend/app/routes/settings.py
++++ b/backend/app/routes/settings.py
+@@ -14,6 +14,7 @@ bp = Blueprint('settings', __name__, url_prefix='/api')
+ _TEST_TARGETS = {
+     'gemini': capabilities.probe_gemini,
+     'openai': capabilities.probe_openai,
++    'openrouter': capabilities.probe_openrouter,
+     'comfyui': capabilities.probe_comfyui,
+     # End-to-end (reachable + vision model pulled), NOT reachability alone: the old
+     # reachability-only target returned a green check while the Setup/diagnostic model
+@@ -534,7 +535,7 @@ def _recent_generation_errors(scan=40) -> dict:
+             low = reason.lower()
+             # fail_reason is written as f'{engine}: …' on the generation path, so the
+             # engine is the prefix; anything else lands in 'other' (save/queue errors).
+-            eng = next((e for e in ('klein', 'chatgpt', 'nanobanana')
++            eng = next((e for e in ('klein', 'chatgpt', 'nanobanana', 'openrouter')
+                         if low.startswith(e)), 'other')
+             engines.setdefault(eng, reason)  # first hit == most recent for that engine
+     except Exception:
+diff --git a/backend/app/services/face_dataset_service.py b/backend/app/services/face_dataset_service.py
+index 4ffbdaaa..91d1765d 100644
+--- a/backend/app/services/face_dataset_service.py
++++ b/backend/app/services/face_dataset_service.py
+@@ -5566,10 +5566,14 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
+ # Both engines share the exact generate_variation contract (refs + prompt +
+ # aspect -> bytes|None), so the whole fan-out below is engine-parametric. The
+ # filename tag keeps the provenance readable in the dataset folder.
+-API_ENGINES = ('nanobanana', 'chatgpt')
+-_ENGINE_FILE_TAG = {'nanobanana': 'NBFace', 'chatgpt': 'GPTFace'}
++# APPEND-ONLY: both the engine ids and the file tags are persisted (dataset rows
++# record the engine, and the tag is baked into the filename on disk), so a value
++# here is never renamed or reordered.
++API_ENGINES = ('nanobanana', 'chatgpt', 'openrouter')
++_ENGINE_FILE_TAG = {'nanobanana': 'NBFace', 'chatgpt': 'GPTFace', 'openrouter': 'ORFace'}
+ 
+ from .chatgpt_image import SubscriptionQuotaExceeded, SubscriptionUnavailable
++from .openrouter import OpenRouterFatal
+ 
+ _QUOTA_MSG = ('chatgpt: subscription image quota reached — remaining rows were '
+               'stopped; rerun in API-key mode or wait for your plan quota to reset')
+@@ -5580,6 +5584,8 @@ _LOST_MSG = ('chatgpt: subscription connection lost — remaining rows stopped;
+ def _api_generate_fn(engine):
+     if engine == 'chatgpt':
+         from .chatgpt_image import generate_variation
++    elif engine == 'openrouter':
++        from .openrouter import generate_variation
+     else:
+         from .nanobanana import generate_variation
+     return generate_variation
+@@ -5672,6 +5678,15 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
+             quota_exhausted.set(); stop_msg['text'] = _LOST_MSG
+             logger.warning(f"{engine} batch: subscription lost at row {image_id}: {e}")
+             fail_reason = _LOST_MSG
++        except OpenRouterFatal as e:
++            # No key, key rejected, no credits, unknown model: every remaining row
++            # would fail on the exact same cause, so stop the batch instead of
++            # asking OpenRouter the same refused question once per image. Reuses
++            # the ChatGPT quota machinery — same need, same shape.
++            msg = f'{engine}: {str(e)[:400]} — remaining rows were stopped'
++            quota_exhausted.set(); stop_msg['text'] = msg
++            logger.warning(f"{engine} batch: fatal at row {image_id}: {e}")
++            fail_reason = msg
+         except Exception as e:
+             logger.warning(f"{engine} batch: generation error for row {image_id}: {e}")
+             fail_reason = f'{engine}: {str(e)[:400]}'
+diff --git a/backend/app/services/openrouter.py b/backend/app/services/openrouter.py
+new file mode 100644
+index 00000000..15efde42
+--- /dev/null
++++ b/backend/app/services/openrouter.py
+@@ -0,0 +1,231 @@
++"""OpenRouter image engine for the dataset generator.
++
++WHY THIS EXISTS
++---------------
++The two API engines each need their own provider account: Nano Banana wants a
++Google Gemini key, ChatGPT wants an OpenAI key (or a ChatGPT subscription).
++People who already pay for OpenRouter — one account that fronts every provider —
++had no way in (requested on GitHub #13 by jqs). This engine reaches the SAME
++upstream models through that one key: OpenRouter's image API serves
++`google/gemini-3-pro-image` (the Nano Banana model) and `openai/gpt-image-2`
++(the ChatGPT one) among ~40 others, all through a single credit balance.
++
++It is a THIRD engine, not a replacement: `nanobanana` and `chatgpt` are
++unchanged, and which one a stored dataset row was generated with keeps its
++historical value.
++
++THE API
++-------
++`POST https://openrouter.ai/api/v1/images` — OpenRouter's own image endpoint
++(NOT the OpenAI-compatible chat route). Reference images ride in
++`input_references` as data URLs; the answer carries base64 bytes in
++`data[].b64_json` with a `media_type`. Errors come back as
++`{"error": {"code": …, "message": …}}`.
++
++FAILING LOUDLY, ON PURPOSE
++--------------------------
++Every failure here RAISES with a named cause instead of returning None. A None
++return is reserved for "the provider answered 200 and produced no image", i.e. a
++refusal — which the caller already words correctly. This matters more than usual
++because the user is spending money at a provider they chose: silently falling
++back to another engine would bill them somewhere they did not intend, and a mute
++failure would look like OpenRouter working badly rather than a key/credit/model
++problem they can fix.
++
++`OpenRouterFatal` marks the failures where EVERY other row of the batch would
++fail identically (no key, rejected key, no credits, unknown model): the fan-out
++catches it and stops the run instead of burning one call per row.
++
++The API key is a secret: it only ever appears in the Authorization header. No
++log line, no exception message and no error surfaced to the UI contains it or
++any fragment of it.
++"""
++from __future__ import annotations
++
++import base64
++import logging
++
++import requests
++
++from .. import config as cfg
++
++logger = logging.getLogger(__name__)
++
++_API = 'https://openrouter.ai/api/v1/images'
++
++# Default model: the same weights the Nano Banana engine calls directly, so
++# switching engine is a change of BILLING, not of image quality. Kept as free
++# text in config (engines.openrouter_model) — OpenRouter's catalogue moves fast
++# and a new slug must never require a new release.
++DEFAULT_MODEL = 'google/gemini-3-pro-image'
++
++# Optional attribution headers OpenRouter uses for its app rankings. Public
++# project identity only — nothing about the machine or the user.
++_APP_URL = 'https://github.com/perfectgf/lora-dataset-studio'
++_APP_TITLE = 'LoRA Dataset Studio'
++
++_NO_KEY = ('no OpenRouter API key saved — add OPENROUTER_API_KEY in '
++           'Settings > Image engines')
++
++
++class OpenRouterError(RuntimeError):
++    """A named OpenRouter failure. The message is user-facing and never carries
++    the API key."""
++
++
++class OpenRouterFatal(OpenRouterError):
++    """A failure that would repeat identically on every remaining row of a batch
++    (missing/rejected key, no credits, unknown model). The fan-out stops the run
++    on this rather than paying for the same refusal N times."""
++
++
++def _api_key():
++    return cfg.secret('OPENROUTER_API_KEY')
++
++
++def get_model() -> str:
++    """The configured model slug, or the default. Free text on purpose."""
++    return (cfg.get('engines.openrouter_model') or '').strip() or DEFAULT_MODEL
++
++
++def _error_message(resp) -> str:
++    """OpenRouter's own explanation for a rejected request, trimmed.
++
++    The documented error body is {"error": {"code": int, "message": str}}; a
++    proxy/edge failure can answer with something else entirely, so fall back to
++    the raw text. Returning the provider's exact words is the whole point — a
++    generic 'request failed' would leave the user with nothing to act on."""
++    try:
++        body = resp.json()
++    except Exception:                                  # noqa: BLE001 — non-JSON edge error
++        body = None
++    if isinstance(body, dict):
++        err = body.get('error')
++        if isinstance(err, dict):
++            msg = str(err.get('message') or '').strip()
++            if msg:
++                return msg[:300]
++        elif isinstance(err, str) and err.strip():
++            return err.strip()[:300]
++    try:
++        return (resp.text or '').strip()[:300]
++    except Exception:                                  # noqa: BLE001
++        return ''
++
++
++def _raise_for_status(resp, *, ref_count: int, model: str) -> None:
++    """Turn a non-200 into the most specific exception we can justify.
++
++    401/403 = the key itself, 402 = the balance, 404 = the model slug: all three
++    would fail the same way on every other row, so they are FATAL and stop the
++    batch. 429 and 5xx are transient (rate limit, provider hiccup) and stay
++    per-row, so one bad minute doesn't cancel a run that would have finished.
++
++    A 400 is where a reference-count mismatch lands: models accept anywhere from
++    1 to 16 references and that ceiling changes as OpenRouter's catalogue moves,
++    so nothing here caps the list — we send what we were given and, if it is
++    refused, SAY that the count may be the reason instead of silently dropping
++    references the user expected to be used."""
++    status = resp.status_code
++    if status == 200:
++        return
++    detail = _error_message(resp)
++    suffix = f': {detail}' if detail else ''
++    if status in (401, 403):
++        raise OpenRouterFatal(f'OpenRouter rejected the API key (HTTP {status}){suffix}')
++    if status == 402:
++        raise OpenRouterFatal(f'OpenRouter is out of credits (HTTP 402){suffix}')
++    if status == 404:
++        raise OpenRouterFatal(
++            f'OpenRouter does not serve the model "{model}" (HTTP 404){suffix} — '
++            'check the model in Settings > Image engines')
++    if status == 429:
++        raise OpenRouterError(f'OpenRouter rate-limited the request (HTTP 429){suffix}')
++    if status == 400 and ref_count > 1:
++        raise OpenRouterError(
++            f'OpenRouter refused the request (HTTP 400){suffix} — note that '
++            f'{ref_count} reference images were sent and "{model}" may accept fewer')
++    raise OpenRouterError(f'OpenRouter returned HTTP {status}{suffix}')
++
++
++def parse_image_response(data) -> bytes | None:
++    """First image of an OpenRouter image response -> raw bytes, or None when the
++    call succeeded without producing one (a refusal).
++
++    Raises when the payload IS an image but one we cannot hand to the caller:
++    the vector models answer with `image/svg+xml` inside the same b64_json field,
++    and returning SVG markup where the caller expects pixels would surface much
++    later as an unreadable-file error blaming the save step."""
++    if not isinstance(data, dict):
++        return None
++    for entry in (data.get('data') or []):
++        if not isinstance(entry, dict):
++            continue
++        b64 = entry.get('b64_json')
++        if not b64:
++            continue
++        media = str(entry.get('media_type') or '').lower()
++        if 'svg' in media:
++            raise OpenRouterError(
++                'OpenRouter returned a vector image (image/svg+xml) — pick a '
++                'photographic model in Settings > Image engines')
++        try:
++            return base64.b64decode(b64)
++        except (TypeError, ValueError) as e:
++            raise OpenRouterError(f'OpenRouter returned an unreadable image payload: {e}')
++    return None
++
++
++def generate_variation(ref_bytes: bytes | list[bytes], prompt: str, model: str | None = None,
++                       aspect_ratio: str = '1:1') -> bytes | None:
++    """Reference photo(s) + variation prompt -> generated image bytes, or None.
++
++    Same contract as the Nano Banana and ChatGPT engines, so the whole fan-out
++    stays engine-parametric. `ref_bytes` is one image or a list of images of the
++    same subject, principal first; every one of them is sent.
++
++    None means only one thing: OpenRouter answered 200 without an image (a
++    content-policy refusal). Anything else raises with the cause named."""
++    key = _api_key()
++    if not key:
++        # Deliberately an exception, not a None + warning: a missing key must
++        # never read as "the provider refused your prompt".
++        raise OpenRouterFatal(_NO_KEY)
++    mdl = (model or '').strip() or get_model()
++    refs = ref_bytes if isinstance(ref_bytes, (list, tuple)) else [ref_bytes]
++    refs = [r for r in refs if r]
++    references = [{'type': 'image_url',
++                   'image_url': {'url': 'data:image/webp;base64,'
++                                        + base64.b64encode(r).decode('ascii')}}
++                  for r in refs]
++    base = {'model': mdl, 'prompt': prompt}
++    if references:
++        base['input_references'] = references
++    # Two attempts, same shape as the Nano Banana engine: aspect_ratio is a
++    # normalized OpenRouter field but individual endpoints clamp to their own
++    # subset and answer 400 when they don't take it at all. Retrying once without
++    # it keeps a model that ignores framing usable instead of failing the row —
++    # the image is still generated, just at the provider's own ratio.
++    payloads = [dict(base, aspect_ratio=aspect_ratio), base]
++    headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json',
++               'HTTP-Referer': _APP_URL, 'X-OpenRouter-Title': _APP_TITLE}
++    for i, payload in enumerate(payloads):
++        try:
++            r = requests.post(_API, headers=headers, json=payload, timeout=(10, 300))
++        except requests.RequestException as e:
++            raise OpenRouterError(f'could not reach OpenRouter: {e}')
++        if r.status_code == 400 and i == 0 and len(payloads) > 1:
++            logger.info('openrouter: %s refused aspect_ratio=%s, retrying without it',
++                        mdl, aspect_ratio)
++            continue                                   # retry without aspect_ratio
++        _raise_for_status(r, ref_count=len(refs), model=mdl)
++        try:
++            data = r.json()
++        except ValueError as e:
++            raise OpenRouterError(f'OpenRouter returned a non-JSON response: {e}')
++        img = parse_image_response(data)
++        if img is None:
++            logger.warning('openrouter: no image in response from %s '
++                           '(safety block or text-only answer)', mdl)
++        return img
++    return None
+diff --git a/backend/tests/test_capabilities.py b/backend/tests/test_capabilities.py
+index 64df08de..4ceb7954 100644
+--- a/backend/tests/test_capabilities.py
++++ b/backend/tests/test_capabilities.py
+@@ -34,7 +34,8 @@ def test_probe_all_off_when_unconfigured(app):
+         from app import capabilities
+         with patch('app.capabilities._http_ok', return_value=False):
+             caps = capabilities.probe(force=True)
+-    assert caps['engines'] == {'nanobanana': False, 'chatgpt': False, 'klein': False}
++    assert caps['engines'] == {'nanobanana': False, 'chatgpt': False,
++                               'openrouter': False, 'klein': False}
+     assert caps['training_visible'] is False and caps['studio_visible'] is False
+ 
+ def test_python_ml_status_reports_version_and_range(app):
+diff --git a/backend/tests/test_openrouter_engine.py b/backend/tests/test_openrouter_engine.py
+new file mode 100644
+index 00000000..ce15900b
+--- /dev/null
++++ b/backend/tests/test_openrouter_engine.py
+@@ -0,0 +1,440 @@
++"""OpenRouter image engine (GitHub #13).
++
++NOTHING here talks to OpenRouter: `requests.post` is patched in every test, so
++the suite never needs a key, never spends a credit, and never depends on the
++service being up. That is also the honest limit of this file — it proves the
++REQUEST we build and how we read an answer we hand ourselves, not that the real
++service accepts it.
++
++The invariants worth locking, in order of how badly they hurt when broken:
++  1. the API key never appears in an exception, a log record or any text a user
++     can read or paste;
++  2. every failure is NAMED (missing key / rejected key / no credits / unknown
++     model / rate limit) and none of them silently becomes another engine;
++  3. the causes that would fail every remaining row identically stop the batch;
++  4. the reference images we were given are all sent, and a refusal mentions the
++     count instead of the app dropping some.
++"""
++import base64
++import logging
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++KEY = 'sk-or-v1-testkeyvalue0123456789'
++PNG = b'\x89PNG\r\n\x1a\nfake-pixels'
++
++
++def _resp(status=200, json_body=None, text=''):
++    r = MagicMock(status_code=status)
++    if json_body is None:
++        r.json.side_effect = ValueError('no json')
++    else:
++        r.json.return_value = json_body
++    r.text = text
++    return r
++
++
++def _ok_body(b64=None, media='image/png'):
++    return {'created': 1, 'media_type': media,
++            'data': [{'b64_json': b64 or base64.b64encode(PNG).decode(), 'media_type': media}],
++            'usage': {'cost': 0.04}}
++
++
++def _err(msg, code=400):
++    return {'error': {'code': code, 'message': msg}}
++
++
++# --- the request we build --------------------------------------------------
++
++def test_sends_every_reference_as_a_data_url_with_the_configured_model(app, monkeypatch):
++    """The dataset generator's whole point is reference-driven generation: all the
++    references handed over must ride in input_references, principal first."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(200, _ok_body())) as post:
++        out = openrouter.generate_variation([b'ref-a', b'ref-b'], 'a portrait',
++                                            aspect_ratio='3:4')
++    assert out == PNG
++    payload = post.call_args.kwargs['json']
++    assert post.call_args.args[0] == 'https://openrouter.ai/api/v1/images'
++    assert payload['model'] == 'google/gemini-3-pro-image'
++    assert payload['prompt'] == 'a portrait'
++    assert payload['aspect_ratio'] == '3:4'
++    refs = payload['input_references']
++    assert len(refs) == 2
++    assert refs[0]['type'] == 'image_url'
++    assert refs[0]['image_url']['url'] == ('data:image/webp;base64,'
++                                           + base64.b64encode(b'ref-a').decode())
++    assert refs[1]['image_url']['url'].endswith(base64.b64encode(b'ref-b').decode())
++
++
++def test_a_single_reference_is_accepted_like_the_other_engines(app, monkeypatch):
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(200, _ok_body())) as post:
++        assert openrouter.generate_variation(b'ref', 'p') == PNG
++    assert len(post.call_args.kwargs['json']['input_references']) == 1
++
++
++def test_the_model_is_free_text_from_config(app, monkeypatch):
++    """A model slug must never require a release: OpenRouter's catalogue moves."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app import config as cfg
++    from app.services import openrouter
++    with app.app_context():
++        cfg.save_config({'engines': {'openrouter_model': 'bytedance-seed/seedream-4.5'}})
++        assert openrouter.get_model() == 'bytedance-seed/seedream-4.5'
++        with patch('app.services.openrouter.requests.post',
++                   return_value=_resp(200, _ok_body())) as post:
++            openrouter.generate_variation(b'r', 'p')
++        assert post.call_args.kwargs['json']['model'] == 'bytedance-seed/seedream-4.5'
++        # Blank falls back rather than asking OpenRouter for the empty model.
++        cfg.save_config({'engines': {'openrouter_model': '   '}})
++        assert openrouter.get_model() == openrouter.DEFAULT_MODEL
++
++
++def test_an_endpoint_that_refuses_aspect_ratio_is_retried_without_it(app, monkeypatch):
++    """Providers clamp aspect_ratio to their own subset. Losing the framing is far
++    better than losing the image — but only the framing is given up, never the
++    references or the prompt."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    responses = [_resp(400, _err('aspect_ratio is not supported')),
++                 _resp(200, _ok_body())]
++    with patch('app.services.openrouter.requests.post',
++               side_effect=responses) as post:
++        assert openrouter.generate_variation(b'r', 'p', aspect_ratio='9:16') == PNG
++    assert post.call_count == 2
++    assert 'aspect_ratio' in post.call_args_list[0].kwargs['json']
++    second = post.call_args_list[1].kwargs['json']
++    assert 'aspect_ratio' not in second
++    assert second['prompt'] == 'p' and len(second['input_references']) == 1
++
++
++# --- the secret ------------------------------------------------------------
++
++def test_the_key_is_sent_as_a_bearer_header_and_nowhere_else(app, monkeypatch):
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(200, _ok_body())) as post:
++        openrouter.generate_variation(b'r', 'p')
++    call = post.call_args
++    assert call.kwargs['headers']['Authorization'] == f'Bearer {KEY}'
++    # The key must not have leaked into the body under any name.
++    assert KEY not in str(call.kwargs['json'])
++
++
++@pytest.mark.parametrize('status,body', [
++    (401, _err('User not found', 401)),
++    (402, _err('Insufficient credits', 402)),
++    (404, _err('No endpoints found', 404)),
++    (429, _err('Rate limit exceeded', 429)),
++    (500, _err('upstream error', 500)),
++])
++def test_no_error_message_or_log_line_can_ever_carry_the_key(app, monkeypatch, caplog,
++                                                             status, body):
++    """The one thing that must hold for EVERY failure path, including the ones a
++    user is most likely to paste into a public help channel."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    caplog.set_level(logging.DEBUG)
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(status, body, text=str(body))):
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert KEY not in str(e.value)
++    assert KEY[8:] not in str(e.value)          # not even a fragment
++    assert KEY not in caplog.text
++
++
++def test_a_missing_key_says_so_instead_of_looking_like_a_refusal(app, monkeypatch):
++    """Returning None here (what the Nano Banana engine does) would surface as
++    'empty response - often a content-policy refusal', sending the user to rewrite
++    a prompt when the real fix is pasting a key."""
++    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post') as post:
++        with pytest.raises(openrouter.OpenRouterFatal) as e:
++            openrouter.generate_variation(b'r', 'p')
++    post.assert_not_called()                    # no request without a key
++    msg = str(e.value)
++    assert 'OPENROUTER_API_KEY' in msg and 'Settings' in msg
++
++
++# --- each class of failure, named ------------------------------------------
++
++@pytest.mark.parametrize('status,message,expected', [
++    (401, 'User not found', 'rejected the API key'),
++    (403, 'Forbidden', 'rejected the API key'),
++    (402, 'Insufficient credits', 'out of credits'),
++    (404, 'No endpoints found for model', 'does not serve the model'),
++])
++def test_a_failure_that_would_repeat_on_every_row_is_fatal_and_named(app, monkeypatch,
++                                                                    status, message,
++                                                                    expected):
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(status, _err(message, status))):
++        with pytest.raises(openrouter.OpenRouterFatal) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert expected in str(e.value)
++    assert message in str(e.value)              # OpenRouter's own words, verbatim
++
++
++@pytest.mark.parametrize('status,expected', [
++    (429, 'rate-limited'),
++    (502, 'HTTP 502'),
++])
++def test_a_transient_failure_stays_per_row(app, monkeypatch, status, expected):
++    """A rate limit or a provider hiccup must NOT cancel a run that would have
++    finished: it fails this image only."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(status, _err('boom', status))):
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert not isinstance(e.value, openrouter.OpenRouterFatal)
++    assert expected in str(e.value)
++
++
++def test_a_refused_request_reports_the_reference_count_instead_of_dropping_some(
++        app, monkeypatch):
++    """Models accept anywhere from 1 to 16 references and that ceiling moves with
++    the catalogue, so nothing is hardcoded: we send them all and, if refused, name
++    the count as a possible cause rather than truncating behind the user's back."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    refs = [b'a', b'b', b'c', b'd', b'e']
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(400, _err('too many input references'))) as post:
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(refs, 'p')
++    # Every reference really was sent — the count in the message is the truth.
++    assert len(post.call_args_list[0].kwargs['json']['input_references']) == 5
++    msg = str(e.value)
++    assert '5 reference images were sent' in msg
++    assert 'may accept fewer' in msg
++    assert 'too many input references' in msg
++
++
++def test_a_network_error_names_the_network(app, monkeypatch):
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    import requests
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               side_effect=requests.ConnectionError('dns failure')):
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert 'could not reach OpenRouter' in str(e.value)
++
++
++def test_an_unparseable_error_body_still_yields_a_status(app, monkeypatch):
++    """An edge/proxy failure answers HTML, not the documented error envelope."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(503, None, text='<html>gateway</html>')):
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert 'HTTP 503' in str(e.value)
++
++
++# --- reading the answer -----------------------------------------------------
++
++def test_a_200_with_no_image_is_the_only_none(app, monkeypatch):
++    """None means exactly one thing to the caller: the provider answered without
++    an image, i.e. a content-policy refusal. Everything else raises."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(200, {'created': 1, 'data': []})):
++        assert openrouter.generate_variation(b'r', 'p') is None
++
++
++def test_a_vector_answer_is_refused_where_it_happens(app, monkeypatch):
++    """Recraft's vector models put SVG markup in the same b64_json field. Passing
++    it on would fail much later, blaming the image-saving step."""
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    body = _ok_body(b64=base64.b64encode(b'<svg/>').decode(), media='image/svg+xml')
++    with patch('app.services.openrouter.requests.post', return_value=_resp(200, body)):
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert 'vector image' in str(e.value)
++
++
++def test_a_non_json_success_body_is_reported_not_swallowed(app, monkeypatch):
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.services import openrouter
++    with patch('app.services.openrouter.requests.post',
++               return_value=_resp(200, None, text='not json')):
++        with pytest.raises(openrouter.OpenRouterError) as e:
++            openrouter.generate_variation(b'r', 'p')
++    assert 'non-JSON' in str(e.value)
++
++
++# --- wiring into the engine set --------------------------------------------
++
++def test_the_engine_is_registered_without_disturbing_the_existing_two(app):
++    """Engine ids and file tags are PERSISTED (dataset rows, filenames on disk):
++    this locks that the new one was appended, never a rename or a reorder."""
++    from app.services import face_dataset_service as svc
++    assert svc.API_ENGINES == ('nanobanana', 'chatgpt', 'openrouter')
++    assert svc._ENGINE_FILE_TAG['nanobanana'] == 'NBFace'
++    assert svc._ENGINE_FILE_TAG['chatgpt'] == 'GPTFace'
++    assert svc._ENGINE_FILE_TAG['openrouter'] == 'ORFace'
++    from app.services import openrouter
++    assert svc._api_generate_fn('openrouter') is openrouter.generate_variation
++    # ...and the other two still resolve to THEIR own module.
++    from app.services import nanobanana
++    assert svc._api_generate_fn('nanobanana') is nanobanana.generate_variation
++
++
++def test_the_engine_lights_up_on_the_key_alone(app, monkeypatch):
++    """Readiness is key-presence only: probing for real would mean a billed
++    request on every capability poll."""
++    from app import capabilities
++    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
++    assert capabilities.probe_openrouter() == {'ok': False, 'detail': 'key missing'}
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    probe = capabilities.probe_openrouter()
++    assert probe['ok'] is True
++    assert KEY not in str(probe)                # presence, never the value
++
++
++def test_the_key_is_a_declared_secret_so_it_is_never_echoed_back(app, monkeypatch):
++    """SECRET_KEYS membership is what makes /api/settings report presence only —
++    forgetting it would have leaked the key into the settings payload."""
++    from app import config as cfg
++    assert 'OPENROUTER_API_KEY' in cfg.SECRET_KEYS
++    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
++    from app.routes.settings import _secret_presence
++    with app.app_context():
++        presence = _secret_presence()
++    assert presence['OPENROUTER_API_KEY'] is True
++    assert KEY not in str(presence)
++
++
++# --- the batch stop ---------------------------------------------------------
++
++class _SerialPool:
++    """Deterministic stand-in for ThreadPoolExecutor (same reason as
++    test_dataset_service: the real 3-worker pool races on the shared in-memory
++    sqlite). The concurrency is not what is under test here."""
++    def __init__(self, *a, **k): pass
++    def __enter__(self): return self
++    def __exit__(self, *a): return False
++    def map(self, fn, items): return [fn(i) for i in items]
++
++
++def _real_png():
++    import io
++    from PIL import Image
++    buf = io.BytesIO(); Image.new('RGB', (64, 64), (255, 0, 0)).save(buf, 'PNG')
++    return buf.getvalue()
++
++
++@pytest.mark.parametrize('fatal_message,expected', [
++    ('OpenRouter is out of credits (HTTP 402): Insufficient credits', 'out of credits'),
++    ('OpenRouter rejected the API key (HTTP 401): User not found', 'rejected the API key'),
++])
++def test_a_fatal_failure_stops_the_batch_instead_of_paying_per_row(app, monkeypatch,
++                                                                   fatal_message, expected):
++    """Out of credits (or a rejected key) would refuse EVERY remaining row for the
++    same reason. Asking the question 30 more times costs the user time and, on a
++    partially-refused batch, money — so the run stops on the first one and every
++    remaining row says why."""
++    import concurrent.futures
++    from app.config import LOCAL_USER
++    from app.models import FaceDatasetImage
++    from app.services import face_dataset_service as svc
++    from app.services.openrouter import OpenRouterFatal
++    monkeypatch.setattr(concurrent.futures, 'ThreadPoolExecutor', _SerialPool)
++    calls = []
++
++    def boom(*a, **k):
++        calls.append(1)
++        raise OpenRouterFatal(fatal_message)
++
++    monkeypatch.setattr(svc, '_api_generate_fn', lambda engine: boom)
++    with app.app_context():
++        import os
++        ds = svc.create_dataset(LOCAL_USER, 'OR', 'or')
++        os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
++        rows = [FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='openrouter')
++                for _ in range(3)]
++        svc.db.session.add_all(rows); svc.db.session.commit()
++        items = [(r.id, 'p', '1:1') for r in rows]
++        svc._run_nanobanana_batch(app, items, [_real_png()], engine='openrouter')
++        assert len(calls) == 1                  # rows 2-3 never reached the API
++        svc.db.session.expire_all()
++        for r in rows:
++            row = svc.db.session.get(FaceDatasetImage, r.id)
++            assert row.status == 'failed'
++            assert 'openrouter:' in row.fail_reason
++            assert expected in row.fail_reason
++            assert 'remaining rows were stopped' in row.fail_reason
++
++
++def test_a_transient_failure_does_not_stop_the_batch(app, monkeypatch):
++    """The mirror invariant: one rate-limited image must not cancel the rest of a
++    run the user is paying for."""
++    import concurrent.futures
++    from app.config import LOCAL_USER
++    from app.models import FaceDatasetImage
++    from app.services import face_dataset_service as svc
++    from app.services.openrouter import OpenRouterError
++    monkeypatch.setattr(concurrent.futures, 'ThreadPoolExecutor', _SerialPool)
++    calls = []
++
++    def flaky(*a, **k):
++        calls.append(1)
++        if len(calls) == 1:
++            raise OpenRouterError('OpenRouter rate-limited the request (HTTP 429)')
++        return _real_png()
++
++    monkeypatch.setattr(svc, '_api_generate_fn', lambda engine: flaky)
++    with app.app_context():
++        import os
++        ds = svc.create_dataset(LOCAL_USER, 'OR2', 'or2')
++        os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
++        rows = [FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='openrouter')
++                for _ in range(3)]
++        svc.db.session.add_all(rows); svc.db.session.commit()
++        svc._run_nanobanana_batch(app, [(r.id, 'p', '1:1') for r in rows],
++                                  [_real_png()], engine='openrouter')
++        assert len(calls) == 3                  # every row was still attempted
++        svc.db.session.expire_all()
++        done = [svc.db.session.get(FaceDatasetImage, r.id) for r in rows]
++        assert done[0].status == 'failed' and 'rate-limited' in done[0].fail_reason
++        # The generated rows carry the engine's own file tag, never another's.
++        assert all(d.filename and '_ORFace_' in d.filename for d in done[1:])
++
++
++def test_a_generated_file_is_tagged_with_the_engine_that_made_it(app, monkeypatch):
++    """The tag is baked into the filename on disk and is how a dataset folder stays
++    readable after a mixed run."""
++    import concurrent.futures
++    from app.config import LOCAL_USER
++    from app.models import FaceDatasetImage
++    from app.services import face_dataset_service as svc
++    monkeypatch.setattr(concurrent.futures, 'ThreadPoolExecutor', _SerialPool)
++    monkeypatch.setattr(svc, '_api_generate_fn', lambda engine: (lambda *a, **k: _real_png()))
++    with app.app_context():
++        import os
++        ds = svc.create_dataset(LOCAL_USER, 'OR3', 'or3')
++        os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
++        row = FaceDatasetImage(dataset_id=ds.id, status='pending', klein_model='openrouter')
++        svc.db.session.add(row); svc.db.session.commit()
++        svc._run_nanobanana_batch(app, [(row.id, 'p', '1:1')], [_real_png()],
++                                  engine='openrouter')
++        svc.db.session.expire_all()
++        saved = svc.db.session.get(FaceDatasetImage, row.id)
++        assert '_ORFace_' in saved.filename
++        assert os.path.isfile(os.path.join(svc._dataset_dir(ds.id), saved.filename))
+diff --git a/docs/guide/settings-reference.md b/docs/guide/settings-reference.md
+index 3c141e94..8406a5f0 100644
+--- a/docs/guide/settings-reference.md
++++ b/docs/guide/settings-reference.md
+@@ -33,14 +33,31 @@ The Overview section has **no settings of its own** — it's the at-a-glance das
+ 
+ ## Image engines
+ 
+-This is where you connect the services that *generate* dataset images. The app has three engines: **Nano Banana** (Google Gemini), **ChatGPT** (`gpt-image-2`), and **Klein** (local, via ComfyUI). Klein is configured under **Local tools**; the two API engines are configured here.
++This is where you connect the services that *generate* dataset images. The app has four engines: **Nano Banana** (Google Gemini), **ChatGPT** (`gpt-image-2`), **OpenRouter** (one account in front of many providers), and **Klein** (local, via ComfyUI). Klein is configured under **Local tools**; the three API engines are configured here.
+ 
+ ### API keys
+ 
+ - **Gemini API key** — powers the Nano Banana engine. Paste it here and hit **Test** to confirm the key works. Get one from [aistudio.google.com](https://aistudio.google.com) → *Get API key*.
+ - **OpenAI API key** — powers the ChatGPT engine (`gpt-image-2`). **Test** confirms it. This key is **optional if you connect a ChatGPT subscription** below — the subscription lane can run the ChatGPT engine on your plan's image quota instead.
++- **OpenRouter API key** — powers the OpenRouter engine. Get one from [openrouter.ai/keys](https://openrouter.ai/keys). One account and one balance in front of most providers, *including the same models the two engines above call directly* — so it is the way in if you would rather not open an account per provider. **Test** only checks that a key is saved: OpenRouter bills per request, so the app never spends a credit just to light up a checkmark.
+ 
+-Both are write-only secrets: blank once saved, replaced by typing a new value, cleared only via **Remove**.
++All three are write-only secrets: blank once saved, replaced by typing a new value, cleared only via **Remove**.
++
++### OpenRouter model
++
++- **Model slug** → `engines.openrouter_model`. Which image model the OpenRouter engine asks for. Default **`google/gemini-3-pro-image`** — the same weights the Nano Banana engine calls, so switching engine changes who bills you, not what the pictures look like. Leaving the field blank falls back to that default.
++
++It is **free text on purpose**: OpenRouter's image catalogue moves fast (models arrive, get renamed, retire), and a dropdown frozen into a release would eventually lock you out of a model that works. Browse the current list at [openrouter.ai/models](https://openrouter.ai/models?output_modalities=image).
++
++The model **must accept reference images** — the dataset generator always sends your reference photo(s) with the prompt, so a text-only model is not usable here. How many references a model takes varies (roughly 1 to 16 depending on the provider); the app sends every reference you gave it and, if the model refuses the request, says so and mentions the count rather than quietly dropping references you expected to be used.
++
++What OpenRouter does **not** change:
++
++- **Not cheaper by itself.** You still pay per image, at that model's rate, out of your OpenRouter credits.
++- **Not less restricted.** OpenRouter forwards to the same upstream providers, so the same content policies apply. NSFW variations still run on local Klein only.
++- **No subscription lane.** OpenRouter is credit-based; there is no equivalent of the ChatGPT-plan option below.
++
++When a generation fails, the tile names the cause in OpenRouter's own words — no key saved, key rejected, out of credits, unknown model, rate-limited. The four causes that would fail every remaining image identically (no key, rejected key, no credits, unknown model) **stop the rest of the batch** instead of asking the same refused question once per image. The app never falls back to another engine behind your back: if you picked OpenRouter, only OpenRouter is billed.
+ 
+ ### ChatGPT subscription (experimental)
+ 
+@@ -61,12 +78,12 @@ Good to know: in subscription mode you get up to **5 reference images** per gene
+ 
+ ### Engines
+ 
+-- **Default engine** → `engines.default`. Which engine is preselected in the workspace. One of `nanobanana`, `chatgpt`, `klein`. Default **`chatgpt`**.
+-- **Enabled engines** → `engines.enabled`. Checkboxes deciding which engines appear as options at all. Default: **all three** enabled. Untick an engine you never use to declutter the generator picker.
++- **Default engine** → `engines.default`. Which engine is preselected in the workspace. One of `nanobanana`, `chatgpt`, `openrouter`, `klein`. Default **`chatgpt`**.
++- **Enabled engines** → `engines.enabled`. Checkboxes deciding which engines appear as options at all. Default: **all four** enabled. Untick an engine you never use to declutter the generator picker. If you upgraded from a build that predates the OpenRouter engine and had ever saved your settings, your stored list still holds the old three — tick **OpenRouter** here once and it appears in the workspace.
+ 
+ #### Using several engines in one batch
+ 
+-In the workspace the engine cards are **checkboxes**, not a one-of-three choice: tick as many as you want. Each engine has its own colour (Klein indigo, Nano Banana amber, ChatGPT sky) and every generated tile is labelled with the engine that made it, so a mixed batch stays readable.
++In the workspace the engine cards are **checkboxes**, not a one-of-three choice: tick as many as you want. Each engine has its own colour (Klein indigo, Nano Banana amber, ChatGPT sky, OpenRouter fuchsia) and every generated tile is labelled with the engine that made it, so a mixed batch stays readable.
+ 
+ From **two** engines on, a mode appears deciding what "several engines" means:
+ 
+@@ -393,7 +410,7 @@ These have no UI control — they're for advanced users editing `config.json` by
+ 
+ ## config.json key reference (all keys)
+ 
+-A flat cheat-sheet of the main `config.json` keys, for quick lookup or hand-editing (copy `config.example.json` to `config.json` first — it's git-ignored, in your data directory). Every key here is documented in full, with defaults and traps, in the sections above; this table is the index. **Secrets** (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN`, `VAST_API_KEY`, optional scraper credentials) live in `.env`, not here.
++A flat cheat-sheet of the main `config.json` keys, for quick lookup or hand-editing (copy `config.example.json` to `config.json` first — it's git-ignored, in your data directory). Every key here is documented in full, with defaults and traps, in the sections above; this table is the index. **Secrets** (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `HF_TOKEN`, `VAST_API_KEY`, optional scraper credentials) live in `.env`, not here.
+ 
+ | Key | Meaning |
+ |---|---|
+@@ -415,9 +432,10 @@ A flat cheat-sheet of the main `config.json` keys, for quick lookup or hand-edit
+ | `aitoolkit.output_dir` | Override for ai-toolkit's output folder (defaults to `<aitoolkit.dir>/output`). |
+ | `aitoolkit.hf_home` | Override for the Hugging Face cache directory ai-toolkit uses. |
+ | `aitoolkit.python` | Full path to the Python interpreter to run ai-toolkit with. Empty = auto-detect a `venv/`/`.venv/` next to `run.py`; set it for conda/uv/system-Python and portable/embedded (`python_embeded`) installs that have no venv folder. |
+-| `engines.default` | Default image-generation engine selected in the UI (`nanobanana`, `chatgpt`, or `klein`). |
++| `engines.default` | Default image-generation engine selected in the UI (`nanobanana`, `chatgpt`, `openrouter`, or `klein`). |
+ | `engines.enabled` | List of engines shown as options in the UI. |
+ | `engines.chatgpt_auth` | Which credential the ChatGPT engine uses: `auto` (subscription when connected, else API key), `api`, or `subscription`. |
++| `engines.openrouter_model` | Image model slug the OpenRouter engine requests. Free text; blank = `google/gemini-3-pro-image`. Must accept reference images. |
+ | `engines.chatgpt_subscription_model` | Codex **router** model for the subscription lane (default `gpt-5.4-mini`); the image model stays `gpt-image-2` regardless. |
+ | `captioning.backend` | Caption backend: `auto` (prefer JoyCaption, fall back to Ollama), `joycaption`, `ollama`, or `none`. |
+ | `training.default_family` | Default model family preselected for new training runs (`zimage`, `sdxl`, `krea`, `flux`, `flux2klein`, or `anima`). |
+diff --git a/frontend/src/components/common/diagnosticFormat.js b/frontend/src/components/common/diagnosticFormat.js
+index 75715065..8b2983dc 100644
+--- a/frontend/src/components/common/diagnosticFormat.js
++++ b/frontend/src/components/common/diagnosticFormat.js
+@@ -26,7 +26,7 @@ export function formatDiagnostic(d) {
+   L.push(`OS: ${d.os} · Python ${d.python}${pml.ml_supported === false ? ` (⚠ outside ML wheel range ${pml.ml_range})` : ''}`)
+ 
+   L.push('── Engines ──')
+-  L.push(`default=${cf.default_engine} · nanobanana=${yn(e.nanobanana)} chatgpt=${yn(e.chatgpt)} klein=${yn(e.klein)}`)
++  L.push(`default=${cf.default_engine} · nanobanana=${yn(e.nanobanana)} chatgpt=${yn(e.chatgpt)} openrouter=${yn(e.openrouter)} klein=${yn(e.klein)}`)
+   if ((c.klein_missing || []).length) L.push(`  klein missing assets: ${c.klein_missing.join(', ')}`)
+   if (c.chatgpt_subscription) L.push('  chatgpt: subscription connected')
+   L.push(`Keys set: ${Object.entries(d.secrets_present || {}).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none'}`)
+diff --git a/frontend/src/components/common/promptOverride.js b/frontend/src/components/common/promptOverride.js
+index a7745190..25c381bc 100644
+--- a/frontend/src/components/common/promptOverride.js
++++ b/frontend/src/components/common/promptOverride.js
+@@ -55,19 +55,25 @@ export function promptBoxText(value, defaultText) {
+    `engines` says which engine family really consumes the prompt, verified in
+    face_variations.py: wrap_variation picks face_multi/face_single for the API
+    engines, wrap_variation_klein always uses klein_identity. */
++
++/** The engines whose prompts go through wrap_variation, i.e. every API engine.
++ *  Listed once: an engine missing from here would silently be treated as Klein
++ *  by activeExtraRefPromptKey and badge the wrong prompt box. */
++export const API_PROMPT_ENGINES = ['nanobanana', 'chatgpt', 'openrouter'];
++
+ export const IDENTITY_PROMPT_FIELDS = [
+   {
+     key: 'face_single',
+     id: 'identity-prompt-face-single',
+     label: 'API engine — identity lock (single reference)',
+-    engines: ['nanobanana', 'chatgpt'],
+-    desc: 'Prepended to every Nano Banana / ChatGPT variation made from ONE reference photo. Tells the model to keep the exact face and take outfit + expression from the description, not the reference.',
++    engines: API_PROMPT_ENGINES,
++    desc: 'Prepended to every Nano Banana / ChatGPT / OpenRouter variation made from ONE reference photo. Tells the model to keep the exact face and take outfit + expression from the description, not the reference.',
+   },
+   {
+     key: 'face_multi',
+     id: 'identity-prompt-face-multi',
+     label: 'API engine — identity lock (multiple references)',
+-    engines: ['nanobanana', 'chatgpt'],
++    engines: API_PROMPT_ENGINES,
+     desc: 'Same, but for variations generated from SEVERAL reference photos of the person — tells the model all references are the same person and to use them together.',
+   },
+   {
+@@ -214,7 +220,7 @@ export const EXTRA_REF_PROMPT_KEYS = ['face_multi', 'klein_identity'];
+  *  "neither API engine"). */
+ export function activeExtraRefPromptKey(generator) {
+   const g = String(generator || 'nanobanana').toLowerCase();
+-  return g === 'nanobanana' || g === 'chatgpt' ? 'face_multi' : 'klein_identity';
++  return API_PROMPT_ENGINES.includes(g) ? 'face_multi' : 'klein_identity';
+ }
+ 
+ /** Same question for a MULTI-engine selection: every key at least one selected
+diff --git a/frontend/src/components/dataset/VariationCatalog.jsx b/frontend/src/components/dataset/VariationCatalog.jsx
+index bdd81610..07421304 100644
+--- a/frontend/src/components/dataset/VariationCatalog.jsx
++++ b/frontend/src/components/dataset/VariationCatalog.jsx
+@@ -85,6 +85,24 @@ function ChatGptIcon({ className }) {
+   );
+ }
+ 
++/** Routing pictogram for the OpenRouter card: one input fanning out to several
++ *  providers — which is exactly what the engine does (one key, many models). */
++function RouterIcon({ className }) {
++  return (
++    <svg viewBox="0 0 32 32" className={className} aria-hidden="true" focusable="false">
++      <g stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round">
++        <line x1="9" y1="16" x2="17" y2="16" />
++        <path d="M17 16 C 21 16, 21 8, 25 8" />
++        <path d="M17 16 C 21 16, 21 24, 25 24" />
++      </g>
++      <circle cx="7" cy="16" r="3" fill="currentColor" />
++      <circle cx="25" cy="8" r="2.4" fill="currentColor" opacity="0.85" />
++      <circle cx="25" cy="16" r="2.4" fill="currentColor" opacity="0.85" />
++      <circle cx="25" cy="24" r="2.4" fill="currentColor" opacity="0.85" />
++    </svg>
++  );
++}
++
+ /** Small inline GPU-chip pictogram for the local Klein engine card. */
+ function GpuIcon({ className }) {
+   return (
+@@ -410,6 +428,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+ 
+   const isNB = engines.includes('nanobanana');
+   const isGPT = engines.includes('chatgpt');
++  const isOR = engines.includes('openrouter');
+   // Klein-only affordances (NSFW catalog, Klein tuning panel) light up as soon as
+   // Klein is part of the run — its shots really are rendered locally.
+   const isKlein = engines.includes('klein');
+@@ -439,6 +458,9 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+   // ChatGPT auth lane (auto|api|subscription) — decides whether the card shows a
+   // per-image API price or "uses your ChatGPT subscription quota".
+   const [chatgptAuth, setChatgptAuth] = useState('auto');
++  // Which OpenRouter model the run will actually bill: free text in Settings, so
++  // the card names it rather than implying a fixed one.
++  const [openrouterModel, setOpenrouterModel] = useState('');
+   useEffect(() => {
+     let cancelled = false;
+     apiFetch('/api/settings')
+@@ -446,6 +468,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+         if (cancelled) return;
+         setEnabledEngines(d.config?.engines?.enabled || []);
+         setChatgptAuth(d.config?.engines?.chatgpt_auth || 'auto');
++        setOpenrouterModel((d.config?.engines?.openrouter_model || '').trim());
+         // Optional generation-LoRA presets: names + chains for the picker.
+         setLoraPresets(sanitizeGenerationLoraPresets(d.config?.klein?.generation_lora_presets));
+       })
+@@ -454,8 +477,10 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+   }, []);
+   const nbAvailable = enabledEngines.includes('nanobanana') && caps.engines.nanobanana;
+   const gptAvailable = enabledEngines.includes('chatgpt') && caps.engines.chatgpt;
++  const orAvailable = enabledEngines.includes('openrouter') && caps.engines.openrouter;
+   const klAvailable = enabledEngines.includes('klein') && caps.engines.klein;
+-  const available = { klein: klAvailable, nanobanana: nbAvailable, chatgpt: gptAvailable };
++  const available = { klein: klAvailable, nanobanana: nbAvailable, chatgpt: gptAvailable,
++    openrouter: orAvailable };
+ 
+   // The persisted selection can name engines that have since been disabled in
+   // Settings (or lost their key/backend): drop those instead of trying to
+@@ -465,10 +490,11 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+   useEffect(() => {
+     const usable = engines.filter((e) => available[e]);
+     if (usable.length === engines.length) return;
+-    const first = nbAvailable ? 'nanobanana' : gptAvailable ? 'chatgpt' : klAvailable ? 'klein' : null;
++    const first = nbAvailable ? 'nanobanana' : gptAvailable ? 'chatgpt'
++      : orAvailable ? 'openrouter' : klAvailable ? 'klein' : null;
+     setEngines(usable.length ? usable : (first ? [first] : []));
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [engines, nbAvailable, gptAvailable, klAvailable]);
++  }, [engines, nbAvailable, gptAvailable, orAvailable, klAvailable]);
+   // Effective ChatGPT lane: the subscription (ChatGPT Plus/Pro image quota) vs the
+   // pay-per-use API key. Mirrors the backend "auto = subscription when connected".
+   const gptSub = caps.chatgpt_subscription || {};
+@@ -788,7 +814,10 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+         Not the look you wanted (a stylized reference coming out realistic)? Edit the generation prompt in{' '}
+         <a href="#/settings/engines" className="text-amber-300 underline decoration-amber-300/50">Settings › Image engines →</a>
+       </p>
+-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
++      {/* Four cards now. One column on a phone (they stack, nothing is clipped),
++          two from sm, four only from xl — three-across at sm would squeeze each
++          card under ~200 px and wrap every tag onto its own line. */}
++      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
+         <EngineCard id="klein" checked={isKlein} available={klAvailable} generating={generating}
+           onToggle={toggleEngine} share={engineShare('klein')}
+           icon={<GpuIcon className={`w-9 h-9 shrink-0 ${isKlein ? ENGINE_ACCENTS.klein.icon : 'text-content-subtle'}`} />}
+@@ -848,6 +877,26 @@ export default function VariationCatalog({ onGenerate, busy, generating = null,
+           ) : (
+             <span className="text-amber-300 text-[0.625rem]">⚠ Add an API key or connect a subscription in Settings</span>
+           )} />
++        <EngineCard id="openrouter" checked={isOR} available={orAvailable} generating={generating}
++          onToggle={toggleEngine} share={engineShare('openrouter')}
++          icon={<RouterIcon className={`w-9 h-9 shrink-0 ${isOR ? ENGINE_ACCENTS.openrouter.icon : 'text-content-subtle'}`} />}
++          title={<>OpenRouter <span className="font-normal text-content-subtle">· API</span></>}
++          tags={[
++            <span key="gpu" className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">No GPU</span>,
++            <span key="price" className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">Your credits</span>,
++            <span key="sfw" className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">SFW</span>,
++          ]}
++          hint={orAvailable ? (
++            <span className={`text-[0.625rem] ${isOR ? ENGINE_ACCENTS.openrouter.text : 'text-content-subtle'}`}>
++              {/* The model is free text in Settings, so the price here is an
++                  estimate for the DEFAULT one — say so rather than quote a
++                  number the user may have changed under it. */}
++              <span className="break-all">{openrouterModel || 'default model'}</span>
++              {' · '}{engineShare('openrouter')} image(s), billed by OpenRouter at that model&rsquo;s rate
++            </span>
++          ) : (
++            <span className="text-amber-300 text-[0.625rem]">⚠ Add OPENROUTER_API_KEY in Settings</span>
++          )} />
+       </div>
+ 
+       {/* How several engines share the run. Only shown when it can change
+diff --git a/frontend/src/components/dataset/engineSelection.js b/frontend/src/components/dataset/engineSelection.js
+index 539025b8..029a25af 100644
+--- a/frontend/src/components/dataset/engineSelection.js
++++ b/frontend/src/components/dataset/engineSelection.js
+@@ -19,14 +19,15 @@
+ /** Canonical engine order — drives the card order, the primary pick and the
+  *  round-robin. Stable: it is also the order batches are BUILT in, and Klein
+  *  must come last at DISPATCH time (see engineBatches). */
+-export const ENGINES = ['klein', 'nanobanana', 'chatgpt'];
++export const ENGINES = ['klein', 'nanobanana', 'chatgpt', 'openrouter'];
+ 
+-export const API_ENGINES = ['nanobanana', 'chatgpt'];
++export const API_ENGINES = ['nanobanana', 'chatgpt', 'openrouter'];
+ 
+ export const ENGINE_LABELS = {
+   klein: 'Klein',
+   nanobanana: 'Nano Banana Pro',
+   chatgpt: 'ChatGPT',
++  openrouter: 'OpenRouter',
+ };
+ 
+ /* Per-engine accent colour. Deliberately NOT green: green already means
+@@ -60,11 +61,28 @@ export const ENGINE_ACCENTS = {
+     pill: 'bg-sky-500/25 text-sky-200',
+     dot: 'bg-sky-400',
+   },
++  // Fuchsia is the 4th hue that stays apart from the other three in a dark
++  // theme AND in deuteranopia: indigo and sky are both blue-side but far apart
++  // in lightness, amber is the warm one, fuchsia is the only magenta. Still not
++  // green — green keeps meaning "kept / free" everywhere else.
++  openrouter: {
++    card: 'border-fuchsia-400/60 bg-fuchsia-500/15 ring-1 ring-fuchsia-400/40',
++    title: 'text-fuchsia-200',
++    text: 'text-fuchsia-300',
++    icon: 'text-fuchsia-300',
++    pill: 'bg-fuchsia-500/25 text-fuchsia-200',
++    dot: 'bg-fuchsia-400',
++  },
+ };
+ 
+ /** Pay-per-image rate. Klein is local GPU time, hence free; the ChatGPT
+- *  subscription lane spends plan quota, not dollars (handled by estimateCost). */
+-export const ENGINE_RATES = { klein: 0, nanobanana: 0.15, chatgpt: 0.17 };
++ *  subscription lane spends plan quota, not dollars (handled by estimateCost).
++ *  OpenRouter is an ESTIMATE for its default model (the same Gemini weights
++ *  Nano Banana calls, hence the same rate): the model is free text in Settings,
++ *  so a user who points it at a cheaper or dearer slug pays that instead. The
++ *  engine card says so — a number here is better than no guard-rail at all, but
++ *  it is the only rate in this table that the user can move. */
++export const ENGINE_RATES = { klein: 0, nanobanana: 0.15, chatgpt: 0.17, openrouter: 0.15 };
+ 
+ export const STORAGE_ENGINES = 'datasetGenerators';     // JSON list (new)
+ export const STORAGE_PRIMARY = 'datasetGenerator';      // legacy string mirror — NEVER renamed
+diff --git a/frontend/src/components/settings/EnginesSection.jsx b/frontend/src/components/settings/EnginesSection.jsx
+index b39810de..4104451e 100644
+--- a/frontend/src/components/settings/EnginesSection.jsx
++++ b/frontend/src/components/settings/EnginesSection.jsx
+@@ -13,11 +13,17 @@ const ENGINE_SECRETS = [
+   { key: 'GEMINI_API_KEY', label: 'Gemini API key', testTarget: 'gemini', help: 'Powers the Nano Banana engine.' },
+   { key: 'OPENAI_API_KEY', label: 'OpenAI API key', testTarget: 'openai',
+     help: 'Powers the ChatGPT (gpt-image-2) engine. Optional if you connect a ChatGPT subscription below.' },
++  { key: 'OPENROUTER_API_KEY', label: 'OpenRouter API key', testTarget: 'openrouter',
++    help: 'Powers the OpenRouter engine: one account and one balance in front of the same '
++      + 'upstream image models, including the ones the two engines above call directly. '
++      + 'Test only checks that a key is saved — OpenRouter bills per request, so nothing '
++      + 'is sent until you generate.' },
+ ]
+ 
+ const ENGINE_OPTIONS = [
+   { id: 'nanobanana', label: 'Nano Banana (Gemini)' },
+   { id: 'chatgpt', label: 'ChatGPT (gpt-image-2)' },
++  { id: 'openrouter', label: 'OpenRouter' },
+   { id: 'klein', label: 'Klein (ComfyUI, local)' },
+ ]
+ 
+@@ -516,6 +522,37 @@ export default function EnginesSection(props) {
+         {ENGINE_SECRETS.map((f) => <SecretField key={f.key} field={f} {...props} />)}
+       </Card>
+ 
++      {/* Free text, deliberately: OpenRouter's image catalogue changes often
++          (models arrive, get renamed, retire), and a dropdown baked into a build
++          would go stale between releases and lock users out of a model that
++          works. A blank field falls back to the default on the server. */}
++      <Card title="OpenRouter model"
++        help="Which image model the OpenRouter engine asks for. Any image model slug from openrouter.ai works.">
++        <div>
++          <label htmlFor="engines-openrouter_model" className="block text-sm font-medium text-content">
++            Model slug
++          </label>
++          <input
++            id="engines-openrouter_model"
++            type="text"
++            spellCheck="false"
++            autoComplete="off"
++            value={config.engines.openrouter_model ?? ''}
++            onChange={(e) => setField('engines', 'openrouter_model', e.target.value)}
++            placeholder="google/gemini-3-pro-image"
++            className={INPUT_CLASS}
++          />
++          <p className="mt-1 text-xs text-content-muted">
++            Leave blank for <code>google/gemini-3-pro-image</code> — the same weights the Nano
++            Banana engine calls, so switching engine changes who bills you, not the picture.
++            The model must accept reference images: the dataset generator always sends your
++            reference photos with the prompt. Browse the list at{' '}
++            <a href="https://openrouter.ai/models?output_modalities=image" target="_blank" rel="noreferrer"
++              className="text-primary underline">openrouter.ai/models</a>.
++          </p>
++        </div>
++      </Card>
++
+       <ChatgptSubscriptionCard caps={caps} config={config} setField={setField} refreshCaps={refreshCaps} toast={toast} />
+ 
+       <Card title="Engines" help="Which engines appear in the generate panel, and which one is preselected.">
+diff --git a/frontend/src/components/settings/registry.js b/frontend/src/components/settings/registry.js
+index 253577e7..127e3b0a 100644
+--- a/frontend/src/components/settings/registry.js
++++ b/frontend/src/components/settings/registry.js
+@@ -7,7 +7,7 @@ export const SETTINGS_SECTIONS = [
+     keywords: ['status', 'summary', 'capabilities', 'ready'] },
+   { id: 'engines', title: 'Image engines', icon: '🎨', eyebrow: 'generation',
+     description: 'API keys and engines used to generate dataset images.',
+-    keywords: ['gemini', 'openai', 'api key', 'chatgpt', 'nano banana', 'klein', 'engine', 'subscription', 'gpt-image',
++    keywords: ['gemini', 'openai', 'openrouter', 'api key', 'chatgpt', 'nano banana', 'klein', 'engine', 'subscription', 'gpt-image',
+       'lora', 'preset', 'texture', 'anatomy', 'nsfw', 'identity', 'prompt', 'guard', 'improve', 'upscale'] },
+   { id: 'scraping', title: 'Scraping & sources', icon: '🔎', eyebrow: 'sources',
+     description: 'Credentials used when scanning image sources.',
+@@ -39,7 +39,7 @@ export function sectionStatus(id, caps) {
+   const e = c.engines || {}
+   switch (id) {
+     case 'engines':
+-      return (e.nanobanana || e.chatgpt || e.klein) ? 'ready' : 'off'
++      return (e.nanobanana || e.chatgpt || e.openrouter || e.klein) ? 'ready' : 'off'
+     case 'local-tools': {
+       const parts = [
+         !!(c.comfyui && c.comfyui.reachable),
+diff --git a/frontend/src/context/CapabilitiesContext.jsx b/frontend/src/context/CapabilitiesContext.jsx
+index 48e7d8e6..b02ce64f 100644
+--- a/frontend/src/context/CapabilitiesContext.jsx
++++ b/frontend/src/context/CapabilitiesContext.jsx
+@@ -10,7 +10,7 @@ const CapabilitiesContext = createContext(null)
+ 
+ const EMPTY_CAPS = {
+   configured: false,
+-  engines: { nanobanana: false, chatgpt: false, klein: false },
++  engines: { nanobanana: false, chatgpt: false, openrouter: false, klein: false },
+   comfyui: { reachable: false, api_url: '', models: {} },
+   ollama: { reachable: false, installed: false, binary_path: '', url: '', vision_model: '', vision_model_ready: false },
+   aitoolkit: { configured: false, valid: false },
+diff --git a/frontend/src/help/helpRegistry.js b/frontend/src/help/helpRegistry.js
+index eaa1c3d1..6ca4b88b 100644
+--- a/frontend/src/help/helpRegistry.js
++++ b/frontend/src/help/helpRegistry.js
+@@ -296,9 +296,11 @@ const TOPICS = [
+   // ---- Settings: per-field topics (kind 'setting') -----------------------
+   // engines
+   setting('engines.default', 'engines', 'engine-default', 'Default engine',
+-    ['default engine', 'engine', 'preselect', 'nanobanana', 'nano banana', 'chatgpt', 'klein', 'gpt-image']),
++    ['default engine', 'engine', 'preselect', 'nanobanana', 'nano banana', 'chatgpt', 'klein', 'gpt-image',
++     'openrouter']),
+   setting('engines.enabled', 'engines', 'engines-enabled', 'Enabled engines',
+-    ['enabled engines', 'engine', 'engines', 'show', 'hide', 'generate panel', 'nanobanana', 'chatgpt', 'klein']),
++    ['enabled engines', 'engine', 'engines', 'show', 'hide', 'generate panel', 'nanobanana', 'chatgpt', 'klein',
++     'openrouter']),
+   setting('engines.chatgpt_auth', 'engines', 'chatgpt-auth-mode', 'ChatGPT engine auth',
+     ['chatgpt', 'auth', 'subscription', 'api key', 'codex', 'oauth', 'openai']),
+   setting('klein.generation_lora_presets', 'engines', 'klein-generation-lora-presets', 'Klein generation LoRA presets',
+@@ -318,6 +320,12 @@ const TOPICS = [
+     ['gemini', 'api key', 'nano banana', 'nanobanana', 'google', 'key']),
+   setting('OPENAI_API_KEY', 'engines', 'OPENAI_API_KEY', 'OpenAI API key',
+     ['openai', 'api key', 'chatgpt', 'gpt-image', 'gpt', 'key']),
++  setting('OPENROUTER_API_KEY', 'engines', 'OPENROUTER_API_KEY', 'OpenRouter API key',
++    ['openrouter', 'open router', 'api key', 'key', 'credits', 'one key', 'no subscription',
++     'gemini', 'gpt-image', 'seedream', 'flux']),
++  setting('engines.openrouter_model', 'engines', 'engines-openrouter_model', 'OpenRouter model',
++    ['openrouter', 'model', 'slug', 'model slug', 'gemini-3-pro-image', 'gpt-image-2', 'seedream',
++     'flux', 'reference images', 'image model']),
+   // scraping
+   setting('REDDIT_CLIENT_ID', 'scraping', 'REDDIT_CLIENT_ID', 'Reddit client ID',
+     ['reddit', 'client id', 'scrape', '429', 'rate limit', 'quota', 'key']),
+diff --git a/frontend/src/hooks/useSetupSteps.js b/frontend/src/hooks/useSetupSteps.js
+index a7bc8021..ec4e759d 100644
+--- a/frontend/src/hooks/useSetupSteps.js
++++ b/frontend/src/hooks/useSetupSteps.js
+@@ -12,12 +12,13 @@ function gateStatus(reachable, complete) {
+ 
+ function imageStep(caps) {
+   const e = caps.engines || {}
+-  const ready = e.nanobanana || e.chatgpt || e.klein
++  const ready = e.nanobanana || e.chatgpt || e.openrouter || e.klein
+   return {
+     id: 'image', title: 'Image generation', recommended: true,
+-    unlocks: ['Nano Banana (Gemini)', 'ChatGPT (gpt-image-2)', 'Klein (local)'],
++    unlocks: ['Nano Banana (Gemini)', 'ChatGPT (gpt-image-2)', 'OpenRouter', 'Klein (local)'],
+     status: ready ? 'ready' : 'available',
+-    engines: { nanobanana: !!e.nanobanana, chatgpt: !!e.chatgpt, klein: !!e.klein },
++    engines: { nanobanana: !!e.nanobanana, chatgpt: !!e.chatgpt,
++      openrouter: !!e.openrouter, klein: !!e.klein },
+   }
+ }
+ 
+@@ -109,7 +110,7 @@ export const COMFYUI_SKIP_LOST = [
+ export const COMFYUI_SKIP_KEPT = [
+   'Scraping and dataset curation',
+   'Captioning (Ollama vision model or the API engines)',
+-  'Nano Banana and ChatGPT image engines',
++  'Nano Banana, ChatGPT and OpenRouter image engines',
+   'LoRA training — local ai-toolkit and cloud (vast.ai)',
+   'Publishing datasets and LoRAs to Hugging Face',
+ ]
+@@ -269,6 +270,7 @@ export function deriveCapabilitySummary(caps) {
+   return [
+     { label: 'Nano Banana (Gemini)', ok: !!e.nanobanana },
+     { label: 'ChatGPT (gpt-image-2)', ok: !!e.chatgpt },
++    { label: 'OpenRouter', ok: !!e.openrouter },
+     { label: 'Klein (local)', ok: !!e.klein,
+       ...(!e.klein && comfyOff ? { pending: true, note: NOTE } : {}) },
+     { label: 'Captioning', ok: !!(cap.joycaption || cap.ollama) },
+@@ -284,7 +286,7 @@ export function deriveCapabilitySummary(caps) {
+ 
+ export function recommendedMet(caps) {
+   const e = (caps && caps.engines) || {}
+-  return !!(e.nanobanana || e.chatgpt || e.klein)
++  return !!(e.nanobanana || e.chatgpt || e.openrouter || e.klein)
+ }
+ 
+ // --- "Install everything" plan -------------------------------------------------
+diff --git a/frontend/src/pages/SetupPage.jsx b/frontend/src/pages/SetupPage.jsx
+index e7455a7a..63adee18 100644
+--- a/frontend/src/pages/SetupPage.jsx
++++ b/frontend/src/pages/SetupPage.jsx
+@@ -21,8 +21,15 @@ const KEY_FIELDS = [
+     href: 'https://aistudio.google.com/apikey', help: 'Powers Nano Banana.' },
+   { key: 'OPENAI_API_KEY', label: 'OpenAI API key', engine: 'chatgpt',
+     href: 'https://platform.openai.com/api-keys', help: 'Powers ChatGPT (gpt-image-2).' },
++  { key: 'OPENROUTER_API_KEY', label: 'OpenRouter API key', engine: 'openrouter',
++    href: 'https://openrouter.ai/keys',
++    help: 'Powers the OpenRouter engine — one key and one balance for the same '
++      + 'upstream models. Pick the model in Settings \u203a Image engines.' },
+ ]
+ 
++/** Which capability probe the "Save & test" button runs for each key field. */
++const KEY_TEST_TARGET = { nanobanana: 'gemini', chatgpt: 'openai', openrouter: 'openrouter' }
++
+ // Default local vision model + rough VRAM notes surfaced in the wizard. The
+ // ABLITERATED Qwen3-VL is required — vanilla qwen3-vl refuses to caption the NSFW
+ // concept datasets this app targets. VRAM figures are approximate minimums for the
+@@ -57,6 +64,7 @@ const STATUS_META = {
+ const CAPABILITY_STEP_ID = {
+   'Nano Banana (Gemini)': 'image',
+   'ChatGPT (gpt-image-2)': 'image',
++  'OpenRouter': 'image',
+   'Klein (local)': 'comfyui',
+   'Captioning': 'ollama',
+   'Auto-framing & head-crop': 'ollama',
+@@ -292,7 +300,7 @@ export default function SetupPage() {
+                 onChange={(e) => setSecretInputs((p) => ({ ...p, [f.key]: e.target.value }))} />
+               <div className="mt-1 flex items-center gap-3">
+                 <a href={f.href} target="_blank" rel="noreferrer" className="text-xs text-primary underline">Get a key</a>
+-                <button type="button" onClick={() => saveSecretThenTest(f.key, f.engine === 'nanobanana' ? 'gemini' : 'openai')}
++                <button type="button" onClick={() => saveSecretThenTest(f.key, KEY_TEST_TARGET[f.engine])}
+                   className="text-xs text-content-muted underline">Save &amp; test</button>
+               </div>
+             </div>
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index afa40c92..1705e7f0 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -54,6 +54,14 @@ export const WHATS_NEW = [
+       "Plenty of ai-toolkit installs have no venv at all — the popular easy-install script ships a python_embeded folder instead, and conda, uv and system-Python setups have nothing to find either. Setup used to answer those with \"set up its Python venv per the README\", which named a cause it had never checked and a fix those installs can never follow; more than one person concluded the app required a venv. It now says what it actually found — no Python interpreter in that folder — and offers both real ways out: create a venv, or keep the Python you already run ai-toolkit with. Better still, when an interpreter is sitting in that folder the wizard spots it and applies it with a single button. Thanks to Psyko_2000 (Reddit) for reporting it.",
+     to: '/settings/local-tools',
+   },
++  {
++    id: '2026-07-26-openrouter-image-engine',
++    date: '2026-07-26',
++    title: '🔀 OpenRouter is now an image engine — one key instead of one per provider',
++    blurb:
++      'Generating a dataset meant an account at Google AND at OpenAI, one key each. If you already pay for OpenRouter — a single balance in front of every provider — there was no way in at all. There is now: paste your OpenRouter key in Settings › Image engines, tick the OpenRouter card in the generator, and it renders alongside (or instead of) the others. It reaches the SAME upstream models, so this changes who bills you, not what the images look like: the default is google/gemini-3-pro-image, exactly the weights the Nano Banana engine calls. The model is a plain text field, so you can point it at gpt-image-2, Seedream, FLUX or anything else OpenRouter serves that accepts reference images, without waiting for an update. When something goes wrong it says which thing — no key, key refused, out of credits, unknown model — and a run that cannot possibly succeed stops instead of paying for the same refusal once per image. Nothing about the existing engines changed. Suggested by jqs (GitHub #13).',
++    to: '/settings/engines',
++  },
+   {
+     id: '2026-07-26-stop-during-a-watermark-pass-loses-nothing',
+     date: '2026-07-26',

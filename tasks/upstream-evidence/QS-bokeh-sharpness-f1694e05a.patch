@@ -1,0 +1,332 @@
+commit f1694e05a2f5ac8eceff861b10acc2dbfa343a9b
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Mon Aug 10 11:23:32 2026 +0200
+
+    fix(bank): stop flagging bokeh portraits as blurry
+    
+    Reported through community feedback: the 🌫 blurry flag caught shots with a
+    razor-sharp subject on a creamy out-of-focus background — technically true of
+    the frame as a whole, and exactly backwards for curation, since those are
+    often the best images in a bank.
+    
+    Cause: sharpness was the variance of the Laplacian over the WHOLE analysis
+    copy, so a large soft background averaged the sharp subject away and dragged
+    the score under bank.sharpness_min (100).
+    
+    The Laplacian is still recovered from the same two clamp-free half-
+    convolutions, and they still run ONCE on the whole frame — filtering each
+    tile separately would invent an edge at every tile border. The E[L²] identity
+    is per-pixel, so cropping the two filtered images yields exact per-tile
+    moments from their histograms, for free. The frame is split into at most 8×8
+    tiles (never below 32 px a side, so small images degrade to a single tile and
+    keep the historical whole-frame score) and blur_score is the 90th percentile
+    of the tile variances — not the max, which one JPEG-artefact block or burnt
+    highlight would use to certify a soft image as sharp.
+    
+    Threshold semantics are unchanged and still applied at read time: "even the
+    sharpest region of this image is soft". Scores land on a new, higher scale;
+    already-scanned banks pick them up at their next Quality re-scan, and the
+    settings reference says so.
+    
+    Measured on the synthetic fixtures: bokeh shot 78 (flagged) → 323 (kept);
+    uniformly blurred copy 2.2 → 2.5 (still flagged); tiny full-contrast speck in
+    a soft frame 869 (wrongly kept) → 2.5 (now flagged).
+---
+ backend/app/models.py                              |  2 +-
+ backend/app/services/image_quality.py              | 83 +++++++++++++++++++---
+ backend/tests/test_image_bank.py                   | 71 +++++++++++++++++-
+ docs/guide/settings-reference.md                   |  2 +-
+ frontend/src/components/bank/bankThresholds.js     |  2 +-
+ .../src/components/settings/CaptioningSection.jsx  |  2 +-
+ frontend/src/whatsNew.js                           |  8 +++
+ 7 files changed, 154 insertions(+), 16 deletions(-)
+
+diff --git a/backend/app/models.py b/backend/app/models.py
+index 12dcaf57..e585df4b 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -324,7 +324,7 @@ class BankImage(db.Model):
+     # Quality pass (pure-PIL, CPU). quality_state: NULL = not scanned yet |
+     # 'ok' | 'unreadable'. Scores are raw metric values (see image_quality.py).
+     quality_state = db.Column(String(12), nullable=True)
+-    blur_score = db.Column(Float, nullable=True)         # Laplacian variance (sharpness)
++    blur_score = db.Column(Float, nullable=True)         # Laplacian variance of the sharpest regions
+     noise_score = db.Column(Float, nullable=True)        # residual std vs Gaussian blur
+     uniformity_score = db.Column(Float, nullable=True)   # grayscale std (low = flat)
+     dhash = db.Column(String(16), nullable=True)         # 64-bit hex, same dHash as imports
+diff --git a/backend/app/services/image_quality.py b/backend/app/services/image_quality.py
+index 563a1ab5..a586a5b7 100644
+--- a/backend/app/services/image_quality.py
++++ b/backend/app/services/image_quality.py
+@@ -5,13 +5,27 @@ work out of the box on every install, extras or not).
+ The three metrics follow the classic recipes (the same ones Crucible-style
+ curation tools use), reformulated for PIL:
+ 
+-* **Sharpness** — variance of the 4-neighbour Laplacian. PIL's ``Kernel``
+-  filter clamps its uint8 output, so the signed Laplacian is recovered from
+-  TWO clamped convolutions (kernel and its negation, ``scale=4`` so the
+-  extreme |L|=4·255 maps exactly to 255 — no value ever clamps) and the
+-  variance is computed from their histograms: at every pixel exactly one of
+-  the two passes is non-zero, so E[L²] = 16·(E[pos²]+E[neg²]) and
+-  E[L] = 4·(E[pos]−E[neg]). Low variance = blurry (the ~100 rule of thumb).
++* **Sharpness** — variance of the 4-neighbour Laplacian, measured PER TILE and
++  aggregated over the SHARPEST regions, not over the whole frame. PIL's
++  ``Kernel`` filter clamps its uint8 output, so the signed Laplacian is
++  recovered from TWO clamped convolutions (kernel and its negation,
++  ``scale=4`` so the extreme |L|=4·255 maps exactly to 255 — no value ever
++  clamps) and the variance is computed from their histograms: at every pixel
++  exactly one of the two passes is non-zero, so E[L²] = 16·(E[pos²]+E[neg²])
++  and E[L] = 4·(E[pos]−E[neg]). That identity is per-pixel, so it holds over
++  any subset — cropping the two filtered images gives exact per-tile moments
++  for free. Low variance = blurry (the ~100 rule of thumb).
++
++  Whole-frame variance punished exactly the images a curator wants most:
++  a bokeh portrait is a small razor-sharp subject inside a large creamy
++  background, and the background drags the average under the threshold
++  (reported from the community). Scoring tile by tile and keeping a high
++  percentile of the tiles restores the intended meaning of the threshold: "even the
++  sharpest region of this image is soft → it really is blurry".
++  Scores are therefore on a NEW scale (higher for anything with a sharp
++  region); nothing breaks, since the threshold is applied at read time —
++  banks scanned before this change pick up the new score at their next
++  Quality re-scan.
+ * **Noise** — RMS of the residual against a Gaussian blur (σ≈1.1, the OpenCV
+   5×5 default): high-frequency energy the blur removed. High = noisy/grainy.
+   (Fine texture counts too — that's inherent to the method; it's a FLAG
+@@ -25,6 +39,8 @@ and the per-image cost is bounded (a phone photo and a 4K export cost the
+ same). Raw scores are returned — thresholds live in config ('bank' section)
+ and are applied at read time.
+ """
++import math
++
+ from PIL import Image, ImageChops, ImageFilter, ImageStat
+ 
+ ANALYSIS_MAX_SIDE = 1024
+@@ -37,6 +53,18 @@ _LAPLACIAN_NEG = tuple(-c for c in _LAPLACIAN)
+ # half-convolutions never clamp and the variance below is exact (mod rounding).
+ _LAP_SCALE = 4
+ 
++# Sharpness is read on a grid of at most _TILE_GRID×_TILE_GRID tiles over the
++# analysis copy; tiles never go below _TILE_MIN_SIDE px (a 20-px tile measures
++# almost nothing and its variance swings wildly), so small images simply get a
++# coarser grid — down to a single tile, i.e. the historical whole-frame score.
++_TILE_GRID = 8
++_TILE_MIN_SIDE = 32
++# Aggregate = 90th percentile of the tile variances, not the max: the max is one
++# tile, so a single JPEG-artefact block, a sensor hot spot or a burnt highlight
++# would certify a soft image as sharp. p90 asks that ~a tenth of the frame be
++# sharp — far below the share a bokeh subject occupies, far above one stray tile.
++_TILE_PERCENTILE = 0.90
++
+ # σ of the reference Gaussian for the noise residual — matches OpenCV's implied
+ # sigma for its 5×5 default kernel (0.3·((5−1)·0.5−1)+0.8).
+ _NOISE_SIGMA = 1.1
+@@ -52,6 +80,38 @@ def _moments(hist):
+     return m1, m2
+ 
+ 
++def _laplacian_variance(pos: Image.Image, neg: Image.Image, box) -> float:
++    """Variance of the signed Laplacian over ``box``, from the histograms of the
++    two half-convolutions (see module docstring). ``box`` must already exclude
++    PIL's unfiltered 1-px border."""
++    p1, p2 = _moments(pos.crop(box).histogram())
++    n1, n2 = _moments(neg.crop(box).histogram())
++    mean = _LAP_SCALE * (p1 - n1)
++    return max(0.0, _LAP_SCALE * _LAP_SCALE * (p2 + n2) - mean * mean)
++
++
++def _tile_boxes(box):
++    """Split ``box`` into an ~even grid of at most _TILE_GRID² tiles, each at
++    least _TILE_MIN_SIDE px per side where the box allows it."""
++    x0, y0, x1, y1 = box
++    cols = max(1, min(_TILE_GRID, (x1 - x0) // _TILE_MIN_SIDE))
++    rows = max(1, min(_TILE_GRID, (y1 - y0) // _TILE_MIN_SIDE))
++    xs = [x0 + round(i * (x1 - x0) / cols) for i in range(cols + 1)]
++    ys = [y0 + round(j * (y1 - y0) / rows) for j in range(rows + 1)]
++    return [(xs[i], ys[j], xs[i + 1], ys[j + 1])
++            for j in range(rows) for i in range(cols)]
++
++
++def _high_percentile(values) -> float:
++    """Nearest-rank percentile (_TILE_PERCENTILE) of a list of tile variances."""
++    ordered = sorted(values)
++    if not ordered:
++        return 0.0
++    idx = min(len(ordered) - 1,
++              max(0, math.ceil(_TILE_PERCENTILE * len(ordered)) - 1))
++    return ordered[idx]
++
++
+ def analysis_copy(im: Image.Image) -> Image.Image:
+     """Grayscale working copy, long side capped to ANALYSIS_MAX_SIDE.
+     LANCZOS: a box/bilinear downscale would smear detail and systematically
+@@ -72,14 +132,15 @@ def quality_metrics(im: Image.Image) -> dict:
+     # Sharpness: Laplacian variance via the two clamp-free half-convolutions.
+     # PIL leaves a 1-px border UNFILTERED (raw grayscale values, huge once
+     # squared) — crop to the interior before reading the histograms.
++    # The convolutions run ONCE on the whole frame and the tiles are cropped out
++    # of the RESULT: filtering each tile separately would invent a hard edge at
++    # every tile border and inflate the score of a perfectly smooth image.
+     w, h = g.size
+     interior = (1, 1, max(2, w - 1), max(2, h - 1))
+     pos = g.filter(ImageFilter.Kernel((3, 3), _LAPLACIAN, scale=_LAP_SCALE))
+     neg = g.filter(ImageFilter.Kernel((3, 3), _LAPLACIAN_NEG, scale=_LAP_SCALE))
+-    p1, p2 = _moments(pos.crop(interior).histogram())
+-    n1, n2 = _moments(neg.crop(interior).histogram())
+-    mean = _LAP_SCALE * (p1 - n1)
+-    blur = max(0.0, _LAP_SCALE * _LAP_SCALE * (p2 + n2) - mean * mean)
++    blur = _high_percentile([_laplacian_variance(pos, neg, box)
++                             for box in _tile_boxes(interior)])
+     # Noise: RMS of the Gaussian residual.
+     blurred = g.filter(ImageFilter.GaussianBlur(radius=_NOISE_SIGMA))
+     _d1, d2 = _moments(ImageChops.difference(g, blurred).histogram())
+diff --git a/backend/tests/test_image_bank.py b/backend/tests/test_image_bank.py
+index d8c02376..fde9fe74 100644
+--- a/backend/tests/test_image_bank.py
++++ b/backend/tests/test_image_bank.py
+@@ -38,6 +38,25 @@ def photo_like(size=256):
+     return im.convert('RGB')
+ 
+ 
++def bokeh_like(size=512, subject=208, cell=2, amp=5, base=120):
++    """A bokeh portrait in miniature: an in-focus subject (fine ±``amp``
++    texture) covering ~17% of the frame, on a large creamy out-of-focus
++    background (smooth gradient). The defaults sit in the exact regime the bug
++    report describes — whole-frame Laplacian variance ≈78, i.e. under the
++    default sharpness_min of 100, while the subject's own tiles score ≈320.
++    ``amp=120`` with a tiny ``subject`` gives the opposite pathology: a single
++    blazing block in an otherwise soft frame."""
++    im = Image.new('L', (size, size))
++    lo, hi = (size - subject) // 2, (size + subject) // 2
++
++    def value(x, y):
++        if lo <= x < hi and lo <= y < hi:
++            return base + (amp if (x // cell + y // cell) % 2 else -amp)
++        return min(255, int(60 + 140 * x / size + 40 * y / size))
++    im.putdata([value(x, y) for y in range(size) for x in range(size)])
++    return im.convert('RGB')
++
++
+ def noisy(size=128, seed=7):
+     rng = random.Random(seed)
+     im = Image.new('L', (size, size))
+@@ -110,10 +129,60 @@ def test_quality_metrics_discriminate():
+     assert gray['uniformity_score'] < 12 < sharp['uniformity_score']
+ 
+ 
++def test_sharpness_reads_the_sharpest_region_not_the_whole_frame():
++    """Reported by the community: bokeh portraits — a small razor-sharp subject
++    on a large creamy background — were flagged 🌫 blurry, because whole-frame
++    Laplacian variance averages the sharp subject away. Per-tile scoring must
++    clear the default sharpness_min for the bokeh shot while a genuinely soft
++    image (everything blurred) stays below it."""
++    from app.services.image_quality import (
++        _laplacian_variance, analysis_copy, quality_metrics, _LAPLACIAN,
++        _LAPLACIAN_NEG, _LAP_SCALE)
++    from app.config import DEFAULTS
++    threshold = DEFAULTS['bank']['sharpness_min']
++
++    bokeh = bokeh_like()
++    soft = bokeh.filter(ImageFilter.GaussianBlur(6))
++
++    # The regression this fixes: whole-frame variance sinks the bokeh shot.
++    g = analysis_copy(bokeh)
++    w, h = g.size
++    whole = _laplacian_variance(
++        g.filter(ImageFilter.Kernel((3, 3), _LAPLACIAN, scale=_LAP_SCALE)),
++        g.filter(ImageFilter.Kernel((3, 3), _LAPLACIAN_NEG, scale=_LAP_SCALE)),
++        (1, 1, w - 1, h - 1))
++    assert whole < threshold, 'fixture no longer reproduces the reported bug'
++
++    assert quality_metrics(bokeh)['blur_score'] > threshold
++    assert quality_metrics(soft)['blur_score'] < threshold
++
++
++def test_sharpness_tiles_ignore_a_single_hot_tile():
++    """p90, not max: one blazing block in an otherwise soft frame (a JPEG
++    artefact, a burnt highlight, a watermark) must NOT certify the image as
++    sharp — and here the whole-frame score would have."""
++    from app.services.image_quality import (
++        _laplacian_variance, analysis_copy, quality_metrics, _LAPLACIAN,
++        _LAPLACIAN_NEG, _LAP_SCALE)
++    from app.config import DEFAULTS
++    threshold = DEFAULTS['bank']['sharpness_min']
++    speck = bokeh_like(subject=48, amp=120)  # <1% of the frame, full contrast
++    g = analysis_copy(speck)
++    w, h = g.size
++    whole = _laplacian_variance(
++        g.filter(ImageFilter.Kernel((3, 3), _LAPLACIAN, scale=_LAP_SCALE)),
++        g.filter(ImageFilter.Kernel((3, 3), _LAPLACIAN_NEG, scale=_LAP_SCALE)),
++        (1, 1, w - 1, h - 1))
++    assert whole > threshold, 'whole-frame variance used to call this sharp'
++    assert quality_metrics(speck)['blur_score'] < threshold
++
++
+ def test_quality_metrics_match_reference_laplacian():
+     """The two-pass histogram trick must equal a direct signed Laplacian
+     variance over the interior (PIL leaves the 1-px border unfiltered, so the
+-    implementation crops it — the reference does the same)."""
++    implementation crops it — the reference does the same).
++    48 px is below one tile's minimum side, so the grid degenerates to a single
++    tile and blur_score is exactly the whole-interior variance."""
+     from app.services.image_quality import quality_metrics
+     im = photo_like(size=48).convert('L')
+     px = list(im.getdata())
+diff --git a/docs/guide/settings-reference.md b/docs/guide/settings-reference.md
+index 0314c628..a534f2f3 100644
+--- a/docs/guide/settings-reference.md
++++ b/docs/guide/settings-reference.md
+@@ -646,7 +646,7 @@ with **no rescan**. (The two exceptions are noted below.)
+ > save, and groups the controls by intent. See
+ > *Using the app → Tune the Bank filter thresholds*.
+ 
+-- **Sharpness minimum** → `bank.sharpness_min`. Variance of the Laplacian (the classic focus measure) under this = flagged **🌫 blurry**. Default **`100`**. Raise it to be stricter about focus, lower it if artistic soft shots get flagged.
++- **Sharpness minimum** → `bank.sharpness_min`. Variance of the Laplacian (the classic focus measure) under this = flagged **🌫 blurry**. Default **`100`**. Raise it to be stricter about focus, lower it if artistic soft shots get flagged. Measured **region by region**, and the score kept is that of the sharpest regions — so a bokeh portrait (sharp subject, creamy background) is not flagged just because most of the frame is deliberately out of focus. A bank scanned before that change carries the old whole-frame scores, which are lower: re-run the Quality pass on it to compare like with like.
+ - **Noise maximum** → `bank.noise_max`. High-frequency residual (RMS vs a Gaussian blur) over this = flagged **📺 noisy**. Default **`15`**. Heavily textured images (foliage, fabric) score high by nature — this is a flag to review, not a verdict.
+ - **Uniformity minimum** → `bank.uniformity_min`. Grayscale spread under this = flagged **⬜ flat** (solid colors, black frames, empty screenshots). Default **`12`**.
+ - **Minimum side (px)** → `bank.min_side`. Smaller image side under this = flagged **📐 small**. Default **`768`** — the same bar as the dataset import guard, because trainers only ever *downscale*.
+diff --git a/frontend/src/components/bank/bankThresholds.js b/frontend/src/components/bank/bankThresholds.js
+index 074eedd2..ef482682 100644
+--- a/frontend/src/components/bank/bankThresholds.js
++++ b/frontend/src/components/bank/bankThresholds.js
+@@ -119,7 +119,7 @@ export const BANK_THRESHOLDS = [
+     label: 'Sharpness minimum', unit: 'Laplacian variance',
+     step: 10, min: 0, integer: false,
+     catchesMoreWhen: 'raised', applies: 'instant',
+-    hint: 'Laplacian variance under this is flagged 🌫 blurry. ~100 is the classic rule of thumb.',
++    hint: 'Laplacian variance of the image\'s SHARPEST regions under this is flagged 🌫 blurry — a bokeh subject on a soft background stays sharp. ~100 is the classic rule of thumb.',
+   },
+   {
+     field: 'noise_max', group: 'quality', flag: 'noise',
+diff --git a/frontend/src/components/settings/CaptioningSection.jsx b/frontend/src/components/settings/CaptioningSection.jsx
+index a60666ce..042013e9 100644
+--- a/frontend/src/components/settings/CaptioningSection.jsx
++++ b/frontend/src/components/settings/CaptioningSection.jsx
+@@ -298,7 +298,7 @@ export default function CaptioningSection({ config, setField, configDefaults })
+               value={config.bank?.sharpness_min ?? bankDefault('sharpness_min')}
+               onChange={(e) => setField('bank', 'sharpness_min', parseFloat(e.target.value) || 0)}
+               className={INPUT_CLASS} />
+-            <p className="mt-0.5 text-xs text-content-muted">Laplacian variance under this = 🌫 blurry.</p>
++            <p className="mt-0.5 text-xs text-content-muted">Sharpest region under this = 🌫 blurry.</p>
+             <ResetToDefault label="Sharpness minimum" section="bank" field="sharpness_min"
+               config={config} configDefaults={configDefaults} setField={setField} />
+           </div>
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index 4e7d97c4..37f066c0 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -49,6 +49,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
+ 
+ // Newest first. Prepend new waves at the top.
+ export const WHATS_NEW = [
++  {
++    id: '2026-08-10-sharpness-reads-the-sharpest-region',
++    date: '2026-08-10',
++    title: 'Bokeh portraits are no longer flagged as blurry',
++    blurb:
++      'The 🌫 blurry flag measured focus across the whole frame, so a shot with a razor-sharp subject on a creamy out-of-focus background averaged out as soft — and the pictures you most wanted to keep were the ones getting flagged. Sharpness is now read region by region and scored on the sharpest parts of the image, so the flag means what it always should have: even the crispest area of this photo is soft. It also stops the reverse mistake, where one blazing block — a watermark, a compression artefact, a burnt highlight — vouched for an otherwise soft frame. Scores are on a new, higher scale; run the Quality pass again on an already-scanned bank to pick them up. Thanks to the community for reporting it.',
++    to: '/bank',
++  },
+   {
+     id: '2026-08-10-bank-pass-remembers-itself',
+     date: '2026-08-10',

@@ -1,0 +1,715 @@
+commit 63b6f634c6e1e82d2ccf9d01fb04ab6e4d233b34
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Fri Aug 7 01:29:07 2026 +0200
+
+    feat(captions): each caption says who wrote it, and the run says who wrote what
+    
+    The default captioning backend is 'auto', which is a CHAIN: JoyCaption writes what
+    it can, then the Ollama vision model covers the images JoyCaption did not caption.
+    Both halves land in the same column, in the same font, and nothing on screen told
+    them apart — so a caption that describes something the image does not contain read
+    exactly like one that reads it correctly.
+    
+    The data already existed. `caption_origin` has been stamped by every caption writer
+    since services/caption_origin.py landed, and it was used for exactly one decision
+    (which rows a forced 🔄 Re-caption spares) while the screens where a caption is READ
+    still showed an anonymous string. utils/captionEngines.js named this follow-up in its
+    own header; this is it.
+    
+    WHERE THE AUTHOR IS NOW VISIBLE
+      · bank tile tooltip — the caption is prefixed by who wrote it;
+      · dataset tile — a chip on the caption's own action row;
+      · expanded caption editor — a line per box, long and short separately (the short
+        caption has its own writers, so the long one's stamp cannot answer for it);
+      · identity-leak list — where captions are read one by one to decide what to redo.
+    
+    WHAT THE RUN NOW REPORTS. The bank caption pass appends '— 340 by JoyCaption, 87 by
+    the Ollama vision model' to its result, counted from the rows it actually STAMPED —
+    not from the pool it started with (which counts rows the pass then skipped as stale,
+    deleted or newer-caption-won) and not from the backend that was asked for ('auto'
+    would mislabel roughly half a bank). 'asserted' is never in that list: no pass writes
+    it. The dataset lane already had these counts; the bank did not.
+    
+    An engine name this build does not know is printed under its own name rather than
+    dropped, and a write whose engine reported no name is counted apart instead of being
+    attributed to one — NULL means 'never recorded', never 'machine'.
+    
+    Payloads gain caption_origin (bank rows, dataset images) and caption_short_origin
+    (dataset images). Additive keys only; no stored value is renamed.
+    
+    Also lands the NSFW notice in the bank caption launch window
+    (components/bank/captionNsfwNotice.js) — see the next commit's tests for its
+    threshold and its evidence base.
+---
+ backend/app/services/face_dataset_service.py       |   9 ++
+ backend/app/services/image_bank_service.py         |  84 ++++++++++-
+ frontend/src/components/bank/BankWorkspace.jsx     |  43 +++++-
+ frontend/src/components/bank/captionNsfwNotice.js  | 157 +++++++++++++++++++++
+ .../src/components/dataset/CaptionEditorDialog.jsx |  42 +++++-
+ .../src/components/dataset/DatasetGridItem.jsx     |  19 +++
+ .../src/components/dataset/DatasetWorkspace.jsx    |  14 ++
+ frontend/src/utils/captionOrigin.js                | 111 +++++++++++++++
+ 8 files changed, 474 insertions(+), 5 deletions(-)
+
+diff --git a/backend/app/services/face_dataset_service.py b/backend/app/services/face_dataset_service.py
+index ce2f108a..c328a985 100644
+--- a/backend/app/services/face_dataset_service.py
++++ b/backend/app/services/face_dataset_service.py
+@@ -5271,6 +5271,15 @@ def dataset_payload(user_id, dataset_id):
+                     'framing': i.framing, 'variation_label': i.variation_label,
+                     'status': i.status, 'caption': i.caption,
+                     'caption_short': i.caption_short,
++                    # WHO wrote each of the two texts ('asserted' | 'joycaption' |
++                    # 'ollama' | NULL = never recorded — services/caption_origin.py).
++                    # It travels WITH the sentence, per image and per field: the
++                    # default 'auto' backend chains JoyCaption then Ollama inside a
++                    # single run, and the short caption has its own writers, so
++                    # neither the settings value nor the long caption's stamp can
++                    # answer "who wrote the words I am reading".
++                    'caption_origin': i.caption_origin,
++                    'caption_short_origin': i.caption_short_origin,
+                     'fail_reason': i.fail_reason,
+                     # 'refused' | 'empty' | 'error' | None — de quelle NATURE est
+                     # l'échec, pour que l'UI puisse compter les refus fournisseur
+diff --git a/backend/app/services/image_bank_service.py b/backend/app/services/image_bank_service.py
+index 2615992b..750bf9d4 100644
+--- a/backend/app/services/image_bank_service.py
++++ b/backend/app/services/image_bank_service.py
+@@ -1273,6 +1273,12 @@ def _image_dict(row: BankImage, th: dict, promoted_by: dict | None = None) -> di
+         # dataset one, which is stored in user databases and read as a dataset id.
+         'promoted_bank_id': row.promoted_bank_id,
+         'caption': row.caption,
++        # WHO wrote that caption ('asserted' | 'joycaption' | 'ollama' | NULL =
++        # never recorded — services/caption_origin.py). Sent with the text and
++        # not derived from the current backend setting: the 'auto' backend CHAINS
++        # two engines inside one run, so a bank holds both, and the settings value
++        # names a policy rather than the writer of any one sentence.
++        'caption_origin': row.caption_origin,
+     }
+ 
+ 
+@@ -1881,7 +1887,17 @@ def bank_payload(user_id, bank_id) -> dict | None:
+         'caption': {'todo': {'keep': int(todo_keep or 0),
+                              'pending': int(todo_pending or 0),
+                              'reject': int(todo_reject or 0)},
+-                    'all': dict(all_by_status)},
++                    'all': dict(all_by_status),
++                    # …and WHAT KIND of images this pile holds, measured, because
++                    # one thing the captioners are known to do badly is tied to
++                    # that: see captionNsfwNotice.js. Two figures per pile and
++                    # never one, for the same reason `unscanned` exists beside the
++                    # flag totals — an image ✨ Score never reached is not a SFW
++                    # image, and a share computed over the whole pile would quietly
++                    # treat "unknown" as "clean" and understate itself.
++                    'nsfw': _todo_by_status(bank_id, _flag_filter('nsfw', th)),
++                    'nsfw_measured': _todo_by_status(
++                        bank_id, BankImage.nsfw_score.isnot(None))},
+     }
+     framing = _framing_counts(bank_id)
+     flags, flags_actionable = _flag_counts(bank_id, th)
+@@ -8346,6 +8362,48 @@ def start_caption(app, user_id, bank_id, ids=None, force=False, vocabulary=None,
+                            total=total)
+ 
+ 
++# The name each stored origin gets in a sentence. 'asserted' is absent ON PURPOSE:
++# no pass ever writes it, and a pass that reported it would be reporting something
++# it did not do. Keys are the stored values (services/caption_origin.py) — frozen.
++_CAPTION_WRITER_NAMES = {
++    caption_origin.JOYCAPTION: 'JoyCaption',
++    caption_origin.OLLAMA: 'the Ollama vision model',
++}
++
++
++def _caption_writers_note(wrote, unrecorded=0):
++    """" — 340 by JoyCaption, 87 by the Ollama vision model", or ''.
++
++    WHY THE RUN HAS TO SAY THIS. The default backend is 'auto', which is a CHAIN:
++    JoyCaption writes what it can, the Ollama vision model covers the rest. The two
++    write differently and, on some material, one of them writes something that is
++    not in the picture at all — so "427 captioned" describes two halves the user has
++    no way to tell apart afterwards. These numbers come from the rows that were
++    STAMPED, so they are what the run wrote and not what it was asked to write.
++
++    Silence when a single engine wrote everything would be a smaller lie but still
++    one — a one-engine run is exactly the thing worth confirming — so the note is
++    emitted for one writer as well.  '' only when nothing was written at all.
++
++    An engine name this build does not know is printed AS ITSELF rather than
++    dropped: swallowing it would rebuild the blind spot this note exists to close.
++    """
++    parts = []
++    for key in (caption_origin.JOYCAPTION, caption_origin.OLLAMA):
++        n = int(wrote.get(key) or 0)
++        if n:
++            parts.append(f'{n} by {_CAPTION_WRITER_NAMES[key]}')
++    for key in sorted(k for k in (wrote or {}) if k not in _CAPTION_WRITER_NAMES):
++        n = int(wrote.get(key) or 0)
++        if n:
++            parts.append(f'{n} by {key}')
++    if unrecorded:
++        # NOT "by nobody": the engine did not report a name, so the row stores
++        # NULL and the sentence says exactly that much and no more.
++        parts.append(f'{int(unrecorded)} whose engine did not report a name')
++    return f' — {", ".join(parts)}' if parts else ''
++
++
+ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+                  backend=None, ollama_model=None, statuses=None,
+                  keep_asserted=False):
+@@ -8385,9 +8443,20 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+         if not paths:
+             return
+         captioned = vanished = stale = spared_mid_pass = 0
++        # WHO ended up writing, counted from the rows that were actually STAMPED —
++        # not from the pool, and not from the backend that was asked for. 'auto'
++        # is a chain (JoyCaption, then Ollama on what it missed), so the requested
++        # value would mislabel roughly half a bank, and the pool would count rows
++        # the pass then skipped as stale/deleted/newer-caption-won. The same
++        # mistake the flag counters were built to stop making.
++        wrote = {}
++        # None is a real outcome (an engine that reports no name) and it is kept
++        # apart rather than folded into either engine — the column stores NULL for
++        # it and reads as "never recorded", not as "machine".
++        unrecorded_writes = 0
+ 
+         def _on_caption(path, caption, engine=None):
+-            nonlocal captioned, vanished, stale, spared_mid_pass
++            nonlocal captioned, vanished, stale, spared_mid_pass, unrecorded_writes
+             planned = by_path.get(path)
+             if planned is None:
+                 return           # a path this pass never asked about — not ours
+@@ -8418,9 +8487,17 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+             # WHICH engine wrote this row, reported by the engine that wrote it —
+             # not the backend that was asked for. 'auto' chains both, so the
+             # requested value would mislabel roughly half the bank.
+-            caption_origin.stamp(row, caption, caption_origin.engine_origin(engine))
++            origin = caption_origin.engine_origin(engine)
++            caption_origin.stamp(row, caption, origin)
+             db.session.commit()
+             captioned += 1
++            # Counted from row.caption_origin rather than from `origin`: stamp()
++            # clears the origin on a blank caption, and a row that stored no author
++            # must not be reported as one written by an engine.
++            if row.caption_origin:
++                wrote[row.caption_origin] = wrote.get(row.caption_origin, 0) + 1
++            else:
++                unrecorded_writes += 1
+ 
+         # GPU-exclusive for the whole pass, exactly like the score/watermark passes:
+         # frees ComfyUI VRAM and blocks a training start for the duration.
+@@ -8444,6 +8521,7 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+             bank_jobs.progress(job, detail=f'cancelled — {captioned} captioned so far')
+             return
+         detail = f'done — {captioned} captioned'
++        detail += _caption_writers_note(wrote, unrecorded_writes)
+         if skipped_asserted:
+             # Named in the RESULT, not only in the warning before the click: the
+             # user has to be able to see afterwards that the protection did
+diff --git a/frontend/src/components/bank/BankWorkspace.jsx b/frontend/src/components/bank/BankWorkspace.jsx
+index b3beeeeb..4c4be70d 100644
+--- a/frontend/src/components/bank/BankWorkspace.jsx
++++ b/frontend/src/components/bank/BankWorkspace.jsx
+@@ -50,6 +50,11 @@ import {
+   captionRecaptionConfirmation, captionRecaptionDisabledReason, captionRecaptionLabel,
+   captionRecaptionNote, captionScopeNote, captionScopeStatuses,
+ } from './bankCaptionScope.js'
++// …and the one thing the captioners are known to do badly, said where the engine is
++// still free to change. Pure/testable; stays silent unless the scope is measurably
++// the material it was measured on (see the module header for the evidence base).
++import { captionNsfwNotice } from './captionNsfwNotice.js'
++import { passScopeOption } from './bankPassScope.js'
+ // 🎛 The launch window every pass now opens, and the two pure modules behind it:
+ // what each pass is (blocks, offered scopes, refusals) and how big a run is.
+ import PassDialog from './PassDialog.jsx'
+@@ -63,6 +68,9 @@ import { BANK_ZONES, nextBankStep } from './bankGuide.js'
+ import { ORIGIN_CHIPS, PROVENANCE_FLAG_LABEL, detailSummary } from './bankProvenance.js'
+ // Grid ordering menu (which sorts exist, and which ones have data) — pure/testable.
+ import { bankSortGroups, loadBankSort, saveBankSort } from '../../utils/gridSort.js'
++// WHO wrote the caption on a tile — the per-image half of the same provenance the
++// pass reports in aggregate (utils/captionEngines.js).
++import { captionOriginTooltipLine } from '../../utils/captionOrigin.js'
+ // 🏷️ One image's caption → the chips you can filter by, and the same chips over a
+ // whole SELECTION with how often each was cited (pure/testable).
+ import {
+@@ -627,7 +635,13 @@ function Tile({ img, bankId, selected, onToggle, onReview, onTags, size }) {
+           + (img.origin && img.origin !== 'unknown' ? ` · ${img.origin}` : '')
+           + (img.style_cluster ? ` · style #${img.style_cluster}` : '')
+           + (img.semantic_dup_group ? ` · same shot #${img.semantic_dup_group}` : '')
+-          + (img.caption ? `\n${img.caption}` : '')}
++          // The caption, and WHO WROTE IT in the same breath. The 'auto' backend
++          // chains two engines inside one run, so a bank holds both and the
++          // sentence alone cannot say which half produced it — exactly the reading
++          // this tooltip was missing.
++          + (img.caption
++            ? `\n${captionOriginTooltipLine(img.caption, img.caption_origin)}: ${img.caption}`
++            : '')}
+         className="block w-full">
+         {/* ?r= is a cache buster, not a parameter the server reads: the thumb
+             route answers with max-age=3600, so a turned image would keep showing
+@@ -1933,6 +1947,16 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
+      ("Standard — the prompt as⌄"). */
+   const captionSelectClass = 'mt-0.5 w-full rounded-lg border border-border bg-app/60 '
+     + 'px-2 py-1 text-xs text-content disabled:opacity-40'
++  /* Rendered UNDER the engine picker, because it is about the engine and the picker
++     is the lever it names. It re-computes as the engine changes, so ticking
++     JoyCaption turns the warning into its own confirmation instead of leaving an
++     alarm on screen about a half that will no longer run. */
++  const captionNsfw = captionNsfwNotice({
++    payload,
++    scopeId: captionScope,
++    piles: passScopeOption(captionScope).piles,
++    engineId: captionEngine,
++  })
+   const captionRunControls = (
+     <div className="space-y-2 rounded-md border border-border bg-surface-raised p-2">
+       <p className="m-0 text-[11px] font-semibold uppercase tracking-wide text-content-muted">
+@@ -1991,6 +2015,23 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
+           </select>
+         </label>
+       </div>
++      {captionNsfw && (
++        <div role="note" aria-label="What this run is about to caption"
++          className={`space-y-1 rounded-md border px-2 py-1.5 ${
++            captionNsfw.tone === 'warn'
++              ? 'border-amber-400/40 bg-amber-500/10' : 'border-sky-400/40 bg-sky-500/10'}`}>
++          <p className={`m-0 text-[11px] font-semibold leading-snug ${
++            captionNsfw.tone === 'warn' ? 'text-amber-200' : 'text-sky-200'}`}>
++            {captionNsfw.tone === 'warn' ? '⚠ ' : 'ℹ ' }{captionNsfw.heading}
++          </p>
++          {captionNsfw.paragraphs.map((line) => (
++            <p key={line} className={`m-0 text-[11px] leading-snug ${
++              captionNsfw.tone === 'warn' ? 'text-amber-100/90' : 'text-sky-100/90'}`}>
++              {line}
++            </p>
++          ))}
++        </div>
++      )}
+       <p className="m-0 text-[11px] leading-snug text-content-subtle">
+         {captionScopeNote(selected.size, counts, captionScope)}
+       </p>
+diff --git a/frontend/src/components/bank/captionNsfwNotice.js b/frontend/src/components/bank/captionNsfwNotice.js
+new file mode 100644
+index 00000000..4c3c29de
+--- /dev/null
++++ b/frontend/src/components/bank/captionNsfwNotice.js
+@@ -0,0 +1,157 @@
++/* THE ONE THING THE CAPTIONERS ARE KNOWN TO DO BADLY, said where it is decided.
++ *
++ * Plain .js (no JSX) so `node --test` executes all of it.
++ *
++ * WHAT WAS MEASURED, AND BY WHOM
++ * ------------------------------
++ * This project's maintainer captioned one explicit test image with three
++ * abliterated qwen3-vl builds (30b-a3b, 8b-instruct, 8b) and with JoyCaption.
++ * All three qwen builds missed a person who was present in the image and each
++ * described a generic act that was not the one in the picture; JoyCaption read the
++ * same image correctly. Refusal was NOT the failure mode — the models answered
++ * confidently, at length, about something else.
++ *
++ * That is the whole evidence base: ONE image, ONE session, THREE named builds. The
++ * sentences below say exactly that and stop. They do not say "vision models
++ * hallucinate", they do not say "Ollama is unreliable", and they must never be
++ * edited into either — over-claiming about a third party's model would be the same
++ * failure of honesty this feature exists to correct, pointed outward.
++ *
++ * WHY IT BELONGS IN THE CAPTION WINDOW
++ * ------------------------------------
++ * The default backend is 'auto', a CHAIN: JoyCaption writes what it can, the Ollama
++ * vision model covers the rest. The measured failure is in the second half, and the
++ * chain is invisible — the two halves land in the same column, in the same font.
++ * The launch window is the last moment where the choice is still free and costs
++ * nothing; afterwards the only remedy is re-reading captions one by one.
++ *
++ * WHEN IT STAYS QUIET, which is most of the time and is the point:
++ *   · below CAPTION_NSFW_SHARE_MIN of the measured images — a bank that is
++ *     incidentally spicy is not a bank this measurement is about, and a notice
++ *     that fires everywhere is a notice nobody reads;
++ *   · below CAPTION_NSFW_MEASURED_MIN measured images — "3 of 8" is not a share,
++ *     it is noise, and quoting it would dress a coin flip up as a finding;
++ *   · when ✨ Score has never run on the pile: the share is then UNKNOWN, not low.
++ *     Silence is the honest reading — an unmeasured image is not a SFW image, and
++ *     the app does not guess which. The cost is real and named here rather than
++ *     hidden: on a never-scored bank this notice cannot fire at all.
++ *
++ * THE DENOMINATOR IS THE MEASURED ROWS, never the pile, for that same reason: a
++ * share over the pile would silently count "never scored" as "not NSFW" and
++ * understate itself on exactly the banks that need the sentence.
++ */
++
++/** At or above this share of the MEASURED images, the pass is running mostly on
++ *  the material the failure was measured on.
++ *
++ *  A quarter, and not a majority: the failure is per image, not per bank. At 25%
++ *  a 400-image run puts ~100 captions in the zone where a caption that describes
++ *  something else would be indistinguishable from a good one — far past the point
++ *  where a user who spot-checks a handful would happen to catch it. Going higher
++ *  (a "majority") would stay silent on banks where a quarter of the work is
++ *  affected; going lower would fire on ordinary portrait banks and turn the notice
++ *  into furniture. */
++export const CAPTION_NSFW_SHARE_MIN = 0.25;
++
++/** …and never on fewer measured images than this. A percentage of 8 rows is not a
++ *  measurement of anything. */
++export const CAPTION_NSFW_MEASURED_MIN = 20;
++
++/** How many images of this scope ✨ Score measured, and how many it flagged NSFW.
++ *  null when the server has not sent the figures (a build that predates them, or a
++ *  payload that has not landed) — which is not the same as zero and never renders
++ *  as one. */
++export function captionNsfwCounts(payload, scopeId, piles) {
++  const p = payload?.pass_scopes?.caption;
++  if (!p || !p.nsfw || !p.nsfw_measured) return null;
++  const list = Array.isArray(piles) && piles.length ? piles : ['keep', 'pending'];
++  let flagged = 0;
++  let measured = 0;
++  for (const pile of list) {
++    flagged += Number(p.nsfw[pile]) || 0;
++    measured += Number(p.nsfw_measured[pile]) || 0;
++  }
++  return { flagged, measured, share: measured ? flagged / measured : 0 };
++}
++
++/** Does this run reach the half that was measured going wrong?
++ *  'joycaption' does not; '', 'auto' and 'ollama' do, in two different ways. */
++function ollamaHalf(engineId) {
++  const id = (engineId || '').trim().toLowerCase();
++  if (id === 'joycaption') return 'none';
++  if (id === 'ollama') return 'only';
++  return 'chain';   // '' (Settings) and 'auto' — the default, and a chain
++}
++
++/** The notice, or null for "say nothing".
++ *
++ *  Shape: { tone, heading, paragraphs: [string] }. `tone` is 'warn' when the run
++ *  reaches the measured half and 'info' when the user has already picked the way
++ *  around it — the second one is a confirmation, not an alarm, and it exists
++ *  because a protection nobody can see is a protection nobody trusts.
++ */
++export function captionNsfwNotice({ payload, scopeId, piles, engineId } = {}) {
++  const counts = captionNsfwCounts(payload, scopeId, piles);
++  if (!counts) return null;
++  if (counts.measured < CAPTION_NSFW_MEASURED_MIN) return null;
++  if (counts.share < CAPTION_NSFW_SHARE_MIN) return null;
++  const pct = Math.round(counts.share * 100);
++  const scale = `${pct}% of the ${counts.measured} scored images in this scope `
++    + 'are flagged NSFW.';
++  // What the measurement was, stated once and identically in every branch, so the
++  // claim can never drift between them. Named builds, named count, named tester.
++  const measured =
++    'On one explicit test image, three abliterated qwen3-vl builds (30b-a3b, '
++    + '8b-instruct, 8b) each missed a person who was present and each described a '
++    + 'generic act that was not the one in the picture, while JoyCaption read the '
++    + 'same image correctly.';
++  const limits =
++    'That is one image, captioned once by this project\'s maintainer, on those '
++    + 'three builds — not a benchmark, and nothing is claimed about other vision '
++    + 'models. It is worth saying because the failure is silent: an invented '
++    + 'caption reads exactly like an accurate one.';
++  const half = ollamaHalf(engineId);
++  if (half === 'none') {
++    return {
++      tone: 'info',
++      heading: 'Mostly NSFW — and you already picked JoyCaption',
++      paragraphs: [
++        scale,
++        'JoyCaption writes this whole run: the Ollama vision model, the half that '
++        + 'was measured going wrong on explicit images here, is not called at all.',
++        measured,
++        limits,
++      ],
++    };
++  }
++  if (half === 'only') {
++    return {
++      tone: 'warn',
++      heading: 'Mostly NSFW — and this run is entirely the Ollama vision model',
++      paragraphs: [
++        scale,
++        'You picked Ollama, so every caption in this run comes from the Ollama '
++        + 'vision model — the half that was measured going wrong on explicit '
++        + 'images here.',
++        measured,
++        limits,
++        'Every caption records who wrote it, so you can read them back knowing '
++        + 'where they came from. Picking JoyCaption above runs without Ollama.',
++      ],
++    };
++  }
++  return {
++    tone: 'warn',
++    heading: 'Mostly NSFW — check who wrote what afterwards',
++    paragraphs: [
++      scale,
++      'Auto runs JoyCaption first, then the Ollama vision model on whatever '
++      + 'JoyCaption did not caption. That second half is the one that was measured '
++      + 'going wrong on explicit images here.',
++      measured,
++      limits,
++      'Every caption records who wrote it, so you can read the Ollama-written ones '
++      + 'first — or pick JoyCaption above to run without that second half.',
++    ],
++  };
++}
+diff --git a/frontend/src/components/dataset/CaptionEditorDialog.jsx b/frontend/src/components/dataset/CaptionEditorDialog.jsx
+index ad0b5f58..12a73eb7 100644
+--- a/frontend/src/components/dataset/CaptionEditorDialog.jsx
++++ b/frontend/src/components/dataset/CaptionEditorDialog.jsx
+@@ -3,10 +3,33 @@ import { createPortal } from 'react-dom';
+ import { captionCharacterLabel, isCaptionSaveShortcut, isLikelyTruncatedCaption } from '../../utils/captionEditor';
+ import { attemptModalSubmit } from '../../utils/submitOutcome.js';
+ import CaptionLab from './CaptionLab';
++// WHO wrote the sentence in the box — this is the surface where a caption is read
++// in full, so it is the one that says it in words rather than as a chip.
++import { captionOriginInfo } from '../../utils/captionOrigin.js';
++
++/** The authorship line for a text box, or null.
++ *
++ *  IT DESCRIBES THE SAVED TEXT, NOT THE DRAFT. The stamp on the row is about the
++ *  sentence the server holds; the moment the user types, the two are different
++ *  things and claiming the old author for the new words would be exactly the kind
++ *  of confident wrong label this whole feature exists to remove. So an edited draft
++ *  says what it really is — unsaved, and yours once saved.
++ */
++function authorshipNote(draft, saved, origin) {
++  const text = (draft || '');
++  if (!text.trim()) return null;
++  if (text !== (saved || '')) {
++    return { text: 'Unsaved edit — saving records this caption as written by you.',
++             title: 'A caption you save is stamped as yours, and a forced 🔄 Re-caption '
++               + 'then skips it.' };
++  }
++  const info = captionOriginInfo(origin);
++  return { text: info.short, title: info.title };
++}
+ 
+ export default function CaptionEditorDialog({
+   initialCaption, initialShortCaption, showShort = false, imageUrl, imageLabel, onClose, onSave,
+-  datasetId, imageId,
++  datasetId, imageId, captionOrigin = null, shortCaptionOrigin = null,
+ }) {
+   const [draft, setDraft] = useState(initialCaption || '');
+   const [shortDraft, setShortDraft] = useState(initialShortCaption || '');
+@@ -123,6 +146,12 @@ export default function CaptionEditorDialog({
+                 {captionCharacterLabel(draft)}
+               </span>
+             </div>
++            {authorshipNote(draft, initialCaption, captionOrigin) && (
++              <p className="m-0 text-[0.6875rem] leading-relaxed text-content-subtle"
++                title={authorshipNote(draft, initialCaption, captionOrigin).title}>
++                {authorshipNote(draft, initialCaption, captionOrigin).text}
++              </p>
++            )}
+             {isLikelyTruncatedCaption(initialCaption) && (
+               <p className="m-0 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-[0.6875rem] leading-relaxed text-amber-200">
+                 This caption is exactly 800 characters and ends mid-sentence — an earlier
+@@ -160,6 +189,17 @@ export default function CaptionEditorDialog({
+                       (no trigger, keep the identity/concept/aesthetic out). Leave empty to reuse
+                       the long caption; (re-)captioning regenerates it automatically.
+                     </p>
++                    {/* Its OWN author: the short caption has its own writers on both
++                        sides (this box types it, the dual-caption pass derives it),
++                        so the long caption's stamp cannot answer for it. */}
++                    {authorshipNote(shortDraft, initialShortCaption, shortCaptionOrigin) && (
++                      <p className="m-0 text-[0.6875rem] leading-relaxed text-content-subtle"
++                        title={authorshipNote(shortDraft, initialShortCaption,
++                                              shortCaptionOrigin).title}>
++                        {authorshipNote(shortDraft, initialShortCaption,
++                                        shortCaptionOrigin).text}
++                      </p>
++                    )}
+                     <textarea value={shortDraft}
+                       onChange={(event) => setShortDraft(event.target.value)}
+                       onKeyDown={(event) => {
+diff --git a/frontend/src/components/dataset/DatasetGridItem.jsx b/frontend/src/components/dataset/DatasetGridItem.jsx
+index 7fff1271..c7f793b7 100644
+--- a/frontend/src/components/dataset/DatasetGridItem.jsx
++++ b/frontend/src/components/dataset/DatasetGridItem.jsx
+@@ -2,6 +2,9 @@
+ import { improvementBadge } from './improveCandidates.js';
+ import { useEffect, useRef, useState } from 'react';
+ import { displayLabel } from '../../utils/labels';
++// WHO wrote this tile's caption — the per-image half of the provenance the pass
++// already reports in aggregate (utils/captionEngines.js).
++import { captionIsAsserted, captionOriginInfo } from '../../utils/captionOrigin.js';
+ import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
+ import CaptionEditorDialog from './CaptionEditorDialog';
+ import PromptEditPopover from './PromptEditPopover';
+@@ -334,6 +337,21 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
+       {img.status === 'keep' && (
+         <div className="m-1.5 mt-0 flex flex-col gap-1">
+           <div className="dataset-grid-item__actions flex items-center justify-end gap-1">
++            {/* WHO WROTE THE TEXT IN THE BOX BELOW, on the row that already carries
++                this caption's actions. Only when there IS a caption and its author
++                was recorded: stamping "author not recorded" on every legacy tile
++                would be a grid of identical chips, which is noise rather than
++                information — the expanded editor has the room to say it and does. */}
++            {(cap || '').trim() && captionOriginInfo(img.caption_origin).known && (
++              <span title={captionOriginInfo(img.caption_origin).title}
++                aria-label={captionOriginInfo(img.caption_origin).short}
++                className={`mr-auto rounded border px-1 py-0.5 text-[10px] leading-none ${
++                  captionIsAsserted(img.caption_origin)
++                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
++                    : 'border-border bg-surface text-content-subtle'}`}>
++                {captionOriginInfo(img.caption_origin).chip}
++              </span>
++            )}
+             <button type="button" onClick={() => setCaptionEditorOpen(true)}
+               disabled={busy}
+               title="Open a larger caption editor"
+@@ -372,6 +390,7 @@ export default function DatasetGridItem({ img, datasetId, onStatus, onCaption, o
+         <CaptionEditorDialog initialCaption={cap} imageUrl={url}
+           datasetId={datasetId} imageId={img.id}
+           initialShortCaption={img.caption_short || ''} showShort={dualCaptions}
++          captionOrigin={img.caption_origin} shortCaptionOrigin={img.caption_short_origin}
+           imageLabel={displayLabel(img.variation_label)}
+           onClose={() => setCaptionEditorOpen(false)}
+           /* Awaited, and its answer is handed BACK: an unawaited handler cannot
+diff --git a/frontend/src/components/dataset/DatasetWorkspace.jsx b/frontend/src/components/dataset/DatasetWorkspace.jsx
+index 13f41c3b..48b00d3b 100644
+--- a/frontend/src/components/dataset/DatasetWorkspace.jsx
++++ b/frontend/src/components/dataset/DatasetWorkspace.jsx
+@@ -24,6 +24,8 @@ import ReferenceEditModal from './ReferenceEditModal';
+ import { defaultEditEngine } from './referenceEdit';
+ import { localEngineUnavailableReason, hasComfyui } from '../../utils/localEngineReason.js';
+ import { captionEnginesSummary, CAPTION_ENGINE_WHY } from '../../utils/captionEngines.js';
++// …and the per-image half of the same question, for the captions listed in full here.
++import { captionOriginInfo } from '../../utils/captionOrigin.js';
+ import { extraRefCropSource } from './extraRefs';
+ import DatasetLightbox from './DatasetLightbox';
+ import DatasetSettingsModal from './DatasetSettingsModal';
+@@ -1811,6 +1813,18 @@ export default function DatasetWorkspace({ ds, onBack }) {
+                                 }}
+                                 aria-label={`Caption of image ${img.id}`}
+                                 className="w-full bg-app/60 border border-amber-400/30 rounded px-2 py-1 text-[0.6875rem] text-content resize-y" />
++                              {/* WHO WROTE THE LEAKING SENTENCE. This list is read
++                                  caption by caption to decide what to redo, and the
++                                  'auto' backend chains two engines inside one run —
++                                  so "which engine keeps leaking" is answerable here
++                                  and was not. Silent when the author was never
++                                  recorded (that is not "a model wrote it"). */}
++                              {captionOriginInfo(img.caption_origin).known && (
++                                <span className="text-[0.625rem] text-content-subtle"
++                                  title={captionOriginInfo(img.caption_origin).title}>
++                                  {captionOriginInfo(img.caption_origin).short}
++                                </span>
++                              )}
+                               <button type="button"
+                                 disabled={recaptionLocked}
+                                 onClick={() => ds.recaptionImages([img.id], effCaptionMode)}
+diff --git a/frontend/src/utils/captionOrigin.js b/frontend/src/utils/captionOrigin.js
+new file mode 100644
+index 00000000..8f14b106
+--- /dev/null
++++ b/frontend/src/utils/captionOrigin.js
+@@ -0,0 +1,111 @@
++/* WHO wrote THIS caption — the per-image reading of `caption_origin`.
++
++   PURE JS (no JSX, no imports) so `node --test` drives it directly.
++
++   WHY THIS FILE EXISTS
++   --------------------
++   captionEngines.js reports the PASS that just ran ("12 by JoyCaption, 3 by the
++   Ollama vision model") and its own header names the gap it left open, in as many
++   words: "It reports the pass that just ran, not the provenance of a caption you
++   are looking at weeks later." The column it asked for exists now — `caption_origin`
++   on both image tables, written by every caption writer through
++   services/caption_origin.stamp — and it was being used for exactly one decision
++   (which rows a forced re-caption spares) while the screen where you READ the
++   sentence still showed an anonymous string.
++
++   That gap is not cosmetic. The default backend is 'auto', which is a CHAIN:
++   JoyCaption writes what it can, the Ollama vision model covers the rest. The two
++   halves land in the same column, in the same font, and until this module nothing
++   on screen told them apart — so a caption that describes something the image does
++   not contain looked exactly like one that reads it correctly.
++
++   THE FOUR STATES, and the fourth is why this is a module and not a ternary:
++
++     'asserted'   — a human typed, corrected or imported the text. Never folded
++                    into the two engines: it is the one a forced pass SKIPS, and
++                    calling it "machine-written" would be wrong about the work the
++                    user did.
++     'joycaption' — written by JoyCaption (local, via the ai-toolkit venv).
++     'ollama'     — written by the Ollama vision model.
++     NULL / ''    — the author was NEVER RECORDED. This is what every row that
++                    predates the column carries, and it is NOT "machine": reading
++                    the absence as an engine would put an attribution on screen
++                    that nothing measured. It gets its own wording, and callers
++                    that would rather stay silent on it can (`known` is false).
++
++   An origin this build does not know is shown UNDER ITS OWN NAME rather than
++   dropped — the same rule captionEngines.js follows for an unknown writer, and for
++   the same reason: swallowing it rebuilds the blind spot the module exists to close.
++
++   THE KEYS ARE STORED IN USER DATABASES (services/caption_origin.py says so in its
++   header). Read them; never rename them here. */
++
++/* Canonical order and the three wordings each state needs: `chip` for a badge
++   beside the text, `short` for a sentence fragment, `title` for the tooltip that
++   says what the state MEANS rather than repeating the label. */
++export const CAPTION_ORIGINS = [
++  {
++    key: 'asserted',
++    chip: '✍ you',
++    short: 'You wrote this',
++    title: 'You wrote or corrected this caption. A forced 🔄 Re-caption skips it '
++      + 'unless you tick the box that says otherwise.',
++  },
++  {
++    key: 'joycaption',
++    chip: 'JoyCaption',
++    short: 'Written by JoyCaption',
++    title: 'Written by JoyCaption, which runs locally through the ai-toolkit folder.',
++  },
++  {
++    key: 'ollama',
++    chip: 'Ollama',
++    short: 'Written by the Ollama vision model',
++    title: 'Written by the Ollama vision model. With the Auto backend this is the '
++      + 'second half of the run — the images JoyCaption did not caption.',
++  },
++];
++
++/* The absence, spelled out. Its `known` flag is false so a caller can choose
++   silence (a grid of legacy rows would otherwise carry the same chip on every
++   tile, which is noise), while a caller that has room says the true thing. */
++export const CAPTION_ORIGIN_UNRECORDED = {
++  key: '',
++  chip: 'author not recorded',
++  short: 'Author not recorded',
++  title: 'This caption was written before the app recorded who writes captions. '
++    + 'That is not the same as "written by a model" — nobody knows, and the app '
++    + 'does not guess.',
++  known: false,
++};
++
++/** The entry for a stored value. Never null: an empty/unknown origin resolves to
++ *  CAPTION_ORIGIN_UNRECORDED, and an origin this build does not know resolves to
++ *  an entry named after itself. Callers branch on `.known`, not on null. */
++export function captionOriginInfo(origin) {
++  const key = typeof origin === 'string' ? origin.trim().toLowerCase() : '';
++  if (!key) return CAPTION_ORIGIN_UNRECORDED;
++  const hit = CAPTION_ORIGINS.find((o) => o.key === key);
++  if (hit) return { ...hit, known: true };
++  return {
++    key,
++    chip: key,
++    short: `Written by ${key}`,
++    title: `Written by ${key}, an origin this version of the app does not know. `
++      + 'Shown under its own name rather than dropped.',
++    known: true,
++  };
++}
++
++/** Is this caption the user's own word? The one question that changes what a
++ *  destructive button is allowed to do, asked in the UI's vocabulary. */
++export function captionIsAsserted(origin) {
++  return captionOriginInfo(origin).key === 'asserted';
++}
++
++/** One line for a tooltip that already describes an image, or '' when there is no
++ *  caption to attribute. An empty caption has no author, whatever the column says. */
++export function captionOriginTooltipLine(caption, origin) {
++  if (!(caption || '').trim()) return '';
++  return captionOriginInfo(origin).short;
++}

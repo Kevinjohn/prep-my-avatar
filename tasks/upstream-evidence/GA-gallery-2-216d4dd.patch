@@ -1,0 +1,335 @@
+commit 216d4dd282039cfa9d4a66f1e7c5f138697dc77f
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Mon Aug 24 12:12:41 2026 +0200
+
+    feat(gallery): selection delete and ZIP for the app-wide feed
+    
+    Delete is the checkpoint delete with its scope removed — same recoverable
+    disposal, same refusals (a generating cell is skipped, never cancelled);
+    the narrow routes keep their 'not ours to delete' guard, pinned by a test.
+    
+    The ZIP is selection-ONLY: the feed spans every run, so an absent ids
+    argument is refused rather than widened into an accidental everything.
+    Archive names keep the lineage grammar; a cross-dataset pick drops the
+    dataset slug it cannot honestly carry.
+---
+ backend/app/routes/training.py           | 50 +++++++++++++++++
+ backend/app/services/cloud_training.py   | 30 ++++++++--
+ backend/app/services/gallery_download.py | 65 ++++++++++++++++++++++
+ backend/tests/test_app_gallery.py        | 94 ++++++++++++++++++++++++++++++++
+ 4 files changed, 235 insertions(+), 4 deletions(-)
+
+diff --git a/backend/app/routes/training.py b/backend/app/routes/training.py
+index 1b301c9c..cfdb90a9 100644
+--- a/backend/app/routes/training.py
++++ b/backend/app/routes/training.py
+@@ -3033,6 +3033,56 @@ def app_gallery_images():
+         liked=request.args.get('liked', default=0, type=int) == 1))
+ 
+ 
++@bp.post('/gallery/images/delete')
++def app_gallery_images_delete():
++    """🗑 Delete generated images from the Gallery page. Body: {image_ids: […]}.
++
++    The checkpoint delete with its scope removed (services.cloud_training.
++    delete_gallery_images): same recoverable disposal, same refusals — a cell
++    still generating is skipped, never cancelled."""
++    ids = (request.get_json(silent=True) or {}).get('image_ids') or []
++    if not isinstance(ids, list):
++        return jsonify({'error': 'image_ids must be a list'}), 400
++    try:
++        out = ct.delete_gallery_images(ids)
++    except OSError as e:
++        current_app.logger.warning('gallery delete failed: %s', e)
++        return jsonify({'error': 'Could not delete these images — a file is '
++                                 'locked or unreachable. Try again.'}), 500
++    return jsonify({'ok': True, **out})
++
++
++@bp.get('/gallery/images/zip')
++def app_gallery_images_zip():
++    """⬇ A Gallery SELECTION as one ZIP — `?ids=` is required: the feed spans
++    every run, so "the whole scope" would be an accidental everything."""
++    from ..services import gallery_download as gdl
++    from .datasets import _zip_download
++    ids = _zip_ids_arg()
++    if ids is None:
++        return jsonify({'error': 'ids is required — pick the images first'}), 400
++    plan = gdl.app_gallery_download_plan(ids)
++    if not plan['ok']:
++        return jsonify({'error': plan['note']}), 404
++    response = _zip_download(lambda out: gdl.write_gallery_zip(plan['entries'], out),
++                             plan['filename'])
++    response.headers['X-Lds-Zip-Images'] = str(plan['included'])
++    response.headers['X-Lds-Zip-Total'] = str(plan['total'])
++    return response
++
++
++@bp.get('/gallery/images/zip/plan')
++def app_gallery_images_zip_plan():
++    """The Gallery selection preflight — counts and cuts BEFORE any byte moves,
++    so a short archive is never a discovery."""
++    from ..services import gallery_download as gdl
++    ids = _zip_ids_arg()
++    if ids is None:
++        return jsonify({'error': 'ids is required — pick the images first'}), 400
++    plan = gdl.app_gallery_download_plan(ids)
++    return jsonify({k: v for k, v in plan.items() if k != 'entries'})
++
++
+ @bp.get('/train/run/<int:record_id>/timeline')
+ def train_run_timeline(record_id):
+     """Render-equivalent images across checkpoints, split into safe series."""
+diff --git a/backend/app/services/cloud_training.py b/backend/app/services/cloud_training.py
+index 14a1d86e..40ec1e81 100644
+--- a/backend/app/services/cloud_training.py
++++ b/backend/app/services/cloud_training.py
+@@ -7826,6 +7826,7 @@ def app_gallery(limit=APP_GALLERY_PAGE, before_id=None, dataset_id=None,
+          for i, n in ds_counts),
+         key=lambda d: d['name'].lower())
+ 
++    from . import trash
+     return {
+         'count': count,
+         'has_more': has_more,
+@@ -7835,9 +7836,22 @@ def app_gallery(limit=APP_GALLERY_PAGE, before_id=None, dataset_id=None,
+         'next_before_id': rows[-1].id if rows and has_more else None,
+         'images': [_gallery_image(r) for r in rows],
+         'datasets': datasets,
++        # Where a deleted image WOULD land — same promise, same source as the
++        # checkpoint gallery, so the confirmation never promises the wrong thing.
++        'delete_mode': trash.disposal_mode(),
+     }
+ 
+ 
++def delete_gallery_images(image_ids) -> dict:
++    """🗑 The Gallery page's delete — the checkpoint delete with its scope
++    removed. The feed lists rows from every run at once, so its delete has no
++    (record_id, step) to be scoped BY; what keeps it honest instead is that it
++    can only ever reach `lora_test_image` rows, and every degradation rule of
++    the narrow delete (a generating cell is skipped, a shared file survives,
++    a missing file still loses its row) applies through the same function."""
++    return delete_checkpoint_images(None, None, image_ids)
++
++
+ def delete_checkpoint_images(record_id, step, image_ids) -> dict:
+     """🗑 Delete generated images from a checkpoint's gallery — file AND row.
+ 
+@@ -7862,6 +7876,11 @@ def delete_checkpoint_images(record_id, step, image_ids) -> dict:
+     to keep the recycle-bin promise, the shared-file rule and the "generating is
+     never cancelled" rule true, and they would drift.
+ 
++    ``record_id=None`` removes the scope entirely — the app-wide 🖼 Gallery
++    (``delete_gallery_images``), whose feed spans every run and therefore has
++    no record to be scoped by. The per-checkpoint ROUTES never pass None here,
++    so their "not ours to delete" refusal is unchanged.
++
+     Degrades instead of failing, because the gallery of a real install is never
+     tidy:
+       • a row still generating keeps its file (skipped 'generating') — cancelling
+@@ -7892,8 +7911,9 @@ def delete_checkpoint_images(record_id, step, image_ids) -> dict:
+            'skipped': []}
+     if not wanted:
+         return out
+-    scoped = LoraTestImage.query.filter(LoraTestImage.record_id == record_id,
+-                                        LoraTestImage.id.in_(wanted))
++    scoped = LoraTestImage.query.filter(LoraTestImage.id.in_(wanted))
++    if record_id is not None:
++        scoped = scoped.filter(LoraTestImage.record_id == record_id)
+     if step is not None:
+         scoped = scoped.filter(LoraTestImage.step == step)
+     rows = scoped.all()
+@@ -7936,8 +7956,10 @@ def delete_checkpoint_images(record_id, step, image_ids) -> dict:
+             remove_ids.append(row.id)
+             continue
+         try:
+-            mode = trash.dispose(path, context=(f'run-{record_id}' if step is None
+-                                                else f'checkpoint-{record_id}-{step}'))
++            mode = trash.dispose(path, context=(
++                'gallery' if record_id is None
++                else f'run-{record_id}' if step is None
++                else f'checkpoint-{record_id}-{step}'))
+         except OSError as e:
+             out['skipped'].append({'id': row.id, 'reason': str(e)})
+             continue
+diff --git a/backend/app/services/gallery_download.py b/backend/app/services/gallery_download.py
+index 6db694e0..ab8f3387 100644
+--- a/backend/app/services/gallery_download.py
++++ b/backend/app/services/gallery_download.py
+@@ -243,6 +243,71 @@ def gallery_download_plan(record_id, step, image_ids=None, cap=ZIP_IMAGE_CAP):
+     }
+ 
+ 
++def app_zip_download_name(rows, names):
++    """What a Gallery-page archive is called. One dataset → its slug keeps the
++    identity (`<slug>_gallery_selection.zip`); a cross-dataset pick has no one
++    name to carry, so the scope word does the job alone."""
++    ds_ids = {r.dataset_id for r in rows}
++    if len(ds_ids) == 1:
++        only = next(iter(ds_ids))
++        return f'{slugify(names.get(only), f"dataset{only}")}_gallery_selection.zip'
++    return 'gallery_selection.zip'
++
++
++def app_gallery_download_plan(image_ids, cap=ZIP_IMAGE_CAP):
++    """The Gallery page's selection as a ZIP plan — same answer shape as
++    ``gallery_download_plan``, with the (record_id, step) scope replaced by an
++    explicit id list. Always a SELECTION: the feed can span thousands of images
++    across every run, so "the whole scope" is not a thing this plan offers —
++    a caller that wants everything must say which everything.
++
++    Rows are matched by id across the whole table (status done, file-backed),
++    exactly the rows the feed lists; an id that no longer exists simply is not
++    found, which the counts then state."""
++    from ..models import LoraTestImage
++    cap = max(1, int(cap or ZIP_IMAGE_CAP))
++    wanted = []
++    for i in (image_ids or []):
++        try:
++            wanted.append(int(i))
++        except (TypeError, ValueError):
++            continue
++    rows = []
++    if wanted:
++        rows = (LoraTestImage.query
++                .filter(LoraTestImage.id.in_(wanted),
++                        LoraTestImage.status == 'done',
++                        LoraTestImage.filename.isnot(None))
++                .order_by(LoraTestImage.id.desc()).all())
++    total = len(rows)
++    kept = rows[:cap]
++    truncated = total > len(kept)
++    names = _dataset_names(kept)
++    entries, missing, seen = [], 0, set()
++    for row in kept:
++        path = os.path.join(dataset_path(row.dataset_id), row.filename)
++        if not os.path.exists(path):
++            missing += 1
++            continue
++        name = image_download_name(row, names.get(row.dataset_id))
++        if name in seen:
++            name = f'{row.id}_{name}'
++        seen.add(name)
++        entries.append({'id': row.id, 'path': path, 'name': name})
++    included = len(entries)
++    return {
++        'ok': included > 0,
++        'total': total,
++        'included': included,
++        'missing': missing,
++        'truncated': truncated,
++        'cap': cap,
++        'note': _note(total, included, missing, truncated, cap),
++        'filename': app_zip_download_name(kept, names),
++        'entries': entries,
++    }
++
++
+ def write_gallery_zip(entries, output):
+     """Write the planned entries into `output`, sorted by their names.
+ 
+diff --git a/backend/tests/test_app_gallery.py b/backend/tests/test_app_gallery.py
+index c51b7945..568f52e6 100644
+--- a/backend/tests/test_app_gallery.py
++++ b/backend/tests/test_app_gallery.py
+@@ -134,6 +134,100 @@ def test_the_dataset_list_feeds_the_picker_so_it_is_never_filtered(client, app):
+         assert empty not in [d['id'] for d in out['datasets']]
+ 
+ 
++# --- gestion: delete ---------------------------------------------------------
++
++def test_gallery_delete_reaches_rows_from_any_run_but_never_a_generating_one(client, app):
++    from app.extensions import db
++    from app.models import LoraTestImage
++    from app.services import cloud_training as ct
++    with app.app_context():
++        a = _create(client, 'Nova', 'nova')
++        b = _create(client, 'Vega', 'vega')
++        one = _image(db, a, record_id=1, step=500, filename='a.png')
++        two = _image(db, b, record_id=2, step=1000, filename='b.png')
++        cooking = _image(db, a, status='pending', filename=None)
++
++        out = ct.delete_gallery_images([one.id, two.id, cooking.id])
++        # No file on disk in this fixture: the rows still go, honestly counted.
++        assert out['rows_removed'] == 2
++        assert out['already_absent'] == 2
++        assert out['skipped'] == [{'id': cooking.id, 'reason': 'generating'}]
++        assert sorted(out['dataset_ids']) == sorted([a, b])
++        assert LoraTestImage.query.count() == 1   # the generating cell survives
++
++
++def test_the_checkpoint_scoped_delete_still_refuses_ids_outside_its_scope(client, app):
++    """Widening the gallery must not have loosened the narrow routes."""
++    from app.extensions import db
++    from app.models import LoraTestImage
++    from app.services import cloud_training as ct
++    with app.app_context():
++        ds = _create(client)
++        mine = _image(db, ds, record_id=7, step=500, filename='a.png')
++        other = _image(db, ds, record_id=8, step=500, filename='b.png')
++        out = ct.delete_checkpoint_images(7, 500, [mine.id, other.id])
++        assert out['rows_removed'] == 1
++        assert out['skipped'] == [{'id': other.id, 'reason': 'not_in_gallery'}]
++        assert db.session.get(LoraTestImage, other.id) is not None
++
++
++def test_delete_route_and_the_feeds_delete_mode_agree(client, app):
++    from app.extensions import db
++    with app.app_context():
++        ds = _create(client)
++        img = _image(db, ds, filename='a.png')
++        image_id = img.id
++    feed = client.get('/api/gallery/images').get_json()
++    assert feed['delete_mode'] in ('trash', 'app_trash', 'delete')
++    r = client.post('/api/gallery/images/delete', json={'image_ids': [image_id]})
++    assert r.status_code == 200
++    assert r.get_json()['rows_removed'] == 1
++    assert client.get('/api/gallery/images').get_json()['count'] == 0
++
++
++# --- gestion: ZIP ------------------------------------------------------------
++
++def test_zip_plan_is_selection_only_and_names_the_lineage(client, app):
++    import os
++    from app.extensions import db
++    from app.services import gallery_download as gdl
++    from app.services.dataset_storage import dataset_path
++    with app.app_context():
++        ds = _create(client, 'Nova Style', 'nova')
++        real = _image(db, ds, record_id=42, step=2500, seed=99, filename='real.png')
++        gone = _image(db, ds, record_id=42, step=2500, filename='gone.png')
++        folder = dataset_path(ds)
++        os.makedirs(folder, exist_ok=True)
++        with open(os.path.join(folder, 'real.png'), 'wb') as f:
++            f.write(b'\x89PNG')
++
++        plan = gdl.app_gallery_download_plan([real.id, gone.id])
++        assert (plan['ok'], plan['total'], plan['included'], plan['missing']) == (
++            True, 2, 1, 1)
++        assert plan['entries'][0]['name'] == (
++            f'Nova-Style_run42_step002500_seed99_{real.id}.png')
++        assert plan['filename'] == 'Nova-Style_gallery_selection.zip'
++
++        # Two datasets in one pick: no single name can carry the identity.
++        other = _create(client, 'Vega', 'vega')
++        v = _image(db, other, filename='v.png')
++        folder2 = dataset_path(other)
++        os.makedirs(folder2, exist_ok=True)
++        with open(os.path.join(folder2, 'v.png'), 'wb') as f:
++            f.write(b'\x89PNG')
++        mixed = gdl.app_gallery_download_plan([real.id, v.id])
++        assert mixed['filename'] == 'gallery_selection.zip'
++
++
++def test_zip_routes_require_an_explicit_selection(client, app):
++    assert client.get('/api/gallery/images/zip').status_code == 400
++    assert client.get('/api/gallery/images/zip/plan').status_code == 400
++    # An unparseable selection is refused out loud, never widened to everything.
++    r = client.get('/api/gallery/images/zip/plan?ids=9999')
++    assert r.status_code == 200
++    assert r.get_json()['ok'] is False
++
++
+ # --- the route ---------------------------------------------------------------
+ 
+ def test_the_route_serves_the_feed_and_refuses_an_unknown_kind(client, app):

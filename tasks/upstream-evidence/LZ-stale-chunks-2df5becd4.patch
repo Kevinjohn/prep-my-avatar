@@ -1,0 +1,144 @@
+commit 2df5becd4bb5f277dc0d02e3118ff2258f0189e0
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Sun Aug 23 20:24:06 2026 +0200
+
+    perf(frontend): every page is its own chunk — the entry bundle drops 3.4 MB → 0.9 MB
+    
+    Eighteen routes rode in one entry chunk: the first paint of ANY screen paid
+    for all of them. The nine page components load through lazyPage() now — each
+    becomes its own chunk fetched on first navigation (vite splits the shared
+    hooks out on its own), and the Suspense sits INSIDE the shell so the nav,
+    banners and queue dock stay put while a page chunk is in flight.
+    
+    lazyPage also owns the failure mode code splitting creates here: Update &
+    restart swaps dist/ under an open tab, whose old index.html then requests
+    chunk files that no longer exist. First failed chunk load = one reload (the
+    new index.html carries current chunk names); a sessionStorage flag stops a
+    reload loop when the chunk is missing for a real reason, and clears on any
+    successful load so the next update gets its one reload too.
+    
+    Measured: entry 3 460 kB → 901 kB (gzip 295 kB); DatasetPage 594 kB,
+    GuidePage 332 kB, BankPage 293 kB… load only when visited. Probe rerun on
+    all four pages through real lazy navigation: 0 findings.
+---
+ frontend/src/App.jsx           | 45 +++++++++++++++++++++++++++++++-----------
+ frontend/src/utils/lazyPage.js | 37 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 71 insertions(+), 11 deletions(-)
+
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 4e3e9f4c..cd2aadaa 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useState } from 'react'
++import { Suspense, useEffect, useState } from 'react'
+ import { HashRouter, Routes, Route, Navigate, Outlet, NavLink, useLocation } from 'react-router'
+ import { apiFetch, postJson } from './api/fetchClient'
+ import { JobsProvider } from './context/JobsContext'
+@@ -13,15 +13,20 @@ import ComfyRecoveryBanner from './components/common/ComfyRecoveryBanner'
+ import GenerationQueueDock from './components/common/GenerationQueueDock'
+ import DockerUpdateInstructions from './components/common/DockerUpdateInstructions'
+ import PinokioUpdateInstructions from './components/common/PinokioUpdateInstructions'
+-import DatasetPage from './pages/DatasetPage'
+-import BankPage from './pages/BankPage'
+-import VideoBankPage from './pages/VideoBankPage'
+-import StudioPage from './pages/StudioPage'
+-import SettingsPage from './pages/SettingsPage'
+-import SetupPage from './pages/SetupPage'
+-import GuidePage from './pages/GuidePage'
+-import CloudRunsPage from './pages/CloudRunsPage'
+-import CanvasPage from './pages/CanvasPage'
++import { lazyPage } from './utils/lazyPage'
++
++// Each page is its own chunk, fetched on first navigation — the entry bundle
++// stops carrying all eighteen routes to paint one. `lazyPage` also owns the
++// stale-chunk reload after an Update & restart (see utils/lazyPage.js).
++const DatasetPage = lazyPage(() => import('./pages/DatasetPage'))
++const BankPage = lazyPage(() => import('./pages/BankPage'))
++const VideoBankPage = lazyPage(() => import('./pages/VideoBankPage'))
++const StudioPage = lazyPage(() => import('./pages/StudioPage'))
++const SettingsPage = lazyPage(() => import('./pages/SettingsPage'))
++const SetupPage = lazyPage(() => import('./pages/SetupPage'))
++const GuidePage = lazyPage(() => import('./pages/GuidePage'))
++const CloudRunsPage = lazyPage(() => import('./pages/CloudRunsPage'))
++const CanvasPage = lazyPage(() => import('./pages/CanvasPage'))
+ import { recommendedMet } from './hooks/useSetupSteps'
+ import { HelpModeProvider, useHelpMode, TipHost } from './help/HelpMode'
+ import HeaderMenu from './components/common/HeaderMenu'
+@@ -432,6 +437,18 @@ function UpdateBanner() {
+  * once-per-session redirect to the wizard; a verified one is never interrupted
+  * again and re-verifies quietly in the background. */
+ 
++/* What the content area shows for the instant a page's chunk is in flight —
++   first navigation to a route, or the one reload after an update. Quiet on
++   purpose: the shell around it is already painted, so a big spinner would
++   shout about a wait that is usually under a second. */
++function PageLoading() {
++  return (
++    <div className="flex items-center justify-center py-24" role="status" aria-label="Loading this page">
++      <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-border border-t-content-muted" aria-hidden />
++    </div>
++  )
++}
++
+ function Shell() {
+   const { pathname } = useLocation();
+   const wideWorkspaceRoute = pathname === '/canvas' || pathname === '/bank';
+@@ -476,7 +493,13 @@ function Shell() {
+           : wideWorkspaceRoute
+             ? 'mx-auto w-full max-w-[1800px] px-3 py-4 sm:px-4 sm:py-6'
+             : 'mx-auto max-w-5xl px-4 py-6'}>
+-        <Outlet />
++        {/* The Suspense sits INSIDE the shell on purpose: a page chunk loading
++            on first navigation swaps only the content area, while the nav, the
++            banners and the queue dock stay put — wrapping <Routes> instead
++            made the whole chrome blink away on every first visit. */}
++        <Suspense fallback={<PageLoading />}>
++          <Outlet />
++        </Suspense>
+       </main>
+       <TipHost />
+       {/* One ComfyUI, one queue, fed by every surface — so the dock that shows
+diff --git a/frontend/src/utils/lazyPage.js b/frontend/src/utils/lazyPage.js
+new file mode 100644
+index 00000000..0d696443
+--- /dev/null
++++ b/frontend/src/utils/lazyPage.js
+@@ -0,0 +1,37 @@
++// Route-level code splitting, with the one failure mode it creates handled.
++//
++// Every page used to sit in the single 3.4 MB entry chunk: the first paint of
++// ANY screen paid for all eighteen routes. `lazyPage` moves each page into its
++// own chunk, loaded on first navigation.
++//
++// The guard is not sugar. "Update & restart" swaps the whole dist/ folder
++// while a tab may still be open — the OLD index.html then asks for chunk
++// files that no longer exist, and the first navigation after every update
++// would be a dead page with a console error nobody reads. On a failed chunk
++// load we reload ONCE (the reload fetches the new index.html, whose chunk
++// names are current); a sessionStorage flag stops a reload LOOP when the
++// chunk is missing for a real reason (a broken deploy stays a visible error,
++// not a flickering tab). The flag clears on any successful load so the NEXT
++// update gets its one reload too. sessionStorage can throw (private mode) —
++// then we skip straight to the error rather than risk the loop.
++import { lazy } from 'react'
++
++const RELOAD_FLAG = 'lds-chunk-reloaded'
++
++export function lazyPage(importer) {
++  return lazy(() => importer().then((mod) => {
++    try { sessionStorage.removeItem(RELOAD_FLAG) } catch { /* private mode */ }
++    return mod
++  }).catch((err) => {
++    let alreadyReloaded = true
++    try {
++      alreadyReloaded = sessionStorage.getItem(RELOAD_FLAG) === '1'
++      if (!alreadyReloaded) sessionStorage.setItem(RELOAD_FLAG, '1')
++    } catch { /* private mode: no way to bound a loop, so never start one */ }
++    if (!alreadyReloaded) {
++      window.location.reload()
++      return new Promise(() => {})   // the reload owns the tab from here
++    }
++    throw err
++  }))
++}

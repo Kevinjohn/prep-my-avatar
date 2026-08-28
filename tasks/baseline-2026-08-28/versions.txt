@@ -1,0 +1,5 @@
+SHA: 7cd3055df7d1595ac5fee0f5c026e810ea8cc534
+Python: Python 3.12.14
+Node: v22.21.1
+pnpm: 10.21.0
+OS: 26.5.2 arm64

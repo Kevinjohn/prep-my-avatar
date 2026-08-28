@@ -1,0 +1,597 @@
+commit b6f64bd09f51d7a803b75253be29d20d8a2a6941
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Tue Aug 25 23:51:04 2026 +0200
+
+    feat(studio): a FLUX.2 Klein generation lane, and an honest refusal for the rest
+    
+    With his Klein LoRA finally reading as deployed (#52), lunchingfriar ticked it,
+    hit Generate from the board, and got "no Z-Image model available" about a
+    family he had never chosen (#53). The Test Studio had three generation lanes
+    and every unrecognised family fell into the Z-Image one: first for its base
+    models, then for its workflow.
+    
+    The deeper fault was mine, from the #52 fix: ONE list was answering TWO
+    questions. FAMILIES says which families the studio can SEE, which the
+    deployed-state lookup needs; it was also read as which families it can
+    GENERATE with, so adding Klein to it offered Klein in a picker nothing could
+    honour.
+    
+    - GENERATION_FAMILIES is now its own list, and available_families offers only
+      what it can serve: a choice that fails on click is worse than no choice.
+    - The three silent Z-Image fallbacks in this file are closed. A laneless family
+      raises a refusal that NAMES the family asked for and says the LoRA itself is
+      fine, instead of sending the user after a Z-Image model they never wanted.
+    - FLUX.2 Klein gains a real lane: flux2_klein_t2i.json, an all-vanilla
+      text-to-image graph (Klein is the edit engine everywhere else, so a test cell
+      starting from a prompt needed a graph of its own), plus
+      apply_klein_lora_test_settings. Engine assets come from the same resolvers as
+      every other Klein path rather than the names frozen in the JSON, the tested
+      LoRA and any user base go through whitelists, and cfg is pinned at 1.0
+      because a swept CFG on a guidance-distilled model burns cells that then read
+      as a bad checkpoint.
+    - FLUX.1 and Anima get no lane, and this says why rather than pretending: the
+      app holds no unet/vae/text-encoder setting for either, so there is nothing to
+      generate with until they get an engine configuration. They now refuse
+      honestly, which is the whole point of this change.
+    
+    Verified on GPU through the real code path: a Klein LoRA grid cell built by
+    apply_klein_lora_test_settings rendered in 18s, with cfg 7.5 clamped to 1.0 and
+    all three assets resolved from configuration. Tests pin the wiring, the
+    whitelists, the clamp, and that every family offered for generation has a
+    workflow file on disk.
+    
+    Reported by lunchingfriar (GitHub #53).
+---
+ backend/app/services/lora_test_studio.py      | 148 +++++++++++++++++++++++++-
+ backend/tests/test_flux2_klein_lane.py        | 105 ++++++++++++++++++
+ backend/tests/test_generation_lane_honesty.py |  80 ++++++++++++++
+ backend/tests/test_studio_service.py          |  16 +++
+ backend/workflows/flux2_klein_t2i.json        |  85 +++++++++++++++
+ frontend/src/whatsNew.js                      |  16 +++
+ 6 files changed, 449 insertions(+), 1 deletion(-)
+
+diff --git a/backend/app/services/lora_test_studio.py b/backend/app/services/lora_test_studio.py
+index a8441056..53c5c845 100644
+--- a/backend/app/services/lora_test_studio.py
++++ b/backend/app/services/lora_test_studio.py
+@@ -174,6 +174,7 @@ WORKFLOW_ZTURBO_PATH = cfg.BACKEND_DIR / 'workflows' / 'ZImage_bigLove_ZT3_optim
+ WORKFLOW_HQ_PATH = cfg.BACKEND_DIR / 'workflows' / 'image_real_HQ.json'
+ WORKFLOW_KREA_TURBO_PATH = cfg.BACKEND_DIR / 'workflows' / 'krea2_turbo.json'
+ WORKFLOW_KREA_IMG2IMG_PATH = cfg.BACKEND_DIR / 'workflows' / 'krea2_turbo_img2img.json'
++WORKFLOW_FLUX2KLEIN_PATH = cfg.BACKEND_DIR / 'workflows' / 'flux2_klein_t2i.json'
+ 
+ 
+ def _comfy_output_dir():
+@@ -536,6 +537,39 @@ def _prompt_with_triggers(prompt, trigger_words):
+ # sélecteur du Test Studio, via available_families().
+ FAMILIES = ('zimage', 'sdxl', 'krea', 'flux', 'flux2klein', 'anima')
+ 
++# DEUX QUESTIONS, DEUX LISTES. « Quelles familles le studio sait-il VOIR » (au-
++# dessus : toute famille déployable, sinon son LoRA se lit comme jamais déployé,
++# cf. GitHub #52) n'est PAS « avec quelles familles sait-il GÉNÉRER » (ici :
++# celles qui ont une voie complète — un workflow, un applicateur de réglages,
++# une whitelist de bases).
++#
++# Les confondre a coûté GitHub #53 : réparer #52 a mis Klein dans FAMILIES, donc
++# dans le sélecteur, donc à portée d'un bouton Generate qui n'a aucun workflow
++# Klein derrière — et l'utilisateur a reçu « no Z-Image model available », une
++# famille qu'il n'avait jamais choisie. Une liste répondait à la mauvaise
++# question ; ce n'est pas un `if` de plus qu'il fallait, c'est de cesser de
++# faire dire à une liste ce qu'elle ne sait pas.
++GENERATION_FAMILIES = ('zimage', 'sdxl', 'krea', 'flux2klein')
++
++
++def can_generate_with(family: str) -> bool:
++    """Le studio a-t-il une voie de génération pour cette famille ?"""
++    return (family or 'zimage').lower() in GENERATION_FAMILIES
++
++
++def _no_generation_lane(family: str) -> ValueError:
++    """L'erreur à lever quand on demande à générer dans une famille sans voie.
++
++    Elle NOMME la famille demandée. L'ancien message accusait Z-Image parce que
++    le repli silencieux y menait, ce qui envoyait chercher un modèle manquant
++    dans une famille sans rapport (GitHub #53, lunchingfriar)."""
++    label = FAMILY_LABELS.get((family or '').lower(), family or 'this family')
++    return ValueError(
++        f'generating from the board is not supported for {label} yet — its '
++        'LoRAs train, deploy and show up as deployed, but the studio has no '
++        f'{label} generation workflow. Use a family that has one, or generate '
++        'from the dataset instead.')
++
+ 
+ def _pool_for_family(family: str) -> list[dict]:
+     """Pool de LoRA d'une famille : SDXL → loras/sdxl, Krea → loras/krea,
+@@ -655,9 +689,17 @@ def available_families(ds) -> list[dict]:
+     """Familles (pipelines) sous lesquelles CE dataset a effectivement été entraîné =
+     celles dont le pool contient ≥1 checkpoint testable (trigger match).
+     Le même dataset peut apparaître sous plusieurs familles (ex. lola2 en ZIT+SDXL+Krea).
+-    Returns [{family, label, count}], ordre FAMILIES. Vide si aucun LoRA déployé."""
++    Returns [{family, label, count}], ordre FAMILIES. Vide si aucun LoRA déployé.
++
++    Ne propose QUE les familles avec lesquelles le studio sait générer : ce
++    retour remplit un sélecteur, et offrir un choix qui échouera au clic est pire
++    que ne pas l'offrir. Un LoRA Klein reste parfaitement visible comme déployé
++    ailleurs (c'est FAMILIES qui répond à ça) — il n'est simplement pas proposé
++    comme base d'un run de test tant qu'il n'a pas sa voie."""
+     out = []
+     for fam in FAMILIES:
++        if not can_generate_with(fam):
++            continue
+         n = len(list_test_checkpoints(ds, fam))
+         if n:
+             out.append({'family': fam, 'label': FAMILY_LABELS.get(fam, fam), 'count': n})
+@@ -1342,6 +1384,72 @@ def krea_alt_base_models() -> list:
+     return [m for m in get_krea_models() if not bare or _basename(m).lower() != bare]
+ 
+ 
++def apply_klein_lora_test_settings(workflow, *, lora_name, strength, prompt, seed,
++                                   width, height, cfg=None, steps=None, batch_size=1,
++                                   filename_prefix=None, allowed_loras=None,
++                                   base_model=None, allowed_bases=None):
++    """Configure une cellule de test sur le workflow FLUX.2 Klein texte-vers-image.
++
++    Klein est le moteur d'ÉDITION de l'app partout ailleurs (variations, improve,
++    inpaint), et cette voie est la seule qui lui demande de générer depuis un
++    simple prompt : le Test Studio compare des checkpoints à prompt et seed
++    identiques, il n'a aucune image source à éditer. Le graphe est donc bâti sur
++    EmptyFlux2LatentImage, et il est ENTIÈREMENT composé de nœuds vanilla — aucun
++    pack tiers, contrairement à la voie Krea (cf. test_workflow_portability).
++
++    Les assets (UNET, encodeur de texte, VAE) sont résolus par les MÊMES fonctions
++    que le reste de la voie Klein plutôt que lus dans le JSON : les noms figés
++    dans un workflow livré ne valent que sur la machine où il a été capturé, et
++    c'est exactement ce qui a fait mentir d'autres graphes ici.
++
++    Le LoRA testé est chargé en model-only (node 29) : les LoRA de personnage
++    produits par ai-toolkit pour Klein n'entraînent que le transformer.
++
++    `base_model` : UNET Klein local à charger à la place de celui que la config
++    élit, même mécanique que Krea/SDXL/Z-Image. Validé contre `allowed_bases`
++    (anti path-injection), comme le LoRA. cfg est CLAMPÉ à 1.0 : Klein 9B est
++    guidance-distillé, une valeur au-dessus le fait diverger."""
++    if allowed_loras is not None and lora_name not in allowed_loras:
++        raise ValueError(f'unknown Klein LoRA: {lora_name}')
++    if base_model and allowed_bases is not None and base_model not in allowed_bases:
++        raise ValueError(f'unknown Klein base model: {base_model}')
++
++    def _set(node_id, key, value):
++        n = workflow.get(node_id)
++        if isinstance(n, dict) and key in n.get('inputs', {}):
++            n['inputs'][key] = value
++
++    from . import klein_edit_helper as keh
++    unet = base_model or keh.unet_for_job()
++    if unet:
++        _set('20', 'unet_name', unet)
++        _set('20', 'weight_dtype', keh._unet_weight_dtype(unet))
++    te = keh.resolve_klein_text_encoder()
++    if te:
++        _set('21', 'clip_name', te)
++    vae = keh.resolve_klein_vae()
++    if vae:
++        _set('22', 'vae_name', vae)
++
++    _set('29', 'lora_name', lora_name)
++    _set('29', 'strength_model', float(strength))
++    _set('23', 'text', prompt)
++    for node in ('25', '31'):                    # latent ET ModelSamplingFlux
++        _set(node, 'width', int(width))
++        _set(node, 'height', int(height))
++    _set('25', 'batch_size', int(batch_size))
++    _set('26', 'seed', int(seed))
++    if steps is not None:
++        _set('26', 'steps', max(1, min(50, int(steps))))
++    # Pas de `if cfg is not None` : la valeur vient d'un AXE de balayage du studio,
++    # et laisser passer un cfg > 1 sur un modèle guidance-distillé rendrait des
++    # cellules brûlées que l'utilisateur lirait comme un mauvais checkpoint.
++    _set('26', 'cfg', 1.0)
++    if filename_prefix is not None:
++        _set('28', 'filename_prefix', filename_prefix)
++    return workflow
++
++
+ def apply_krea_lora_test_settings(workflow, *, lora_name, strength, prompt, seed,
+                                   width, height, cfg=None, steps=None, batch_size=1,
+                                   filename_prefix=None, allowed_loras=None, extra_loras=None,
+@@ -1594,6 +1702,28 @@ def _build_cell_workflow(user_id, checkpoint, strength, prompt, seed, z_model,
+         # Krea2RebalanceConditioning), réécrire le class_type vers le nom réel pour que
+         # le graphe enqueué valide. available_classes None = on garde le canonique.
+         return _resolve_workflow_node_classes(workflow, available_classes)
++    if (train_type or 'zimage').lower() == 'flux2klein':
++        workflow = load_workflow_local(str(WORKFLOW_FLUX2KLEIN_PATH))
++        if not workflow:
++            raise ValueError('FLUX.2 Klein workflow not found/unreadable')
++        from ..utils.comfyui import get_flux2_klein_models
++        apply_klein_lora_test_settings(
++            workflow, lora_name=checkpoint, strength=strength, prompt=prompt,
++            seed=seed, width=width, height=height, cfg=cfg, steps=steps,
++            batch_size=1, filename_prefix=fname,
++            allowed_loras={l['filename'] for l in _pool_for_family('flux2klein')},
++            base_model=z_model,
++            allowed_bases={m['filename'] if isinstance(m, dict) else m
++                           for m in get_flux2_klein_models()},
++        )
++        return _resolve_workflow_node_classes(workflow, available_classes)
++    # Troisième repli silencieux vers Z-Image de ce fichier, fermé pour la même
++    # raison que les deux autres : une famille sans voie repartait avec le
++    # WORKFLOW d'une autre, donc un graphe Z-Image chargé d'un LoRA Klein. Les
++    # dispatchers de bases refusent déjà en amont ; cette garde est là pour que
++    # l'ajout d'une famille ne puisse pas se glisser ici en silence.
++    if not can_generate_with(train_type):
++        raise _no_generation_lane(train_type)
+     workflow = load_workflow_local(str(WORKFLOW_ZTURBO_PATH))
+     if not workflow:
+         raise ValueError('ZTurbo workflow not found/unreadable')
+@@ -2629,6 +2759,17 @@ def create_run(user_id, dataset_id, checkpoints, strengths, settings=None, *,
+         # None en tête = UNET câblé du workflow (défaut historique et repli) ; les
+         # checkpoints Krea locaux deviennent un axe de base optionnel comme ailleurs.
+         models = [None] + get_krea_models()
++    elif run_family == 'flux2klein':
++        # None en tête = l'UNET que la config élit (apply_klein_lora_test_settings
++        # le résout), les Klein locaux devenant un axe de base optionnel — même
++        # mécanique que Krea.
++        from ..utils.comfyui import get_flux2_klein_models
++        models = [None] + [m['filename'] for m in get_flux2_klein_models()]
++    elif not can_generate_with(run_family):
++        # AVANT le repli Z-Image, et c'est tout l'objet du correctif : une famille
++        # sans voie tombait ici en silence et repartait avec l'erreur d'une AUTRE
++        # famille (GitHub #53).
++        raise _no_generation_lane(run_family)
+     else:
+         models = get_zimage_models()
+         if not models:
+@@ -2818,6 +2959,11 @@ def _cmp_resolve_run_family(selections):
+         # None en tête = UNET câblé (node 20), repli des runs sans base explicite ;
+         # les checkpoints Krea locaux sont désormais sélectionnables.
+         models = [None] + get_krea_models()
++    elif run_type == 'flux2klein':
++        from ..utils.comfyui import get_flux2_klein_models
++        models = [None] + [m['filename'] for m in get_flux2_klein_models()]
++    elif not can_generate_with(run_type):
++        raise _no_generation_lane(run_type)      # cf. create_run, même raison
+     else:
+         models = get_zimage_models()
+         if not models:
+diff --git a/backend/tests/test_flux2_klein_lane.py b/backend/tests/test_flux2_klein_lane.py
+new file mode 100644
+index 00000000..2f46a213
+--- /dev/null
++++ b/backend/tests/test_flux2_klein_lane.py
+@@ -0,0 +1,105 @@
++"""The FLUX.2 Klein generation lane for the Test Studio (GitHub #53).
++
++Klein is the app's EDIT engine everywhere else: variations, improve, inpaint,
++all of which start from an image. The Test Studio starts from a prompt, so this
++lane is the only place Klein is asked to generate from nothing, and it needed a
++graph of its own rather than a branch on somebody else's.
++
++What is pinned here is what makes the lane trustworthy: the graph is built from
++the SAME asset resolvers the rest of the Klein lane uses (never the names frozen
++into the shipped JSON), the tested LoRA and any user-supplied base go through a
++whitelist, and cfg cannot escape 1.0 on a guidance-distilled model.
++"""
++import json
++
++import pytest
++
++from app.services import lora_test_studio as studio
++
++
++def _wf():
++    return json.loads(studio.WORKFLOW_FLUX2KLEIN_PATH.read_text(encoding='utf-8'))
++
++
++def test_the_graph_generates_from_a_prompt_not_from_an_image():
++    """An empty latent is the whole difference from the Klein edit graphs."""
++    classes = {n['class_type'] for n in _wf().values()}
++    assert 'EmptyFlux2LatentImage' in classes
++    assert 'LoadImage' not in classes, 'a test cell has no source image to edit'
++    assert 'LoraLoaderModelOnly' in classes, 'the tested LoRA must reach the model'
++
++
++def test_the_lora_sits_between_the_unet_and_the_sampler():
++    """Wiring, not just presence: a LoRA node nothing consumes changes nothing."""
++    w = _wf()
++    assert w['29']['inputs']['model'] == ['20', 0], 'the LoRA must read the UNET'
++    assert w['31']['inputs']['model'] == ['29', 0], 'sampling must read the LoRA'
++    assert w['26']['inputs']['model'] == ['31', 0], 'the sampler must read that'
++
++
++def test_assets_come_from_the_resolvers_never_from_the_shipped_json(monkeypatch):
++    """The names in a captured workflow are true on ONE machine. Every other
++    Klein path resolves them; so does this one."""
++    from app.services import klein_edit_helper as keh
++    monkeypatch.setattr(keh, 'unet_for_job', lambda *a, **k: 'klein/mine.safetensors')
++    monkeypatch.setattr(keh, '_unet_weight_dtype', lambda *a, **k: 'fp8_e4m3fn')
++    monkeypatch.setattr(keh, 'resolve_klein_text_encoder', lambda: 'te_mine.safetensors')
++    monkeypatch.setattr(keh, 'resolve_klein_vae', lambda: 'vae_mine.safetensors')
++    w = _wf()
++    studio.apply_klein_lora_test_settings(
++        w, lora_name='flux2klein/lora_x.safetensors', strength=0.8, prompt='a cat',
++        seed=7, width=768, height=1024, steps=6, allowed_loras=None)
++    assert w['20']['inputs']['unet_name'] == 'klein/mine.safetensors'
++    assert w['21']['inputs']['clip_name'] == 'te_mine.safetensors'
++    assert w['22']['inputs']['vae_name'] == 'vae_mine.safetensors'
++
++
++def test_the_cell_axes_all_land_where_they_belong():
++    w = _wf()
++    studio.apply_klein_lora_test_settings(
++        w, lora_name='flux2klein/lora_x.safetensors', strength=0.65, prompt='a cat',
++        seed=1234, width=768, height=1024, steps=6, filename_prefix='pfx',
++        allowed_loras=None)
++    assert w['29']['inputs']['lora_name'] == 'flux2klein/lora_x.safetensors'
++    assert w['29']['inputs']['strength_model'] == pytest.approx(0.65)
++    assert w['23']['inputs']['text'] == 'a cat'
++    assert w['26']['inputs']['seed'] == 1234 and w['26']['inputs']['steps'] == 6
++    assert w['28']['inputs']['filename_prefix'] == 'pfx'
++    # The size must reach BOTH the latent and the shift, or the shift is
++    # computed for a picture nobody asked for.
++    for node in ('25', '31'):
++        assert w[node]['inputs']['width'] == 768
++        assert w[node]['inputs']['height'] == 1024
++
++
++def test_cfg_cannot_escape_one_on_a_guidance_distilled_model():
++    """The studio sweeps cfg as an axis. Klein 9B diverges above 1, and a burnt
++    cell reads to the user as a bad checkpoint rather than a bad setting."""
++    w = _wf()
++    studio.apply_klein_lora_test_settings(
++        w, lora_name='l.safetensors', strength=1.0, prompt='p', seed=1,
++        width=512, height=512, cfg=7.5, allowed_loras=None)
++    assert w['26']['inputs']['cfg'] == 1.0
++
++
++@pytest.mark.parametrize('kwargs, wrong', [
++    ({'lora_name': '../../etc/passwd', 'allowed_loras': {'ok.safetensors'}}, 'LoRA'),
++    ({'lora_name': 'ok.safetensors', 'allowed_loras': {'ok.safetensors'},
++      'base_model': '../evil.safetensors', 'allowed_bases': {'klein/a.safetensors'}}, 'base'),
++])
++def test_a_name_outside_its_whitelist_is_refused(kwargs, wrong):
++    """Both user-supplied names are guarded, exactly like the Krea lane."""
++    with pytest.raises(ValueError, match=wrong):
++        studio.apply_klein_lora_test_settings(
++            _wf(), strength=1.0, prompt='p', seed=1, width=512, height=512, **kwargs)
++
++
++def test_an_elected_base_is_not_forced_through_the_user_whitelist():
++    """No base_model given means the app elects one; that value is ours, not a
++    request, so it must not be judged against a whitelist meant for user input."""
++    w = _wf()
++    studio.apply_klein_lora_test_settings(
++        w, lora_name='ok.safetensors', strength=1.0, prompt='p', seed=1,
++        width=512, height=512, allowed_loras={'ok.safetensors'},
++        allowed_bases={'nothing-matches'})
++    assert w['20']['inputs']['unet_name']       # elected, not refused
+diff --git a/backend/tests/test_generation_lane_honesty.py b/backend/tests/test_generation_lane_honesty.py
+new file mode 100644
+index 00000000..c96bda39
+--- /dev/null
++++ b/backend/tests/test_generation_lane_honesty.py
+@@ -0,0 +1,80 @@
++"""A family without a generation lane must SAY SO, and name itself.
++
++GitHub #53 (lunchingfriar, straight after #52): with his Klein LoRA finally
++reading as deployed, he ticked it, hit Generate from the board, and got
++"no Z-Image model available" — a family he had never chosen, about a model he
++had no reason to own. The studio has three generation lanes (SDXL, Krea,
++Z-Image), each with its own workflow, and every unrecognised family fell into
++the Z-Image one: first for its base models, then for its workflow.
++
++The deeper fault is that ONE list was answering TWO questions. FAMILIES says
++which families the studio can SEE (needed by the deployed-state lookup, #52);
++it was also being read as which families it can GENERATE with. Fixing #52 added
++Klein to it and therefore offered Klein in a picker that could not honour it.
++
++These tests pin the separation and the honesty of the refusal.
++"""
++import pytest
++
++from app.services import lora_test_studio as studio
++
++
++def test_generation_families_are_a_subset_of_visible_families():
++    """You cannot generate with a family the studio cannot even see."""
++    assert set(studio.GENERATION_FAMILIES) <= set(studio.FAMILIES)
++
++
++def test_every_generation_family_has_a_workflow_on_disk():
++    """A lane is a workflow, not a name in a tuple. If a family is offered for
++    generation, the file its cells load must exist."""
++    paths = {'sdxl': studio.WORKFLOW_HQ_PATH,
++             'krea': studio.WORKFLOW_KREA_TURBO_PATH,
++             'zimage': studio.WORKFLOW_ZTURBO_PATH,
++             'flux2klein': studio.WORKFLOW_FLUX2KLEIN_PATH}
++    assert set(paths) == set(studio.GENERATION_FAMILIES), (
++        'GENERATION_FAMILIES changed without this map: name the workflow the '
++        'new family generates through, or it will silently borrow another one')
++    for fam, p in paths.items():
++        assert p.is_file(), f'{fam} is offered for generation but {p.name} is missing'
++
++
++def test_a_deployable_family_without_a_lane_is_known_to_be_one():
++    """The exact shape of #53: deployable, visible, NOT generatable."""
++    # Klein GAINED its lane (see test_flux2_klein_lane.py). FLUX.1 and Anima
++    # have not: the app holds no unet/vae/text-encoder setting for them at all,
++    # so there is nothing to generate with until they get an engine config.
++    for fam in ('flux', 'anima'):
++        assert fam in studio.FAMILIES, f'{fam} must stay visible (GitHub #52)'
++        assert not studio.can_generate_with(fam)
++    assert studio.can_generate_with('flux2klein')
++
++
++def test_the_refusal_names_the_family_asked_for_and_never_z_image():
++    """The message is the whole fix. It must name what the user chose, and must
++    not send them looking for a Z-Image model they never wanted."""
++    err = studio._no_generation_lane('flux')
++    text = str(err)
++    assert 'FLUX.1' in text, 'the refusal must name the family the user picked'
++    assert 'Z-Image' not in text, 'blaming Z-Image is exactly the bug (#53)'
++    # And it must not read as "your install is broken": the LoRA is fine.
++    assert 'deploy' in text.lower()
++
++
++def test_the_picker_does_not_offer_a_family_it_cannot_serve(monkeypatch):
++    """available_families fills a selector. Offering a choice that fails on
++    click is worse than not offering it."""
++    monkeypatch.setattr(studio, 'list_test_checkpoints',
++                        lambda ds, fam: [{'filename': f'{fam}/x.safetensors'}])
++    fams = [f['family'] for f in studio.available_families(object())]
++    assert 'flux' not in fams and 'anima' not in fams
++    assert set(fams) == set(studio.GENERATION_FAMILIES)
++
++
++def test_the_workflow_builder_refuses_rather_than_borrowing_z_image():
++    """Belt and braces: even reached directly, a laneless family must not be
++    handed the Z-Image graph with a Klein LoRA bolted onto it."""
++    with pytest.raises(ValueError, match='FLUX.1'):
++        studio._build_cell_workflow(
++            'u', 'flux/lora_x.safetensors', 1.0, 'p', 1, None,
++            allowed_loras={'flux/lora_x.safetensors'},
++            dataset_id=1, train_type='flux')
+diff --git a/backend/tests/test_studio_service.py b/backend/tests/test_studio_service.py
+index 7a6312ee..03391db9 100644
+--- a/backend/tests/test_studio_service.py
++++ b/backend/tests/test_studio_service.py
+@@ -1648,6 +1648,22 @@ def test_embedded_workflow_model_refs_are_all_layout_independent():
+             ('qwen3vl_4b_fp8_scaled.safetensors', 'DORMANT'),
+         ('krea2_turbo_img2img.json', '22', 'vae_name'):
+             ('qwen_image_vae.safetensors', 'DORMANT'),
++        # The Test Studio's FLUX.2 Klein lane (GitHub #53). Its three engine
++        # assets go through the SAME resolvers as the Klein inpaint graphs above
++        # — apply_klein_lora_test_settings calls unet_for_job /
++        # resolve_klein_text_encoder / resolve_klein_vae before enqueue — so the
++        # spellings below are a readable default, never a dependency.
++        ('flux2_klein_t2i.json', '20', 'unet_name'):
++            ('klein\\flux-2-klein-9b-fp8.safetensors', 'RESOLVED'),
++        ('flux2_klein_t2i.json', '21', 'clip_name'):
++            ('qwen_3_8b_fp8mixed.safetensors', 'RESOLVED'),
++        ('flux2_klein_t2i.json', '22', 'vae_name'):
++            ('flux2-vae.safetensors', 'RESOLVED'),
++        # Never loaded: the cell's own LoRA always replaces it, and the name is
++        # deliberately one no install can hold, so a builder that forgot to set
++        # it fails loudly instead of quietly testing somebody else's LoRA.
++        ('flux2_klein_t2i.json', '29', 'lora_name'):
++            ('flux2klein\\placeholder.safetensors', 'OVERRIDDEN'),
+     }
+     assert all(cat in ALLOWED for _ref, cat in EXPECTED.values())
+     actual = {}
+diff --git a/backend/workflows/flux2_klein_t2i.json b/backend/workflows/flux2_klein_t2i.json
+new file mode 100644
+index 00000000..8f117208
+--- /dev/null
++++ b/backend/workflows/flux2_klein_t2i.json
+@@ -0,0 +1,85 @@
++{
++  "20": {
++    "inputs": {
++      "unet_name": "klein\\flux-2-klein-9b-fp8.safetensors",
++      "weight_dtype": "fp8_e4m3fn"
++    },
++    "class_type": "UNETLoader",
++    "_meta": { "title": "Load Diffusion Model (Klein)" }
++  },
++  "21": {
++    "inputs": {
++      "clip_name": "qwen_3_8b_fp8mixed.safetensors",
++      "type": "flux2",
++      "device": "default"
++    },
++    "class_type": "CLIPLoader",
++    "_meta": { "title": "Load CLIP" }
++  },
++  "22": {
++    "inputs": { "vae_name": "flux2-vae.safetensors" },
++    "class_type": "VAELoader",
++    "_meta": { "title": "Load VAE" }
++  },
++  "29": {
++    "inputs": {
++      "lora_name": "flux2klein\\placeholder.safetensors",
++      "strength_model": 1.0,
++      "model": ["20", 0]
++    },
++    "class_type": "LoraLoaderModelOnly",
++    "_meta": { "title": "Tested LoRA" }
++  },
++  "31": {
++    "inputs": {
++      "max_shift": 1.15,
++      "base_shift": 0.6,
++      "width": 1024,
++      "height": 1024,
++      "model": ["29", 0]
++    },
++    "class_type": "ModelSamplingFlux",
++    "_meta": { "title": "ModelSamplingFlux" }
++  },
++  "23": {
++    "inputs": { "text": "a photo", "clip": ["21", 0] },
++    "class_type": "CLIPTextEncode",
++    "_meta": { "title": "Prompt" }
++  },
++  "24": {
++    "inputs": { "text": "", "clip": ["21", 0] },
++    "class_type": "CLIPTextEncode",
++    "_meta": { "title": "Empty negative" }
++  },
++  "25": {
++    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 },
++    "class_type": "EmptyFlux2LatentImage",
++    "_meta": { "title": "Empty latent" }
++  },
++  "26": {
++    "inputs": {
++      "seed": 0,
++      "steps": 8,
++      "cfg": 1.0,
++      "sampler_name": "euler",
++      "scheduler": "simple",
++      "denoise": 1.0,
++      "model": ["31", 0],
++      "positive": ["23", 0],
++      "negative": ["24", 0],
++      "latent_image": ["25", 0]
++    },
++    "class_type": "KSampler",
++    "_meta": { "title": "KSampler" }
++  },
++  "27": {
++    "inputs": { "samples": ["26", 0], "vae": ["22", 0] },
++    "class_type": "VAEDecode",
++    "_meta": { "title": "VAE Decode" }
++  },
++  "28": {
++    "inputs": { "filename_prefix": "Flux2Klein_LoraTest", "images": ["27", 0] },
++    "class_type": "SaveImage",
++    "_meta": { "title": "Save Image" }
++  }
++}
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index e1d2caf7..a4419927 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -82,6 +82,22 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
+ 
+ // Newest first. Prepend new waves at the top.
+ export const WHATS_NEW = [
++  {
++    id: '2026-08-26-klein-in-the-test-studio',
++    date: '2026-08-26',
++    title: 'Test Studio can finally generate with your FLUX.2 Klein LoRAs',
++    blurb:
++      'Klein LoRAs trained and deployed, but the Test Studio had no Klein '
++      + 'generation lane, so clicking Generate from the board answered "no '
++      + 'Z-Image model available" about a family you never picked. Klein now '
++      + 'has a lane of its own: fixed-seed checkpoint and strength grids, the '
++      + 'same as Krea and Z-Image, built on your configured Klein model, text '
++      + 'encoder and VAE. Guidance is pinned where a distilled model wants it, '
++      + 'so a swept CFG cannot burn a cell and make a good checkpoint look bad. '
++      + 'FLUX.1 and Anima still have no lane, and now say so plainly instead of '
++      + 'blaming Z-Image. Reported by lunchingfriar.',
++    to: '/studio',
++  },
+   {
+     id: '2026-08-26-klein-loras-report-as-deployed',
+     date: '2026-08-26',

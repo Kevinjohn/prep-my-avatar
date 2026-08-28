@@ -1,0 +1,2962 @@
+commit 8606832fa6eb2d2e307b6815252da3cbb25fac15
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Sun Aug 2 13:59:21 2026 +0200
+
+    feat(upscale): add SeedVR2 as the fidelity alternative to Klein improve
+    
+    Idea and specification by SurpassHR (GitHub #32): Klein's improve pass is a
+    diffusion edit, so it re-renders skin and micro-detail and can move colour —
+    the wrong trade when the frame's exact look is what the dataset teaches.
+    SeedVR2 (ByteDance-Seed, Apache-2.0) restores detail instead of reinterpreting
+    it. Both are now offered on the same pass, and every surface states the
+    difference in one line so nobody discovers it on a ruined batch.
+    
+    * backend/app/services/seedvr2_helper.py — the engine: resolvers over the
+      models/SEEDVR2 folder, missing/invalid-asset and node-pack preflight, the
+      ComfyUI graph, and the enqueue. Node ids are read from the pack's own
+      define_schema (SeedVR2VideoUpscaler), not its README, which spells them
+      differently and would have made every preflight report a missing node on a
+      correct install.
+    * Only builds already ON DISK are ever submitted: the pack's loaders download
+      an unknown name on first use, and a dropdown must not start a multi-gigabyte
+      download.
+    * The node pack is deliberately NOT auto-installed, unlike comfyui-krea2edit:
+      it declares thirteen pip dependencies that belong in ComfyUI's interpreter,
+      which this app does not own. Setup downloads the two weights (3.9 GB) and
+      names ComfyUI-Manager for the pack.
+    * Settings > Image engines: DiT build, target resolution, max long edge, colour
+      correction, block swapping, and the default engine for the improve pass. No
+      batch-size knob on purpose — the node's batch size is a video window whose
+      frames share attention, so grouping unrelated photos would let them bleed
+      into each other. The card says so rather than shipping a dial that corrupts.
+    * Bulk actions: one button per available engine on the selection, each stating
+      its trade-off; the batch choice never comes from the setting.
+    
+    Stored ids are untouched: derivation_kind stays klein_image_improve and action
+    stays upscale_improve, with the engine recorded additively, so every existing
+    improved tile keeps curating, undoing and re-improving as before.
+    
+    30 new backend tests + 7 new frontend contract tests.
+---
+ README.md                                          |   3 +-
+ backend/app/capabilities.py                        |  26 +
+ backend/app/config.py                              |  33 ++
+ backend/app/routes/datasets.py                     | 135 +++++-
+ backend/app/routes/settings.py                     |  28 ++
+ backend/app/services/face_dataset_service.py       | 171 +++++--
+ backend/app/services/seedvr2_helper.py             | 529 +++++++++++++++++++++
+ backend/app/setup_installer.py                     | 102 +++-
+ backend/tests/test_bulk_improve_batch.py           |  11 +-
+ backend/tests/test_image_improve.py                |  10 +-
+ backend/tests/test_seedvr2.py                      | 498 +++++++++++++++++++
+ docs/guide/settings-reference.md                   |  29 ++
+ frontend/src/components/dataset/DatasetGrid.jsx    |  84 ++--
+ .../src/components/dataset/DatasetLightbox.test.js |   9 +-
+ .../src/components/settings/EnginesSection.jsx     | 205 ++++++++
+ frontend/src/components/settings/registry.js       |   4 +-
+ .../src/components/setup/InstallEverything.jsx     |   2 +
+ .../src/components/setup/SeedVr2InstallCard.jsx    | 219 +++++++++
+ frontend/src/help/helpRegistry.js                  |   6 +
+ frontend/src/hooks/useDataset.js                   |   9 +-
+ frontend/src/hooks/useSetupSteps.js                |  30 ++
+ frontend/src/utils/improveEngines.js               | 103 ++++
+ frontend/src/utils/improveEngines.test.js          |  85 ++++
+ frontend/src/whatsNew.js                           |   8 +
+ 24 files changed, 2201 insertions(+), 138 deletions(-)
+
+diff --git a/README.md b/README.md
+index b9a0d782..259ed7be 100644
+--- a/README.md
++++ b/README.md
+@@ -58,7 +58,7 @@ API generation follows each provider's billing and content policy. Read the dire
+ 
+ | Capability | What it provides |
+ |---|---|
+-| **Curation grid** | Keep/reject, crop, mirror, rotate, zoom, resize, multi-select and non-destructive Klein improvement candidates |
++| **Curation grid** | Keep/reject, crop, mirror, rotate, zoom, resize, multi-select and non-destructive upscale candidates from either engine — Klein re-renders detail (sharper, but skin and colour can shift), SeedVR2 resolves detail and leaves the original look alone |
+ | **Identity and composition checks** | InsightFace similarity, score-based auto-triage, framing badges and a live Character composition meter |
+ | **Model-matched captions** | Prose or booru form selected by target family, with kind-aware Concept leak checks and content-only Style rules |
+ | **Caption Lab and recovery** | Find/replace, tag frequencies, expanded editing, targeted re-captioning, stoppable batches and reload-proof recovery |
+@@ -160,6 +160,7 @@ Missing dependencies are shown in Setup/Settings and gated features stay unavail
+ | ChatGPT / `gpt-image-2` generation | `OPENAI_API_KEY`, or the separate experimental ChatGPT-subscription connection |
+ | OpenRouter generation | `OPENROUTER_API_KEY` plus an image-capable model slug; OpenRouter billing and the upstream provider's policy still apply |
+ | Klein generation / improvement | ComfyUI reachable + Klein model stack |
++| SeedVR2 upscaling | ComfyUI reachable + the `ComfyUI-SeedVR2_VideoUpscaler` node pack (installed from ComfyUI, not by this app — it has its own Python dependencies) + two model files the Setup step downloads (~3.9 GB); [exact files](docs/guide/settings-reference.md#seedvr2-upscaling-local) |
+ | Krea 2 Edit generation | ComfyUI reachable + `comfyui-krea2edit`, a Krea 2 base, Identity Edit LoRA, Qwen3-VL encoder and Qwen Image VAE; [exact files](docs/guide/settings-reference.md#krea-2-edit-local) |
+ | Captioning | Ollama **or** ai-toolkit (JoyCaption) |
+ | Dual long + short captions | ai-toolkit + local vision caption derivation; local training only, and unavailable for Krea 2 / Anima |
+diff --git a/backend/app/capabilities.py b/backend/app/capabilities.py
+index c2861032..3ec388de 100644
+--- a/backend/app/capabilities.py
++++ b/backend/app/capabilities.py
+@@ -1533,6 +1533,20 @@ def probe(force=False) -> dict:
+     krea_blocking_invalid = any(i['blocking'] for i in krea_invalid)
+     krea_ready = (comfy['ok'] and not krea_missing and not krea_nodes_missing
+                   and not krea_blocking_invalid)
++    # SeedVR2 — the fidelity upscaler (issue #32). Same three-part shape as Krea
++    # (weights on disk / node pack present / weights actually loadable), because
++    # it has the same three ways to be half-installed. It is NOT a generation
++    # engine: nothing in the dataset catalog can be produced by it, so it is
++    # published as an upscaler capability and the engine picker that offers it is
++    # the ✨ improve pass's, not the variation catalog's.
++    from .services import seedvr2_helper as _svr
++    seedvr2_missing = _svr.seedvr2_missing_assets()
++    seedvr2_nodes_missing = _svr.seedvr2_missing_nodes() if comfy['ok'] else []
++    seedvr2_nodes_installed = _svr.seedvr2_node_pack_installed()
++    seedvr2_invalid = _svr.seedvr2_invalid_assets()
++    seedvr2_ready = _svr.engine_ready(comfy['ok'], missing=seedvr2_missing,
++                                      invalid=seedvr2_invalid,
++                                      nodes_missing=seedvr2_nodes_missing)
+     base_dir = cfg.get('comfyui.base_dir') or ''
+     from .services import comfyui_control
+     comfy_launcher = comfyui_control.launcher_status()
+@@ -1615,6 +1629,18 @@ def probe(force=False) -> dict:
+             # [{asset, filename, verdict, blocking, reason}] shape as
+             # klein_invalid, so one banner covers both engines.
+             'krea_invalid': krea_invalid,
++            # SeedVR2 gaps, kept apart from the generation engines' for the same
++            # reason theirs are kept apart from each other: "download the
++            # weights" and "install the node pack in ComfyUI" are different
++            # actions with different buttons.
++            'seedvr2_missing': seedvr2_missing,
++            'seedvr2_nodes_missing': seedvr2_nodes_missing,
++            'seedvr2_nodes_installed': seedvr2_nodes_installed,
++            'seedvr2_invalid': seedvr2_invalid,
++            # The single verdict every SeedVR2 surface reads (Settings card,
++            # Setup step, the improve engine picker) so none of them re-derives
++            # readiness from a different subset of the four gaps above.
++            'seedvr2_ready': seedvr2_ready,
+             # Klein assets PRESENT on disk but not real, loadable weights:
+             # [{asset, filename, verdict, blocking, reason}]. Distinct from
+             # klein_missing (the file exists, it just can't load) — drives the Setup
+diff --git a/backend/app/config.py b/backend/app/config.py
+index fafdb524..a1a22652 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -399,6 +399,39 @@ DEFAULTS = {
+         # How hard the source latent is pushed back into the model each step.
+         'ref_boost': 0.25,
+     },
++    # The ✨ Upscale & improve pass — which engine runs it. Its own namespace
++    # rather than a key under `klein`, because the whole point of the setting is
++    # that the pass is no longer Klein-only: 'klein' rewrites detail, 'seedvr2'
++    # restores it without reinterpreting. 'klein' is the default because it is
++    # what every improve did before this setting existed.
++    'improve': {'engine': 'klein'},
++    # SeedVR2 — the FIDELITY upscaler (services/seedvr2_helper.py, issue #32 by
++    # SurpassHR). Not a generation engine: it restores detail and leaves the
++    # content alone, which is the opposite trade from Klein's ✨ improve. Same
++    # discipline as every other engine block: blank means "find it yourself",
++    # never a machine path.
++    'seedvr2': {
++        # Blank = auto-resolve: the canonical 3B FP8 build when present, else the
++        # first build in the SEEDVR2 folder. Set it to a filename to pin one (a
++        # 7B build you dropped in yourself resolves exactly the same way).
++        'model': '',
++        # Target for the SHORT edge in pixels; the long edge follows the source
++        # aspect. 1080 is the node's own default and a sane dataset target — LoRA
++        # training buckets rarely exceed it, so going higher mostly costs VRAM.
++        'resolution': 1080,
++        # Hard cap on the LONG edge, 0 = none. The VRAM safety valve on a wide
++        # panorama, where a 1080 short edge can mean 4000+ px across.
++        'max_resolution': 0,
++        # How the result is graded back onto the source's colours. 'lab' is the
++        # node's default and the most conservative; 'wavelet' preserves broad
++        # tone better on heavily degraded sources. Colour fidelity is the whole
++        # reason this engine exists, so this is deliberately exposed.
++        'color_correction': 'lab',
++        # Transformer blocks offloaded to system RAM during inference. 0 = none
++        # (fastest). Raise it to fit a bigger build on a smaller card; it trades
++        # speed for VRAM headroom, it does not change the result.
++        'blocks_to_swap': 0,
++    },
+     # Z-Image pipeline — the two loader refs the shipped Test Studio workflow used
+     # to hardcode from the developer's own ComfyUI (reported by bobba84, GitHub #18).
+     # BLANK = "find it yourself": services/zimage_model_resolver scans every
+diff --git a/backend/app/routes/datasets.py b/backend/app/routes/datasets.py
+index 2e89a199..e2cd7903 100644
+--- a/backend/app/routes/datasets.py
++++ b/backend/app/routes/datasets.py
+@@ -639,6 +639,92 @@ def _krea_missing_response(e):
+                                      'node_packs': node_packs}}), 409
+ 
+ 
++def _seedvr2_missing_response(e):
++    """Turn a SeedVR2ModelsMissing into a structured 409, in the same
++    `{files, nodes, node_packs}` vocabulary as the Krea one so a single banner
++    renders every engine.
++
++    The one real difference is the node pack: this app INSTALLS Krea's (it has no
++    pip dependencies) and deliberately does NOT install this one, whose thirteen
++    dependencies belong in ComfyUI's interpreter (see seedvr2_helper's module
++    docstring). So the weights auto-start exactly like Klein's and Krea's, and
++    the pack gets an instruction naming ComfyUI-Manager — the tool that installs
++    a pack's requirements properly."""
++    from .. import capabilities, config as cfg
++    from ..services import seedvr2_helper as svr
++    files = svr.missing_file_entries(e.missing)
++    node_packs = svr.seedvr2_node_hints(e.missing_nodes)
++    dir_valid = capabilities.resolve_comfyui_base(cfg.get('comfyui.base_dir') or '')['valid']
++    started = _autostart_seedvr2_downloads(e.missing) if dir_valid else []
++    parts = ["SeedVR2 can't run yet."]
++    if not dir_valid:
++        parts.append('Point the app at your ComfyUI install folder in Setup ▸ ComfyUI '
++                     'and the app can download the weights for you; until then, by hand:')
++    if e.missing_nodes:
++        if svr.seedvr2_node_pack_installed():
++            # On disk, absent from /object_info: the ONE thing no installer can do.
++            parts.append(
++                f"The “{svr.SEEDVR2_NODE_PACK['pack']}” node pack is already installed "
++                "but ComfyUI has not loaded it — RESTART ComfyUI (it only registers "
++                "custom nodes at startup). If it still doesn't appear, its Python "
++                "dependencies failed to install: check ComfyUI's console.")
++        else:
++            parts.append(
++                f"Install the “{svr.SEEDVR2_NODE_PACK['pack']}” custom-node pack in "
++                f"ComfyUI (search “{svr.SEEDVR2_NODE_PACK['search']}” in ComfyUI-Manager, "
++                f"or clone {svr.SEEDVR2_NODE_PACK['url']} and install its "
++                "requirements.txt), then restart ComfyUI — it provides "
++                f"{', '.join(e.missing_nodes)}.")
++    if started:
++        names = ', '.join(svr.SEEDVR2_ASSETS[a]['kind'] for a in started
++                          if a in svr.SEEDVR2_ASSETS)
++        parts.append(f"I've started downloading {names} into your ComfyUI folder "
++                     "(~3.9 GB in total) — watch progress in Setup ▸ ComfyUI.")
++    else:
++        # Nothing could be started: the by-hand answer is still owed in full.
++        for f in files:
++            parts.append(f"Missing {f['kind']}: place it at {f['path']} inside your "
++                         f"ComfyUI folder (from {f['source']}).")
++    parts.append('Then retry.')
++    return jsonify({'ok': False, 'error': ' '.join(parts),
++                    'downloading': started,
++                    'seedvr2_missing': {'assets': e.missing, 'files': files,
++                                        'nodes': e.missing_nodes,
++                                        'node_packs': node_packs}}), 409
++
++
++def _autostart_seedvr2_downloads(missing):
++    """Start the weight downloads that close a SeedVR2 preflight miss. Returns the
++    actions actually started; never raises, so a download that can't start leaves
++    the manual instructions standing."""
++    from .. import setup_installer
++    started = []
++    for action in (missing or []):
++        if action not in setup_installer.INSTALL_ACTIONS:
++            continue
++        try:
++            setup_installer.start(action)
++            started.append(action)
++        except Exception:   # noqa: BLE001 — already running / disk precondition
++            continue
++    return started
++
++
++def _improve_engine_error(e):
++    """The (body, 409) for an improve preflight miss, whichever engine raised it,
++    or None when `e` is not one of those. Every improve route answers the same
++    three exception types, so the mapping lives once."""
++    from ..services.klein_edit_helper import KleinModelsMissing
++    from ..services.seedvr2_helper import SeedVR2ModelsMissing
++    if isinstance(e, svc.KleinNodesMissing):
++        return _klein_missing_response(e.missing, e.missing_nodes)
++    if isinstance(e, KleinModelsMissing):
++        return _klein_missing_response(e.missing)
++    if isinstance(e, SeedVR2ModelsMissing):
++        return _seedvr2_missing_response(e)
++    return None
++
++
+ def _autostart_krea_install(missing, missing_nodes):
+     """Kick off the installs that close a Krea preflight miss: the node pack (a
+     small git clone) and each missing weight. Returns the action names actually
+@@ -1313,18 +1399,21 @@ def dataset_klein_model_set(dataset_id):
+ 
+ @bp.post('/dataset/image/<int:image_id>/improve')
+ def dataset_image_improve(image_id):
+-    """Create a regular Klein-upscaled candidate without touching the source."""
++    """Create an upscaled candidate without touching the source.
++
++    `engine` (optional): 'klein' (rewrites detail) or 'seedvr2' (restores it).
++    Absent = the improve.engine setting, which defaults to the historical Klein."""
+     gate = _require_no_stalled_comfyui()
+     if gate:
+         return gate
++    data = request.get_json(silent=True) or {}
++    engine = (data.get('engine') or '').strip() or None
+     try:
+-        result = svc.improve_existing_image(LOCAL_USER, image_id)
++        result = svc.improve_existing_image(LOCAL_USER, image_id, engine=engine)
+     except Exception as e:
+-        from ..services.klein_edit_helper import KleinModelsMissing
+-        if isinstance(e, svc.KleinNodesMissing):
+-            return _klein_missing_response(e.missing, e.missing_nodes)
+-        if isinstance(e, KleinModelsMissing):
+-            return _klein_missing_response(e.missing)
++        engine_error = _improve_engine_error(e)
++        if engine_error:
++            return engine_error
+         return _map_error(e)
+     if result is None:
+         return jsonify({'error': 'not found'}), 404
+@@ -1344,11 +1433,9 @@ def dataset_image_reimprove(image_id):
+     try:
+         result = svc.reimprove_image(LOCAL_USER, image_id)
+     except Exception as e:
+-        from ..services.klein_edit_helper import KleinModelsMissing
+-        if isinstance(e, svc.KleinNodesMissing):
+-            return _klein_missing_response(e.missing, e.missing_nodes)
+-        if isinstance(e, KleinModelsMissing):
+-            return _klein_missing_response(e.missing)
++        engine_error = _improve_engine_error(e)
++        if engine_error:
++            return engine_error
+         return _map_error(e)
+     if result is None:
+         return jsonify({'error': 'not found'}), 404
+@@ -1357,27 +1444,31 @@ def dataset_image_reimprove(image_id):
+ 
+ @bp.post('/dataset/<int:dataset_id>/improve/batch')
+ def dataset_improve_batch(dataset_id):
+-    """Start the SERVER-side ✨ Klein upscale & improve batch over a selection.
++    """Start the SERVER-side ✨ Upscale & improve batch over a selection.
++
++    Returns immediately with {queued, skipped, engine}; progress rides on the
++    dataset's `activity` (kind 'improve'), so it survives a reload, and ⏹ Stop
++    generation stops it. The browser no longer loops one request per image.
+ 
+-    Returns immediately with {queued, skipped}; progress rides on the dataset's
+-    `activity` (kind 'improve'), so it survives a reload, and ⏹ Stop generation
+-    stops it. The browser no longer loops one request per image."""
++    `engine` (optional): 'klein' or 'seedvr2' — absent = the improve.engine
++    setting. The choice is made ONCE for the whole batch, so a mixed selection
++    can never come back half-rewritten and half-restored."""
+     data = request.get_json(silent=True) or {}
+     ids = data.get('image_ids')
+     if not isinstance(ids, list):
+         return jsonify({'error': 'image_ids must be a list'}), 400
++    engine = (data.get('engine') or '').strip() or None
+     gate = _require_no_stalled_comfyui()
+     if gate:
+         return gate
+     try:
+         result = svc.start_bulk_improve(
+-            current_app._get_current_object(), LOCAL_USER, dataset_id, ids)
++            current_app._get_current_object(), LOCAL_USER, dataset_id, ids,
++            engine=engine)
+     except Exception as e:
+-        from ..services.klein_edit_helper import KleinModelsMissing
+-        if isinstance(e, svc.KleinNodesMissing):
+-            return _klein_missing_response(e.missing, e.missing_nodes)
+-        if isinstance(e, KleinModelsMissing):
+-            return _klein_missing_response(e.missing)
++        engine_error = _improve_engine_error(e)
++        if engine_error:
++            return engine_error
+         return _map_error(e)
+     return jsonify({'ok': True, **result})
+ 
+diff --git a/backend/app/routes/settings.py b/backend/app/routes/settings.py
+index ff6df84a..87084405 100644
+--- a/backend/app/routes/settings.py
++++ b/backend/app/routes/settings.py
+@@ -320,6 +320,34 @@ def loras_list():
+     return jsonify({'loras': loras})
+ 
+ 
++@bp.get('/seedvr2/models')
++def seedvr2_models_list():
++    """The SeedVR2 DiT builds actually PRESENT in this install's SEEDVR2 folder(s),
++    plus the catalog of builds the app can talk about.
++
++    ``{installed: [name], catalog: [{file, label, size_gb, vram_gb, recommended,
++    installed}], resolved: name|null, vae: name|null}``.
++
++    Only installed builds are offered as a pin: the pack's loader nodes download
++    an unknown name on first use, so a picker listing everything would turn a
++    dropdown into a silent multi-gigabyte download. The catalog is still returned
++    so the card can SHOW what else exists (with its size and VRAM guidance) and
++    say it has to be placed in the folder — informing is not fetching.
++
++    Degrades to empty lists rather than an error when ComfyUI is unconfigured."""
++    from ..services import seedvr2_helper as svr
++    try:
++        installed = svr.installed_dit_models()
++        resolved = svr.resolve_seedvr2_dit()
++        vae = svr.resolve_seedvr2_vae()
++    except Exception:
++        current_app.logger.exception('seedvr2 model scan failed')
++        installed, resolved, vae = [], None, None
++    catalog = [{**v, 'installed': v['file'] in installed} for v in svr.DIT_VARIANTS]
++    return jsonify({'installed': installed, 'catalog': catalog,
++                    'resolved': resolved, 'vae': vae})
++
++
+ @bp.get('/scoring-python')
+ def scoring_python_list():
+     """Pythons on this machine that could run the ✨ Score pass, each with a
+diff --git a/backend/app/services/face_dataset_service.py b/backend/app/services/face_dataset_service.py
+index 67034c63..4eec0889 100644
+--- a/backend/app/services/face_dataset_service.py
++++ b/backend/app/services/face_dataset_service.py
+@@ -7815,7 +7815,7 @@ def _improve_enqueue_profile(ds=None) -> dict:
+     }
+ 
+ 
+-def _improve_extra_metadata(source, label) -> dict:
++def _improve_extra_metadata(source, label, engine='klein') -> dict:
+     return {
+         'is_dataset': True,
+         'dataset_id': source.dataset_id,
+@@ -7824,19 +7824,95 @@ def _improve_extra_metadata(source, label) -> dict:
+         'parent_image_id': source.id,
+         'source_image_id': source.id,
+         'action': 'upscale_improve',
++        # WHICH engine produced this candidate. Additive: `derivation_kind` and
++        # `action` keep the values every existing row and every reader already
++        # carries (they are stored, and stored ids are never renamed here), so a
++        # SeedVR2 result curates, undoes and re-improves exactly like a Klein one.
++        'improve_engine': engine,
+     }
+ 
+ 
+-def improve_existing_image(user_id, image_id):
++# --- Which engine runs the ✨ improve pass ------------------------------------
++# Two passes, one lane. Klein REWRITES (a diffusion edit that re-renders skin
++# and micro-detail from a prompt: it fixes a soft photo and it changes it);
++# SeedVR2 RESTORES (one-step diffusion super-resolution that leaves the content
++# where it was). Which one you want depends on whether the frame's exact look is
++# the thing you are training on — so it is a choice, not a default we can pick
++# for everyone. Requested in issue #32 by SurpassHR, whose complaint was exactly
++# that Klein "tends to change the detail and color of the original image".
++IMPROVE_ENGINES = ('klein', 'seedvr2')
++
++
++def resolve_improve_engine(requested=None):
++    """The engine an improve request will run on: the explicit pick when it names
++    a known engine, else the `improve.engine` setting, else Klein.
++
++    Fail-SAFE rather than fail-closed: an unknown name falls back instead of
++    raising, because a stale tab must degrade to the historical behaviour rather
++    than refuse a batch. Klein is the fallback because it is what every improve
++    did before this setting existed."""
++    for candidate in (requested, cfg.get('improve.engine')):
++        name = str(candidate or '').strip().lower()
++        if name in IMPROVE_ENGINES:
++            return name
++        if name:
++            logger.warning('unknown improve engine %r — falling back to klein', candidate)
++    return 'klein'
++
++
++def _improve_preflight(engine):
++    """Raise the engine's structured missing-assets exception when it cannot run.
++
++    Called BEFORE any candidate row is created, so a missing model surfaces once
++    per batch instead of once per image. Each engine keeps its own exception type
++    (KleinModelsMissing / KleinNodesMissing / SeedVR2ModelsMissing) — the routes
++    already turn each into its own actionable 409 body, and collapsing them into
++    one would lose the "install the node pack" vs "place the weights" distinction
++    that makes those bodies useful."""
++    if engine == 'seedvr2':
++        from . import seedvr2_helper
++        seedvr2_helper.preflight()
++        return
++    from . import klein_edit_helper as keh
++    missing = keh.klein_missing_assets()
++    missing_nodes = keh.klein_missing_nodes()
++    if missing_nodes:
++        raise KleinNodesMissing(missing, missing_nodes)
++    if any(asset in missing for asset in keh.KLEIN_REQUIRED):
++        raise keh.KleinModelsMissing(missing)
++
++
++def _enqueue_improve(engine, *, user_id, source, source_path, prompt, label,
++                     dataset):
++    """Hand ONE improve off to the chosen engine and return its job id.
++
++    The two engines take deliberately different arguments — Klein needs a prompt,
++    a consistency-LoRA strength and a step count; SeedVR2 needs none of them
++    (there is no prompt in a restoration) — so this is where that difference
++    stops, and every caller above it stays engine-agnostic."""
++    meta = _improve_extra_metadata(source, label, engine=engine)
++    if engine == 'seedvr2':
++        from . import seedvr2_helper
++        return seedvr2_helper.enqueue_seedvr2_upscale(
++            user_id=str(user_id), source_filename=source.filename,
++            source_path=source_path, extra_metadata=meta)
++    from . import klein_edit_helper as keh
++    return keh.enqueue_klein_edit(
++        user_id=str(user_id), source_filename=source.filename,
++        source_path=source_path, edit_prompt=prompt,
++        **_improve_enqueue_profile(dataset), extra_metadata=meta)
++
++
++def improve_existing_image(user_id, image_id, engine=None):
+     """Serialize one source's improve request, including the queue hand-off."""
+     lock = _IMAGE_IMPROVE_LOCKS[hash((str(user_id), image_id))
+                                 % len(_IMAGE_IMPROVE_LOCKS)]
+     with lock:
+-        return _improve_existing_image_locked(user_id, image_id)
++        return _improve_existing_image_locked(user_id, image_id, engine=engine)
+ 
+ 
+-def _improve_existing_image_locked(user_id, image_id):
+-    """Queue one non-destructive Klein upscale/improvement of an existing image.
++def _improve_existing_image_locked(user_id, image_id, engine=None):
++    """Queue one non-destructive upscale/improvement of an existing image.
+ 
+     The source row and file are deliberately never modified.  The result is a
+     regular generated dataset image linked back to the source only for
+@@ -7876,13 +7952,8 @@ def _improve_existing_image_locked(user_id, image_id):
+         # Refuse a concurrent click rather than creating a second candidate.
+         raise RuntimeError('this image improvement is already being queued')
+ 
+-    from . import klein_edit_helper as keh
+-    missing = keh.klein_missing_assets()
+-    missing_nodes = keh.klein_missing_nodes()
+-    if missing_nodes:
+-        raise KleinNodesMissing(missing, missing_nodes)
+-    if any(asset in missing for asset in keh.KLEIN_REQUIRED):
+-        raise keh.KleinModelsMissing(missing)
++    engine = resolve_improve_engine(engine)
++    _improve_preflight(engine)
+ 
+     in_flight = (FaceDatasetImage.query
+                  .filter_by(dataset_id=img.dataset_id, status='pending')
+@@ -7892,7 +7963,12 @@ def _improve_existing_image_locked(user_id, image_id):
+             f'too many generations in flight ({in_flight}), wait or cancel')
+ 
+     prompt = _improve_prompt()
+-    stored_prompt = prompt[:500]
++    # What the tile SHOWS as the prompt behind this candidate. A SeedVR2 run has
++    # no prompt at all — it is a restoration — so storing the Klein improve
++    # prompt on one would put a sentence on screen that had no effect on the
++    # image. The honest value is the pass that ran.
++    stored_prompt = (prompt[:500] if engine == 'klein'
++                     else 'SeedVR2 upscale (no prompt — restoration pass)')
+     label = _improve_candidate_label(img)
+     candidate = FaceDatasetImage(
+         dataset_id=img.dataset_id, source='generated', status='pending',
+@@ -7907,12 +7983,10 @@ def _improve_existing_image_locked(user_id, image_id):
+     db.session.commit()
+ 
+     try:
+-        job_id = keh.enqueue_klein_edit(
+-            user_id=str(user_id), source_filename=img.filename,
+-            source_path=source_path, edit_prompt=prompt,
+-            **_improve_enqueue_profile(get_dataset(user_id, img.dataset_id)),
+-            extra_metadata=_improve_extra_metadata(img, label),
+-        )
++        job_id = _enqueue_improve(
++            engine, user_id=user_id, source=img, source_path=source_path,
++            prompt=prompt, label=label,
++            dataset=get_dataset(user_id, img.dataset_id))
+     except Exception:
+         # No broken tile: the original is still untouched and the user can retry
+         # as soon as the queue/ComfyUI issue is fixed.
+@@ -7992,13 +8066,12 @@ def _reimprove_image_locked(user_id, image_id):
+     if not os.path.isfile(source_path):
+         raise ValueError(REIMPROVE_SOURCE_FILE_GONE)
+ 
+-    from . import klein_edit_helper as keh
+-    missing = keh.klein_missing_assets()
+-    missing_nodes = keh.klein_missing_nodes()
+-    if missing_nodes:
+-        raise KleinNodesMissing(missing, missing_nodes)
+-    if any(asset in missing for asset in keh.KLEIN_REQUIRED):
+-        raise keh.KleinModelsMissing(missing)
++    # A re-run uses the CURRENTLY selected engine, not the one that produced the
++    # row: "re-improve" means "try again with what I have set now", and someone
++    # who switched to SeedVR2 precisely because the Klein result changed too much
++    # would otherwise get the same Klein result back.
++    engine = resolve_improve_engine()
++    _improve_preflight(engine)
+ 
+     in_flight = (FaceDatasetImage.query
+                  .filter_by(dataset_id=img.dataset_id, status='pending')
+@@ -8020,12 +8093,10 @@ def _reimprove_image_locked(user_id, image_id):
+     expected_transition_caption = (old_state['caption']
+                                    if old_state['caption'] else parent.caption)
+     old_path = _img_path(img) if img.filename else None
+-    job_id = keh.enqueue_klein_edit(
+-        user_id=str(user_id), source_filename=parent.filename,
+-        source_path=source_path, edit_prompt=prompt,
+-        **_improve_enqueue_profile(get_dataset(user_id, img.dataset_id)),
+-        extra_metadata=_improve_extra_metadata(parent, label),
+-    )
++    job_id = _enqueue_improve(
++        engine, user_id=user_id, source=parent, source_path=source_path,
++        prompt=prompt, label=label,
++        dataset=get_dataset(user_id, img.dataset_id))
+ 
+     try:
+         # Do this while the candidate is still Keep.  The CAS observes both
+@@ -8160,26 +8231,22 @@ def bulk_improve_eligible_ids(user_id, dataset_id, image_ids):
+     return eligible
+ 
+ 
+-def start_bulk_improve(app, user_id, dataset_id, image_ids):
+-    """Start the server-side ✨ Klein upscale & improve batch over ``image_ids``.
++def start_bulk_improve(app, user_id, dataset_id, image_ids, engine=None):
++    """Start the server-side ✨ Upscale & improve batch over ``image_ids``.
+ 
+-    Returns ``{'queued', 'skipped'}`` — how many images the job will process and
+-    how many of the selection were not eligible. Raises ValueError (-> 400) on an
+-    unknown dataset / an empty eligible set, RuntimeError (-> 409) when a batch is
+-    already running, and the Klein missing-assets exceptions (-> structured 409)
+-    so a missing model surfaces ONCE instead of once per image."""
++    Returns ``{'queued', 'skipped', 'engine'}`` — how many images the job will
++    process, how many of the selection were not eligible, and which engine ran
++    (the caller echoes it so the toast can name it). Raises ValueError (-> 400) on
++    an unknown dataset / an empty eligible set, RuntimeError (-> 409) when a batch
++    is already running, and the engine's missing-assets exceptions (-> structured
++    409) so a missing model surfaces ONCE instead of once per image."""
+     ds = get_dataset(user_id, dataset_id)
+     if not ds:
+         raise ValueError('dataset not found')
+     if dataset_activity.running(dataset_id, dataset_activity.IMPROVE_KINDS):
+         raise RuntimeError('an improvement batch is already running on this dataset')
+-    from . import klein_edit_helper as keh
+-    missing = keh.klein_missing_assets()
+-    missing_nodes = keh.klein_missing_nodes()
+-    if missing_nodes:
+-        raise KleinNodesMissing(missing, missing_nodes)
+-    if any(asset in missing for asset in keh.KLEIN_REQUIRED):
+-        raise keh.KleinModelsMissing(missing)
++    engine = resolve_improve_engine(engine)
++    _improve_preflight(engine)
+     eligible = bulk_improve_eligible_ids(user_id, dataset_id, image_ids)
+     if not eligible:
+         raise ValueError('no selected image is eligible for improvement')
+@@ -8187,12 +8254,13 @@ def start_bulk_improve(app, user_id, dataset_id, image_ids):
+     total = len(eligible)
+     token = dataset_activity.begin(dataset_id, 'improve', total=total,
+                                    detail=f'Queuing improvements… 0/{total}',
+-                                   engine='klein')
++                                   engine=engine)
+ 
+     def _run():
+         try:
+             with app.app_context():
+-                _drain_improve_queue(user_id, dataset_id, eligible, token)
++                _drain_improve_queue(user_id, dataset_id, eligible, token,
++                                     engine=engine)
+         except Exception:   # noqa: BLE001 — a background crash must not strand the indicator
+             logger.exception('bulk improve batch failed on dataset %s', dataset_id)
+         finally:
+@@ -8207,10 +8275,11 @@ def start_bulk_improve(app, user_id, dataset_id, image_ids):
+     else:
+         threading.Thread(target=_run, daemon=True,
+                          name=f'ds-{dataset_id}-improve').start()
+-    return {'queued': total, 'skipped': skipped}
++    return {'queued': total, 'skipped': skipped, 'engine': engine}
+ 
+ 
+-def _drain_improve_queue(user_id, dataset_id, image_ids, token, sleep=time.sleep):
++def _drain_improve_queue(user_id, dataset_id, image_ids, token, sleep=time.sleep,
++                         engine=None):
+     """Queue one improvement per id, in WAVES that respect the MAX_FANOUT
+     concurrency cap: when the dataset already has that many generations in flight
+     the worker WAITS for a slot (the count drops as ComfyUI writes the files) rather
+@@ -8245,7 +8314,7 @@ def _drain_improve_queue(user_id, dataset_id, image_ids, token, sleep=time.sleep
+             break
+         waited = 0.0
+         try:
+-            improve_existing_image(user_id, image_id)
++            improve_existing_image(user_id, image_id, engine=engine)
+             queued += 1
+         except Exception as exc:   # noqa: BLE001 — one refusal never sinks the batch
+             failed += 1
+diff --git a/backend/app/services/seedvr2_helper.py b/backend/app/services/seedvr2_helper.py
+new file mode 100644
+index 00000000..1005bb47
+--- /dev/null
++++ b/backend/app/services/seedvr2_helper.py
+@@ -0,0 +1,529 @@
++"""SeedVR2 — the FIDELITY upscaler, next to Klein's rewriting "improve".
++
++WHY IT EXISTS (issue #32, requested by SurpassHR)
++-------------------------------------------------
++The app already had one way to make a dataset image bigger and cleaner: the
++Klein ✨ Upscale & improve pass. It is a diffusion EDIT — it re-renders skin,
++hair and micro-detail from a prompt, so it genuinely improves a soft photo and
++genuinely CHANGES it. On a dataset built to teach a likeness that is sometimes
++the wrong trade: the crop you picked for its exact skin tone comes back with a
++different one.
++
++SeedVR2 is the other half of that choice. It is ByteDance-Seed's one-step
++diffusion restoration model: it resolves detail at a higher resolution and
++leaves the content where it was. Neither pass replaces the other, and the UI
++says which is which in one line rather than leaving people to discover it on a
++ruined batch.
++
++THE ECOSYSTEM (measured 2026-08-02, not quoted from a README)
++--------------------------------------------------------------
++  * Node pack: `ComfyUI-SeedVR2_VideoUpscaler` (numz / adrientoupet),
++    Apache-2.0. Node ids are `SeedVR2LoadDiTModel`, `SeedVR2LoadVAEModel` and
++    `SeedVR2VideoUpscaler` — read from the pack's own `define_schema`, NOT from
++    its README, whose prose names differ (`SeedVR2_VideoUpscaler`) and would
++    have made every preflight report a missing node on a correct install.
++  * Weights: `numz/SeedVR2_comfyUI` on Hugging Face — anonymous HTTP 200, API
++    `gated=false`, Apache-2.0, same licence as ByteDance's originals
++    (`ByteDance-Seed/SeedVR2-3B` / `-7B`). Sizes measured from content-length:
++    3B fp8 3.39 GB, 3B fp16 6.78 GB, 7B fp8 8.24 GB, 7B fp16 16.48 GB, VAE
++    501 MB — all in that one repo. GGUF quantisations live in
++    `AInVFX/SeedVR2_comfyUI`.
++  * Licence check is the point of that paragraph: the repo is MIT and has
++    refused an AGPL dependency before (ultralytics, for watermark detection).
++    Apache-2.0 on BOTH the code and the weights is clean.
++
++WHY THE NODE PACK IS NOT AUTO-INSTALLED (unlike comfyui-krea2edit)
++-------------------------------------------------------------------
++The Krea pack declares `dependencies = []`, so installing it is a clone and the
++app does it. This one declares thirteen — diffusers, peft, omegaconf, einops,
++rotary_embedding_torch, gguf, opencv-python… — and they belong in ComfyUI's
++interpreter, which this app does not own and must never pip into. A clone alone
++would land a pack that fails to import, and the user would read "install the
++pack" about a pack that is already there. So the pack is DETECTED and explained
++(install it through ComfyUI-Manager, restart ComfyUI), and only the WEIGHTS —
++which are just files in a folder — are one-click downloadable from Setup.
++
++WHY WE ONLY EVER SUBMIT A MODEL THAT IS ALREADY ON DISK
++--------------------------------------------------------
++Both loader nodes are "(Down)Load" nodes: their `model` combo lists every known
++build and the node downloads it on first use. Handing them a name we have not
++verified would start a multi-gigabyte download inside ComfyUI, from a button
++that promised an upscale — exactly the "nothing downloads without a click" rule
++this app keeps everywhere else. So the resolvers below list what is ON DISK and
++`preflight()` refuses when nothing is.
++
++ONE IMAGE PER JOB — and why there is no batch-size setting
++------------------------------------------------------------
++The node's `batch_size` is a VIDEO window: the frames in one batch share
++temporal attention, which is what keeps a clip coherent. Feeding it five
++unrelated dataset photos would let them bleed into each other. The requested
++"batch size" therefore has no honest meaning for a photo set, and shipping the
++knob anyway would ship a way to corrupt a batch. Images go one per job
++(`batch_size=1`, which is also the node's required 4n+1 shape), the dataset
++batch gets its throughput from the existing MAX_FANOUT queue, and the Settings
++card says so instead of leaving a dead dial.
++"""
++from __future__ import annotations
++import logging
++import os
++import time
++import uuid
++
++from .. import config as cfg
++from . import comfy_model_paths
++from ..utils import comfy_fs
++from ..job_queue import queue_manager
++
++logger = logging.getLogger(__name__)
++
++ENGINE_ID = 'seedvr2'
++ENGINE_LABEL = 'SeedVR2'
++
++# ComfyUI folder type. The pack registers `models/SEEDVR2` under the model type
++# 'seedvr2' but the FOLDER on disk is 'SEEDVR2', and comfy_model_paths falls
++# back to `<models>/<type>` for a type it has no default mapping for — so this
++# name is both the folder and the search-root key, and an extra_model_paths.yaml
++# entry for it works like any other.
++MODEL_FOLDER = 'SEEDVR2'
++
++# Loadable here, deliberately NOT comfy_model_paths.is_loadable_model: that
++# predicate excludes .gguf because the app's OTHER loaders cannot read one. This
++# pack ships its own GGUF loader (utils/gguf), so a quantised build IS loadable
++# through it — for someone on 8 GB of VRAM it is the only build that fits.
++_MODEL_SUFFIXES = ('.safetensors', '.gguf')
++
++SEEDVR2_NODE_CLASSES = ('SeedVR2LoadDiTModel', 'SeedVR2LoadVAEModel',
++                        'SeedVR2VideoUpscaler')
++SEEDVR2_NODE_PACK = {
++    'pack': 'ComfyUI-SeedVR2_VideoUpscaler',
++    'url': 'https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler',
++    'search': 'SeedVR2',
++}
++
++# Where each asset belongs inside a ComfyUI install, for the "place it here"
++# message. Display paths only — the real lookup goes through comfy_model_paths,
++# so an extra_model_paths.yaml root works exactly the same.
++SEEDVR2_ASSETS = {
++    'seedvr2_model': {
++        'kind': 'SeedVR2 DiT model (3B or 7B)',
++        'path': 'models/SEEDVR2/seedvr2_ema_3b_fp8_e4m3fn.safetensors',
++        'source': 'https://huggingface.co/numz/SeedVR2_comfyUI',
++    },
++    'seedvr2_vae': {
++        'kind': 'SeedVR2 VAE',
++        'path': 'models/SEEDVR2/ema_vae_fp16.safetensors',
++        'source': 'https://huggingface.co/numz/SeedVR2_comfyUI',
++    },
++}
++SEEDVR2_REQUIRED = tuple(SEEDVR2_ASSETS)
++
++CANONICAL_DIT = 'seedvr2_ema_3b_fp8_e4m3fn.safetensors'
++CANONICAL_VAE = 'ema_vae_fp16.safetensors'
++
++# The builds the app knows how to talk about, smallest first. `vram_gb` is the
++# pack's own published guidance, not a measurement of ours — it is shown as
++# guidance and never used to gate anything, because real usage moves with
++# resolution and block swapping.
++DIT_VARIANTS = (
++    {'file': 'seedvr2_ema_3b_fp8_e4m3fn.safetensors', 'label': '3B FP8',
++     'size_gb': 3.4, 'vram_gb': '8-12', 'recommended': True},
++    {'file': 'seedvr2_ema_3b_fp16.safetensors', 'label': '3B FP16',
++     'size_gb': 6.8, 'vram_gb': '12-16', 'recommended': False},
++    {'file': 'seedvr2_ema_7b_fp8_e4m3fn.safetensors', 'label': '7B FP8',
++     'size_gb': 8.2, 'vram_gb': '16-20', 'recommended': False},
++    {'file': 'seedvr2_ema_7b_fp16.safetensors', 'label': '7B FP16',
++     'size_gb': 16.5, 'vram_gb': '24+', 'recommended': False},
++    {'file': 'seedvr2_ema_7b_sharp_fp8_e4m3fn.safetensors', 'label': '7B Sharp FP8',
++     'size_gb': 8.2, 'vram_gb': '16-20', 'recommended': False},
++)
++
++
++class SeedVR2ModelsMissing(Exception):
++    """A SeedVR2 asset is not on disk and/or the custom-node pack is absent, so
++    no valid job can be built. Raised BEFORE any row or job is created, so a
++    batch answers ONE actionable 409 instead of failing image by image.
++
++    Same attribute shape as KreaModelsMissing so the routes and the preflight
++    banner need no second format: `.missing` = asset keys (subset of
++    SEEDVR2_REQUIRED), `.missing_nodes` = class_types this ComfyUI lacks."""
++
++    def __init__(self, missing, missing_nodes=None):
++        self.missing = list(missing or [])
++        self.missing_nodes = list(missing_nodes or [])
++        super().__init__('SeedVR2 assets missing: '
++                         + ', '.join(self.missing + self.missing_nodes))
++
++
++# --- Resolution -------------------------------------------------------------
++
++def _listings():
++    out = []
++    for folder in comfy_model_paths.search_roots(MODEL_FOLDER):
++        try:
++            out.append((folder, sorted(n for n in os.listdir(folder)
++                                       if n.lower().endswith(_MODEL_SUFFIXES))))
++        except OSError:
++            continue
++    return out
++
++
++def installed_dit_models():
++    """Bare filenames of every SeedVR2 DiT build present in any SEEDVR2 search
++    root, de-duplicated, sorted. The VAE lives in the same folder and is NOT a
++    DiT, so it is filtered out — offering it in the model picker would produce a
++    job that dies at load time."""
++    seen, out = set(), []
++    for _root, names in _listings():
++        for n in names:
++            if n == CANONICAL_VAE or _is_vae_name(n):
++                continue
++            if n not in seen:
++                seen.add(n)
++                out.append(n)
++    return sorted(out)
++
++
++def _is_vae_name(name):
++    return 'vae' in (name or '').lower()
++
++
++def resolve_seedvr2_dit(selected=None):
++    """The `model` value for SeedVR2LoadDiTModel, or None when no DiT build is on
++    disk.
++
++    Preference: the explicit pick (`selected`, or the `seedvr2.model` setting,
++    matched on its BASENAME so a value copied from a listing still resolves),
++    then the canonical 3B FP8, then the first installed build in name order.
++    Deterministic — the same install always resolves the same file, which is what
++    makes a re-run reproduce its result."""
++    installed = installed_dit_models()
++    if not installed:
++        return None
++    pick = selected or cfg.get('seedvr2.model') or ''
++    bare = os.path.basename(str(pick).replace('/', os.sep).replace('\\', os.sep))
++    if bare:
++        if bare in installed:
++            return bare
++        logger.warning('seedvr2.model %r is not in the SEEDVR2 folder — '
++                       'falling back to automatic resolution', pick)
++    if CANONICAL_DIT in installed:
++        return CANONICAL_DIT
++    return installed[0]
++
++
++def resolve_seedvr2_vae():
++    """The `model` value for SeedVR2LoadVAEModel — the canonical
++    ema_vae_fp16.safetensors when present, else the first file in the folder
++    whose name says VAE. Never a blind first-file guess: handing the DiT weights
++    to the VAE loader fails deep inside the node with an unreadable error."""
++    listings = _listings()
++    if any(CANONICAL_VAE in names for _root, names in listings):
++        return CANONICAL_VAE
++    for _root, names in listings:
++        for n in names:
++            if _is_vae_name(n):
++                return n
++    return None
++
++
++def _abs_under_roots(rel_name):
++    if not rel_name:
++        return None
++    for root in comfy_model_paths.search_roots(MODEL_FOLDER):
++        cand = os.path.join(root, rel_name)
++        if os.path.exists(cand):
++            return cand
++    return None
++
++
++def seedvr2_missing_assets():
++    """Which SeedVR2 assets are NOT on disk, as SEEDVR2_ASSETS keys. Disk-only,
++    network-free — safe for the readiness probe."""
++    missing = []
++    if not resolve_seedvr2_dit():
++        missing.append('seedvr2_model')
++    if not resolve_seedvr2_vae():
++        missing.append('seedvr2_vae')
++    return missing
++
++
++# Advisory floors, deliberately far under the real sizes (3.4 GB / 501 MB) so a
++# legitimate file can never trip them. Same reason as Klein's and Krea's: an
++# interrupted or proxied download saves an HTML error page or a half file under
++# the right name, passes "the file is there", and then dies inside the node.
++SEEDVR2_MIN_BYTES = {
++    'seedvr2_model': 512 * 1024 ** 2,   # 512 MB (real >= 3.4 GB)
++    'seedvr2_vae': 32 * 1024 ** 2,      # 32 MB  (real ~= 500 MB)
++}
++
++
++def seedvr2_invalid_assets():
++    """SeedVR2 assets present under the resolved name but NOT real, loadable
++    weights — the state between 'missing' and 'ready'. Same
++    [{asset, filename, verdict, blocking, reason}] shape as klein_invalid /
++    krea_invalid, so one banner covers every engine.
++
++    GGUF builds are skipped: model_integrity reads a safetensors header, and a
++    valid .gguf has none — validating it there would condemn a working file."""
++    from . import model_integrity
++    out = []
++    for key, rel in (('seedvr2_model', resolve_seedvr2_dit()),
++                     ('seedvr2_vae', resolve_seedvr2_vae())):
++        path = _abs_under_roots(rel)
++        if not path or str(rel).lower().endswith('.gguf'):
++            continue
++        res = model_integrity.validate_model_file(
++            path, min_bytes=SEEDVR2_MIN_BYTES.get(key))
++        if res['ok']:
++            continue
++        out.append({'asset': key, 'filename': res['filename'],
++                    'verdict': res['verdict'], 'blocking': res['blocking'],
++                    'reason': res['reason']})
++    return out
++
++
++# --- Custom-node preflight ---------------------------------------------------
++# Success-only TTL cache, the same contract as krea_missing_nodes: /object_info
++# is the heaviest probe in the app, node packs do not uninstall mid-session, and
++# a MISS is never cached so "install the pack, restart ComfyUI, retry" re-probes
++# at once. FAIL-OPEN when ComfyUI cannot be reached — a transient probe failure
++# must never block a pass.
++_NODES_OK_TTL_S = 300
++_nodes_ok_until = 0.0
++
++
++def seedvr2_missing_nodes():
++    """[class_type] of the SeedVR2 nodes the target ComfyUI does not expose.
++    [] when they are all present OR when /object_info is unreachable."""
++    global _nodes_ok_until
++    if time.time() < _nodes_ok_until:
++        return []
++    from ..utils.comfyui import fetch_object_info_classes
++    available = fetch_object_info_classes()
++    if available is None:
++        return []
++    out = sorted(c for c in SEEDVR2_NODE_CLASSES if c not in available)
++    if not out:
++        _nodes_ok_until = time.time() + _NODES_OK_TTL_S
++    return out
++
++
++def clear_nodes_cache():
++    """Drop the success TTL so the next probe re-asks /object_info."""
++    global _nodes_ok_until
++    _nodes_ok_until = 0.0
++
++
++def seedvr2_node_pack_installed():
++    """Is the pack's folder present in this ComfyUI's custom_nodes? Disk-only.
++
++    This is what separates "install the pack" from "the pack is installed,
++    ComfyUI just hasn't been restarted yet" — ComfyUI registers nodes at STARTUP
++    only. Folder names vary (ComfyUI-Manager clones the repo name, the registry
++    installs `seedvr2_videoupscaler`), so any custom_nodes entry whose name
++    contains 'seedvr2' counts. False whenever ComfyUI's folder isn't
++    configured/valid: we then genuinely do not know."""
++    from .. import capabilities
++    r = capabilities.resolve_comfyui_base(cfg.get('comfyui.base_dir') or '')
++    if not r['valid']:
++        return False
++    root = os.path.join(r['resolved'], 'custom_nodes')
++    try:
++        for entry in os.scandir(root):
++            if entry.is_dir() and 'seedvr2' in entry.name.lower():
++                return any(os.scandir(entry.path))
++    except OSError:
++        return False
++    return False
++
++
++def seedvr2_node_hints(nodes):
++    """[{class_type, pack, url, search}] for each missing node — the shape the
++    preflight banner already renders."""
++    return [{'class_type': ct, **SEEDVR2_NODE_PACK} for ct in (nodes or [])]
++
++
++def missing_file_entries(missing):
++    """[{path, kind, source}] for each missing asset key — again the shape the
++    banner already renders."""
++    out = []
++    for key in missing or []:
++        meta = SEEDVR2_ASSETS.get(key)
++        if meta:
++            out.append({'path': meta['path'], 'kind': meta['kind'],
++                        'source': meta['source']})
++    return out
++
++
++def engine_ready(comfy_ok, missing=None, invalid=None, nodes_missing=None):
++    """THE readiness verdict, so every caller reads the same four conditions
++    instead of its own laxer copy. Ingredients are passed in because
++    capabilities.probe() has already computed them."""
++    if not comfy_ok:
++        return False
++    if missing is None:
++        missing = seedvr2_missing_assets()
++    if nodes_missing is None:
++        nodes_missing = seedvr2_missing_nodes()
++    if invalid is None:
++        invalid = seedvr2_invalid_assets()
++    return not missing and not nodes_missing and not any(
++        i.get('blocking') for i in invalid)
++
++
++def preflight():
++    """Raise SeedVR2ModelsMissing when the engine cannot run."""
++    missing = seedvr2_missing_assets()
++    nodes = seedvr2_missing_nodes()
++    if missing or nodes:
++        raise SeedVR2ModelsMissing(missing, nodes)
++
++
++# --- Settings ----------------------------------------------------------------
++
++RESOLUTION_MIN, RESOLUTION_MAX = 256, 4096
++MAX_RESOLUTION_MAX = 8192
++COLOR_CORRECTIONS = ('lab', 'wavelet', 'wavelet_adaptive', 'hsv', 'adain', 'none')
++BLOCKS_TO_SWAP_MAX = 36
++
++
++def _clamp_int(value, lo, hi, default):
++    try:
++        return int(max(lo, min(hi, float(value))))
++    except (TypeError, ValueError):
++        return default
++
++
++def target_resolution():
++    """Short-edge target in pixels. The node scales the SHORT edge to this and
++    keeps the aspect ratio, so 1080 on a 3:2 photo gives 1620x1080. Snapped to an
++    even number — the node requires it."""
++    v = _clamp_int(cfg.get('seedvr2.resolution'), RESOLUTION_MIN, RESOLUTION_MAX, 1080)
++    return v - (v % 2)
++
++
++def max_resolution():
++    """Hard cap on the LONG edge, 0 = no cap. This is the VRAM safety valve on a
++    panorama: without it a 4:1 crop at 1080 short edge becomes 4320 px wide."""
++    v = _clamp_int(cfg.get('seedvr2.max_resolution'), 0, MAX_RESOLUTION_MAX, 0)
++    return v - (v % 2)
++
++
++def color_correction():
++    """How the output is graded back onto the input's colours. Unknown values
++    fall back to the node's own default rather than being passed through — a
++    typo in config must not reach ComfyUI as an invalid enum."""
++    v = str(cfg.get('seedvr2.color_correction') or '').strip().lower()
++    return v if v in COLOR_CORRECTIONS else 'lab'
++
++
++def blocks_to_swap():
++    """Transformer blocks offloaded to system RAM during inference. 0 = none
++    (fastest); higher trades speed for VRAM headroom, which is what lets the 7B
++    builds run on a card that cannot hold them."""
++    return _clamp_int(cfg.get('seedvr2.blocks_to_swap'), 0, BLOCKS_TO_SWAP_MAX, 0)
++
++
++# --- Graph -------------------------------------------------------------------
++
++def build_workflow(source_image, *, dit, vae, seed, resolution=1080,
++                   max_res=0, color_correct='lab', swap_blocks=0,
++                   filename_prefix='seedvr2_upscale'):
++    """The ComfyUI API-format graph. Pure function of its arguments — no config
++    read, no disk access — so a test can assert the exact wiring without a
++    ComfyUI, and every loader value is one a resolver produced.
++
++    `batch_size` is pinned to 1: see the module docstring — it is a video frame
++    window, and one dataset image is one job.
++
++    `cache_model` stays False on both loaders. Caching would keep several GB
++    resident in ComfyUI between jobs, which on a single-GPU machine is exactly
++    the memory the next generation (or a training run) needs; the app already
++    treats the GPU as a contended resource everywhere else."""
++    return {
++        '1': {'class_type': 'SeedVR2LoadDiTModel',
++              'inputs': {'model': dit, 'device': 'cuda:0',
++                         'offload_device': 'none', 'cache_model': False,
++                         'blocks_to_swap': int(swap_blocks),
++                         'swap_io_components': False,
++                         'attention_mode': 'sdpa'},
++              '_meta': {'title': 'SeedVR2 DiT model'}},
++        '2': {'class_type': 'SeedVR2LoadVAEModel',
++              'inputs': {'model': vae, 'device': 'cuda:0',
++                         'offload_device': 'none', 'cache_model': False,
++                         'encode_tiled': False, 'decode_tiled': False},
++              '_meta': {'title': 'SeedVR2 VAE'}},
++        '3': {'class_type': 'LoadImage', 'inputs': {'image': source_image}},
++        '4': {'class_type': 'SeedVR2VideoUpscaler',
++              'inputs': {'image': ['3', 0], 'dit': ['1', 0], 'vae': ['2', 0],
++                         'seed': int(seed), 'resolution': int(resolution),
++                         'max_resolution': int(max_res), 'batch_size': 1,
++                         'uniform_batch_size': False, 'temporal_overlap': 0,
++                         'prepend_frames': 0,
++                         'color_correction': color_correct,
++                         'input_noise_scale': 0.0, 'latent_noise_scale': 0.0,
++                         'offload_device': 'cpu', 'enable_debug': False},
++              '_meta': {'title': 'SeedVR2 upscale'}},
++        '5': {'class_type': 'SaveImage',
++              'inputs': {'filename_prefix': filename_prefix, 'images': ['4', 0]}},
++    }
++
++
++def _comfy_input_dir() -> str:
++    d = cfg.comfyui_dir('input')
++    if not d:
++        raise RuntimeError('ComfyUI is not configured')
++    return str(d)
++
++
++def enqueue_seedvr2_upscale(user_id, source_filename, source_path=None,
++                            extra_metadata=None, model=None, seed=42):
++    """Copy the source into ComfyUI's input folder, build the SeedVR2 graph
++    against what is ACTUALLY installed, and enqueue it. Returns the app job_id.
++
++    Raises SeedVR2ModelsMissing when an asset or a node is absent (checked BEFORE
++    anything is copied or queued), ValueError on a missing source, RuntimeError
++    when ComfyUI isn't configured. Same contract, in the same order, as
++    krea_edit_helper.enqueue_krea_edit — the callers treat the two engines
++    interchangeably and must not need two error paths.
++
++    The seed is FIXED (42, the node's own default) rather than random: this is a
++    restoration, not a generation. A user who re-runs it expects the same file
++    back, not a lottery."""
++    if source_path is None:
++        out_dir = cfg.comfyui_dir('output')
++        if not out_dir:
++            raise RuntimeError('ComfyUI is not configured')
++        source_path = os.path.join(str(out_dir), source_filename)
++    if not os.path.exists(source_path):
++        raise ValueError(f'source image not found: {source_filename}')
++
++    preflight()
++    dit = resolve_seedvr2_dit(model)
++    vae = resolve_seedvr2_vae()
++
++    comfy_input_dir = comfy_fs.ensure_input_usable(_comfy_input_dir())
++    uid = uuid.uuid4().hex[:8]
++    source_stem = os.path.splitext(os.path.basename(str(source_filename)))[0] or 'source'
++    staged_source = comfy_fs.stage_input_image(
++        source_path, f'seedvr2_source_{uid}_{source_stem}.png', comfy_input_dir)
++    comfy_input = os.path.basename(staged_source)
++
++    workflow = build_workflow(
++        comfy_input, dit=dit, vae=vae, seed=seed,
++        resolution=target_resolution(), max_res=max_resolution(),
++        color_correct=color_correction(), swap_blocks=blocks_to_swap(),
++        # UNIQUE prefix per job: SaveImage numbers from what is currently in the
++        # output folder and the app moves each result out right after completion,
++        # so a shared prefix makes the counter re-issue the same name.
++        filename_prefix=f'{user_id}_DatasetSeedVR2_{uid}')
++
++    job_id = str(uuid.uuid4())
++    meta = {'model_name': 'seedvr2_upscale'}
++    if extra_metadata:
++        meta.update(extra_metadata)
++    meta['staged_inputs'] = [comfy_input]   # dropped again when the job ends
++    queue_manager.add_job(job_type='image', user_id=str(user_id),
++                          workflow_data=workflow, prompt='', job_id=job_id,
++                          metadata=meta)
++    return job_id
+diff --git a/backend/app/setup_installer.py b/backend/app/setup_installer.py
+index 199a1caf..326a8da0 100644
+--- a/backend/app/setup_installer.py
++++ b/backend/app/setup_installer.py
+@@ -176,10 +176,42 @@ _KREA_DOWNLOADS = {
+     },
+ }
+ 
++# SeedVR2 — the fidelity upscaler (issue #32, SurpassHR). Two files only, and
++# the small one is the DEFAULT on purpose: the 3B FP8 build is 3.4 GB and the
++# pack's own guidance puts it at 8-12 GB of VRAM, which is the card most people
++# have. Someone with more drops a 7B build in the same folder and points
++# `seedvr2.model` at it — seedvr2_helper.resolve_seedvr2_dit picks up anything
++# present, so the bigger builds need no second install action.
++#
++# URL survey 2026-08-02 (anonymous HTTP HEAD, no token): `numz/SeedVR2_comfyUI`
++# answers 200 with the full content-length on every file, API `gated=false`,
++# licence apache-2.0 — the same licence as ByteDance's own SeedVR2 weights. The
++# 401/403 recovery path is kept anyway, exactly like Klein's: a measurement is a
++# photograph of one moment, and a future re-gating must degrade into actionable
++# steps rather than a bare error.
++#
++# `dest[0]` is 'SEEDVR2' — the folder the node pack itself registers under
++# ComfyUI's models dir (SEEDVR2_FOLDER_NAME in its constants.py), and the same
++# string seedvr2_helper.MODEL_FOLDER searches.
++_SEEDVR2_DOWNLOADS = {
++    'seedvr2_model': {
++        'url': 'https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/seedvr2_ema_3b_fp8_e4m3fn.safetensors',
++        'dest': ('SEEDVR2', 'seedvr2_ema_3b_fp8_e4m3fn.safetensors'),
++        'min_free_gb': 5, 'gated': False, 'min_bytes': 512 * 1024 ** 2,
++        'license_url': 'https://huggingface.co/numz/SeedVR2_comfyUI',
++    },
++    'seedvr2_vae': {
++        'url': 'https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/ema_vae_fp16.safetensors',
++        'dest': ('SEEDVR2', 'ema_vae_fp16.safetensors'),
++        'min_free_gb': 1, 'gated': False, 'min_bytes': 32 * 1024 ** 2,
++        'license_url': 'https://huggingface.co/numz/SeedVR2_comfyUI',
++    },
++}
++
+ # Every streamed model download, whatever engine it belongs to. The worker,
+ # destination resolution, disk precondition and extra_model_paths de-duplication
+ # are engine-agnostic; only the catalog entries differ.
+-_MODEL_DOWNLOADS = {**_KLEIN_DOWNLOADS, **_KREA_DOWNLOADS}
++_MODEL_DOWNLOADS = {**_KLEIN_DOWNLOADS, **_KREA_DOWNLOADS, **_SEEDVR2_DOWNLOADS}
+ 
+ # Custom-node packs the app can install itself. THE ONLY ONE TODAY — and the
+ # first git-cloned dependency this app installs at all, so the rules are written
+@@ -812,26 +844,46 @@ def start_all(caps) -> dict:
+ # "Install everything" plan. The Krea group is the node pack FIRST (it is a
+ # ~1 MB clone; getting it out of the way means the only thing left to wait for is
+ # bytes) then the four weights.
++#
++# SeedVR2 has NO pack action: its node pack declares thirteen pip dependencies
++# that belong in ComfyUI's interpreter, which this app does not own and must
++# never pip into (see seedvr2_helper's module docstring). Cloning it alone would
++# land a pack that fails to import, so the pack is explained and only the two
++# weights are installed here.
+ _INSTALL_GROUPS = {
+     'krea': ('krea_nodes', 'krea_model', 'krea_text_encoder', 'krea_vae',
+              'krea_identity_lora'),
++    'seedvr2': ('seedvr2_model', 'seedvr2_vae'),
++}
++
++# Which capabilities keys hold each group's gaps, and which member (if any) is
++# the node-pack install. Written down per group rather than branched on the
++# group name, so adding the next engine is one row.
++_GROUP_CAPS_KEYS = {
++    'krea': {'missing': 'krea_missing', 'invalid': 'krea_invalid',
++             'pack_action': 'krea_nodes', 'nodes_missing': 'krea_nodes_missing',
++             'nodes_installed': 'krea_nodes_installed'},
++    'seedvr2': {'missing': 'seedvr2_missing', 'invalid': 'seedvr2_invalid',
++                'pack_action': None, 'nodes_missing': 'seedvr2_nodes_missing',
++                'nodes_installed': 'seedvr2_nodes_installed'},
+ }
+ 
+ 
+ def install_group_plan(group, caps=None) -> list:
+     """The actions a named group would queue: its members MINUS what is already
+-    installed, in a fixed order. `caps` is the live capabilities payload (the
+-    Krea gaps come from comfyui.krea_missing / krea_nodes_missing /
+-    krea_nodes_installed); with none it plans the whole group. Pure."""
++    installed, in a fixed order. `caps` is the live capabilities payload (each
++    group's gaps come from the comfyui.* keys named in _GROUP_CAPS_KEYS); with
++    none it plans the whole group. Pure."""
+     members = _INSTALL_GROUPS.get(group)
+     if not members:
+         return []
+     if caps is None:
+         return list(members)
++    keys = _GROUP_CAPS_KEYS[group]
+     c = (caps or {}).get('comfyui') or {}
+     if not c.get('dir_valid'):
+         return []                      # nowhere to install into — never guess a path
+-    missing_assets = _broken_or_missing(c.get('krea_missing'), c.get('krea_invalid'))
++    missing_assets = _broken_or_missing(c.get(keys['missing']), c.get(keys['invalid']))
+     # Does the pack need INSTALLING? Three states, and the difference matters:
+     #   on disk                -> no. Missing nodes then mean a ComfyUI RESTART, and
+     #                             re-running the installer would only log "already
+@@ -844,14 +896,17 @@ def install_group_plan(group, caps=None) -> list:
+     #                             missing because it could not ask). Not on disk +
+     #                             no answer = install it; a stopped ComfyUI must not
+     #                             silently drop the pack from a one-click install.
+-    if c.get('krea_nodes_installed'):
++    #   no pack action        -> the group installs weights only (SeedVR2).
++    if not keys['pack_action']:
++        needs_pack = False
++    elif c.get(keys['nodes_installed']):
+         needs_pack = False
+-    elif c.get('krea_nodes_missing'):
++    elif c.get(keys['nodes_missing']):
+         needs_pack = True
+     else:
+         needs_pack = not c.get('reachable')
+     return [a for a in members
+-            if (a == 'krea_nodes' and needs_pack) or a in missing_assets]
++            if (a == keys['pack_action'] and needs_pack) or a in missing_assets]
+ 
+ 
+ def start_group(group, caps=None) -> dict:
+@@ -1778,9 +1833,23 @@ def _verify_downloaded_model(action, dest, spec, provider='hf') -> bool:
+     return False
+ 
+ 
++def _resolver_backed_assets():
++    """{action: (missing_fn, invalid_fn)} for every engine whose OWN resolvers can
++    answer "is this installed?". Built lazily so importing this module never drags
++    in the engine helpers (and their ComfyUI probes)."""
++    from .services import krea_edit_helper, seedvr2_helper
++    out = {a: (krea_edit_helper.krea_missing_assets,
++               krea_edit_helper.krea_invalid_assets) for a in _KREA_DOWNLOADS}
++    out.update({a: (seedvr2_helper.seedvr2_missing_assets,
++                    seedvr2_helper.seedvr2_invalid_assets)
++                for a in _SEEDVR2_DOWNLOADS})
++    return out
++
++
+ def _krea_asset_already_installed(action) -> bool:
+-    """RETROFIT guard: someone who placed a Krea asset by hand, under their own
+-    file name, anywhere ComfyUI registers, must not see it re-downloaded. The
++    """RETROFIT guard: someone who placed a Krea or SeedVR2 asset by hand, under
++    their own file name, anywhere ComfyUI registers, must not see it
++    re-downloaded. The
+     engine's own resolvers already answer "is this installed?" for exactly the
+     file a generate would load, so we ask them rather than test one hardcoded
+     path. Klein keeps its filename-based checks above (its resolver accepts a
+@@ -1792,13 +1861,14 @@ def _krea_asset_already_installed(action) -> bool:
+     (krea_invalid_assets, blocking only — the same list capabilities greys the
+     engine on) vetoes the skip. Nothing is deleted: the file sits under a name and
+     a folder the user chose, and the download goes to the canonical dest anyway."""
+-    if action not in _KREA_DOWNLOADS:
+-        return False
+     try:
+-        from .services import krea_edit_helper
+-        if action in krea_edit_helper.krea_missing_assets():
++        entry = _resolver_backed_assets().get(action)
++        if not entry:
++            return False
++        missing_fn, invalid_fn = entry
++        if action in missing_fn():
+             return False
+-        broken = next((i for i in krea_edit_helper.krea_invalid_assets()
++        broken = next((i for i in invalid_fn()
+                        if i['asset'] == action and i['blocking']), None)
+         if broken:
+             _note(action, f"the file already resolving for this asset cannot be loaded: "
+@@ -1806,7 +1876,7 @@ def _krea_asset_already_installed(action) -> bool:
+             return False
+         return True
+     except Exception:
+-        logger.debug('krea presence check failed for %s', action, exc_info=True)
++        logger.debug('resolver presence check failed for %s', action, exc_info=True)
+         return False
+ 
+ 
+diff --git a/backend/tests/test_bulk_improve_batch.py b/backend/tests/test_bulk_improve_batch.py
+index 1665a58b..698d1844 100644
+--- a/backend/tests/test_bulk_improve_batch.py
++++ b/backend/tests/test_bulk_improve_batch.py
+@@ -82,8 +82,8 @@ def test_batch_larger_than_max_fanout_eventually_processes_everything(app, monke
+ 
+         real_improve = svc.improve_existing_image
+ 
+-        def _tracked(user_id, image_id):
+-            result = real_improve(user_id, image_id)
++        def _tracked(user_id, image_id, engine=None):
++            result = real_improve(user_id, image_id, engine=engine)
+             peaks.append(svc._improve_in_flight(ds.id))
+             return result
+ 
+@@ -118,8 +118,8 @@ def test_stop_generation_really_ends_the_batch(app, monkeypatch):
+         token = da.begin(ds.id, 'improve', total=len(source_ids))
+         real_improve = svc.improve_existing_image
+ 
+-        def _stop_after_three(user_id, image_id):
+-            result = real_improve(user_id, image_id)
++        def _stop_after_three(user_id, image_id, engine=None):
++            result = real_improve(user_id, image_id, engine=engine)
+             if len(jobs) == 3:
+                 svc.cancel_pending(LOCAL_USER, ds.id)   # the ⏹ Stop button path
+             return result
+@@ -216,7 +216,8 @@ def test_route_starts_the_job_and_refuses_a_second_one(app, client, monkeypatch)
+     resp = client.post(f'/api/dataset/{dataset_id}/improve/batch',
+                        json={'image_ids': [*source_ids, 424242]})
+     assert resp.status_code == 200
+-    assert resp.get_json() == {'ok': True, 'queued': 4, 'skipped': 1}
++    assert resp.get_json() == {'ok': True, 'queued': 4, 'skipped': 1,
++                               'engine': 'klein'}
+     assert len(jobs) == 4
+ 
+     # A live batch refuses a second one (409) — two workers racing the same cap
+diff --git a/backend/tests/test_image_improve.py b/backend/tests/test_image_improve.py
+index 26b334c3..55ca341c 100644
+--- a/backend/tests/test_image_improve.py
++++ b/backend/tests/test_image_improve.py
+@@ -536,7 +536,7 @@ def test_improve_route_accepts_empty_json_and_returns_contract(client, monkeypat
+ 
+     monkeypatch.setattr(
+         svc, 'improve_existing_image',
+-        lambda user_id, image_id: {'candidate_id': 41, 'job_id': 'route-job'})
++        lambda user_id, image_id, engine=None: {'candidate_id': 41, 'job_id': 'route-job'})
+     response = client.post('/api/dataset/image/7/improve', json={})
+     assert response.status_code == 200
+     assert response.get_json() == {
+@@ -552,7 +552,7 @@ def test_improve_route_recovery_barrier_has_no_service_side_effect(client, monke
+             COMFYUI_STALLED_BARRIER_KEY, {'job_id': 'unresolved'})
+     monkeypatch.setattr(
+         svc, 'improve_existing_image',
+-        lambda *_args: (_ for _ in ()).throw(AssertionError('service must not run')))
++        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError('service must not run')))
+ 
+     response = client.post('/api/dataset/image/7/improve', json={})
+     assert response.status_code == 409
+@@ -567,12 +567,12 @@ def test_improve_route_maps_not_found_and_klein_missing(client, monkeypatch):
+     monkeypatch.setattr(
+         keh, 'klein_missing_nodes',
+         lambda: (_ for _ in ()).throw(AssertionError('route must not preflight before ownership')))
+-    monkeypatch.setattr(svc, 'improve_existing_image', lambda *_args: None)
++    monkeypatch.setattr(svc, 'improve_existing_image', lambda *_a, **_k: None)
+     assert client.post('/api/dataset/image/404/improve').status_code == 404
+ 
+     monkeypatch.setattr(
+         svc, 'improve_existing_image',
+-        lambda *_args: (_ for _ in ()).throw(KleinModelsMissing(['klein_model'])))
++        lambda *_a, **_k: (_ for _ in ()).throw(KleinModelsMissing(['klein_model'])))
+     response = client.post('/api/dataset/image/8/improve', json={})
+     assert response.status_code == 409
+     assert response.get_json()['ok'] is False
+@@ -584,7 +584,7 @@ def test_improve_route_preflights_missing_nodes(client, monkeypatch):
+     missing = [{'class_type': 'ExampleNode', 'pack': None, 'url': None}]
+     monkeypatch.setattr(
+         svc, 'improve_existing_image',
+-        lambda *_args: (_ for _ in ()).throw(svc.KleinNodesMissing([], missing)))
++        lambda *_a, **_k: (_ for _ in ()).throw(svc.KleinNodesMissing([], missing)))
+     response = client.post('/api/dataset/image/8/improve', json={})
+     assert response.status_code == 409
+     assert response.get_json()['klein_nodes_missing'] == missing
+diff --git a/backend/tests/test_seedvr2.py b/backend/tests/test_seedvr2.py
+new file mode 100644
+index 00000000..7056e253
+--- /dev/null
++++ b/backend/tests/test_seedvr2.py
+@@ -0,0 +1,498 @@
++"""SeedVR2 — the fidelity upscaler (issue #32, requested by SurpassHR).
++
++What these tests pin is what would silently ruin the feature:
++
++* the NODE CLASS NAMES. The pack's README spells them `SeedVR2_VideoUpscaler`;
++  its code registers `SeedVR2VideoUpscaler`. Reading the README would have made
++  every preflight report a missing node on a perfectly good install, and the
++  symptom ("install the pack" about a pack that is there) is the least
++  debuggable one there is.
++* the DESTINATION. A download that lands where the resolver never looks is a
++  3.4 GB no-op — the exact failure the Krea install tests exist for.
++* the RESOLVERS never guessing: handing the DiT weights to the VAE loader, or a
++  name that is not on disk to a loader that DOWNLOADS unknown names, both turn a
++  button into a multi-gigabyte surprise.
++* the improve lane staying engine-agnostic ABOVE the dispatch, and the stored
++  ids (`derivation_kind`, `action`) not moving when the engine does.
++"""
++import os
++import struct
++
++import pytest
++
++
++def _make_comfyui(root):
++    base = root / 'ComfyUI'
++    (base / 'models').mkdir(parents=True, exist_ok=True)
++    (base / 'main.py').write_text('# fake ComfyUI entrypoint', encoding='utf-8')
++    return base
++
++
++def _safetensors(payload_size=1024):
++    header = b'{"__metadata__":{"lds":"test"}}'
++    return struct.pack('<Q', len(header)) + header + b'\0' * payload_size
++
++
++def _install_weights(base, *names):
++    folder = base / 'models' / 'SEEDVR2'
++    folder.mkdir(parents=True, exist_ok=True)
++    for name in names:
++        (folder / name).write_bytes(_safetensors())
++    return folder
++
++
++# --- The contract with the node pack ----------------------------------------
++
++def test_node_class_names_match_the_packs_code_not_its_readme():
++    """`SeedVR2VideoUpscaler`, not `SeedVR2_VideoUpscaler`. Read from the pack's
++    own define_schema on 2026-08-02. If this ever changes, every preflight lies."""
++    from app.services import seedvr2_helper as svr
++    assert svr.SEEDVR2_NODE_CLASSES == ('SeedVR2LoadDiTModel',
++                                        'SeedVR2LoadVAEModel',
++                                        'SeedVR2VideoUpscaler')
++    assert all('_' not in c.removeprefix('SeedVR2')
++               for c in svr.SEEDVR2_NODE_CLASSES)
++
++
++def test_workflow_wires_the_three_nodes_and_pins_batch_size_to_one():
++    """One image per job. The node's batch_size is a VIDEO window whose frames
++    share temporal attention — grouping unrelated dataset photos would let them
++    bleed into each other, which is why no batch-size setting is shipped."""
++    from app.services import seedvr2_helper as svr
++    g = svr.build_workflow('src.png', dit='dit.safetensors', vae='vae.safetensors',
++                           seed=42, resolution=1440, max_res=2048,
++                           color_correct='wavelet', swap_blocks=12,
++                           filename_prefix='pfx')
++    classes = {n['class_type'] for n in g.values()}
++    assert classes == {'SeedVR2LoadDiTModel', 'SeedVR2LoadVAEModel',
++                       'LoadImage', 'SeedVR2VideoUpscaler', 'SaveImage'}
++    up = next(n for n in g.values() if n['class_type'] == 'SeedVR2VideoUpscaler')
++    assert up['inputs']['batch_size'] == 1
++    assert up['inputs']['resolution'] == 1440
++    assert up['inputs']['max_resolution'] == 2048
++    assert up['inputs']['color_correction'] == 'wavelet'
++    # Every loader value is one a resolver produced, and the graph is connected.
++    assert up['inputs']['image'] == ['3', 0]
++    assert up['inputs']['dit'] == ['1', 0]
++    assert up['inputs']['vae'] == ['2', 0]
++    dit = next(n for n in g.values() if n['class_type'] == 'SeedVR2LoadDiTModel')
++    assert dit['inputs']['model'] == 'dit.safetensors'
++    assert dit['inputs']['blocks_to_swap'] == 12
++    # Caching would keep several GB resident between jobs on a contended GPU.
++    assert dit['inputs']['cache_model'] is False
++    vae = next(n for n in g.values() if n['class_type'] == 'SeedVR2LoadVAEModel')
++    assert vae['inputs']['cache_model'] is False
++    save = next(n for n in g.values() if n['class_type'] == 'SaveImage')
++    assert save['inputs']['filename_prefix'] == 'pfx'
++
++
++def test_build_workflow_is_pure(app, tmp_path, monkeypatch):
++    """No config read, no disk access — a graph assertion must not need a
++    ComfyUI, and a settings change must not silently rewrite an enqueued job."""
++    from app.services import seedvr2_helper as svr
++    monkeypatch.setattr(svr.cfg, 'get', lambda *a, **k: pytest.fail('config read'))
++    svr.build_workflow('s.png', dit='d', vae='v', seed=1)
++
++
++# --- Resolution never guesses ------------------------------------------------
++
++def test_weights_land_where_the_resolvers_actually_look(app, tmp_path):
++    from app import setup_installer, config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        for action in ('seedvr2_model', 'seedvr2_vae'):
++            dest = setup_installer._download_dest_path(action)
++            os.makedirs(os.path.dirname(dest), exist_ok=True)
++            with open(dest, 'wb') as fh:
++                fh.write(_safetensors())
++        assert svr.resolve_seedvr2_dit() == svr.CANONICAL_DIT
++        assert svr.resolve_seedvr2_vae() == svr.CANONICAL_VAE
++        assert svr.seedvr2_missing_assets() == []
++
++
++def test_download_dest_is_the_folder_the_node_pack_registers(app, tmp_path):
++    """`models/SEEDVR2` — SEEDVR2_FOLDER_NAME in the pack's constants.py, and the
++    same string the helper searches. A one-word mistake with a 3.4 GB cost."""
++    from app import setup_installer, config
++    base = _make_comfyui(tmp_path)
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        dest = setup_installer._download_dest_path('seedvr2_model')
++    assert dest.endswith(os.path.join('models', 'SEEDVR2',
++                                      'seedvr2_ema_3b_fp8_e4m3fn.safetensors'))
++
++
++def test_the_vae_is_never_offered_as_a_dit_build(app, tmp_path):
++    """Both files live in ONE folder. Handing the VAE to the DiT loader fails deep
++    inside the node with an unreadable error, so the picker must not list it."""
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    _install_weights(base, svr.CANONICAL_DIT, svr.CANONICAL_VAE)
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        assert svr.installed_dit_models() == [svr.CANONICAL_DIT]
++        assert svr.resolve_seedvr2_vae() == svr.CANONICAL_VAE
++
++
++def test_only_an_installed_build_is_ever_submitted(app, tmp_path):
++    """The loader nodes DOWNLOAD an unknown name on first use. A pin pointing at a
++    build that is not on disk must therefore fall back to one that is, never be
++    passed through — otherwise a dropdown starts a multi-gigabyte download from a
++    button that promised an upscale."""
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    _install_weights(base, 'seedvr2_ema_3b_fp16.safetensors', svr.CANONICAL_VAE)
++    with app.app_context():
++        config.save_config({
++            'comfyui': {'base_dir': str(base)},
++            'seedvr2': {'model': 'seedvr2_ema_7b_fp16.safetensors'}})
++        comfy_model_paths.clear_cache()
++        assert svr.resolve_seedvr2_dit() == 'seedvr2_ema_3b_fp16.safetensors'
++
++
++def test_nothing_on_disk_resolves_to_nothing(app, tmp_path):
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        assert svr.resolve_seedvr2_dit() is None
++        assert svr.resolve_seedvr2_vae() is None
++        assert sorted(svr.seedvr2_missing_assets()) == ['seedvr2_model', 'seedvr2_vae']
++
++
++def test_a_pinned_build_is_honoured_when_it_is_present(app, tmp_path):
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    _install_weights(base, svr.CANONICAL_DIT, 'seedvr2_ema_7b_fp8_e4m3fn.safetensors',
++                     svr.CANONICAL_VAE)
++    with app.app_context():
++        config.save_config({
++            'comfyui': {'base_dir': str(base)},
++            'seedvr2': {'model': 'seedvr2_ema_7b_fp8_e4m3fn.safetensors'}})
++        comfy_model_paths.clear_cache()
++        assert svr.resolve_seedvr2_dit() == 'seedvr2_ema_7b_fp8_e4m3fn.safetensors'
++
++
++def test_a_gguf_build_is_usable_here_even_though_other_engines_refuse_one(app, tmp_path):
++    """comfy_model_paths.is_loadable_model excludes .gguf because the app's other
++    loaders cannot read one. THIS pack ships its own GGUF loader, and on a small
++    card the quantised build is the only one that fits."""
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    _install_weights(base, svr.CANONICAL_VAE)
++    (base / 'models' / 'SEEDVR2' / 'seedvr2_ema_3b-Q8_0.gguf').write_bytes(b'GGUF' * 64)
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        assert svr.installed_dit_models() == ['seedvr2_ema_3b-Q8_0.gguf']
++        # ...and it is NOT condemned by the safetensors header check, which a
++        # valid .gguf could never satisfy. (The stub VAE trips only the ADVISORY
++        # too_small floor — nothing here is blocking.)
++        assert [i['asset'] for i in svr.seedvr2_invalid_assets()
++                if i['blocking']] == []
++
++
++def test_an_html_gate_page_saved_as_weights_is_reported_invalid(app, tmp_path):
++    """Present, not loadable — the state between 'missing' and 'ready'. Same
++    verdict shape as klein_invalid / krea_invalid so one banner covers all."""
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    folder = base / 'models' / 'SEEDVR2'
++    folder.mkdir(parents=True, exist_ok=True)
++    (folder / svr.CANONICAL_DIT).write_bytes(b'<!DOCTYPE html><html>login</html>' * 40)
++    (folder / svr.CANONICAL_VAE).write_bytes(_safetensors())
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        bad = svr.seedvr2_invalid_assets()
++        blocking = [i for i in bad if i['blocking']]
++        assert [i['asset'] for i in blocking] == ['seedvr2_model']
++        assert blocking[0]['verdict'] == 'html_or_text'
++        assert svr.engine_ready(True, missing=[], invalid=bad, nodes_missing=[]) is False
++
++
++# --- Preflight ---------------------------------------------------------------
++
++def test_preflight_raises_before_anything_is_queued(app, tmp_path, monkeypatch):
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    monkeypatch.setattr(svr, 'seedvr2_missing_nodes', lambda: [])
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        with pytest.raises(svr.SeedVR2ModelsMissing) as exc:
++            svr.preflight()
++        assert sorted(exc.value.missing) == ['seedvr2_model', 'seedvr2_vae']
++        assert exc.value.missing_nodes == []
++
++
++def test_missing_nodes_fails_open_when_comfyui_is_unreachable(app, monkeypatch):
++    """A transient probe failure must never block a pass — the job would fail
++    with ComfyUI's own error, and two red flags for one cause is noise."""
++    from app.services import seedvr2_helper as svr
++    svr.clear_nodes_cache()
++    monkeypatch.setattr('app.utils.comfyui.fetch_object_info_classes', lambda: None)
++    with app.app_context():
++        assert svr.seedvr2_missing_nodes() == []
++
++
++def test_missing_nodes_lists_exactly_what_object_info_lacks(app, monkeypatch):
++    from app.services import seedvr2_helper as svr
++    svr.clear_nodes_cache()
++    monkeypatch.setattr('app.utils.comfyui.fetch_object_info_classes',
++                        lambda: {'SeedVR2LoadDiTModel', 'LoadImage'})
++    with app.app_context():
++        assert svr.seedvr2_missing_nodes() == ['SeedVR2LoadVAEModel',
++                                               'SeedVR2VideoUpscaler']
++    svr.clear_nodes_cache()
++
++
++def test_a_pack_installed_under_another_folder_name_still_counts(app, tmp_path):
++    """ComfyUI-Manager clones the repo name; the registry installs
++    `seedvr2_videoupscaler`. Both mean "installed" — the distinction this answers
++    is 'install the pack' vs 'restart ComfyUI', and getting it wrong tells someone
++    to install what they just installed."""
++    from app import config
++    from app.services import seedvr2_helper as svr
++    base = _make_comfyui(tmp_path)
++    pack = base / 'custom_nodes' / 'seedvr2_videoupscaler'
++    pack.mkdir(parents=True)
++    (pack / '__init__.py').write_text('', encoding='utf-8')
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        assert svr.seedvr2_node_pack_installed() is True
++
++
++def test_no_comfyui_means_we_do_not_know_rather_than_installed(app, tmp_path):
++    from app import config
++    from app.services import seedvr2_helper as svr
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(tmp_path / 'nope')}})
++        assert svr.seedvr2_node_pack_installed() is False
++
++
++# --- The node pack is deliberately NOT auto-installed ------------------------
++
++def test_the_node_pack_is_not_an_install_action():
++    """It declares thirteen pip dependencies that belong in ComfyUI's
++    interpreter, which this app does not own and must never pip into. Cloning it
++    alone would land a pack that fails to import."""
++    from app import setup_installer
++    assert 'seedvr2_nodes' not in setup_installer.INSTALL_ACTIONS
++    assert not any('seedvr2' in p for p in setup_installer._NODE_PACKS)
++    assert setup_installer._INSTALL_GROUPS['seedvr2'] == ('seedvr2_model',
++                                                          'seedvr2_vae')
++
++
++def test_install_actions_and_workers_cover_the_weights():
++    from app import setup_installer
++    for a in ('seedvr2_model', 'seedvr2_vae'):
++        assert a in setup_installer.INSTALL_ACTIONS
++        assert a in setup_installer._WORKERS
++
++
++def test_seedvr2_stays_out_of_install_everything():
++    """"Install everything" runs unattended from a Setup button. SeedVR2 is an
++    explicit pick like Krea, not a 3.9 GB surprise on a metered link."""
++    from app import setup_installer
++    caps = {'comfyui': {'dir_valid': True,
++                        'seedvr2_missing': ['seedvr2_model', 'seedvr2_vae']}}
++    assert 'seedvr2_model' not in setup_installer.install_all_plan(caps)
++
++
++def test_the_group_plan_only_queues_what_is_missing():
++    from app import setup_installer
++    caps = {'comfyui': {'dir_valid': True, 'reachable': True,
++                        'seedvr2_missing': ['seedvr2_vae'], 'seedvr2_invalid': []}}
++    assert setup_installer.install_group_plan('seedvr2', caps) == ['seedvr2_vae']
++    # A file that is present but not loadable is not "installed".
++    caps['comfyui']['seedvr2_missing'] = []
++    caps['comfyui']['seedvr2_invalid'] = [{'asset': 'seedvr2_model', 'blocking': True}]
++    assert setup_installer.install_group_plan('seedvr2', caps) == ['seedvr2_model']
++    # Nowhere to install into -> never guess a path.
++    assert setup_installer.install_group_plan(
++        'seedvr2', {'comfyui': {'dir_valid': False}}) == []
++
++
++def test_krea_group_planning_is_unchanged_by_the_generalisation():
++    """The group table was generalised to carry SeedVR2; Krea's node-pack logic
++    (three states: on disk / missing / unreachable) must be byte-identical."""
++    from app import setup_installer
++    caps = {'comfyui': {'dir_valid': True, 'reachable': True,
++                        'krea_missing': ['krea_vae'], 'krea_invalid': [],
++                        'krea_nodes_missing': ['Krea2EditModelPatch'],
++                        'krea_nodes_installed': False}}
++    assert setup_installer.install_group_plan('krea', caps) == ['krea_nodes', 'krea_vae']
++    caps['comfyui']['krea_nodes_installed'] = True
++    assert setup_installer.install_group_plan('krea', caps) == ['krea_vae']
++
++
++# --- Settings clamp to something the node accepts ----------------------------
++
++def test_settings_clamp_and_never_pass_an_invalid_enum_through(app):
++    from app import config
++    from app.services import seedvr2_helper as svr
++    with app.app_context():
++        config.save_config({'seedvr2': {'resolution': 99999, 'max_resolution': 1081,
++                                        'color_correction': 'sepia',
++                                        'blocks_to_swap': 999}})
++        assert svr.target_resolution() == svr.RESOLUTION_MAX
++        assert svr.max_resolution() == 1080          # snapped even
++        assert svr.color_correction() == 'lab'       # typo -> the node's default
++        assert svr.blocks_to_swap() == svr.BLOCKS_TO_SWAP_MAX
++        config.save_config({'seedvr2': {'resolution': 'nonsense',
++                                        'color_correction': 'wavelet'}})
++        assert svr.target_resolution() == 1080
++        assert svr.color_correction() == 'wavelet'
++
++
++def test_shipped_defaults_are_the_conservative_ones(app):
++    from app import config
++    from app.services import seedvr2_helper as svr
++    with app.app_context():
++        assert svr.target_resolution() == 1080
++        assert svr.max_resolution() == 0
++        assert svr.color_correction() == 'lab'
++        assert svr.blocks_to_swap() == 0
++        assert config.DEFAULTS['improve']['engine'] == 'klein'
++
++
++# --- The improve lane -------------------------------------------------------
++
++def test_improve_engine_resolution_falls_back_instead_of_raising(app):
++    """A stale tab naming an engine that no longer exists must degrade to the
++    historical behaviour, not refuse a 250-image batch."""
++    from app import config
++    from app.services import face_dataset_service as svc
++    with app.app_context():
++        assert svc.resolve_improve_engine() == 'klein'
++        assert svc.resolve_improve_engine('seedvr2') == 'seedvr2'
++        assert svc.resolve_improve_engine('SeedVR2') == 'seedvr2'
++        assert svc.resolve_improve_engine('nonsense') == 'klein'
++        config.save_config({'improve': {'engine': 'seedvr2'}})
++        assert svc.resolve_improve_engine() == 'seedvr2'
++        # An explicit request still wins over the setting.
++        assert svc.resolve_improve_engine('klein') == 'klein'
++
++
++def test_the_candidates_stored_ids_do_not_move_with_the_engine(app):
++    """`derivation_kind` and `action` are STORED in user databases. Renaming them
++    for a second engine would strand every existing improved tile — the engine is
++    recorded additively instead."""
++    from app.services import face_dataset_service as svc
++
++    class _Src:
++        id, dataset_id, source_metadata = 7, 3, None
++
++    for engine in svc.IMPROVE_ENGINES:
++        meta = svc._improve_extra_metadata(_Src(), 'label', engine=engine)
++        assert meta['derivation_kind'] == 'klein_image_improve'
++        assert meta['action'] == 'upscale_improve'
++        assert meta['improve_engine'] == engine
++
++
++def test_preflight_raises_the_engines_own_exception_type(app, tmp_path, monkeypatch):
++    """Each engine keeps its own type so the routes can answer 'install the node
++    pack' vs 'place the weights' — collapsing them loses that distinction."""
++    from app import config
++    from app.services import face_dataset_service as svc
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    monkeypatch.setattr(svr, 'seedvr2_missing_nodes', lambda: [])
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        with pytest.raises(svr.SeedVR2ModelsMissing):
++            svc._improve_preflight('seedvr2')
++
++
++def test_the_bulk_batch_refuses_once_not_once_per_image(app, tmp_path, monkeypatch):
++    """A missing model must surface ONE actionable 409 before any candidate row
++    exists, not 250 broken tiles."""
++    from app import config
++    from app.services import face_dataset_service as svc
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    monkeypatch.setattr(svr, 'seedvr2_missing_nodes', lambda: [])
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        ds = svc.create_dataset('local', 'seedvr2 batch', 'sv2trigger')
++        with pytest.raises(svr.SeedVR2ModelsMissing):
++            svc.start_bulk_improve(app, 'local', ds.id, [1, 2, 3], engine='seedvr2')
++
++
++def test_the_batch_endpoint_answers_a_structured_409(app, client, tmp_path, monkeypatch):
++    from app import config
++    from app.services import face_dataset_service as svc
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    monkeypatch.setattr(svr, 'seedvr2_missing_nodes', lambda: ['SeedVR2VideoUpscaler'])
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        ds = svc.create_dataset('local', 'seedvr2 409', 'sv2trigger')
++        dataset_id = ds.id
++    r = client.post(f'/api/dataset/{dataset_id}/improve/batch',
++                    json={'image_ids': [1], 'engine': 'seedvr2'})
++    assert r.status_code == 409
++    body = r.get_json()
++    assert body['ok'] is False
++    assert 'seedvr2_missing' in body
++    assert body['seedvr2_missing']['nodes'] == ['SeedVR2VideoUpscaler']
++    # The node pack is named with a way to install it that also installs its
++    # dependencies — a bare clone would land a pack that cannot import.
++    assert 'ComfyUI-Manager' in body['error']
++    assert [f['path'] for f in body['seedvr2_missing']['files']] == [
++        'models/SEEDVR2/seedvr2_ema_3b_fp8_e4m3fn.safetensors',
++        'models/SEEDVR2/ema_vae_fp16.safetensors']
++
++
++def test_capabilities_publishes_every_gap_separately(app, tmp_path, monkeypatch):
++    """"Download the weights" and "install the node pack" are different actions
++    with different buttons, so they are different keys."""
++    from app import capabilities, config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    monkeypatch.setattr(svr, 'seedvr2_missing_nodes', lambda: [])
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++        caps = capabilities.probe(force=True)['comfyui']
++    for key in ('seedvr2_missing', 'seedvr2_nodes_missing',
++                'seedvr2_nodes_installed', 'seedvr2_invalid', 'seedvr2_ready'):
++        assert key in caps
++    assert sorted(caps['seedvr2_missing']) == ['seedvr2_model', 'seedvr2_vae']
++    assert caps['seedvr2_ready'] is False
++
++
++def test_the_models_endpoint_only_offers_installed_builds(app, client, tmp_path):
++    from app import config
++    from app.services import seedvr2_helper as svr, comfy_model_paths
++    base = _make_comfyui(tmp_path)
++    _install_weights(base, svr.CANONICAL_DIT, svr.CANONICAL_VAE)
++    with app.app_context():
++        config.save_config({'comfyui': {'base_dir': str(base)}})
++        comfy_model_paths.clear_cache()
++    body = client.get('/api/seedvr2/models').get_json()
++    assert body['installed'] == [svr.CANONICAL_DIT]
++    assert body['resolved'] == svr.CANONICAL_DIT
++    assert body['vae'] == svr.CANONICAL_VAE
++    # The catalog still SHOWS the bigger builds (with size and VRAM guidance) and
++    # marks them uninstalled — informing is not fetching.
++    by_file = {v['file']: v for v in body['catalog']}
++    assert by_file[svr.CANONICAL_DIT]['installed'] is True
++    assert by_file['seedvr2_ema_7b_fp16.safetensors']['installed'] is False
++    assert by_file['seedvr2_ema_7b_fp16.safetensors']['size_gb'] > 16
+diff --git a/docs/guide/settings-reference.md b/docs/guide/settings-reference.md
+index bbd831c8..5a63b5a5 100644
+--- a/docs/guide/settings-reference.md
++++ b/docs/guide/settings-reference.md
+@@ -194,6 +194,35 @@ Two behaviours worth knowing before you build a dataset with it:
+ 
+ Outfits and expressions are steered differently here than on the other engines: this model preserves anything it is not *positively* told to change, so the catalog's "a different outfit (not the one in the reference)" phrasing is rewritten at generation time into a concrete garment ("wearing a red knit sweater"), picked from the shot's own name — so outfits genuinely differ across the dataset while regenerating one shot reproduces its own.
+ 
++### SeedVR2 upscaling (local)
++
++*Requested by SurpassHR ([GitHub #32](https://github.com/perfectgf/lora-dataset-studio/issues/32)).*
++
++The **fidelity** half of ✨ Upscale & improve. The two passes are a choice, not two qualities of the same thing:
++
++| | what it does | when you want it |
++| --- | --- | --- |
++| **Klein** | re-renders detail and texture from a prompt | a genuinely soft or low-detail photo you are willing to see changed |
++| **SeedVR2** | resolves detail at a higher resolution, content untouched | the frame is right and you only want it sharper — the exact skin tone, grain and colour are part of what you are training |
++
++Both are **non-destructive**: they create a separate candidate and never touch the source file.
++
++**What it needs** (Setup ▸ ComfyUI ▸ *SeedVR2 — optional fidelity upscaler* handles the models):
++
++- the **[ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)** node pack (Apache-2.0) in ComfyUI, then a ComfyUI restart. **The app does not install this one for you**, unlike the Krea pack: it pulls thirteen Python packages that have to land in ComfyUI's own environment, and a bare copy of the folder would fail to import. Install it from ComfyUI-Manager (search "SeedVR2"), which does the dependencies properly.
++- two model files in `<ComfyUI>/models/SEEDVR2` — from [numz/SeedVR2_comfyUI](https://huggingface.co/numz/SeedVR2_comfyUI) (Apache-2.0, public, no account): `seedvr2_ema_3b_fp8_e4m3fn.safetensors` (3.4 GB) and `ema_vae_fp16.safetensors` (0.5 GB). The Setup card downloads both on a click; an `extra_model_paths.yaml` root for `SEEDVR2` works too.
++
++Settings:
++
++- **Default engine for ✨ Upscale & improve** → `improve.engine`. One of `klein`, `seedvr2`. Default **`klein`** — what every improve did before this setting existed. It governs the ✨ button on a single tile and ↻ Re-improve. **Bulk runs are never decided by it**: the selection toolbar shows one button per available engine and each states its trade-off, so a batch always says which pass it is about to run.
++- **Model build** → `seedvr2.model`. Blank (default) = the app resolves it: the 3B FP8 build when present, else whatever is in the folder. Only builds **already on disk** are offered in the dropdown — the pack's loader node downloads an unknown name on first use, and a dropdown must never start a multi-gigabyte download. To use a 7B or a GGUF build, drop the file in `models/SEEDVR2` and it appears in the list. Guidance from the pack: 3B FP8 ≈ 8–12 GB VRAM, 3B FP16 ≈ 12–16, 7B FP8 ≈ 16–20, 7B FP16 ≈ 24+.
++- **Target resolution (short edge)** → `seedvr2.resolution`. Range `256`–`4096`, default **`1080`**. The **short** edge is scaled to this and the aspect ratio is kept, so 1080 on a 3:2 photo gives 1620×1080. LoRA training buckets rarely exceed 1024–1280, so higher mostly costs VRAM and time.
++- **Maximum long edge** → `seedvr2.max_resolution`. `0` (default) = no limit. The VRAM safety valve on a wide crop: at a 1080 short edge a 4:1 panorama becomes 4320 px across.
++- **Colour correction** → `seedvr2.color_correction`. One of `lab`, `wavelet`, `wavelet_adaptive`, `hsv`, `adain`, `none`. Default **`lab`** — the model's own default and the most conservative. `wavelet` holds broad tone better on heavily degraded sources; `none` shows the raw output. Colour fidelity is the reason this engine exists, so it is worth trying two modes on one image before a long batch.
++- **Blocks offloaded to system RAM** → `seedvr2.blocks_to_swap`. Range `0`–`36`, default **`0`** (none, and fastest). Raise it to fit a bigger build on a smaller card: it trades speed for VRAM headroom and does not change the result.
++
++**There is no batch-size setting, on purpose.** SeedVR2's `batch_size` is a *video* window whose frames share temporal attention to stay coherent — feeding it unrelated dataset photos would let them bleed into each other. Images are upscaled one per job; throughput comes from the normal generation queue and its fan-out cap.
++
+ ### Klein generation LoRA presets (optional)
+ 
+ *Idea from @waltm on Discord.* Named combinations of generation LoRAs that stack on top of the local Klein edit graph. Stored in `klein.generation_lora_presets` (default: empty — no presets).
+diff --git a/frontend/src/components/dataset/DatasetGrid.jsx b/frontend/src/components/dataset/DatasetGrid.jsx
+index dc1556e8..2a1ddefa 100644
+--- a/frontend/src/components/dataset/DatasetGrid.jsx
++++ b/frontend/src/components/dataset/DatasetGrid.jsx
+@@ -3,11 +3,15 @@ import DatasetGridItem from './DatasetGridItem';
+ import TileSizeControl from '../shared/TileSizeControl';
+ import KleinImproveNote from './KleinImproveNote';
+ import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
++import { partitionKleinImproveSelection } from '../../utils/kleinBulkImprove';
+ import {
+-  describeKleinImproveLaunch,
+-  kleinImproveBatchLabel,
+-  partitionKleinImproveSelection,
+-} from '../../utils/kleinBulkImprove';
++  availableImproveEngines,
++  describeImproveLaunch,
++  improveBatchLabel,
++  improveConfirmMessage,
++  improveEngineBlockedReason,
++} from '../../utils/improveEngines';
++import { useCapabilities } from '../../context/CapabilitiesContext';
+ import { useToast } from '../common/Toast';
+ import { autoTriageAvailable } from './faceScoringGate.js';
+ 
+@@ -168,11 +172,16 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
+                                       faceScoringBlocked = null,
+                                       activity = null }) {
+   const toast = useToast();
++  const { caps } = useCapabilities();
+   const [selected, setSelected] = useState(() => new Set());
+   // Only the LAUNCH request is tracked locally; the batch's own progress comes
+   // from the server (`activity`), so it survives a reload and a closed tab.
+   const [launchingImprove, setLaunchingImprove] = useState(false);
+-  const improveLabel = kleinImproveBatchLabel(activity);
++  const improveLabel = improveBatchLabel(activity);
++  // Klein is always offered (its button carries the reason when it can't run);
++  // SeedVR2 joins the toolbar only once it is actually installed — until then it
++  // is a Setup task, not a choice.
++  const improveEngines = useMemo(() => availableImproveEngines(caps), [caps]);
+   const bulkBusy = busy || launchingImprove;
+   useEffect(() => {
+     setSelected(new Set());
+@@ -234,24 +243,23 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
+   // Hand the whole selection to the server in ONE call. The client keeps the
+   // eligibility partition (it already holds the rows, and the confirm must state
+   // what will be skipped); the server re-checks it and owns the pacing.
+-  const improveSelected = async () => {
++  const improveSelected = async (engineId) => {
+     const { eligible, excluded } = partitionKleinImproveSelection(improveUniverse, ids);
+-    if (!onImproveBatch || !kleinAvailable || !eligible.length || bulkBusy) return;
+-    const skipped = excluded.length
+-      ? `\n\n${excluded.length} selected image(s) will be skipped: ${exclusionSummary}.`
+-      : '';
+-    if (!window.confirm(
+-      `Create a separate 2 MP Klein improvement candidate for ${eligible.length} image(s)?`
+-      + `${skipped}\n\nThey are queued a few at a time in the background — you can close`
+-      + ' this tab, and ⏹ Stop generation ends the batch.'
+-      + '\n\nOriginal images stay unchanged until you review the candidates.',
+-    )) return;
++    if (!onImproveBatch || !eligible.length || bulkBusy) return;
++    if (improveEngineBlockedReason(engineId, {
++      caps, engines: caps?.engines, eligibleCount: eligible.length,
++    })) return;
++    if (!window.confirm(improveConfirmMessage(engineId, {
++      eligibleCount: eligible.length,
++      excludedCount: excluded.length,
++      exclusionSummary,
++    }))) return;
+     setLaunchingImprove(true);
+     try {
+-      const result = await onImproveBatch(eligible.map((image) => image.id));
++      const result = await onImproveBatch(eligible.map((image) => image.id), engineId);
+       if (result?.ok) {
+         setSelected(new Set());
+-        toast.success(describeKleinImproveLaunch(result));
++        toast.success(describeImproveLaunch(result));
+       }
+       // A failed launch already surfaced its own error toast (and the selection is
+       // kept so the user can retry once the reason is fixed).
+@@ -294,19 +302,31 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
+               <button type="button" disabled={bulkBusy} onClick={() => act('clear_caption')}
+                 title="Delete the selected images' captions (the Caption button then regenerates them)"
+                 className={`${batchBtn} bg-surface text-content border border-border`}>🧹 Clear captions</button>
+-              {onImproveBatch && (
+-                <button type="button" onClick={improveSelected}
+-                  disabled={bulkBusy || !!improveLabel || !kleinAvailable
+-                            || !improveSelection.eligible.length}
+-                  title={!kleinAvailable
+-                    ? 'Klein is not available in this setup'
+-                    : improveSelection.eligible.length
+-                      ? `Runs in the background, a few at a time — survives a page reload.${exclusionSummary ? ` Excluded: ${exclusionSummary}.` : ''}`
+-                      : `No selected image is eligible.${exclusionSummary ? ` ${exclusionSummary}.` : ''}`}
+-                  className={`${batchBtn} border border-indigo-400/50 bg-indigo-500/20 text-indigo-100`}>
+-                  {improveLabel || `✨ Improve via Klein (${improveSelection.eligible.length})`}
+-                </button>
+-              )}
++              {/* One button per engine that can actually run, because the two
++                  passes are a CHOICE, not two qualities of the same thing:
++                  Klein re-renders detail (and can move skin and colour),
++                  SeedVR2 resolves it and leaves the look alone (issue #32,
++                  SurpassHR). Each button's title carries that sentence, so the
++                  difference is readable before the click, not after a ruined
++                  batch. They wrap onto their own line on a narrow screen — the
++                  toolbar is already flex-wrap. */}
++              {onImproveBatch && improveEngines.map((engine) => {
++                const blocked = improveEngineBlockedReason(engine.id, {
++                  caps, engines: caps?.engines,
++                  eligibleCount: improveSelection.eligible.length,
++                });
++                return (
++                  <button key={engine.id} type="button"
++                    onClick={() => improveSelected(engine.id)}
++                    disabled={bulkBusy || !!improveLabel || !!blocked}
++                    title={blocked
++                      ? `${blocked}${exclusionSummary ? ` ${exclusionSummary}.` : ''}`
++                      : `${engine.summary} Runs in the background, a few at a time — survives a page reload.${exclusionSummary ? ` Excluded: ${exclusionSummary}.` : ''}`}
++                    className={`${batchBtn} border border-indigo-400/50 bg-indigo-500/20 text-indigo-100`}>
++                    {improveLabel || `${engine.emoji} ${engine.action} (${improveSelection.eligible.length})`}
++                  </button>
++                );
++              })}
+               {onImproveBatch && improveSelection.excluded.length > 0 && (
+                 <span className="text-content-subtle" title={exclusionSummary}>
+                   {improveSelection.excluded.length} not eligible
+@@ -325,6 +345,8 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
+                   turned ONE anime tile realistic is about to run on the whole
+                   selection. w-full = its own line under the buttons, at every
+                   width (Qeeyana, Reddit). */}
++              {/* The anime-realism warning is about KLEIN's rewrite specifically —
++                  a SeedVR2 pass does not restyle, so the note follows Klein. */}
+               {onImproveBatch && kleinAvailable && improveSelection.eligible.length > 0 && (
+                 <KleinImproveNote subjectType={subjectType} datasetId={datasetId}
+                   className="w-full border-t border-indigo-400/20 pt-1.5" />
+diff --git a/frontend/src/components/dataset/DatasetLightbox.test.js b/frontend/src/components/dataset/DatasetLightbox.test.js
+index 5e50f00c..65ff979c 100644
+--- a/frontend/src/components/dataset/DatasetLightbox.test.js
++++ b/frontend/src/components/dataset/DatasetLightbox.test.js
+@@ -78,13 +78,16 @@ test('dataset hook starts improvement, reports the preserved original, then refr
+ });
+ 
+ test('the bulk improvement is ONE call that starts a server job, not a per-image loop', () => {
+-  assert.match(hook, /`\/api\/dataset\/\$\{currentId\}\/improve\/batch`, \{ image_ids: ids \}/);
+-  assert.match(grid, /onImproveBatch\(eligible\.map\(\(image\) => image\.id\)\)/);
++  assert.match(hook, /`\/api\/dataset\/\$\{currentId\}\/improve\/batch`,/);
++  assert.match(hook, /\{ image_ids: ids, engine \}/);
++  // The engine the user pressed rides along; absent, the server falls back to the
++  // improve.engine setting (which is what the single-tile pass uses).
++  assert.match(grid, /onImproveBatch\(eligible\.map\(\(image\) => image\.id\), engineId\)/);
+   // No client-side sequential driver survives: that loop is what walked into the
+   // fan-out cap and made ⏹ Stop powerless.
+   assert.doesNotMatch(grid, /runSequentialKleinImprove/);
+   // Progress is read from the server activity, so it survives a reload.
+-  assert.match(grid, /kleinImproveBatchLabel\(activity\)/);
++  assert.match(grid, /improveBatchLabel\(activity\)/);
+   // ⏹ Stop generation stays reachable (and enabled) for a running batch. The
+   // enabled-ness itself is decided by isStopGenerationBlocked (unit-tested in
+   // scraperState.test.js) — this earlier inline expression only exempted
+diff --git a/frontend/src/components/settings/EnginesSection.jsx b/frontend/src/components/settings/EnginesSection.jsx
+index 8475f815..945e057a 100644
+--- a/frontend/src/components/settings/EnginesSection.jsx
++++ b/frontend/src/components/settings/EnginesSection.jsx
+@@ -276,6 +276,16 @@ const KREA_GROUNDING_MIN = 512      // mirrors krea_edit_helper.GROUNDING_PX_MIN
+ const KREA_GROUNDING_MAX = 1536     // mirrors krea_edit_helper.GROUNDING_PX_MAX
+ const KREA_STEPS_MAX = 50
+ 
++// Mirror seedvr2_helper's clamps. The SERVER stays the authority (it re-clamps
++// every value), these only stop the input offering a number that would be
++// silently corrected.
++const SEEDVR2_RESOLUTION_MIN = 256
++const SEEDVR2_RESOLUTION_MAX = 4096
++const SEEDVR2_MAX_RESOLUTION_MAX = 8192
++const SEEDVR2_BLOCKS_MAX = 36
++// seedvr2_helper.COLOR_CORRECTIONS — the node's own enum, in its own order.
++const SEEDVR2_COLOR_MODES = ['lab', 'wavelet', 'wavelet_adaptive', 'hsv', 'adain', 'none']
++
+ function KreaCard({ config, setField, configDefaults }) {
+   const krea = config.krea || {}
+   const reset = { config, configDefaults, setField }
+@@ -382,6 +392,198 @@ function KreaCard({ config, setField, configDefaults }) {
+   )
+ }
+ 
++/* SeedVR2 — the FIDELITY upscaler (issue #32, requested by SurpassHR).
++
++   It is not a generation engine and deliberately does not appear in the enabled-
++   engines list above: nothing in the variation catalog can be produced by it. It
++   is the OTHER way to run ✨ Upscale & improve — the one that resolves detail
++   without reinterpreting it — so its settings live next to the engines that feed
++   the same pass, not in a section of their own. */
++function SeedVr2Card({ config, setField, configDefaults, caps }) {
++  const svr = config.seedvr2 || {}
++  const improve = config.improve || {}
++  const reset = { config, configDefaults, setField }
++  const dflt = (key) => defaultValueAt(configDefaults, 'seedvr2', key)
++  const comfy = (caps && caps.comfyui) || {}
++  const ready = comfy.seedvr2_ready === true
++  const [models, setModels] = useState(null)
++  // Which builds are ON DISK — asked once per readiness change, never polled:
++  // it is a directory listing, and the card is not a monitor.
++  useEffect(() => {
++    let live = true
++    fetch('/api/seedvr2/models')
++      .then((r) => (r.ok ? r.json() : null))
++      .then((d) => { if (live) setModels(d) })
++      .catch(() => { if (live) setModels(null) })
++    return () => { live = false }
++  }, [ready])
++  const installed = (models && models.installed) || []
++  const catalog = (models && models.catalog) || []
++  return (
++    <Card
++      id="seedvr2-engine"
++      title="SeedVR2 upscaling (local)"
++      help="The fidelity half of ✨ Upscale & improve. Klein re-renders detail from a prompt — sharper, but skin and colour can shift; SeedVR2 resolves detail at a higher resolution and leaves the original look alone. Pick it per batch from the bulk actions in the dataset workspace, or make it the default for the single-image pass below. It needs the ComfyUI-SeedVR2_VideoUpscaler node pack in ComfyUI plus two model files — Setup ▸ ComfyUI downloads the models and says what is missing."
++    >
++      <p className={ready ? 'text-[0.6875rem] text-emerald-300' : 'text-[0.6875rem] text-amber-300'}>
++        {ready
++          ? 'Ready — SeedVR2 appears in the workspace bulk actions.'
++          : 'Not ready yet. Setup ▸ ComfyUI lists what is missing and can download the weights; the node pack itself is installed from ComfyUI (search “SeedVR2” in ComfyUI-Manager), then restart ComfyUI.'}
++      </p>
++
++      <div className="mt-3 sm:max-w-md">
++        <label htmlFor="improve-engine" className="block text-xs font-medium text-content">
++          Default engine for ✨ Upscale &amp; improve
++        </label>
++        <select
++          id="improve-engine"
++          value={improve.engine ?? defaultValueAt(configDefaults, 'improve', 'engine')}
++          onChange={(e) => setField('improve', 'engine', e.target.value)}
++          className={INPUT_CLASS}
++        >
++          <option value="klein">Klein — re-renders detail (can shift skin and colour)</option>
++          <option value="seedvr2">SeedVR2 — resolves detail, keeps the original look</option>
++        </select>
++        <p className="mt-1 text-[0.6875rem] text-content-subtle">
++          Used by the ✨ button on a single tile and by ↻ Re-improve. Bulk runs always
++          state their engine on the button you press, so this never decides a batch
++          behind your back.
++        </p>
++        <ResetToDefault label="Default improve engine" section="improve" field="engine"
++          config={config} configDefaults={configDefaults} setField={setField} />
++      </div>
++
++      <div className="mt-3 sm:max-w-md">
++        <label htmlFor="seedvr2-model" className="block text-xs font-medium text-content">
++          Model build (optional)
++        </label>
++        <select
++          id="seedvr2-model"
++          value={svr.model ?? ''}
++          onChange={(e) => setField('seedvr2', 'model', e.target.value)}
++          className={INPUT_CLASS}
++        >
++          <option value="">auto — the 3B FP8 build, or whatever is installed</option>
++          {installed.map((name) => <option key={name} value={name}>{name}</option>)}
++        </select>
++        <p className="mt-1 text-[0.6875rem] text-content-subtle">
++          Only builds already in your ComfyUI&rsquo;s <code>models/SEEDVR2</code> folder are
++          listed: the pack&rsquo;s loader downloads an unknown name on first use, and a
++          dropdown must not start a multi-gigabyte download. To use another build, put the
++          file in that folder — it then appears here.
++        </p>
++        {catalog.length > 0 && (
++          <ul className="mt-1 space-y-0.5 text-[0.6875rem] text-content-subtle">
++            {catalog.map((v) => (
++              <li key={v.file}>
++                {v.installed ? '✓' : '·'} <b>{v.label}</b> — {v.size_gb} GB, ~{v.vram_gb} GB
++                {' '}VRAM{v.recommended ? ' (recommended)' : ''}
++              </li>
++            ))}
++          </ul>
++        )}
++        <ResetToDefault label="Model build" section="seedvr2" field="model" {...reset} />
++      </div>
++
++      <div className="mt-3 sm:max-w-md">
++        <label htmlFor="seedvr2-resolution" className="block text-xs font-medium text-content">
++          Target resolution (short edge, px)
++        </label>
++        <input
++          id="seedvr2-resolution"
++          type="number"
++          min={SEEDVR2_RESOLUTION_MIN}
++          max={SEEDVR2_RESOLUTION_MAX}
++          step={2}
++          value={svr.resolution ?? dflt('resolution')}
++          onChange={(e) => setField('seedvr2', 'resolution',
++            e.target.value === '' ? dflt('resolution') : Number(e.target.value))}
++          className={INPUT_CLASS}
++        />
++        <p className="mt-1 text-[0.6875rem] text-content-subtle">
++          The SHORT edge is scaled to this and the aspect ratio is kept, so 1080 on a 3:2
++          photo gives 1620&times;1080. LoRA training buckets rarely go above 1024&ndash;1280,
++          so higher mostly costs VRAM and time.
++        </p>
++        <ResetToDefault label="Target resolution" section="seedvr2" field="resolution" {...reset} />
++      </div>
++
++      <div className="mt-3 sm:max-w-md">
++        <label htmlFor="seedvr2-max-resolution" className="block text-xs font-medium text-content">
++          Maximum long edge (px, 0 = no limit)
++        </label>
++        <input
++          id="seedvr2-max-resolution"
++          type="number"
++          min={0}
++          max={SEEDVR2_MAX_RESOLUTION_MAX}
++          step={2}
++          value={svr.max_resolution ?? dflt('max_resolution')}
++          onChange={(e) => setField('seedvr2', 'max_resolution',
++            e.target.value === '' ? dflt('max_resolution') : Number(e.target.value))}
++          className={INPUT_CLASS}
++        />
++        <p className="mt-1 text-[0.6875rem] text-content-subtle">
++          The safety valve on a wide crop: at a 1080 short edge a 4:1 panorama becomes
++          4320 px across, which is where a run runs out of VRAM.
++        </p>
++        <ResetToDefault label="Maximum long edge" section="seedvr2" field="max_resolution" {...reset} />
++      </div>
++
++      <div className="mt-3 sm:max-w-md">
++        <label htmlFor="seedvr2-color" className="block text-xs font-medium text-content">
++          Colour correction
++        </label>
++        <select
++          id="seedvr2-color"
++          value={svr.color_correction ?? dflt('color_correction')}
++          onChange={(e) => setField('seedvr2', 'color_correction', e.target.value)}
++          className={INPUT_CLASS}
++        >
++          {SEEDVR2_COLOR_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
++        </select>
++        <p className="mt-1 text-[0.6875rem] text-content-subtle">
++          How the result is graded back onto the source&rsquo;s colours. <b>lab</b> is the
++          model&rsquo;s own default and the most conservative; <b>wavelet</b> holds broad tone
++          better on heavily degraded sources; <b>none</b> shows the raw output. Colour
++          fidelity is the reason this engine exists, so it is worth trying both ways on one
++          image before a big batch.
++        </p>
++        <ResetToDefault label="Colour correction" section="seedvr2" field="color_correction" {...reset} />
++      </div>
++
++      <div className="mt-3 sm:max-w-md">
++        <label htmlFor="seedvr2-swap" className="block text-xs font-medium text-content">
++          Blocks offloaded to system RAM
++        </label>
++        <input
++          id="seedvr2-swap"
++          type="number"
++          min={0}
++          max={SEEDVR2_BLOCKS_MAX}
++          step={1}
++          value={svr.blocks_to_swap ?? dflt('blocks_to_swap')}
++          onChange={(e) => setField('seedvr2', 'blocks_to_swap',
++            e.target.value === '' ? dflt('blocks_to_swap') : Number(e.target.value))}
++          className={INPUT_CLASS}
++        />
++        <p className="mt-1 text-[0.6875rem] text-content-subtle">
++          0 = none, and fastest. Raise it to fit a bigger build on a smaller card: it trades
++          speed for VRAM headroom and does not change the result.
++        </p>
++        <ResetToDefault label="Blocks offloaded" section="seedvr2" field="blocks_to_swap" {...reset} />
++      </div>
++
++      <p className="mt-3 text-[0.6875rem] text-content-subtle">
++        <b>No batch size here, on purpose.</b> SeedVR2&rsquo;s batch size is a <i>video</i> window
++        whose frames share attention to stay coherent — feeding it unrelated photos would let
++        them bleed into each other. Dataset images are upscaled one per job; the throughput
++        comes from the normal generation queue.
++      </p>
++    </Card>
++  )
++}
++
+ /* Krea's own always-on LoRA presets. Same shape as the Klein card — the two lanes
+    are deliberate copies — with two differences that matter: the strength ceiling
+    opens to 20 for utility LoRAs (the bypass ones do nothing below ~10), and the
+@@ -990,6 +1192,9 @@ export default function EnginesSection(props) {
+ 
+       <KreaLorasCard config={config} setField={setField} />
+ 
++      <SeedVr2Card config={config} setField={setField} configDefaults={configDefaults}
++        caps={caps} />
++
+       <IdentityPromptsCard config={config} setField={setField} promptDefaults={props.promptDefaults}
+         promptDefaultsBySubject={props.promptDefaultsBySubject}
+         setIdentityPrompts={props.setIdentityPrompts} configDefaults={configDefaults} />
+diff --git a/frontend/src/components/settings/registry.js b/frontend/src/components/settings/registry.js
+index cdf40c38..7f05ac41 100644
+--- a/frontend/src/components/settings/registry.js
++++ b/frontend/src/components/settings/registry.js
+@@ -9,7 +9,9 @@ export const SETTINGS_SECTIONS = [
+     description: 'API keys and engines used to generate dataset images.',
+     keywords: ['gemini', 'openai', 'openrouter', 'api key', 'chatgpt', 'nano banana', 'klein', 'krea', 'krea 2 edit',
+       'grounding', 'engine', 'subscription', 'gpt-image',
+-      'lora', 'preset', 'texture', 'anatomy', 'nsfw', 'identity', 'prompt', 'guard', 'improve', 'upscale'] },
++      'lora', 'preset', 'texture', 'anatomy', 'nsfw', 'identity', 'prompt', 'guard', 'improve', 'upscale',
++      'seedvr2', 'seed vr2', 'upscaler', 'super resolution', 'restore', 'sharpen', 'fidelity',
++      'colour shift', 'color shift', 'target resolution', 'colour correction', 'blocks to swap'] },
+   { id: 'scraping', title: 'Scraping & sources', icon: '🔎', eyebrow: 'sources',
+     description: 'Credentials used when scanning image sources.',
+     keywords: ['reddit', 'client id', 'civitai', 'pexels', 'pexels api', 'api key', 'scrape', 'scraper',
+diff --git a/frontend/src/components/setup/InstallEverything.jsx b/frontend/src/components/setup/InstallEverything.jsx
+index ee0132bf..b867b5b5 100644
+--- a/frontend/src/components/setup/InstallEverything.jsx
++++ b/frontend/src/components/setup/InstallEverything.jsx
+@@ -4,6 +4,7 @@ import { useToast } from '../common/Toast'
+ import { INSTALL_ALL_ACTION_LABELS, installCatalog } from '../../hooks/useSetupSteps'
+ import InstallRunner from './InstallRunner'
+ import KreaInstallCard from './KreaInstallCard'
++import SeedVr2InstallCard from './SeedVr2InstallCard'
+ import { HelpBadge } from '../../help/HelpMode'
+ 
+ const POLL_MS = 1200
+@@ -243,6 +244,7 @@ export default function InstallEverything({ plan, caps, onDone }) {
+       {/* Path 2 — one click per OPTIONAL engine. Krea is ~20 GB, so it is installed
+           when it is asked for rather than by the unattended shortcut above. */}
+       <KreaInstallCard caps={caps} onDone={onDone} />
++      <SeedVr2InstallCard caps={caps} onDone={onDone} />
+ 
+       {/* Path 3 — the one-by-one menu, always visible (install/repair a single component). */}
+       <section className="rounded-xl border border-border bg-surface p-5">
+diff --git a/frontend/src/components/setup/SeedVr2InstallCard.jsx b/frontend/src/components/setup/SeedVr2InstallCard.jsx
+new file mode 100644
+index 00000000..fe539b2d
+--- /dev/null
++++ b/frontend/src/components/setup/SeedVr2InstallCard.jsx
+@@ -0,0 +1,219 @@
++import { useEffect, useRef, useState } from 'react'
++import { apiFetch, postJson } from '../../api/fetchClient'
++import { useToast } from '../common/Toast'
++import {
++  INSTALL_ALL_ACTION_LABELS, seedvr2InstallPlan, seedvr2NeedsComfyuiRestart,
++} from '../../hooks/useSetupSteps'
++import { HelpBadge } from '../../help/HelpMode'
++
++const POLL_MS = 1200
++
++const ROW_META = {
++  idle: { glyph: '○', cls: 'text-content-subtle', word: 'waiting' },
++  queued: { glyph: '○', cls: 'text-content-subtle', word: 'queued' },
++  running: { glyph: '⟳', cls: 'text-primary', word: 'downloading…' },
++  success: { glyph: '✓', cls: 'text-emerald-400', word: 'done' },
++  error: { glyph: '✗', cls: 'text-rose-400', word: 'needs attention' },
++}
++
++function fmtSize(b) {
++  if (b >= 1e9) return `${(b / 1e9).toFixed(2)} GB`
++  if (b >= 1e6) return `${(b / 1e6).toFixed(0)} MB`
++  return `${Math.max(0, Math.round(b / 1e3))} KB`
++}
++
++const PACK_URL = 'https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler'
++
++// SeedVR2 — the FIDELITY upscaler (issue #32, requested by SurpassHR).
++//
++// TWO HALVES, INSTALLED DIFFERENTLY, AND THE CARD SAYS SO
++// -------------------------------------------------------
++// The WEIGHTS are two files in a folder: the app downloads them here, on a click,
++// like every other model. The NODE PACK is code with thirteen Python
++// dependencies that belong in ComfyUI's own interpreter — which this app does not
++// own and must never pip into. Cloning it would land a pack that fails to import
++// and leave the user reading "install the pack" about a pack that is right there.
++// So the pack is a clear instruction (ComfyUI-Manager, which installs the
++// requirements properly) and never a fake button.
++//
++// Like the Krea card, this is deliberately NOT part of "Install everything":
++// 3.9 GB for a capability nobody asked for is hostile on a metered link.
++export default function SeedVr2InstallCard({ caps, onDone }) {
++  const toast = useToast()
++  const [phase, setPhase] = useState('idle')
++  const [tracked, setTracked] = useState([])
++  const [statuses, setStatuses] = useState({})
++  const timer = useRef(null)
++  const mounted = useRef(true)
++
++  const plan = seedvr2InstallPlan(caps)
++  const cu = caps?.comfyui || {}
++  const dirValid = !!cu.dir_valid
++  const ready = cu.seedvr2_ready === true
++  const needsRestart = seedvr2NeedsComfyuiRestart(caps)
++  // On disk but not loaded is a RESTART; absent from disk is an install the user
++  // has to run in ComfyUI. Two different sentences, so they are two states.
++  const packMissing = !cu.seedvr2_nodes_installed
++    && Array.isArray(cu.seedvr2_nodes_missing) && cu.seedvr2_nodes_missing.length > 0
++  const rows = (phase === 'idle' ? plan : tracked) || []
++  const doneCount = rows.filter((a) => (statuses[a] || {}).state === 'success').length
++  const isTerminal = (s) => s && (s.state === 'success' || s.state === 'error')
++
++  const poll = (actions) => {
++    apiFetch(`/api/setup/install-all/status?actions=${actions.join(',')}`).then((r) => {
++      if (!mounted.current) return
++      const st = r.statuses || {}
++      setStatuses(st)
++      if (actions.length && actions.every((a) => isTerminal(st[a]))) {
++        setPhase('done')
++        onDone?.()
++        const failed = actions.filter((a) => (st[a] || {}).state === 'error')
++        if (failed.length) {
++          toast.warning(`${actions.length - failed.length} of ${actions.length} SeedVR2 files `
++            + 'downloaded — the rest need a look below.')
++        } else {
++          toast.success('SeedVR2 weights downloaded.')
++        }
++      } else {
++        timer.current = setTimeout(() => poll(actions), POLL_MS)
++      }
++    }).catch(() => {
++      if (mounted.current) timer.current = setTimeout(() => poll(actions), POLL_MS)
++    })
++  }
++
++  // Re-attach to a download still in flight (the user left this screen and came
++  // back — the backend kept going).
++  useEffect(() => {
++    mounted.current = true
++    if (plan.length) {
++      apiFetch(`/api/setup/install-all/status?actions=${plan.join(',')}`).then((r) => {
++        if (!mounted.current) return
++        const st = r.statuses || {}
++        if (plan.some((a) => ['running', 'queued'].includes((st[a] || {}).state))) {
++          setTracked(plan); setStatuses(st); setPhase('running'); poll(plan)
++        }
++      }).catch(() => { /* not attached — stay idle */ })
++    }
++    return () => { mounted.current = false; clearTimeout(timer.current) }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [])
++
++  const start = async () => {
++    setPhase('running'); setStatuses({})
++    try {
++      const r = await postJson('/api/setup/install-group/seedvr2', {})
++      const actions = r.plan || []
++      setTracked(actions); setStatuses(r.statuses || {})
++      if (!actions.length) { setPhase('done'); onDone?.(); return }
++      poll(actions)
++    } catch (e) {
++      setPhase('idle')
++      toast.error(e.message || 'Could not start the SeedVR2 download.')
++    }
++  }
++
++  const nothingToDownload = plan.length === 0 && phase !== 'running'
++
++  return (
++    <section className="rounded-xl border border-border bg-surface p-4 sm:p-5">
++      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
++        <h3 className="text-base font-semibold text-content">
++          SeedVR2 — optional fidelity upscaler
++          <HelpBadge topic="setup-seedvr2-install" className="ml-2" />
++        </h3>
++        {phase === 'running' && (
++          <span className="shrink-0 text-xs font-medium tabular-nums text-content-muted">
++            {doneCount} / {rows.length}
++          </span>
++        )}
++      </div>
++      <p className="mt-1 text-sm text-content-muted">
++        The second way to run ✨ Upscale &amp; improve. Klein re-renders detail from a prompt —
++        sharper, but skin and colour can shift; SeedVR2 resolves detail at a higher resolution
++        and leaves the original look alone. It needs a community node pack plus two model files
++        (<span className="whitespace-nowrap">~3.9 GB</span>), so it is installed on request,
++        not by &ldquo;Install everything&rdquo;.
++      </p>
++
++      {!dirValid ? (
++        <p className="mt-3 text-xs text-content-subtle">
++          Point the app at a valid ComfyUI folder first (the ComfyUI step) — the weights go
++          inside it, under <code>models/SEEDVR2</code>.
++        </p>
++      ) : nothingToDownload ? (
++        // "Nothing left to download" is NOT "it works" — the node pack is
++        // installed outside this app, so the weights can all be there while the
++        // capability stays dark. The real verdict comes from the backend.
++        ready ? (
++          <p className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-content">
++            ✓ SeedVR2 is ready — it appears in the workspace bulk actions.
++          </p>
++        ) : (
++          <p className="mt-3 break-words rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-content">
++            ⚠ The weights are in place, but SeedVR2 cannot run yet — see the node pack note below.
++          </p>
++        )
++      ) : (
++        <>
++          {phase === 'running' && rows.length > 0 && (
++            <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-surface-raised">
++              <div className="h-full rounded-full bg-gradient-primary transition-[width] duration-300"
++                style={{ width: `${Math.round((doneCount / rows.length) * 100)}%` }} />
++            </div>
++          )}
++          <ul className="mt-3 space-y-1.5">
++            {rows.map((a) => {
++              const s = statuses[a] || {}
++              const state = phase === 'idle' ? 'idle' : (s.state || 'idle')
++              const m = ROW_META[state] || ROW_META.idle
++              const pr = s.progress
++              return (
++                <li key={a} className="flex items-center justify-between gap-2 text-sm">
++                  <span className="flex min-w-0 items-center gap-2">
++                    <span aria-hidden="true" className={m.cls}>{m.glyph}</span>
++                    <span className="truncate text-content-muted">
++                      {INSTALL_ALL_ACTION_LABELS[a] || a}
++                    </span>
++                  </span>
++                  <span className="shrink-0 text-xs tabular-nums text-content-subtle">
++                    {state === 'running' && pr && pr.total
++                      ? `${pr.pct != null ? `${pr.pct}% · ` : ''}${fmtSize(pr.done)} / ${fmtSize(pr.total)}`
++                      : (phase === 'idle' ? '' : m.word)}
++                  </span>
++                </li>
++              )
++            })}
++          </ul>
++          <button type="button" onClick={start} disabled={phase === 'running'}
++            className="mt-4 w-full rounded-lg border border-primary/50 bg-primary/10 px-4 py-2 text-sm font-semibold text-primary disabled:opacity-50 sm:w-auto">
++            {phase === 'running' ? 'Downloading…' : `Download SeedVR2 models (${plan.length})`}
++          </button>
++        </>
++      )}
++
++      {/* The half this app deliberately does NOT install. Spelled out rather than
++          hidden behind a button that could not work: the pack's Python
++          dependencies have to land in ComfyUI's interpreter, which is exactly
++          what ComfyUI-Manager does and what a bare clone does not. */}
++      {needsRestart ? (
++        <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-content">
++          ⚠ The SeedVR2 node pack is installed but ComfyUI has not loaded it yet.
++          <span className="text-content-muted"> ComfyUI only registers custom nodes at
++            startup — restart it, and this page turns green on its own. If it still does not,
++            the pack&rsquo;s Python dependencies failed to install: ComfyUI&rsquo;s console says
++            which one.</span>
++        </p>
++      ) : packMissing && (
++        <p className="mt-3 break-words rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-content">
++          ⚠ The SeedVR2 node pack is not installed in ComfyUI.
++          <span className="text-content-muted"> Install it from ComfyUI itself — search
++            &ldquo;SeedVR2&rdquo; in ComfyUI-Manager — then restart ComfyUI. The app does not
++            install this one for you: it pulls thirteen Python packages that have to go into
++            ComfyUI&rsquo;s own environment, and a plain copy of the folder would not work.
++            Source: <span className="break-all">{PACK_URL}</span> (Apache-2.0).</span>
++        </p>
++      )}
++    </section>
++  )
++}
+diff --git a/frontend/src/help/helpRegistry.js b/frontend/src/help/helpRegistry.js
+index 0c8de79e..9f246e8b 100644
+--- a/frontend/src/help/helpRegistry.js
++++ b/frontend/src/help/helpRegistry.js
+@@ -395,6 +395,12 @@ const TOPICS = [
+      'qwen3-vl', 'restart comfyui', 'second engine', 'local engine', '20 gb',
+      'corrupted', 'truncated', 'unreadable', 'cannot be loaded', 'download again',
+      'krea not ready', 'everything is in place']),
++  setupStep('setup-seedvr2-install', 'install', 'Install the SeedVR2 upscaler',
++    ['seedvr2', 'seed vr2', 'seedvr', 'upscale', 'upscaler', 'upscaling', 'super resolution',
++     'super-resolution', 'restore', 'restoration', 'sharpen', 'fidelity', 'keeps colours',
++     'colour shift', 'color shift', 'changes the image', 'node pack',
++     'ComfyUI-SeedVR2_VideoUpscaler', 'comfyui-manager', 'dit', 'vae', 'models/SEEDVR2',
++     '3b', '7b', 'fp8', 'blocks to swap', 'target resolution', 'install seedvr2']),
+   setupStep('setup-ollama', 'ollama', 'Set up Ollama & pull the vision model',
+     ['ollama', 'vision model', 'pull model', 'captioning', 'caption', 'auto-framing',
+      'framing', 'head-crop', 'head crop', 'qwen', 'install ollama']),
+diff --git a/frontend/src/hooks/useDataset.js b/frontend/src/hooks/useDataset.js
+index 2349940a..2104ef3c 100644
+--- a/frontend/src/hooks/useDataset.js
++++ b/frontend/src/hooks/useDataset.js
+@@ -531,14 +531,17 @@ export function useDataset() {
+     return d;
+   }, [refresh, toast]);
+ 
+-  // Bulk ✨ Klein upscale & improve: ONE call that starts a SERVER job. The batch
++  // Bulk ✨ Upscale & improve: ONE call that starts a SERVER job. The batch
+   // used to be a browser loop, so a selection bigger than the backend's fan-out cap
+   // was mostly refused, ⏹ Stop could not reach it, and closing the tab killed it.
+   // Progress now rides on `activity` (kind 'improve') and survives a reload.
+-  const improveBatch = useCallback(async (imageIds) => {
++  const improveBatch = useCallback(async (imageIds, engine) => {
+     const ids = (imageIds || []).map((v) => Number(v)).filter(Number.isInteger);
+     if (!ids.length) return { ok: false, error: 'nothing selected' };
+-    const d = await postJson(`/api/dataset/${currentId}/improve/batch`, { image_ids: ids });
++    // `engine` is the button that was pressed ('klein' | 'seedvr2'). Absent = the
++    // improve.engine setting, which is what the single-tile ✨ and re-improve use.
++    const d = await postJson(`/api/dataset/${currentId}/improve/batch`,
++      engine ? { image_ids: ids, engine } : { image_ids: ids });
+     if (!d.ok) toast.error(d.error || 'Could not start the improvement batch');
+     await refresh();
+     return d;
+diff --git a/frontend/src/hooks/useSetupSteps.js b/frontend/src/hooks/useSetupSteps.js
+index 5097c447..bc8e3ef5 100644
+--- a/frontend/src/hooks/useSetupSteps.js
++++ b/frontend/src/hooks/useSetupSteps.js
+@@ -527,6 +527,8 @@ export const INSTALL_ALL_ACTION_LABELS = {
+   krea_text_encoder: 'Krea 2 text encoder',
+   krea_vae: 'Krea 2 VAE',
+   krea_identity_lora: 'Krea 2 Identity Edit LoRA',
++  seedvr2_model: 'SeedVR2 model (3B FP8)',
++  seedvr2_vae: 'SeedVR2 VAE',
+ }
+ 
+ // The Krea 2 Edit engine, installable in ONE click but deliberately NOT part of
+@@ -573,6 +575,34 @@ export function kreaNeedsComfyuiRestart(caps) {
+     && Array.isArray(cu.krea_nodes_missing) && cu.krea_nodes_missing.length)
+ }
+ 
++/** What the "Install SeedVR2" button would queue — the missing weights only.
++ *  Mirror of setup_installer.install_group_plan('seedvr2', caps), which stays the
++ *  authority.
++ *
++ *  There is NO node-pack action here, and that is the difference from Krea: this
++ *  pack declares thirteen pip dependencies that belong in ComfyUI's own
++ *  interpreter, which the app does not own and must never pip into. Cloning it
++ *  alone would land a pack that fails to import — so the pack is explained, and
++ *  only the weights are installed. */
++export const SEEDVR2_INSTALL_ORDER = ['seedvr2_model', 'seedvr2_vae']
++
++export function seedvr2InstallPlan(caps) {
++  const cu = (caps || {}).comfyui || {}
++  if (!cu.dir_valid) return []
++  const missing = brokenOrMissing(cu.seedvr2_missing, cu.seedvr2_invalid)
++  return SEEDVR2_INSTALL_ORDER.filter((a) => missing.includes(a))
++}
++
++/** The one thing an install cannot do: ComfyUI registers custom nodes at STARTUP
++ *  only, so a pack on disk but absent from /object_info means "restart ComfyUI".
++ *  Same rule as Krea's — here it also covers the case where the pack's Python
++ *  dependencies failed to install, which looks identical from outside. */
++export function seedvr2NeedsComfyuiRestart(caps) {
++  const cu = (caps || {}).comfyui || {}
++  return !!(cu.seedvr2_nodes_installed
++    && Array.isArray(cu.seedvr2_nodes_missing) && cu.seedvr2_nodes_missing.length)
++}
++
+ // Grouped by capability area (ML extras → Klein weights). The backend
+ // serializes pip and parallelizes downloads regardless of fire order, so this order
+ // only drives the progress list; it must match the backend's _INSTALL_ALL_ORDER.
+diff --git a/frontend/src/utils/improveEngines.js b/frontend/src/utils/improveEngines.js
+new file mode 100644
+index 00000000..a3b70ba6
+--- /dev/null
++++ b/frontend/src/utils/improveEngines.js
+@@ -0,0 +1,103 @@
++/* Which engine runs the ✨ Upscale & improve pass, and how the UI says what the
++   difference IS.
++
++   The whole point of issue #32 (SurpassHR) is that the two passes are not two
++   qualities of the same thing: Klein REWRITES (a diffusion edit that re-renders
++   skin and micro-detail — it fixes a soft photo and it changes it), SeedVR2
++   RESTORES (one-step super-resolution that leaves the content alone). Someone
++   picking blind will pick wrong on a dataset built around an exact look, so the
++   one-line positioning lives here, next to the ids, rather than being retyped in
++   each surface where it could drift apart.
++
++   Pure module, no JSX — the contract tests run under `node --test`. */
++
++export const IMPROVE_ENGINES = [
++  {
++    id: 'klein',
++    label: 'Klein',
++    emoji: '✨',
++    action: 'Improve via Klein',
++    /* Deliberately says what it CHANGES, not just what it improves — that
++       sentence is the whole reason the second engine exists. */
++    summary: 'Re-renders detail and texture. Sharper, but skin and colour can shift.',
++    confirm: 'Create a separate 2 MP Klein improvement candidate',
++  },
++  {
++    id: 'seedvr2',
++    label: 'SeedVR2',
++    emoji: '🔍',
++    action: 'Upscale via SeedVR2',
++    summary: 'Resolves detail at a higher resolution and keeps the original look.',
++    confirm: 'Create a separate SeedVR2 upscale candidate',
++  },
++]
++
++export const DEFAULT_IMPROVE_ENGINE = 'klein'
++
++export function improveEngine(id) {
++  return IMPROVE_ENGINES.find((e) => e.id === id)
++    || IMPROVE_ENGINES.find((e) => e.id === DEFAULT_IMPROVE_ENGINE)
++}
++
++/** The engines this install can actually run right now, in display order.
++
++    Klein is always listed: it is the historical pass, and when it is not ready
++    its button carries the reason (an engine that vanishes from the toolbar
++    teaches nobody why). SeedVR2 only appears once it is READY, because until
++    then it is not a choice, it is a setup task that belongs in Setup. */
++export function availableImproveEngines(caps) {
++  const comfy = (caps && caps.comfyui) || {}
++  return IMPROVE_ENGINES.filter((e) => e.id !== 'seedvr2' || comfy.seedvr2_ready === true)
++}
++
++/** Why an engine's bulk button is disabled, or null when it can run. */
++export function improveEngineBlockedReason(engineId, { caps, engines, eligibleCount } = {}) {
++  const engine = improveEngine(engineId)
++  if (engineId === 'klein' && engines && engines.klein === false) {
++    return 'Klein is not available in this setup'
++  }
++  if (engineId === 'seedvr2' && !((caps && caps.comfyui) || {}).seedvr2_ready) {
++    return 'SeedVR2 is not installed yet — Setup ▸ ComfyUI can download it'
++  }
++  if (!eligibleCount) return 'No selected image is eligible.'
++  return null
++}
++
++/** The confirm text for a bulk run. States the engine's trade in the sentence
++    the user reads immediately before committing a long batch. */
++export function improveConfirmMessage(engineId, { eligibleCount = 0, exclusionSummary = '',
++  excludedCount = 0 } = {}) {
++  const engine = improveEngine(engineId)
++  const skipped = excludedCount
++    ? `\n\n${excludedCount} selected image(s) will be skipped: ${exclusionSummary}.`
++    : ''
++  return `${engine.confirm} for ${eligibleCount} image(s)?\n\n${engine.summary}${skipped}`
++    + '\n\nThey are queued a few at a time in the background — you can close this tab,'
++    + ' and ⏹ Stop generation ends the batch.'
++    + '\n\nOriginal images stay unchanged until you review the candidates.'
++}
++
++/** Toast wording for a launched batch: what the server took, what it dropped,
++    and which engine actually ran (the server echoes it, so a stale tab cannot
++    claim the wrong one). */
++export function describeImproveLaunch({ queued = 0, skipped = 0, engine } = {}) {
++  const name = improveEngine(engine).label
++  const tail = skipped ? ` · ${skipped} not eligible and skipped` : ''
++  return `${name}: processing ${queued} image(s) in the background${tail} — originals stay intact.`
++    + ' You can close this tab; ⏹ Stop generation ends the batch.'
++}
++
++/** Live progress line for a bulk button, from the dataset's server activity.
++    `null` when no improve batch is running. The engine comes from the activity
++    (the server records it at begin()), so the label names the run that is
++    ACTUALLY going, not whichever button you are hovering. */
++export function improveBatchLabel(activity) {
++  if (!activity || activity.kind !== 'improve') return null
++  const engine = improveEngine(activity.engine)
++  const total = Number(activity.total) || 0
++  const done = Number(activity.done) || 0
++  if (activity.cancelling) return `${engine.emoji} Stopping…`
++  return total
++    ? `${engine.emoji} ${engine.label} ${done}/${total}`
++    : `${engine.emoji} ${engine.label}…`
++}
+diff --git a/frontend/src/utils/improveEngines.test.js b/frontend/src/utils/improveEngines.test.js
+new file mode 100644
+index 00000000..d2f67ce9
+--- /dev/null
++++ b/frontend/src/utils/improveEngines.test.js
+@@ -0,0 +1,85 @@
++import assert from 'node:assert/strict'
++import test from 'node:test'
++
++import {
++  availableImproveEngines,
++  describeImproveLaunch,
++  improveBatchLabel,
++  improveConfirmMessage,
++  improveEngine,
++  improveEngineBlockedReason,
++  IMPROVE_ENGINES,
++} from './improveEngines.js'
++
++test('every engine states what it does to the ORIGINAL, not just that it improves', () => {
++  // Issue #32 is exactly this distinction. A summary that only promised
++  // "sharper" on both would leave the user picking blind, which is the bug.
++  const klein = improveEngine('klein')
++  const seedvr2 = improveEngine('seedvr2')
++  assert.match(klein.summary, /shift|change/i)
++  assert.match(seedvr2.summary, /keeps the original/i)
++  assert.notEqual(klein.summary, seedvr2.summary)
++  for (const engine of IMPROVE_ENGINES) {
++    assert.ok(engine.id && engine.label && engine.action && engine.summary)
++  }
++})
++
++test('an unknown engine id falls back to Klein rather than blowing up a label', () => {
++  assert.equal(improveEngine('nonsense').id, 'klein')
++  assert.equal(improveEngine(undefined).id, 'klein')
++})
++
++test('SeedVR2 only appears once it is ready; Klein always does', () => {
++  const ids = (caps) => availableImproveEngines(caps).map((e) => e.id)
++  assert.deepEqual(ids(undefined), ['klein'])
++  assert.deepEqual(ids({ comfyui: {} }), ['klein'])
++  assert.deepEqual(ids({ comfyui: { seedvr2_ready: false } }), ['klein'])
++  assert.deepEqual(ids({ comfyui: { seedvr2_ready: true } }), ['klein', 'seedvr2'])
++})
++
++test('a blocked engine says WHY, and points at where the fix lives', () => {
++  assert.equal(improveEngineBlockedReason('klein', {
++    engines: { klein: true }, eligibleCount: 3,
++  }), null)
++  assert.match(improveEngineBlockedReason('klein', {
++    engines: { klein: false }, eligibleCount: 3,
++  }), /not available/i)
++  assert.match(improveEngineBlockedReason('seedvr2', {
++    caps: { comfyui: { seedvr2_ready: false } }, eligibleCount: 3,
++  }), /Setup/)
++  assert.match(improveEngineBlockedReason('seedvr2', {
++    caps: { comfyui: { seedvr2_ready: true } }, eligibleCount: 0,
++  }), /eligible/i)
++})
++
++test('the confirm carries the engine trade-off and the skip count', () => {
++  const msg = improveConfirmMessage('seedvr2', {
++    eligibleCount: 12, excludedCount: 3, exclusionSummary: 'already improved',
++  })
++  assert.match(msg, /12 image\(s\)/)
++  assert.match(msg, /keeps the original/i)
++  assert.match(msg, /3 selected image\(s\) will be skipped: already improved/)
++  assert.match(msg, /Original images stay unchanged/)
++  const klein = improveConfirmMessage('klein', { eligibleCount: 1 })
++  assert.match(klein, /Klein/)
++  assert.doesNotMatch(klein, /will be skipped/)
++})
++
++test('the launch toast names the engine the SERVER ran, not the button pressed', () => {
++  assert.match(describeImproveLaunch({ queued: 4, engine: 'seedvr2' }), /^SeedVR2: processing 4/)
++  assert.match(describeImproveLaunch({ queued: 4, skipped: 2, engine: 'klein' }),
++    /^Klein: processing 4 image\(s\) in the background · 2 not eligible/)
++  // A server that echoes nothing still produces a sentence, not "undefined".
++  assert.match(describeImproveLaunch({ queued: 1 }), /^Klein: processing 1/)
++})
++
++test('the progress label reads the running batch engine', () => {
++  assert.equal(improveBatchLabel(null), null)
++  assert.equal(improveBatchLabel({ kind: 'caption', total: 4, done: 1 }), null)
++  assert.equal(improveBatchLabel({ kind: 'improve', engine: 'seedvr2', total: 9, done: 2 }),
++    '🔍 SeedVR2 2/9')
++  assert.equal(improveBatchLabel({ kind: 'improve', engine: 'klein', total: 0, done: 0 }),
++    '✨ Klein…')
++  assert.equal(improveBatchLabel({ kind: 'improve', engine: 'seedvr2', cancelling: true }),
++    '🔍 Stopping…')
++})
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index 5d0ec4af..369e2c3f 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -47,6 +47,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
+ 
+ // Newest first. Prepend new waves at the top.
+ export const WHATS_NEW = [
++  {
++    id: '2026-08-02-seedvr2-upscaling',
++    date: '2026-08-02',
++    title: 'A second way to upscale — one that does not repaint your images',
++    blurb:
++      'Klein’s ✨ Upscale & improve re-renders detail from a prompt: it rescues a soft photo, and it can move skin tone and colour along the way — which is the wrong trade when the exact look is what you are training on. SeedVR2 is now the other option: it resolves detail at a higher resolution and leaves the content alone. Pick either one straight from the bulk actions on a selection (each button says what it does to the original), or set your default for the single-image pass in Settings ▸ Image engines. Setup ▸ ComfyUI downloads the two models (~3.9 GB) on a click and tells you how to add the node pack. Requested by SurpassHR (GitHub #32).',
++    to: '/settings/engines',
++  },
+   {
+     id: '2026-08-02-docker-first-boot-opens-setup',
+     date: '2026-08-02',

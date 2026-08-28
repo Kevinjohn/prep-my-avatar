@@ -1,0 +1,1410 @@
+
+> prep-my-avatar-frontend@0.0.1 gate ~/Documents/GitHub/prep-my-avatar/frontend
+> pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run check:bundle
+
+
+> prep-my-avatar-frontend@0.0.1 lint ~/Documents/GitHub/prep-my-avatar/frontend
+> eslint . --max-warnings=0
+
+
+> prep-my-avatar-frontend@0.0.1 typecheck ~/Documents/GitHub/prep-my-avatar/frontend
+> tsc -p tsconfig.check.json && node scripts/check-typecheck-coverage.mjs
+
+Typecheck coverage includes app, page, component, context, and hook modules.
+
+> prep-my-avatar-frontend@0.0.1 test ~/Documents/GitHub/prep-my-avatar/frontend
+> node --test --test-concurrency=1
+
+TAP version 13
+# Subtest: only an explicit CSRF rejection replays a mutation
+ok 1 - only an explicit CSRF rejection replays a mutation
+  ---
+  duration_ms: 8.82575
+  type: 'test'
+  ...
+# Subtest: apiFetch leaves notification ownership to its caller
+ok 2 - apiFetch leaves notification ownership to its caller
+  ---
+  duration_ms: 0.553709
+  type: 'test'
+  ...
+# Subtest: JSON clients preserve empty and falsy successful payloads
+ok 3 - JSON clients preserve empty and falsy successful payloads
+  ---
+  duration_ms: 1.29375
+  type: 'test'
+  ...
+# Subtest: queued dialogs remount with request-local form state
+ok 4 - queued dialogs remount with request-local form state
+  ---
+  duration_ms: 0.244458
+  type: 'test'
+  ...
+# Subtest: toast timers pause for interaction and provider globals are cleaned up
+ok 5 - toast timers pause for interaction and provider globals are cleaned up
+  ---
+  duration_ms: 0.36125
+  type: 'test'
+  ...
+# Subtest: markdown parser validates table delimiters before dropping a row
+ok 6 - markdown parser validates table delimiters before dropping a row
+  ---
+  duration_ms: 0.08875
+  type: 'test'
+  ...
+# Subtest: lightbox exposes an accessible responsive image improvement action
+ok 7 - lightbox exposes an accessible responsive image improvement action
+  ---
+  duration_ms: 0.298959
+  type: 'test'
+  ...
+# Subtest: workspace guards rescue rows and detects a pending improvement child
+ok 8 - workspace guards rescue rows and detects a pending improvement child
+  ---
+  duration_ms: 0.326958
+  type: 'test'
+  ...
+# Subtest: dataset hook starts improvement and follows reconstruction changes via the shared event stream
+ok 9 - dataset hook starts improvement and follows reconstruction changes via the shared event stream
+  ---
+  duration_ms: 0.05975
+  type: 'test'
+  ...
+# Subtest: settings explains the shared instruction for scraper and lightbox improvement
+ok 10 - settings explains the shared instruction for scraper and lightbox improvement
+  ---
+  duration_ms: 0.038125
+  type: 'test'
+  ...
+# Subtest: manual improvement candidates cannot use the unrelated generic regenerate path
+ok 11 - manual improvement candidates cannot use the unrelated generic regenerate path
+  ---
+  duration_ms: 0.141458
+  type: 'test'
+  ...
+# Subtest: reconstruction review renders the exact input and freezes both previews
+ok 12 - reconstruction review renders the exact input and freezes both previews
+  ---
+  duration_ms: 0.047667
+  type: 'test'
+  ...
+# Subtest: Klein review anchor clears the sticky header on mobile and desktop
+ok 13 - Klein review anchor clears the sticky header on mobile and desktop
+  ---
+  duration_ms: 0.264709
+  type: 'test'
+  ...
+# Subtest: a name is always required
+ok 14 - a name is always required
+  ---
+  duration_ms: 0.276
+  type: 'test'
+  ...
+# Subtest: character and concept need a trigger word, style does not
+ok 15 - character and concept need a trigger word, style does not
+  ---
+  duration_ms: 0.043209
+  type: 'test'
+  ...
+# Subtest: a concept also needs its description
+ok 16 - a concept also needs its description
+  ---
+  duration_ms: 0.034583
+  type: 'test'
+  ...
+# Subtest: the answer is a boolean, not the last truthy field
+ok 17 - the answer is a boolean, not the last truthy field
+  ---
+  duration_ms: 0.033417
+  type: 'test'
+  ...
+# Subtest: bulk curation keeps the selection unless every requested image was updated
+ok 18 - bulk curation keeps the selection unless every requested image was updated
+  ---
+  duration_ms: 0.791416
+  type: 'test'
+  ...
+# Subtest: late Hugging Face prefill cannot replace a repository edited by the user
+ok 19 - late Hugging Face prefill cannot replace a repository edited by the user
+  ---
+  duration_ms: 0.148834
+  type: 'test'
+  ...
+# Subtest: variation catalog exposes retry, storage failure, and stale-preset recovery
+ok 20 - variation catalog exposes retry, storage failure, and stale-preset recovery
+  ---
+  duration_ms: 0.18925
+  type: 'test'
+  ...
+# Subtest: duplicate-shot protection uses authoritative whole-dataset counts
+ok 21 - duplicate-shot protection uses authoritative whole-dataset counts
+  ---
+  duration_ms: 0.173875
+  type: 'test'
+  ...
+# Subtest: unavailable Klein setup is a sibling of the disabled selection button
+ok 22 - unavailable Klein setup is a sibling of the disabled selection button
+  ---
+  duration_ms: 0.168667
+  type: 'test'
+  ...
+# Subtest: lightbox zoom and prompt editing expose keyboard-operable dialog controls
+ok 23 - lightbox zoom and prompt editing expose keyboard-operable dialog controls
+  ---
+  duration_ms: 0.082125
+  type: 'test'
+  ...
+# Subtest: failed crop persistence keeps each crop editor open for retry
+ok 24 - failed crop persistence keeps each crop editor open for retry
+  ---
+  duration_ms: 0.584417
+  type: 'test'
+  ...
+# Subtest: style datasets never present the internal identifier as a prompt trigger
+ok 25 - style datasets never present the internal identifier as a prompt trigger
+  ---
+  duration_ms: 0.180458
+  type: 'test'
+  ...
+# Subtest: dataset kind and character fidelity expose their selected state
+ok 26 - dataset kind and character fidelity expose their selected state
+  ---
+  duration_ms: 0.241667
+  type: 'test'
+  ...
+# Subtest: trigger copy awaits the clipboard and reports both outcomes
+ok 27 - trigger copy awaits the clipboard and reports both outcomes
+  ---
+  duration_ms: 0.296625
+  type: 'test'
+  ...
+# Subtest: settings owns its pending state and prevents duplicate submission or close
+ok 28 - settings owns its pending state and prevents duplicate submission or close
+  ---
+  duration_ms: 0.116959
+  type: 'test'
+  ...
+# Subtest: training evidence is complete and zero-step progress remains visible
+ok 29 - training evidence is complete and zero-step progress remains visible
+  ---
+  duration_ms: 0.092833
+  type: 'test'
+  ...
+# Subtest: scraper import stays available during API generation only
+ok 30 - scraper import stays available during API generation only
+  ---
+  duration_ms: 0.298333
+  type: 'test'
+  ...
+# Subtest: scan results and selection survive reload per dataset
+ok 31 - scan results and selection survive reload per dataset
+  ---
+  duration_ms: 0.331667
+  type: 'test'
+  ...
+# Subtest: reset clears only the targeted dataset scan
+ok 32 - reset clears only the targeted dataset scan
+  ---
+  duration_ms: 0.102167
+  type: 'test'
+  ...
+# Subtest: cloud training state supports legacy active envelopes and family isolation
+ok 33 - cloud training state supports legacy active envelopes and family isolation
+  ---
+  duration_ms: 0.512542
+  type: 'test'
+  ...
+# Subtest: cloud block reason prioritizes unsupported family, invalid config, floor, then limit
+ok 34 - cloud block reason prioritizes unsupported family, invalid config, floor, then limit
+  ---
+  duration_ms: 0.058667
+  type: 'test'
+  ...
+# Subtest: training step policy distinguishes adaptive, malformed, floor, and exact values
+ok 35 - training step policy distinguishes adaptive, malformed, floor, and exact values
+  ---
+  duration_ms: 0.491916
+  type: 'test'
+  ...
+# Subtest: launch body snapshots fresh mode and family-only overrides
+ok 36 - launch body snapshots fresh mode and family-only overrides
+  ---
+  duration_ms: 0.092
+  type: 'test'
+  ...
+# Subtest: training preset parser accepts only the versioned object contract
+ok 37 - training preset parser accepts only the versioned object contract
+  ---
+  duration_ms: 0.395417
+  type: 'test'
+  ...
+# Subtest: checkpoint browser normalizes malformed collections and owns total count
+ok 38 - checkpoint browser normalizes malformed collections and owns total count
+  ---
+  duration_ms: 0.297667
+  type: 'test'
+  ...
+# Subtest: checkpoints-to-keep retains finals + best epoch, falling back to the last step
+ok 39 - checkpoints-to-keep retains finals + best epoch, falling back to the last step
+  ---
+  duration_ms: 0.0815
+  type: 'test'
+  ...
+# Subtest: next-continue-step is the highest step among the run's checkpoints
+ok 40 - next-continue-step is the highest step among the run's checkpoints
+  ---
+  duration_ms: 0.04225
+  type: 'test'
+  ...
+# Subtest: workspace ends with separate training, checkpoints and studio sections
+ok 41 - workspace ends with separate training, checkpoints and studio sections
+  ---
+  duration_ms: 0.770833
+  type: 'test'
+  ...
+# Subtest: registry ids are unique within sections and target ids are globally unique
+ok 42 - registry ids are unique within sections and target ids are globally unique
+  ---
+  duration_ms: 0.114708
+  type: 'test'
+  ...
+# Subtest: character destinations expose real character-only panels
+ok 43 - character destinations expose real character-only panels
+  ---
+  duration_ms: 0.15125
+  type: 'test'
+  ...
+# Subtest: concept and style destinations omit character-only or inapplicable panels
+ok 44 - concept and style destinations omit character-only or inapplicable panels
+  ---
+  duration_ms: 0.090625
+  type: 'test'
+  ...
+# Subtest: data and capability predicates expose only destinations that currently exist
+ok 45 - data and capability predicates expose only destinations that currently exist
+  ---
+  duration_ms: 0.080042
+  type: 'test'
+  ...
+# Subtest: whole-dataset summaries keep older-page destinations available
+ok 46 - whole-dataset summaries keep older-page destinations available
+  ---
+  duration_ms: 0.085041
+  type: 'test'
+  ...
+# Subtest: legacy training checkpoint and studio links normalize to their new sections
+ok 47 - legacy training checkpoint and studio links normalize to their new sections
+  ---
+  duration_ms: 0.09725
+  type: 'test'
+  ...
+# Subtest: queue availability remains pending until the first truthful status response
+ok 48 - queue availability remains pending until the first truthful status response
+  ---
+  duration_ms: 0.033375
+  type: 'test'
+  ...
+# Subtest: invalid sections and panels normalize to truthful parent state
+ok 49 - invalid sections and panels normalize to truthful parent state
+  ---
+  duration_ms: 0.204833
+  type: 'test'
+  ...
+# Subtest: a pending queue URL is preserved until training status resolves
+ok 50 - a pending queue URL is preserved until training status resolves
+  ---
+  duration_ms: 0.191417
+  type: 'test'
+  ...
+# Subtest: query updates preserve unrelated keys and clear panel on parent navigation
+ok 51 - query updates preserve unrelated keys and clear panel on parent navigation
+  ---
+  duration_ms: 0.141875
+  type: 'test'
+  ...
+# Subtest: legacy runs do not invent admission, override, or masking provenance
+ok 52 - legacy runs do not invent admission, override, or masking provenance
+  ---
+  duration_ms: 0.251083
+  type: 'test'
+  ...
+# Subtest: empty trash reloads retained entries and reports partial failures
+ok 53 - empty trash reloads retained entries and reports partial failures
+  ---
+  duration_ms: 0.297833
+  type: 'test'
+  ...
+# Subtest: maintenance fetch failures have persistent, accessible retry states
+ok 54 - maintenance fetch failures have persistent, accessible retry states
+  ---
+  duration_ms: 0.093333
+  type: 'test'
+  ...
+# Subtest: successful trash mutations remain successful when inventory refresh fails
+ok 55 - successful trash mutations remain successful when inventory refresh fails
+  ---
+  duration_ms: 0.350167
+  type: 'test'
+  ...
+# Subtest: log clipboard feedback awaits both successful and rejected writes
+ok 56 - log clipboard feedback awaits both successful and rejected writes
+  ---
+  duration_ms: 0.045375
+  type: 'test'
+  ...
+# Subtest: small-image Klein rescue terms find Scraping & sources
+ok 57 - small-image Klein rescue terms find Scraping & sources
+  ---
+  duration_ms: 0.304458
+  type: 'test'
+  ...
+# Subtest: training is ready when either supported training lane is usable
+ok 58 - training is ready when either supported training lane is usable
+  ---
+  duration_ms: 0.059167
+  type: 'test'
+  ...
+# Subtest: representative visible controls are indexed for every settings section
+ok 59 - representative visible controls are indexed for every settings section
+  ---
+  duration_ms: 0.078292
+  type: 'test'
+  ...
+# Subtest: subscription polling is serialized, abortable, backed off, and reports one local status
+ok 60 - subscription polling is serialized, abortable, backed off, and reports one local status
+  ---
+  duration_ms: 0.388167
+  type: 'test'
+  ...
+# Subtest: async connection results expose status and alert live regions
+ok 61 - async connection results expose status and alert live regions
+  ---
+  duration_ms: 0.099875
+  type: 'test'
+  ...
+# Subtest: installer reattaches to terminal state and keeps reconnecting after poll failures
+ok 62 - installer reattaches to terminal state and keeps reconnecting after poll failures
+  ---
+  duration_ms: 0.360959
+  type: 'test'
+  ...
+# Subtest: guide section links update the fragment, move focus, and honor reduced motion
+ok 63 - guide section links update the fragment, move focus, and honor reduced motion
+  ---
+  duration_ms: 0.107833
+  type: 'test'
+  ...
+# Subtest: setup scan failures remain distinct from completed scans and offer retry
+ok 64 - setup scan failures remain distinct from completed scans and offer retry
+  ---
+  duration_ms: 0.159167
+  type: 'test'
+  ...
+# Subtest: LoRA lock controls include action and model identity
+ok 65 - LoRA lock controls include action and model identity
+  ---
+  duration_ms: 0.354416
+  type: 'test'
+  ...
+# Subtest: resolution selector exposes single-selection group semantics and keyboard movement
+ok 66 - resolution selector exposes single-selection group semantics and keyboard movement
+  ---
+  duration_ms: 0.109208
+  type: 'test'
+  ...
+# Subtest: Klein reconciliation persists fallback and uses an unambiguous dependency
+ok 67 - Klein reconciliation persists fallback and uses an unambiguous dependency
+  ---
+  duration_ms: 0.063542
+  type: 'test'
+  ...
+# Subtest: failed full hydration pauses automatic retries and exposes an explicit retry
+ok 68 - failed full hydration pauses automatic retries and exposes an explicit retry
+  ---
+  duration_ms: 0.573875
+  type: 'test'
+  ...
+# Subtest: full hydration has a request lifecycle independent from routine refreshes
+ok 69 - full hydration has a request lifecycle independent from routine refreshes
+  ---
+  duration_ms: 0.10275
+  type: 'test'
+  ...
+# Subtest: useEscapeToClose responds only to Escape while enabled
+ok 70 - useEscapeToClose responds only to Escape while enabled
+  ---
+  duration_ms: 17.916541
+  type: 'test'
+  ...
+# Subtest: vision-ready imported corpora stop at coverage review when metadata is unknown
+ok 71 - vision-ready imported corpora stop at coverage review when metadata is unknown
+  ---
+  duration_ms: 0.4815
+  type: 'test'
+  ...
+# Subtest: targeted gap generation remains an optional fallback for a mapped corpus
+ok 72 - targeted gap generation remains an optional fallback for a mapped corpus
+  ---
+  duration_ms: 0.062083
+  type: 'test'
+  ...
+# Subtest: generated candidates must be curated before they count as completed work
+ok 73 - generated candidates must be curated before they count as completed work
+  ---
+  duration_ms: 0.083875
+  type: 'test'
+  ...
+# Subtest: exclusive comparisons direct curation to their dedicated review
+ok 74 - exclusive comparisons direct curation to their dedicated review
+  ---
+  duration_ms: 0.111208
+  type: 'test'
+  ...
+# Subtest: useInFlightIds ignores duplicate work and clears the id after resolution
+ok 75 - useInFlightIds ignores duplicate work and clears the id after resolution
+  ---
+  duration_ms: 3.194084
+  type: 'test'
+  ...
+# Subtest: useInFlightIds clears the id after rejection and propagates the error
+ok 76 - useInFlightIds clears the id after rejection and propagates the error
+  ---
+  duration_ms: 0.958
+  type: 'test'
+  ...
+# Subtest: persisted preferences read once, write changes, and contain denied storage
+ok 77 - persisted preferences read once, write changes, and contain denied storage
+  ---
+  duration_ms: 3.01525
+  type: 'test'
+  ...
+# Subtest: expanded caption editor saves with Ctrl+Enter or Command+Enter
+ok 78 - expanded caption editor saves with Ctrl+Enter or Command+Enter
+  ---
+  duration_ms: 0.284417
+  type: 'test'
+  ...
+# Subtest: expanded caption editor exposes a readable character count
+ok 79 - expanded caption editor exposes a readable character count
+  ---
+  duration_ms: 12.429583
+  type: 'test'
+  ...
+# Subtest: results browser chooses the official base when a family provides one
+ok 80 - results browser chooses the official base when a family provides one
+  ---
+  duration_ms: 0.247584
+  type: 'test'
+  ...
+# Subtest: results selection only matches training when both family and base match
+ok 81 - results selection only matches training when both family and base match
+  ---
+  duration_ms: 0.075
+  type: 'test'
+  ...
+# Subtest: family labels and ComfyUI folders stay tied to the results filter
+ok 82 - family labels and ComfyUI folders stay tied to the results filter
+  ---
+  duration_ms: 0.042666
+  type: 'test'
+  ...
+# Subtest: clean admission requires verified identity as well as clean pixels
+ok 83 - clean admission requires verified identity as well as clean pixels
+  ---
+  duration_ms: 0.288542
+  type: 'test'
+  ...
+# Subtest: known watermarks and duplicates never enter clean bulk admission
+ok 84 - known watermarks and duplicates never enter clean bulk admission
+  ---
+  duration_ms: 0.044583
+  type: 'test'
+  ...
+# Subtest: unchecked face-region QA remains visible in quality review
+ok 85 - unchecked face-region QA remains visible in quality review
+  ---
+  duration_ms: 0.069458
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 1
+ok 86 - fixed crop preserves ratio and minimum at 1
+  ---
+  duration_ms: 0.322458
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 0.75
+ok 87 - fixed crop preserves ratio and minimum at 0.75
+  ---
+  duration_ms: 0.079084
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 0.6666666666666666
+ok 88 - fixed crop preserves ratio and minimum at 0.6666666666666666
+  ---
+  duration_ms: 0.032416
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 0.5625
+ok 89 - fixed crop preserves ratio and minimum at 0.5625
+  ---
+  duration_ms: 0.290542
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 1.3333333333333333
+ok 90 - fixed crop preserves ratio and minimum at 1.3333333333333333
+  ---
+  duration_ms: 0.037625
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 1.5
+ok 91 - fixed crop preserves ratio and minimum at 1.5
+  ---
+  duration_ms: 0.026166
+  type: 'test'
+  ...
+# Subtest: fixed crop preserves ratio and minimum at 1.7777777777777777
+ok 92 - fixed crop preserves ratio and minimum at 1.7777777777777777
+  ---
+  duration_ms: 0.068333
+  type: 'test'
+  ...
+# Subtest: readDatasetCurrentId preserves the existing stored-id parsing
+ok 93 - readDatasetCurrentId preserves the existing stored-id parsing
+  ---
+  duration_ms: 0.298833
+  type: 'test'
+  ...
+# Subtest: writeDatasetCurrentId stores the hand-off value under the shared key
+ok 94 - writeDatasetCurrentId stores the hand-off value under the shared key
+  ---
+  duration_ms: 0.0555
+  type: 'test'
+  ...
+# Subtest: clearDatasetCurrentId removes the shared key
+ok 95 - clearDatasetCurrentId removes the shared key
+  ---
+  duration_ms: 0.043208
+  type: 'test'
+  ...
+# Subtest: dataset-current-id helpers contain private-mode storage failures
+ok 96 - dataset-current-id helpers contain private-mode storage failures
+  ---
+  duration_ms: 0.0795
+  type: 'test'
+  ...
+# Subtest: diagnostic report chooses a fence longer than backtick runs in logs
+ok 97 - diagnostic report chooses a fence longer than backtick runs in logs
+  ---
+  duration_ms: 0.3425
+  type: 'test'
+  ...
+# Subtest: unresolved reconstruction pair stays out of generic curation
+ok 98 - unresolved reconstruction pair stays out of generic curation
+  ---
+  duration_ms: 0.561958
+  type: 'test'
+  ...
+# Subtest: resolved reconstruction pair exposes exactly its admitted winner
+ok 99 - resolved reconstruction pair exposes exactly its admitted winner
+  ---
+  duration_ms: 0.067583
+  type: 'test'
+  ...
+# Subtest: legacy siblings form one exclusive group and expose only the kept winner
+ok 100 - legacy siblings form one exclusive group and expose only the kept winner
+  ---
+  duration_ms: 0.136791
+  type: 'test'
+  ...
+# Subtest: orphaned legacy reconstruction remains available for ordinary cleanup
+ok 101 - orphaned legacy reconstruction remains available for ordinary cleanup
+  ---
+  duration_ms: 0.337375
+  type: 'test'
+  ...
+# Subtest: malformed non-array image payloads degrade to an empty grid
+ok 102 - malformed non-array image payloads degrade to an empty grid
+  ---
+  duration_ms: 0.092167
+  type: 'test'
+  ...
+# Subtest: heading ids are Unicode-aware, nonempty, and unique
+ok 103 - heading ids are Unicode-aware, nonempty, and unique
+  ---
+  duration_ms: 0.9565
+  type: 'test'
+  ...
+# Subtest: guide heading model shares ids with rendered headings
+ok 104 - guide heading model shares ids with rendered headings
+  ---
+  duration_ms: 0.104708
+  type: 'test'
+  ...
+# Subtest: resolution display selects exact backend-generated profile dimensions
+ok 105 - resolution display selects exact backend-generated profile dimensions
+  ---
+  duration_ms: 0.406375
+  type: 'test'
+  ...
+# Subtest: unchanged API rows retain their identities and array
+ok 106 - unchanged API rows retain their identities and array
+  ---
+  duration_ms: 0.329625
+  type: 'test'
+  ...
+# Subtest: changed and reordered API rows preserve only valid identities
+ok 107 - changed and reordered API rows preserve only valid identities
+  ---
+  duration_ms: 0.091208
+  type: 'test'
+  ...
+# Subtest: toggleInSet adds an absent value without mutating the input Set
+ok 108 - toggleInSet adds an absent value without mutating the input Set
+  ---
+  duration_ms: 0.466042
+  type: 'test'
+  ...
+# Subtest: toggleInSet removes a present value without mutating the input Set
+ok 109 - toggleInSet removes a present value without mutating the input Set
+  ---
+  duration_ms: 0.051083
+  type: 'test'
+  ...
+# Subtest: session helpers preserve ordinary browser storage behavior
+ok 110 - session helpers preserve ordinary browser storage behavior
+  ---
+  duration_ms: 0.310458
+  type: 'test'
+  ...
+# Subtest: setup redirect retains its established session key
+ok 111 - setup redirect retains its established session key
+  ---
+  duration_ms: 0.036834
+  type: 'test'
+  ...
+# Subtest: session helpers contain denied reads and writes
+ok 112 - session helpers contain denied reads and writes
+  ---
+  duration_ms: 0.083083
+  type: 'test'
+  ...
+# Subtest: settings patch contains only fields changed by this draft
+ok 113 - settings patch contains only fields changed by this draft
+  ---
+  duration_ms: 0.502875
+  type: 'test'
+  ...
+# Subtest: settings patch treats arrays atomically and omits unchanged values
+ok 114 - settings patch treats arrays atomically and omits unchanged values
+  ---
+  duration_ms: 0.104042
+  type: 'test'
+  ...
+# Subtest: navigation guard allows settings sections but blocks routes that discard the draft
+ok 115 - navigation guard allows settings sections but blocks routes that discard the draft
+  ---
+  duration_ms: 0.048125
+  type: 'test'
+  ...
+# Subtest: setup navigation skips ready steps in both directions
+ok 116 - setup navigation skips ready steps in both directions
+  ---
+  duration_ms: 0.319042
+  type: 'test'
+  ...
+# Subtest: Ollama gate distinguishes absent, stopped, and missing model states
+ok 117 - Ollama gate distinguishes absent, stopped, and missing model states
+  ---
+  duration_ms: 0.079417
+  type: 'test'
+  ...
+# Subtest: malformed or unknown stored payloads are ignored
+ok 118 - malformed or unknown stored payloads are ignored
+  ---
+  duration_ms: 0.440667
+  type: 'test'
+  ...
+# Subtest: custom-shot storage migrates arrays and cleans malformed payloads
+ok 119 - custom-shot storage migrates arrays and cleans malformed payloads
+  ---
+  duration_ms: 0.184292
+  type: 'test'
+  ...
+# Subtest: save validates name, selection and duplicate names
+ok 120 - save validates name, selection and duplicate names
+  ---
+  duration_ms: 0.995708
+  type: 'test'
+  ...
+# Subtest: save snapshots selected custom shots and apply restores missing definitions
+ok 121 - save snapshots selected custom shots and apply restores missing definitions
+  ---
+  duration_ms: 0.132541
+  type: 'test'
+  ...
+# Subtest: apply drops catalog ids that are no longer resolvable but restores custom definitions
+ok 122 - apply drops catalog ids that are no longer resolvable but restores custom definitions
+  ---
+  duration_ms: 0.055834
+  type: 'test'
+  ...
+# Subtest: rename validates duplicates and delete removes only the requested preset
+ok 123 - rename validates duplicates and delete removes only the requested preset
+  ---
+  duration_ms: 0.088125
+  type: 'test'
+  ...
+# Subtest: scrape summary reports Klein rescues separately from skipped images
+ok 124 - scrape summary reports Klein rescues separately from skipped images
+  ---
+  duration_ms: 0.340958
+  type: 'test'
+  ...
+# Subtest: pair builder exposes queued, ready and failed candidates
+ok 125 - pair builder exposes queued, ready and failed candidates
+  ---
+  duration_ms: 0.087291
+  type: 'test'
+  ...
+# Subtest: pair builder only resolves mutually exclusive choices
+ok 126 - pair builder only resolves mutually exclusive choices
+  ---
+  duration_ms: 0.26475
+  type: 'test'
+  ...
+# Subtest: generic grid hides unresolved pairs and only exposes a resolved winner
+ok 127 - generic grid hides unresolved pairs and only exposes a resolved winner
+  ---
+  duration_ms: 0.310041
+  type: 'test'
+  ...
+# Subtest: rescue provenance rows are recognizable for generic-action guards
+ok 128 - rescue provenance rows are recognizable for generic-action guards
+  ---
+  duration_ms: 0.038834
+  type: 'test'
+  ...
+# Subtest: decodeStudioForm drops malformed persisted field shapes and ranges
+ok 129 - decodeStudioForm drops malformed persisted field shapes and ranges
+  ---
+  duration_ms: 0.468042
+  type: 'test'
+  ...
+# Subtest: groupStudioRuns keeps launches distinct even with the same prompt and seed
+ok 130 - groupStudioRuns keeps launches distinct even with the same prompt and seed
+  ---
+  duration_ms: 0.110042
+  type: 'test'
+  ...
+# Subtest: groupStudioRuns retains the seed/prompt fallback for legacy rows
+ok 131 - groupStudioRuns retains the seed/prompt fallback for legacy rows
+  ---
+  duration_ms: 0.048042
+  type: 'test'
+  ...
+# Subtest: tag matching normalizes canonically equivalent Unicode
+ok 132 - tag matching normalizes canonically equivalent Unicode
+  ---
+  duration_ms: 1.382166
+  type: 'test'
+  ...
+# Subtest: filterImages preserves include, exclude, empty-tag, and Unicode semantics
+ok 133 - filterImages preserves include, exclude, empty-tag, and Unicode semantics
+  ---
+  duration_ms: 0.969167
+  type: 'test'
+  ...
+# Subtest: training family labels cover the supported codes
+ok 134 - training family labels cover the supported codes
+  ---
+  duration_ms: 0.388083
+  type: 'test'
+  ...
+# Subtest: clamp and normalizeRegion keep ordered coordinates inside the image
+ok 135 - clamp and normalizeRegion keep ordered coordinates inside the image
+  ---
+  duration_ms: 0.805167
+  type: 'test'
+  ...
+# Subtest: pointToNormalized converts rendered pixels and clamps outside points
+ok 136 - pointToNormalized converts rendered pixels and clamps outside points
+  ---
+  duration_ms: 0.120542
+  type: 'test'
+  ...
+# Subtest: moveRegion preserves size while constraining the box within bounds
+ok 137 - moveRegion preserves size while constraining the box within bounds
+  ---
+  duration_ms: 0.097125
+  type: 'test'
+  ...
+# Subtest: resizeRegion moves the northwest corner and anchors southeast
+ok 138 - resizeRegion moves the northwest corner and anchors southeast
+  ---
+  duration_ms: 0.090292
+  type: 'test'
+  ...
+# Subtest: resizeRegion moves the northeast corner and anchors southwest
+ok 139 - resizeRegion moves the northeast corner and anchors southwest
+  ---
+  duration_ms: 0.048125
+  type: 'test'
+  ...
+# Subtest: resizeRegion moves the southwest corner and anchors northeast
+ok 140 - resizeRegion moves the southwest corner and anchors northeast
+  ---
+  duration_ms: 0.033584
+  type: 'test'
+  ...
+# Subtest: resizeRegion moves the southeast corner and anchors northwest
+ok 141 - resizeRegion moves the southeast corner and anchors northwest
+  ---
+  duration_ms: 0.076458
+  type: 'test'
+  ...
+# Subtest: minimum-size enforcement works at an image edge and during resize
+ok 142 - minimum-size enforcement works at an image edge and during resize
+  ---
+  duration_ms: 0.05075
+  type: 'test'
+  ...
+# Subtest: resizeRegion keeps the binary span at the minimum after clamping a moved edge
+ok 143 - resizeRegion keeps the binary span at the minimum after clamping a moved edge
+  ---
+  duration_ms: 0.14875
+  type: 'test'
+  ...
+# Subtest: geometry and list helpers never mutate their inputs
+ok 144 - geometry and list helpers never mutate their inputs
+  ---
+  duration_ms: 0.259333
+  type: 'test'
+  ...
+# Subtest: serializeWatermarkRegions rounds only a cloned API payload and preserves null
+ok 145 - serializeWatermarkRegions rounds only a cloned API payload and preserves null
+  ---
+  duration_ms: 0.089208
+  type: 'test'
+  ...
+# Subtest: buildWatermarkReviewState clones effective regions without mutating the frozen queue
+ok 146 - buildWatermarkReviewState clones effective regions without mutating the frozen queue
+  ---
+  duration_ms: 0.173791
+  type: 'test'
+  ...
+# Subtest: deleteSelectedWatermarkRegion removes only the selected zone and reclamps selection
+ok 147 - deleteSelectedWatermarkRegion removes only the selected zone and reclamps selection
+  ---
+  duration_ms: 0.059209
+  type: 'test'
+  ...
+# Subtest: prose frequency counts useful words by caption instead of comma fragments
+ok 148 - prose frequency counts useful words by caption instead of comma fragments
+  ---
+  duration_ms: 5.142208
+  type: 'test'
+  ...
+# Subtest: booru frequency keeps exact comma-separated tags
+ok 149 - booru frequency keeps exact comma-separated tags
+  ---
+  duration_ms: 0.09675
+  type: 'test'
+  ...
+# Subtest: caption guidance is specific to character, concept and style datasets
+ok 150 - caption guidance is specific to character, concept and style datasets
+  ---
+  duration_ms: 0.125083
+  type: 'test'
+  ...
+# Subtest: re-caption confirmation explains the correct category rule
+ok 151 - re-caption confirmation explains the correct category rule
+  ---
+  duration_ms: 0.329291
+  type: 'test'
+  ...
+# Subtest: setup never suggests the slow Qwen thinking tag for captioning
+ok 152 - setup never suggests the slow Qwen thinking tag for captioning
+  ---
+  duration_ms: 0.399958
+  type: 'test'
+  ...
+# Subtest: ConfirmDialog resolves FIFO requests with an activation boundary and Escape cancellation
+ok 153 - ConfirmDialog resolves FIFO requests with an activation boundary and Escape cancellation
+  ---
+  duration_ms: 596.471208
+  type: 'test'
+  ...
+# Subtest: dialogs reset prompts, cancel on backdrop, restore focus, and settle on provider unmount
+ok 154 - dialogs reset prompts, cancel on backdrop, restore focus, and settle on provider unmount
+  ---
+  duration_ms: 468.469875
+  type: 'test'
+  ...
+# Subtest: LockableSlider persists its lock and only emits changes while unlocked
+ok 155 - LockableSlider persists its lock and only emits changes while unlocked
+  ---
+  duration_ms: 32.749
+  type: 'test'
+  ...
+# Subtest: Markdown renders semantic headings, links, lists and validated tables
+ok 156 - Markdown renders semantic headings, links, lists and validated tables
+  ---
+  duration_ms: 29.663042
+  type: 'test'
+  ...
+# Subtest: Markdown resolves opted-in links as same-document navigation
+ok 157 - Markdown resolves opted-in links as same-document navigation
+  ---
+  duration_ms: 2.961417
+  type: 'test'
+  ...
+# Subtest: every guide link resolves to a chapter route or an absolute external URL
+ok 158 - every guide link resolves to a chapter route or an absolute external URL
+  ---
+  duration_ms: 35.219333
+  type: 'test'
+  ...
+# Subtest: every shipped guide chapter renders semantic content without axe violations
+ok 159 - every shipped guide chapter renders semantic content without axe violations
+  ---
+  duration_ms: 232.126583
+  type: 'test'
+  ...
+# Subtest: focus trap enters, loops in both directions, and restores prior focus
+ok 160 - focus trap enters, loops in both directions, and restores prior focus
+  ---
+  duration_ms: 26.427334
+  type: 'test'
+  ...
+# Subtest: shared model, resolution, and LoRA controls reconcile storage and keyboard state
+ok 161 - shared model, resolution, and LoRA controls reconcile storage and keyboard state
+  ---
+  duration_ms: 34.431083
+  type: 'test'
+  ...
+# Subtest: stacked modal locks release independently and restore focus after final cleanup
+ok 162 - stacked modal locks release independently and restore focus after final cleanup
+  ---
+  duration_ms: 25.884959
+  type: 'test'
+  ...
+# Subtest: assembled VariationCatalog retries, persists custom shots, reconciles duplicates, and launches
+ok 163 - assembled VariationCatalog retries, persists custom shots, reconciles duplicates, and launches
+  ---
+  duration_ms: 85.815917
+  type: 'test'
+  ...
+# ⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future\#v7_starttransition.
+# ⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future\#v7_relativesplatpath.
+# Subtest: assembled SetupPage recovers its initial request and reports autodetection failure
+ok 164 - assembled SetupPage recovers its initial request and reports autodetection failure
+  ---
+  duration_ms: 51.979625
+  type: 'test'
+  ...
+# Subtest: assembled SettingsPage recovers an initial settings request failure
+ok 165 - assembled SettingsPage recovers an initial settings request failure
+  ---
+  duration_ms: 45.628792
+  type: 'test'
+  ...
+# Subtest: training progress renders truthful zero-step state and invalidates polling on unmount
+ok 166 - training progress renders truthful zero-step state and invalidates polling on unmount
+  ---
+  duration_ms: 5.935083
+  type: 'test'
+  ...
+# Subtest: actual TrainingPanel degrades truthfully when training initialization is unavailable
+ok 167 - actual TrainingPanel degrades truthfully when training initialization is unavailable
+  ---
+  duration_ms: 48.938083
+  type: 'test'
+  ...
+# Subtest: training monitoring publishes readiness, queue changes, and stops after unmount
+ok 168 - training monitoring publishes readiness, queue changes, and stops after unmount
+  ---
+  duration_ms: 28.315333
+  type: 'test'
+  ...
+# Subtest: actual TrainingPanel reaches local, queued, scheduled, and cloud launch boundaries
+ok 169 - actual TrainingPanel reaches local, queued, scheduled, and cloud launch boundaries
+  ---
+  duration_ms: 124.462625
+  type: 'test'
+  ...
+# Subtest: resume training dialog exposes fresh, resume, cancel, and keyboard outcomes
+ok 170 - resume training dialog exposes fresh, resume, cancel, and keyboard outcomes
+  ---
+  duration_ms: 3.638417
+  type: 'test'
+  ...
+# Subtest: server restart waits for a successful settings save and aborts after save failure
+ok 171 - server restart waits for a successful settings save and aborts after save failure
+  ---
+  duration_ms: 13.898166
+  type: 'test'
+  ...
+# Subtest: preflight modal locks resolution actions and restores failure for retry
+ok 172 - preflight modal locks resolution actions and restores failure for retry
+  ---
+  duration_ms: 5.960791
+  type: 'test'
+  ...
+# Subtest: installer reattaches to a durable terminal result and notifies once
+ok 173 - installer reattaches to a durable terminal result and notifies once
+  ---
+  duration_ms: 10.121542
+  type: 'test'
+  ...
+# Subtest: Dataset lightbox restores async actions and closes from the keyboard
+ok 174 - Dataset lightbox restores async actions and closes from the keyboard
+  ---
+  duration_ms: 12.542583
+  type: 'test'
+  ...
+# Subtest: small-image rescue prevents re-entry and restores choices after failure
+ok 175 - small-image rescue prevents re-entry and restores choices after failure
+  ---
+  duration_ms: 18.802334
+  type: 'test'
+  ...
+# Subtest: crop modal is single-flight and recovers after rejected persistence
+ok 176 - crop modal is single-flight and recovers after rejected persistence
+  ---
+  duration_ms: 24.198125
+  type: 'test'
+  ...
+# Subtest: shared model and resolution controls reconcile state and expose keyboard semantics
+ok 177 - shared model and resolution controls reconcile state and expose keyboard semantics
+  ---
+  duration_ms: 5.795083
+  type: 'test'
+  ...
+# Subtest: Z-Image LoRA controls migrate persistence, lock strength, and report enabled stack
+ok 178 - Z-Image LoRA controls migrate persistence, lock strength, and report enabled stack
+  ---
+  duration_ms: 3.129083
+  type: 'test'
+  ...
+# Subtest: dataset bulk actions retain the selection after partial failure and prune vanished rows
+ok 179 - dataset bulk actions retain the selection after partial failure and prune vanished rows
+  ---
+  duration_ms: 34.96925
+  type: 'test'
+  ...
+# Subtest: publish modal preserves typed repository data and recovers from a rejected launch
+ok 180 - publish modal preserves typed repository data and recovers from a rejected launch
+  ---
+  duration_ms: 48.5485
+  type: 'test'
+  ...
+# Subtest: watermark editor supports keyboard move, delete, and accessible add mode
+ok 181 - watermark editor supports keyboard move, delete, and accessible add mode
+  ---
+  duration_ms: 8.449416
+  type: 'test'
+  ...
+# Subtest: watermark review blocks duplicate actions, recovers from failure, and cleans up shortcuts
+ok 182 - watermark review blocks duplicate actions, recovers from failure, and cleans up shortcuts
+  ---
+  duration_ms: 29.320666
+  type: 'test'
+  ...
+# Subtest: watermark review contains failed region saves until an explicit retry succeeds
+ok 183 - watermark review contains failed region saves until an explicit retry succeeds
+  ---
+  duration_ms: 20.625958
+  type: 'test'
+  ...
+# Subtest: variation launch preflight filters unavailable and paid-lane shots without mutating selection
+ok 184 - variation launch preflight filters unavailable and paid-lane shots without mutating selection
+  ---
+  duration_ms: 0.569292
+  type: 'test'
+  ...
+# Subtest: every generated backend catalog label has an explicit frontend display mapping
+ok 185 - every generated backend catalog label has an explicit frontend display mapping
+  ---
+  duration_ms: 0.620792
+  type: 'test'
+  ...
+# Subtest: deferred local training snapshots the explicit fresh or resume choice
+ok 186 - deferred local training snapshots the explicit fresh or resume choice
+  ---
+  duration_ms: 0.454375
+  type: 'test'
+  ...
+# Subtest: stopping local training discloses and preserves or explicitly clears deferred jobs
+ok 187 - stopping local training discloses and preserves or explicitly clears deferred jobs
+  ---
+  duration_ms: 0.558041
+  type: 'test'
+  ...
+# Subtest: crop confirmation is synchronous single-flight and locks modal actions
+ok 188 - crop confirmation is synchronous single-flight and locks modal actions
+  ---
+  duration_ms: 0.161875
+  type: 'test'
+  ...
+# Subtest: Studio resume and billing warnings use explicit global scopes
+ok 189 - Studio resume and billing warnings use explicit global scopes
+  ---
+  duration_ms: 0.204708
+  type: 'test'
+  ...
+# Subtest: cloud operational guardrails clamp both sides of every displayed bound
+ok 190 - cloud operational guardrails clamp both sides of every displayed bound
+  ---
+  duration_ms: 0.107167
+  type: 'test'
+  ...
+# Subtest: caption tools render guidance from the dataset kind prop
+ok 191 - caption tools render guidance from the dataset kind prop
+  ---
+  duration_ms: 115.418292
+  type: 'test'
+  ...
+# Subtest: Setup settings preserve edits made while an older save is in flight
+ok 192 - Setup settings preserve edits made while an older save is in flight
+  ---
+  duration_ms: 11.714041
+  type: 'test'
+  ...
+# Subtest: Setup autodetect persists only detected fields and preserves an intervening draft
+ok 193 - Setup autodetect persists only detected fields and preserves an intervening draft
+  ---
+  duration_ms: 1.205417
+  type: 'test'
+  ...
+# Subtest: Studio hook retries initial failure, rejects stale refresh, and recovers after resume
+ok 194 - Studio hook retries initial failure, rejects stale refresh, and recovers after resume
+  ---
+  duration_ms: 37.644542
+  type: 'test'
+  ...
+# Subtest: LoRA Studio keeps polling bounded and loads older runs only through pagination
+ok 195 - LoRA Studio keeps polling bounded and loads older runs only through pagination
+  ---
+  duration_ms: 13.668834
+  type: 'test'
+  ...
+# Subtest: dataset hook rejects switched and stale payloads, paginates, hydrates, and invalidates on unmount
+ok 196 - dataset hook rejects switched and stale payloads, paginates, hydrates, and invalidates on unmount
+  ---
+  duration_ms: 14.608833
+  type: 'test'
+  ...
+# Subtest: capabilities context publishes newest compatibility envelope and invalidates unmounted requests
+ok 197 - capabilities context publishes newest compatibility envelope and invalidates unmounted requests
+  ---
+  duration_ms: 2.590875
+  type: 'test'
+  ...
+# Subtest: variation engine workflow reconciles persisted availability from settings and capabilities
+ok 198 - variation engine workflow reconciles persisted availability from settings and capabilities
+  ---
+  duration_ms: 1.714042
+  type: 'test'
+  ...
+# Subtest: same-port restart accepts the matching replacement nonce without an outage
+ok 199 - same-port restart accepts the matching replacement nonce without an outage
+  ---
+  duration_ms: 7.797167
+  type: 'test'
+  ...
+# Subtest: port-changing restart uses the nonce image probe instead of cross-origin fetch
+ok 200 - port-changing restart uses the nonce image probe instead of cross-origin fetch
+  ---
+  duration_ms: 0.128125
+  type: 'test'
+  ...
+# Subtest: settings toggle preserves switch semantics and delegates clicks
+ok 201 - settings toggle preserves switch semantics and delegates clicks
+  ---
+  duration_ms: 146.08625
+  type: 'test'
+  ...
+# Subtest: capability refresh publishes only the newest response and exposes initial failure
+ok 202 - capability refresh publishes only the newest response and exposes initial failure
+  ---
+  duration_ms: 0.777583
+  type: 'test'
+  ...
+# Subtest: settings failures are recoverable and late saves preserve newer drafts
+ok 203 - settings failures are recoverable and late saves preserve newer drafts
+  ---
+  duration_ms: 0.182125
+  type: 'test'
+  ...
+# Subtest: settings and guide navigation use canonical links and focus routed headings
+ok 204 - settings and guide navigation use canonical links and focus routed headings
+  ---
+  duration_ms: 0.1705
+  type: 'test'
+  ...
+# Subtest: settings edits invalidate stale connection results and count real search matches
+ok 205 - settings edits invalidate stale connection results and count real search matches
+  ---
+  duration_ms: 0.09725
+  type: 'test'
+  ...
+# Subtest: settings enforce face and engine invariants
+ok 206 - settings enforce face and engine invariants
+  ---
+  duration_ms: 0.161625
+  type: 'test'
+  ...
+# Subtest: setup labels secrets and cannot advance without a successful save and probe
+ok 207 - setup labels secrets and cannot advance without a successful save and probe
+  ---
+  duration_ms: 0.118833
+  type: 'test'
+  ...
+# Subtest: queued confirmations insert an activation boundary
+ok 208 - queued confirmations insert an activation boundary
+  ---
+  duration_ms: 0.101375
+  type: 'test'
+  ...
+# Subtest: shell owns the only main landmark and sliders have accessible names
+ok 209 - shell owns the only main landmark and sliders have accessible names
+  ---
+  duration_ms: 0.453917
+  type: 'test'
+  ...
+# Subtest: update polling has one nav owner and restart attempts are bounded
+ok 210 - update polling has one nav owner and restart attempts are bounded
+  ---
+  duration_ms: 0.235792
+  type: 'test'
+  ...
+# Subtest: theme-token guard covers index.html and only Tailwind source inputs
+ok 211 - theme-token guard covers index.html and only Tailwind source inputs
+  ---
+  duration_ms: 3.182958
+  type: 'test'
+  ...
+# Subtest: invalid token matcher accepts common punctuation as a token boundary
+ok 212 - invalid token matcher accepts common punctuation as a token boundary
+  ---
+  duration_ms: 0.377625
+  type: 'test'
+  ...
+# Subtest: invalid token matcher does not truncate longer class-like names
+ok 213 - invalid token matcher does not truncate longer class-like names
+  ---
+  duration_ms: 0.033792
+  type: 'test'
+  ...
+# Subtest: alpha-embedded theme tokens never use Tailwind opacity modifiers
+ok 214 - alpha-embedded theme tokens never use Tailwind opacity modifiers
+  ---
+  duration_ms: 23.752542
+  type: 'test'
+  ...
+# Subtest: training launch is gated by persisted config and authoritative preflight
+ok 215 - training launch is gated by persisted config and authoritative preflight
+  ---
+  duration_ms: 0.885625
+  type: 'test'
+  ...
+# Subtest: checkpoint failures stop launch and preserve the last successful inventory
+ok 216 - checkpoint failures stop launch and preserve the last successful inventory
+  ---
+  duration_ms: 0.222375
+  type: 'test'
+  ...
+# Subtest: running progress and checkpoint continuation retain their immutable family
+ok 217 - running progress and checkpoint continuation retain their immutable family
+  ---
+  duration_ms: 0.481084
+  type: 'test'
+  ...
+# Subtest: crop exposes labeled keyboard-editable geometry
+ok 218 - crop exposes labeled keyboard-editable geometry
+  ---
+  duration_ms: 0.09675
+  type: 'test'
+  ...
+# Subtest: Studio sends the complete canonical winning generation config
+ok 219 - Studio sends the complete canonical winning generation config
+  ---
+  duration_ms: 0.093583
+  type: 'test'
+  ...
+# Subtest: runs hub rejects stale refreshes and exposes initial refresh failures
+ok 220 - runs hub rejects stale refreshes and exposes initial refresh failures
+  ---
+  duration_ms: 0.0875
+  type: 'test'
+  ...
+# Subtest: runs hub renders robust timestamps, statuses, cleanup errors, and integer steps
+ok 221 - runs hub renders robust timestamps, statuses, cleanup errors, and integer steps
+  ---
+  duration_ms: 0.08175
+  type: 'test'
+  ...
+# Subtest: training panel reports all checkpoints and preserves failed actions
+ok 222 - training panel reports all checkpoints and preserves failed actions
+  ---
+  duration_ms: 0.157542
+  type: 'test'
+  ...
+# Subtest: queued training displays its immutable recipe and step input is exact
+ok 223 - queued training displays its immutable recipe and step input is exact
+  ---
+  duration_ms: 0.331666
+  type: 'test'
+  ...
+# Subtest: custom-weight confirmation does not also produce an error toast
+ok 224 - custom-weight confirmation does not also produce an error toast
+  ---
+  duration_ms: 0.440333
+  type: 'test'
+  ...
+# Subtest: only undefined recommendations use a preset default
+ok 225 - only undefined recommendations use a preset default
+  ---
+  duration_ms: 0.406167
+  type: 'test'
+  ...
+1..225
+# tests 225
+# suites 0
+# pass 225
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4772.490625
+
+> prep-my-avatar-frontend@0.0.1 build ~/Documents/GitHub/prep-my-avatar/frontend
+> vite build
+
+vite v6.4.3 building for production...
+transforming...
+✓ 199 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                             1.22 kB │ gzip:   0.70 kB
+dist/assets/index-DCKHJr4K.css             59.26 kB │ gzip:  11.48 kB
+dist/assets/trainingFamilies-CuqZQ9VV.js    0.47 kB │ gzip:   0.33 kB
+dist/assets/serverSnapshot-BlzSQqE-.js      0.53 kB │ gzip:   0.30 kB
+dist/assets/DiagnosticReport-oG8ky4c5.js    2.06 kB │ gzip:   1.16 kB
+dist/assets/studioFormat-BrMr2V4E.js        3.49 kB │ gzip:   1.42 kB
+dist/assets/InstallRunner-CvzunhH4.js       3.63 kB │ gzip:   1.57 kB
+dist/assets/TrainingProgress-BM51H1OJ.js    5.17 kB │ gzip:   2.23 kB
+dist/assets/CloudRunsPage-B4xg71ed.js      22.49 kB │ gzip:   6.97 kB
+dist/assets/SetupPage-B0Y3XzVg.js          31.63 kB │ gzip:   9.49 kB
+dist/assets/GuidePage-B03SftgM.js          61.21 kB │ gzip:  23.82 kB
+dist/assets/SettingsPage-YFka85Cr.js       77.13 kB │ gzip:  24.57 kB
+dist/assets/StudioPage-DWd4o6te.js         97.33 kB │ gzip:  26.99 kB
+dist/assets/index-C4V-DnK8.js             198.55 kB │ gzip:  64.94 kB
+dist/assets/DatasetPage-431Ggz1R.js       382.87 kB │ gzip: 107.68 kB
+✓ built in 905ms
+
+> prep-my-avatar-frontend@0.0.1 check:bundle ~/Documents/GitHub/prep-my-avatar/frontend
+> node scripts/check-bundle-budget.mjs
+
+Bundle budget: largest JS 107678, largest CSS 11480, total JS 271464 gzip bytes
+GATE_EXIT:0

@@ -1,0 +1,303 @@
+commit b4fe4422e74a983e02c0f2f605c66c59470e632e
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Mon Aug 24 12:10:12 2026 +0200
+
+    feat(gallery): app-wide generated-image feed — /api/gallery/images
+    
+    Every image the app ever generated (Test Studio cells, canvas previews,
+    comparison runs, improve results), newest first, cursor-paginated so a
+    render landing mid-scroll can never duplicate or skip a page. Filters
+    (dataset, renders/improved, liked) narrow the count with the page; the
+    dataset list stays unfiltered because it feeds the picker.
+    
+    Same rows, same serializer as the checkpoint/run galleries.
+---
+ backend/app/routes/training.py         |  19 ++++
+ backend/app/services/cloud_training.py |  79 +++++++++++++++++
+ backend/tests/test_app_gallery.py      | 158 +++++++++++++++++++++++++++++++++
+ 3 files changed, 256 insertions(+)
+
+diff --git a/backend/app/routes/training.py b/backend/app/routes/training.py
+index 18df2d55..1b301c9c 100644
+--- a/backend/app/routes/training.py
++++ b/backend/app/routes/training.py
+@@ -3014,6 +3014,25 @@ def train_checkpoint_images_delete(record_id, step):
+     return jsonify({'ok': True, **out})
+ 
+ 
++@bp.get('/gallery/images')
++def app_gallery_images():
++    """🖼 Every generated image in the app, newest first — the Gallery page.
++
++    Cursor-paginated (`before_id` = "older than this id"), optionally narrowed
++    by `dataset_id`, `kind` ('renders' | 'improved') and `liked=1`. Open like
++    the other gallery reads; an install that never generated anything answers
++    an empty page, never an error."""
++    kind = (request.args.get('kind') or '').strip() or None
++    if kind not in (None, 'renders', 'improved'):
++        return jsonify({'error': "kind must be 'renders' or 'improved'"}), 400
++    return jsonify(ct.app_gallery(
++        limit=request.args.get('limit', default=ct.APP_GALLERY_PAGE, type=int),
++        before_id=request.args.get('before_id', type=int),
++        dataset_id=request.args.get('dataset_id', type=int),
++        kind=kind,
++        liked=request.args.get('liked', default=0, type=int) == 1))
++
++
+ @bp.get('/train/run/<int:record_id>/timeline')
+ def train_run_timeline(record_id):
+     """Render-equivalent images across checkpoints, split into safe series."""
+diff --git a/backend/app/services/cloud_training.py b/backend/app/services/cloud_training.py
+index 907448f4..14a1d86e 100644
+--- a/backend/app/services/cloud_training.py
++++ b/backend/app/services/cloud_training.py
+@@ -7759,6 +7759,85 @@ def run_gallery(record_id, limit=RUN_GALLERY_LIMIT,
+     }
+ 
+ 
++# One page of the app-wide 🖼 Gallery, and the most it will ever answer at
++# once. Sized like the checkpoint gallery's default: big enough that a phone
++# scroll does not stall every screenful, small enough that the first paint is
++# not a thousand thumbnails.
++APP_GALLERY_PAGE = 60
++APP_GALLERY_PAGE_MAX = 200
++
++
++def app_gallery(limit=APP_GALLERY_PAGE, before_id=None, dataset_id=None,
++                kind=None, liked=False) -> dict:
++    """Every image the app ever generated, newest first — the 🖼 Gallery page.
++
++    The checkpoint and run galleries answer "what did THIS training produce";
++    this one answers "what did I make", across every dataset and every surface
++    at once (Test Studio cells, inline canvas previews, comparison runs, and
++    the ✨ Upscale & improve results derived from them). Same rows, same
++    serializer (`_gallery_image`) — a third shape here would be a third chance
++    for the viewers to disagree about what an image row carries.
++
++    Pagination is a cursor, not an offset: `before_id` returns rows strictly
++    older than that id. Ids are monotonic and the feed is id-descending, so a
++    page boundary cannot skip or duplicate an image when new renders land
++    between two requests — the exact failure OFFSET pagination has on a feed
++    that grows at its head.
++
++    Filters (`dataset_id`, `kind` 'renders'|'improved', `liked`) narrow both
++    the page and `count`, so the header's number always names what the grid is
++    actually showing. `datasets` lists every dataset holding at least one
++    generated image — UNfiltered on purpose: it feeds the filter control, and a
++    picker that only offered the current pick could never be changed."""
++    from ..models import FaceDataset, LoraTestImage
++    q = LoraTestImage.query.filter(
++        LoraTestImage.status == 'done',
++        LoraTestImage.filename.isnot(None))
++    if dataset_id is not None:
++        q = q.filter(LoraTestImage.dataset_id == dataset_id)
++    if kind == 'improved':
++        q = q.filter(LoraTestImage.derivation_kind.isnot(None))
++    elif kind == 'renders':
++        q = q.filter(LoraTestImage.derivation_kind.is_(None))
++    if liked:
++        q = q.filter(LoraTestImage.rating == 1)
++    count = q.count()
++
++    page = q
++    if before_id is not None:
++        page = page.filter(LoraTestImage.id < before_id)
++    cap = max(1, min(int(limit or APP_GALLERY_PAGE), APP_GALLERY_PAGE_MAX))
++    # cap+1 answers "is there another page" with the same query that fetches
++    # this one — a second count per scroll would be paid on every page.
++    rows = page.order_by(LoraTestImage.id.desc()).limit(cap + 1).all()
++    has_more = len(rows) > cap
++    rows = rows[:cap]
++
++    ds_counts = (db.session.query(LoraTestImage.dataset_id,
++                                  func.count(LoraTestImage.id))
++                 .filter(LoraTestImage.status == 'done',
++                         LoraTestImage.filename.isnot(None))
++                 .group_by(LoraTestImage.dataset_id).all())
++    names = ({d.id: d.name for d in FaceDataset.query.filter(
++                 FaceDataset.id.in_([i for i, _ in ds_counts])).all()}
++             if ds_counts else {})
++    datasets = sorted(
++        ({'id': i, 'name': names.get(i) or f'Dataset {i}', 'count': n}
++         for i, n in ds_counts),
++        key=lambda d: d['name'].lower())
++
++    return {
++        'count': count,
++        'has_more': has_more,
++        # The cursor for the next page — the OLDEST id on this one. null when
++        # the feed is exhausted, so the client never asks for a page that can
++        # only be empty.
++        'next_before_id': rows[-1].id if rows and has_more else None,
++        'images': [_gallery_image(r) for r in rows],
++        'datasets': datasets,
++    }
++
++
+ def delete_checkpoint_images(record_id, step, image_ids) -> dict:
+     """🗑 Delete generated images from a checkpoint's gallery — file AND row.
+ 
+diff --git a/backend/tests/test_app_gallery.py b/backend/tests/test_app_gallery.py
+new file mode 100644
+index 00000000..c51b7945
+--- /dev/null
++++ b/backend/tests/test_app_gallery.py
+@@ -0,0 +1,158 @@
++"""🖼 The app-wide Gallery feed — every generated image, one page at a time.
++
++What is asserted here is what a second reader would plausibly get wrong:
++
++  * the feed is id-DESCENDING and excludes rows that are not images yet
++    (pending, failed, or missing their filename);
++  * pagination is a CURSOR, so a render landing at the head between two pages
++    can never duplicate or skip a row on the next one;
++  * each filter narrows `count` along with the page — the header number must
++    name what the grid shows — while `datasets` stays unfiltered, because it
++    feeds the picker that CHANGES the filter;
++  * the route mirrors the service and refuses an unknown `kind` before the
++    query rather than answering something else.
++"""
++
++
++def _create(client, name='Nova', trigger='nova'):
++    return client.post('/api/dataset/create',
++                       json={'name': name, 'trigger_word': trigger}).get_json()['id']
++
++
++def _image(db, dataset_id, checkpoint='a.safetensors', **kw):
++    from app.models import LoraTestImage
++    img = LoraTestImage(dataset_id=dataset_id, checkpoint=checkpoint, strength=1.0,
++                        status=kw.pop('status', 'done'),
++                        filename=kw.pop('filename', 'x.png'), **kw)
++    db.session.add(img)
++    db.session.commit()
++    return img
++
++
++# --- the feed ----------------------------------------------------------------
++
++def test_the_feed_is_newest_first_across_datasets_and_skips_non_images(client, app):
++    from app.extensions import db
++    from app.services import cloud_training as ct
++    with app.app_context():
++        a = _create(client, 'Nova', 'nova')
++        b = _create(client, 'Vega', 'vega')
++        first = _image(db, a, filename='a.png')
++        second = _image(db, b, filename='b.png')
++        # None of these is a picture anyone can look at.
++        _image(db, a, status='pending', filename=None)
++        _image(db, a, status='failed', filename=None)
++        _image(db, b, status='done', filename=None)
++        third = _image(db, a, filename='c.png')
++
++        out = ct.app_gallery()
++        assert [i['id'] for i in out['images']] == [third.id, second.id, first.id]
++        assert out['count'] == 3
++        assert out['has_more'] is False
++        assert out['next_before_id'] is None
++
++
++def test_an_install_that_never_generated_answers_an_empty_page(client, app):
++    from app.services import cloud_training as ct
++    with app.app_context():
++        out = ct.app_gallery()
++        assert (out['count'], out['images'], out['datasets']) == (0, [], [])
++        assert out['has_more'] is False
++
++
++def test_cursor_pages_never_overlap_even_when_the_head_grows(client, app):
++    from app.extensions import db
++    from app.services import cloud_training as ct
++    with app.app_context():
++        ds = _create(client)
++        rows = [_image(db, ds, filename=f'{i}.png') for i in range(5)]
++
++        page1 = ct.app_gallery(limit=2)
++        assert [i['id'] for i in page1['images']] == [rows[4].id, rows[3].id]
++        assert page1['has_more'] is True
++        assert page1['next_before_id'] == rows[3].id
++
++        # A render landing between two requests grows the HEAD of the feed —
++        # the cursor keeps page 2 exactly where page 1 left off.
++        _image(db, ds, filename='new.png')
++        page2 = ct.app_gallery(limit=2, before_id=page1['next_before_id'])
++        assert [i['id'] for i in page2['images']] == [rows[2].id, rows[1].id]
++        assert page2['has_more'] is True
++        page3 = ct.app_gallery(limit=2, before_id=page2['next_before_id'])
++        assert [i['id'] for i in page3['images']] == [rows[0].id]
++        assert page3['has_more'] is False
++        assert page3['next_before_id'] is None
++
++
++# --- filters -----------------------------------------------------------------
++
++def test_filters_narrow_the_count_with_the_page(client, app):
++    from app.extensions import db
++    from app.services import cloud_training as ct
++    with app.app_context():
++        a = _create(client, 'Nova', 'nova')
++        b = _create(client, 'Vega', 'vega')
++        render = _image(db, a, filename='a.png', rating=1)
++        improved = _image(db, a, filename='b.png',
++                          derivation_kind='canvas_image_improve',
++                          parent_image_id=render.id)
++        other = _image(db, b, filename='c.png')
++
++        by_ds = ct.app_gallery(dataset_id=b)
++        assert ([i['id'] for i in by_ds['images']], by_ds['count']) == ([other.id], 1)
++
++        renders = ct.app_gallery(kind='renders')
++        assert {i['id'] for i in renders['images']} == {render.id, other.id}
++        assert renders['count'] == 2
++
++        just_improved = ct.app_gallery(kind='improved')
++        assert ([i['id'] for i in just_improved['images']],
++                just_improved['count']) == ([improved.id], 1)
++
++        liked = ct.app_gallery(liked=True)
++        assert ([i['id'] for i in liked['images']], liked['count']) == ([render.id], 1)
++
++
++def test_the_dataset_list_feeds_the_picker_so_it_is_never_filtered(client, app):
++    from app.extensions import db
++    from app.services import cloud_training as ct
++    with app.app_context():
++        a = _create(client, 'Nova', 'nova')
++        b = _create(client, 'Vega', 'vega')
++        empty = _create(client, 'Mira', 'mira')
++        _image(db, a, filename='a.png')
++        _image(db, a, filename='b.png')
++        _image(db, b, filename='c.png')
++
++        out = ct.app_gallery(dataset_id=b)
++        # Sorted by name; a dataset with nothing generated has no entry to
++        # offer, and the current pick does not shrink the list to itself.
++        assert out['datasets'] == [
++            {'id': a, 'name': 'Nova', 'count': 2},
++            {'id': b, 'name': 'Vega', 'count': 1},
++        ]
++        assert empty not in [d['id'] for d in out['datasets']]
++
++
++# --- the route ---------------------------------------------------------------
++
++def test_the_route_serves_the_feed_and_refuses_an_unknown_kind(client, app):
++    from app.extensions import db
++    with app.app_context():
++        ds = _create(client)
++        img = _image(db, ds, filename='a.png')
++        image_id = img.id
++
++    r = client.get('/api/gallery/images')
++    assert r.status_code == 200
++    d = r.get_json()
++    assert [i['id'] for i in d['images']] == [image_id]
++    # The page publishes the SAME shape the checkpoint gallery does — the
++    # lightbox reads these keys (services.cloud_training._gallery_image).
++    assert d['images'][0]['url'].endswith('/img/a.png')
++    assert 'prompt' in d['images'][0] and 'seed' in d['images'][0]
++
++    assert client.get('/api/gallery/images?kind=all').status_code == 400
++    ok = client.get('/api/gallery/images?kind=improved&liked=1&limit=5')
++    assert ok.status_code == 200
++    assert ok.get_json()['count'] == 0

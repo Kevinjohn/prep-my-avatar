@@ -1,0 +1,2040 @@
+commit 945b2631889a4d5a462a6df8718d4f806a1b5cbd
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Wed Aug 5 08:22:08 2026 +0200
+
+    feat(bank): captions remember who wrote them, so Re-caption stops destroying yours
+    
+    Re-caption warned, honestly, that it could not tell a caption you typed from one
+    a model produced: one Text column, one string, no author. That warning was the
+    right thing to say and the wrong thing to do.
+    
+    Three additive columns record it — bank_image.caption_origin,
+    face_dataset_image.caption_origin and .caption_short_origin — with no invented
+    vocabulary: 'asserted' is face_cluster_origin's token and keeps its contract (the
+    pass SKIPS those rows), 'joycaption'/'ollama' is watermark_source's idea (record
+    which engine decided, because a bank is captioned over weeks and 'auto' writes
+    with both inside one run). NULL is the third state and the important one: origin
+    never recorded. Those rows ARE re-captioned — sparing them would make the button
+    inert on every bank that exists today — but they are counted apart from the
+    machine-written ones, because calling them generated would be an attribution
+    nobody measured.
+    
+    Every writer goes through one helper (services/caption_origin.py) rather than a
+    second line next to each assignment: the caption editor, find/replace and .txt
+    sidecar imports stamp 'asserted'; the four captioning passes stamp the engine
+    that actually wrote the row; clear_caption, regenerate and the concept pass's
+    deliberate blanking clear the stamp with the text, so no row stays protected on
+    an empty string. The stamp travels every copy path — dataset→bank (the case that
+    used to launder hand-written work into an anonymous string), bank→bank, promotion
+    back to a dataset, the improve candidate, both re-improve case() updates, and
+    _BACKUP_IMG_FIELDS, without which one backup restore would drop every protection
+    in silence.
+    
+    The button now states three things instead of two: what it rewrites (and that is
+    the number of rows that change — pile minus what it spares), what it keeps
+    because you wrote it, and what it overwrites whose author was never recorded. The
+    way out of the protection is a separate tick box, offered only when there is
+    something to protect, never pre-ticked, named again in the confirmation, and sent
+    as a key that is simply absent by default.
+    
+    Tests assert WHICH ROWS changed, not which arguments transited: one bank holding
+    machine, hand-written, unrecorded and rejected captions, forced once, checked row
+    by row; the announced count asserted against the rows that really moved; the
+    three copy paths; a legacy SQLite database gaining the columns with its old rows
+    staying NULL; and the unforced pass proven byte-identical.
+---
+ backend/app/__init__.py                            |  12 +
+ backend/app/models.py                              |  27 ++
+ backend/app/routes/bank.py                         |  11 +-
+ backend/app/services/caption_origin.py             | 119 ++++++
+ backend/app/services/face_dataset_service.py       | 173 ++++++--
+ backend/app/services/image_bank_service.py         | 109 ++++-
+ backend/tests/test_caption_provenance.py           | 448 +++++++++++++++++++++
+ docs/guide/using-the-app.md                        |  47 ++-
+ frontend/src/components/bank/BankWorkspace.jsx     |  38 +-
+ frontend/src/components/bank/bankCaptionScope.js   | 215 ++++++++--
+ .../src/components/bank/bankCaptionScope.test.js   | 122 +++++-
+ .../components/bank/captionOptionsRow-ui.test.js   |  27 +-
+ frontend/src/help/helpRegistry.js                  |   8 +-
+ frontend/src/whatsNew.js                           |   8 +
+ 14 files changed, 1240 insertions(+), 124 deletions(-)
+
+diff --git a/backend/app/__init__.py b/backend/app/__init__.py
+index 6b9d14d7..39fbec6a 100644
+--- a/backend/app/__init__.py
++++ b/backend/app/__init__.py
+@@ -298,6 +298,18 @@ _SCHEMA_ADDITIONS = (
+     # person" declaration wrote it with no inference. Additive: a database that
+     # never gains it simply has no assertions and clusters exactly as before.
+     ('bank_image', 'face_cluster_origin', 'VARCHAR(10)'),
++    # WHO wrote a caption: NULL = never recorded | 'asserted' (a human) |
++    # 'joycaption'/'ollama' (the engine). Deliberately NO server default: NULL is
++    # the value that carries meaning here, and back-filling every existing row
++    # with 'joycaption' or with 'asserted' would BOTH be a claim nobody measured
++    # — the first would make Re-caption destroy hand-written work it just
++    # promised to spare, the second would freeze every bank that exists today.
++    # A row that predates the column keeps NULL, is re-captioned as it always
++    # was, and is counted on screen as "origin never recorded". See
++    # services/caption_origin.py.
++    ('bank_image', 'caption_origin', 'VARCHAR(16)'),
++    ('face_dataset_image', 'caption_origin', 'VARCHAR(16)'),
++    ('face_dataset_image', 'caption_short_origin', 'VARCHAR(16)'),
+     ('image_bank', 'pipeline_report', 'TEXT'),
+     # Cloud stop that cannot lie: the moment the user asked for a stop, kept in
+     # the database so the supervisor can terminate a pod whose monitor thread
+diff --git a/backend/app/models.py b/backend/app/models.py
+index e252c7d7..cf82768b 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -147,6 +147,21 @@ class FaceDatasetImage(db.Model):
+     # concept/aesthetic omitted) and stored WITHOUT the trigger; the trigger is prepended at
+     # export like the long. Additive column (migration in create_app). NULL = no short yet.
+     caption_short = db.Column(Text, nullable=True)
++    # WHO wrote each of the two captions above. NULL = never recorded (what every
++    # row that predates these columns carries, and what a caption-free row keeps) |
++    # 'asserted' = a human typed, corrected or imported the text | 'joycaption' /
++    # 'ollama' = the engine that produced it. Same two vocabularies, same reasons,
++    # as face_cluster_origin and watermark_source on BankImage — and the same
++    # consequence for the first: a FORCED caption pass SKIPS 'asserted' rows so it
++    # never silently overwrites the user's own words. NULL is re-captionable on
++    # purpose: sparing it would make Re-caption inert on every existing dataset,
++    # and the screen counts it separately instead of calling it machine-written.
++    # The short caption has its OWN column because it has its own writers on both
++    # sides (the expanded editor types it; the dual-caption pass derives it), and
++    # the two cross constantly — one column for two texts would mislabel one of
++    # them. See services/caption_origin.py. Additive columns (see _SCHEMA_ADDITIONS).
++    caption_origin = db.Column(String(16), nullable=True)
++    caption_short_origin = db.Column(String(16), nullable=True)
+     job_id = db.Column(String(36), nullable=True, index=True)
+     variation_prompt = db.Column(String(500), nullable=True)    # RAW catalog prompt (regenerate)
+     klein_model = db.Column(String(255), nullable=True)         # UNET used (regenerate)
+@@ -373,6 +388,18 @@ class BankImage(db.Model):
+     # dataset on promotion, so a promoted selection starts already captioned. NULL =
+     # not captioned yet. Additive column — created by db.create_all(), no migration.
+     caption = db.Column(Text, nullable=True)
++    # WHO wrote that caption. NULL = never recorded (every row that predates this
++    # column, and every uncaptioned row) | 'asserted' = a human wrote or corrected
++    # it — usually in a Dataset, the only place this app offers a caption editor,
++    # and carried here by the Dataset -> Bank import | 'joycaption' / 'ollama' =
++    # the engine that produced it. Exactly the two vocabularies already on this
++    # table (face_cluster_origin's 'asserted', watermark_source's engine name),
++    # and 'asserted' keeps its meaning: 🔄 Re-caption SKIPS those rows rather than
++    # overwriting a human's words with a model's. NULL rows ARE re-captioned (their
++    # origin was never recorded and cannot be recovered), and the button counts
++    # them apart from the machine-written ones instead of pretending they are the
++    # same thing. See services/caption_origin.py. Additive column (_SCHEMA_ADDITIONS).
++    caption_origin = db.Column(String(16), nullable=True)
+     # Portable source provenance shared with Dataset images. The only currently
+     # accepted shape is normalized Pexels attribution; services validate/canonicalize
+     # it before writing. Keeping it on the Bank makes Bank -> Dataset -> Bank
+diff --git a/backend/app/routes/bank.py b/backend/app/routes/bank.py
+index bfec236d..1f16e678 100644
+--- a/backend/app/routes/bank.py
++++ b/backend/app/routes/bank.py
+@@ -453,7 +453,13 @@ def bank_caption(bank_id):
+     same keys and same validation as the dataset caption options. {statuses} picks
+     the scope: ["keep"], ["pending"] or ["keep","pending"]; "reject" is refused. Every
+     one of these keys is optional, and a body without them runs exactly the pass that
+-    ran before they existed. 202/409/503/400."""
++    ran before they existed.
++
++    {force:true} SPARES the captions a human wrote or corrected (caption_origin =
++    'asserted'); {include_asserted:true} is the explicit opt-out that rewrites those
++    too. Its default is False and it is meaningless without force — the destructive
++    reading of this endpoint is never the one you get by omitting a key.
++    202/409/503/400."""
+     data = request.get_json(silent=True) or {}
+     return _start(banks.start_caption, _app(), LOCAL_USER, bank_id,
+                   ids=data.get('image_ids') or None, force=bool(data.get('force')),
+@@ -461,7 +467,8 @@ def bank_caption(bank_id):
+                   length=data.get('length') or None,
+                   backend=data.get('backend') or None,
+                   ollama_model=data.get('ollama_model') or None,
+-                  statuses=data.get('statuses') or None)
++                  statuses=data.get('statuses') or None,
++                  include_asserted=bool(data.get('include_asserted')))
+ 
+ 
+ @bp.post('/bank/<int:bank_id>/pipeline')
+diff --git a/backend/app/services/caption_origin.py b/backend/app/services/caption_origin.py
+new file mode 100644
+index 00000000..02e88a47
+--- /dev/null
++++ b/backend/app/services/caption_origin.py
+@@ -0,0 +1,119 @@
++"""WHO wrote a caption — the one vocabulary, and the one place that stamps it.
++
++A caption is a single Text column on both image tables, and until this module a
++caption typed by hand and a caption produced by a model were the same string in
++the same column.  A forced caption pass ("Re-caption") therefore could not spare
++the first without also sparing the second, and said so on screen: it warned that
++it was about to destroy hand-written work it had no way to recognise.
++
++NO NEW VOCABULARY.  Both values are lifted from columns that already exist on
++the SAME tables, so a reader who knows one knows this one:
++
++  * ``ASSERTED`` ('asserted') is ``BankImage.face_cluster_origin``'s value, with
++    the same meaning and the same consequence — a human declared this, so the
++    pass SKIPS the row instead of overwriting the user's word.
++  * ``ENGINES`` ('joycaption' | 'ollama') is ``BankImage.watermark_source``'s
++    idea: record WHICH engine decided, because a bank is captioned over weeks
++    and can hold both (the 'auto' backend even writes with both engines inside a
++    single run).
++
++  * NULL is the third state and it is the one that matters most, because it is
++    what every row that predates these columns carries.  It does NOT mean
++    "machine": it means the origin was never recorded.  Those rows CAN be
++    re-captioned — the alternative would make Re-caption inert on every bank
++    that exists today — but the screen never folds them into the machine-written
++    ones: "keeping the 3 you wrote" and "47 whose origin was never recorded" are
++    two different sentences about two different things.
++
++THE VALUES ARE STORED IN USER DATABASES.  They are frozen: renaming one needs an
++alias table, exactly like the variation labels and the What's-new ids.
++
++PROTECTION IS ABOUT TEXT, NOT ABOUT A MARKER.  ``is_protected`` requires a
++NON-EMPTY caption as well as the 'asserted' stamp, so a row whose caption was
++cleared can never stay protected on an empty string — that would be a row the
++pass skips forever, and it would never be visible from the screen.
++"""
++
++from sqlalchemy import and_, or_
++
++# A human wrote or corrected this text.  Same token, same contract as
++# BankImage.face_cluster_origin: the pass skips it.
++ASSERTED = 'asserted'
++
++# Which engine produced the text.  Same idea as BankImage.watermark_source.
++JOYCAPTION = 'joycaption'
++OLLAMA = 'ollama'
++ENGINES = (JOYCAPTION, OLLAMA)
++
++VALUES = (ASSERTED,) + ENGINES
++
++
++def engine_origin(engine):
++    """The origin value for a resolved captioning engine, or None.
++
++    'auto' is deliberately NOT a value: it is a CHAIN (JoyCaption first, Ollama
++    for what it missed), so recording it would name a policy instead of the
++    engine that actually wrote the sentence — the very thing watermark_source
++    exists to avoid.  Callers that cannot tell which half ran pass None and the
++    row stays NULL, which reads as "never recorded" rather than as a wrong
++    attribution.
++    """
++    name = (engine or '').strip().lower()
++    return name if name in ENGINES else None
++
++
++def stamp(row, text, origin, *, field='caption'):
++    """Write a caption AND its origin together, in one gesture.
++
++    Every writer goes through here rather than assigning ``row.caption`` and
++    remembering a second line: the second line is exactly what the next writer
++    added six months later would forget, and a forgotten stamp is not a missing
++    feature — it is a WRONG label, on the side that loses the user's work.
++
++    An empty text clears the origin too (see the module header).  The TEXT is
++    stored exactly as handed over — '' stays '' and None stays None — because
++    each writer already decided which of the two blanks it means, and this helper
++    is not the place to quietly change one into the other.
++    """
++    setattr(row, field, text)
++    setattr(row, f'{field}_origin', origin if (text or '').strip() else None)
++    return row
++
++
++def is_protected(row, *, field='caption'):
++    """True when this row carries text a human asserted — what the pass skips."""
++    return (bool((getattr(row, field, None) or '').strip())
++            and getattr(row, f'{field}_origin', None) == ASSERTED)
++
++
++def protected_clause(model, field='caption'):
++    """SQL for :func:`is_protected` — the rows a forced pass must leave alone."""
++    column = getattr(model, field)
++    return and_(column.isnot(None), column != '',
++                getattr(model, f'{field}_origin') == ASSERTED)
++
++
++def unprotected_clause(model, field='caption'):
++    """SQL for its complement, spelled out rather than negated.
++
++    ``not_(protected_clause(...))`` would be WRONG: in SQL, NOT(true AND NULL)
++    is NULL, so every row whose origin was never recorded — i.e. every row that
++    predates this column — would silently fall out of a forced pass and never be
++    re-captioned at all.  The three-valued logic is the bug; naming the three
++    cases is the fix.
++    """
++    column = getattr(model, field)
++    origin = getattr(model, f'{field}_origin')
++    return or_(column.is_(None), column == '',
++               origin.is_(None), origin != ASSERTED)
++
++
++def unrecorded_clause(model, field='caption'):
++    """SQL for "has text, and nobody recorded who wrote it".
++
++    Its own count, never folded into the machine-written ones: the pass rewrites
++    both, but only one of the two is a risk the user should be told about.
++    """
++    column = getattr(model, field)
++    return and_(column.isnot(None), column != '',
++                getattr(model, f'{field}_origin').is_(None))
+diff --git a/backend/app/services/face_dataset_service.py b/backend/app/services/face_dataset_service.py
+index fd4f4eb4..6f4302f2 100644
+--- a/backend/app/services/face_dataset_service.py
++++ b/backend/app/services/face_dataset_service.py
+@@ -34,8 +34,8 @@ from ..extensions import db
+ from ..models import (CanvasImageNode, CanvasNodePosition, FaceDataset,
+                       FaceDatasetImage, LoraTestImage)
+ from .. import config as cfg
+-from . import (bank_transfer_metadata, dataset_activity, image_encoding,
+-               reference_edit_jobs, trash)
++from . import (bank_transfer_metadata, caption_origin, dataset_activity,
++               image_encoding, reference_edit_jobs, trash)
+ from .dataset_storage import dataset_path, ensure_dataset_dir
+ from .image_provenance import provenance_metrics
+ from .image_quality import ANALYSIS_MAX_SIDE, quality_metrics
+@@ -1868,7 +1868,8 @@ def _matches_reimprove_state(row, img, state):
+ 
+ 
+ def _transition_reimprove_candidate(img, old_state, parent, label, prompt, job_id,
+-                                    expected_transition_caption):
++                                    expected_transition_caption,
++                                    expected_transition_caption_origin=None):
+     """CAS one improvement into its in-flight replacement state.
+ 
+     The job has already been queued, but a status click can land while enqueue is
+@@ -1898,6 +1899,12 @@ def _transition_reimprove_candidate(img, old_state, parent, label, prompt, job_i
+                        | (FaceDatasetImage.caption == ''))
+         values['caption'] = case(
+             (still_blank, expected_transition_caption), else_=FaceDatasetImage.caption)
++        # The stamp moves in the SAME case(), on the same condition, inside the
++        # same statement — a second UPDATE could land between the two and leave a
++        # caption whose recorded author is another caption's.
++        values['caption_origin'] = case(
++            (still_blank, expected_transition_caption_origin),
++            else_=FaceDatasetImage.caption_origin)
+     result = db.session.execute(
+         update(FaceDatasetImage)
+         .where(*_matches_reimprove_state(FaceDatasetImage, img, old_state))
+@@ -1917,11 +1924,18 @@ def _restore_reimprove_candidate_after_trash_failure(
+     # Restore the exact old caption only while it is still what this transition
+     # would have written.  A caption changed during Trash I/O wins instead.
+     restore_values = {field: value for field, value in old_state.items()
+-                      if field != 'caption'}
++                      if field not in ('caption', 'caption_origin')}
++    still_ours = _nullable_equals(FaceDatasetImage.caption,
++                                  expected_transition_caption)
+     restore_values['caption'] = case(
+-        (_nullable_equals(FaceDatasetImage.caption, expected_transition_caption),
+-         old_state['caption']),
+-        else_=FaceDatasetImage.caption)
++        (still_ours, old_state['caption']), else_=FaceDatasetImage.caption)
++    # Same condition, same statement: a Trash failure that restored the old
++    # sentence but not its stamp would quietly demote a hand-written caption to
++    # "origin never recorded", i.e. re-writable — a protection lost to an error
++    # path nobody watches.
++    restore_values['caption_origin'] = case(
++        (still_ours, old_state.get('caption_origin')),
++        else_=FaceDatasetImage.caption_origin)
+     result = db.session.execute(
+         update(FaceDatasetImage)
+         .where(*_matches_reimprove_state(FaceDatasetImage, img, transient))
+@@ -2123,13 +2137,22 @@ _UNSET = object()
+ def set_image_caption(user_id, image_id, caption, short=_UNSET):
+     """Save one image's long caption; optionally its short variant. `short` defaults to a
+     sentinel so a caller that only edits the long caption (the inline grid textarea) never
+-    wipes an existing short — only the expanded editor passes `short` to touch it."""
++    wipes an existing short — only the expanded editor passes `short` to touch it.
++
++    THIS IS THE APP'S ONLY CAPTION EDITOR, so it is where the 'asserted' stamp is
++    born: what is saved here is a human's words, and a forced caption pass must
++    skip it rather than overwrite it (services/caption_origin.py). Clearing the
++    box clears the stamp with the text — protection follows the sentence, never a
++    marker left behind on an empty field. The two captions are stamped
++    independently: typing a long one does not claim authorship of a short one the
++    dual-caption pass derived."""
+     img = _owned_image(user_id, image_id)
+     if not img:
+         return False
+-    img.caption = _cap_caption(caption) or None
++    caption_origin.stamp(img, _cap_caption(caption) or None, caption_origin.ASSERTED)
+     if short is not _UNSET:
+-        img.caption_short = _cap_caption(short) or None
++        caption_origin.stamp(img, _cap_caption(short) or None, caption_origin.ASSERTED,
++                             field='caption_short')
+     db.session.commit()
+     return True
+ 
+@@ -2852,8 +2875,16 @@ _BACKUP_EXTENSION_CANONICAL = {
+ 
+ # Champs snapshotés tels quels par ligne image (job_id/klein_model exclus : liés
+ # à la machine source — un backup restauré ne peut pas « regénérer »).
++# ⚠️ 'caption_origin'/'caption_short_origin' are in this tuple ON PURPOSE and must
++# stay: this is the ONLY place the backup knows about them (the column names exist
++# nowhere else in the export/restore path), and dropping them would not lose a
++# caption — it would lose the PROTECTION on every hand-written caption, silently,
++# at the first backup round-trip, leaving a restored dataset that a forced pass
++# happily overwrites.
+ _BACKUP_IMG_FIELDS = ('filename', 'source', 'framing', 'variation_label', 'status',
+-                      'caption', 'caption_short', 'variation_prompt', 'face_score', 'face_state',
++                      'caption', 'caption_short',
++                      'caption_origin', 'caption_short_origin',
++                      'variation_prompt', 'face_score', 'face_state',
+                       'upscale_ratio', 'watermark_state', 'watermark_bbox',
+                       'watermark_regions', 'parent_image_id', 'derivation_kind',
+                       'fail_reason', 'fail_kind', 'source_metadata',
+@@ -3378,7 +3409,10 @@ def replace_in_captions(user_id, dataset_id, find, replace, mode='text'):
+             new = ', '.join(out)
+         new = _cap_caption(new) or None
+         if new != img.caption:
+-            img.caption = new
++            # A find/replace is a CORRECTION, so the row becomes the user's even
++            # when a model wrote the sentence it started from: cleaning a term out
++            # of 200 captions is exactly the work a later forced pass must not undo.
++            caption_origin.stamp(img, new, caption_origin.ASSERTED)
+             changed += 1
+     if changed:
+         db.session.commit()
+@@ -3419,7 +3453,10 @@ def batch_image_action(user_id, dataset_id, image_ids, action):
+         return n
+     for img in rows:
+         if action == 'clear_caption':
+-            img.caption = None
++            # The stamp goes with the text. An 'asserted' marker left on a row with
++            # no caption would be a row every future pass skips — permanently blank,
++            # for a reason nothing on screen could explain.
++            caption_origin.stamp(img, None, None)
+         else:
+             # Never resurrect a failed generation into keep/reject — the tile has
+             # no file; regenerate is the only way out of 'failed'.
+@@ -4896,7 +4933,8 @@ def face_crop_to_square_webp(image_bytes: bytes, size: int = 1024, pad: float =
+ # --- Import + classify (Qwen3-VL) ------------------------------------------
+ @_serialize_dataset_ingest
+ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, stats=None,
+-                  source_metadata=None, captions=None, bank_image_ids=None,
++                  source_metadata=None, captions=None, caption_origins=None,
++                  bank_image_ids=None,
+                   framings=None, bank_analysis_snapshots=None,
+                   watermark_states=None, watermark_bboxes=None,
+                   watermark_regions=None, dedupe_seen=None):
+@@ -4961,6 +4999,11 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
+             else _existing_dhash_rows(dataset_id)) if dedupe else None
+     metadata_by_index = list(source_metadata) if source_metadata is not None else []
+     captions_by_index = list(captions) if captions is not None else []
++    # Parallel to ``captions`` and travelling WITH it. Without this list a bank
++    # caption a human wrote or corrected arrives in the dataset stamped as
++    # nothing, i.e. re-writable — the protection would survive exactly one hop.
++    caption_origins_by_index = (list(caption_origins)
++                                if caption_origins is not None else [])
+     bank_ids_by_index = list(bank_image_ids) if bank_image_ids is not None else []
+     framings_by_index = list(framings) if framings is not None else []
+     snapshots_by_index = (list(bank_analysis_snapshots)
+@@ -4972,6 +5015,19 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
+     def bank_id_at(i):
+         return bank_ids_by_index[i] if i < len(bank_ids_by_index) else None
+ 
++    def caption_origin_at(i, cap):
++        """The stamp that rides with this caption — validated, never trusted raw.
++
++        An unknown token would be stored and then compared against 'asserted'
++        forever without ever matching, which is a protection that silently is
++        not one. A caption with no stamp stays NULL: "never recorded".
++        """
++        if not (cap or '').strip():
++            return None
++        value = (caption_origins_by_index[i]
++                 if i < len(caption_origins_by_index) else None)
++        return value if value in caption_origin.VALUES else None
++
+     def framing_at(i):
+         # A head crop IS a face by construction; otherwise take the caller's value
+         # when it is one of the composition buckets (an 'unknown'/None verdict must
+@@ -5091,6 +5147,7 @@ def import_images(user_id, dataset_id, files_bytes, crop=False, dedupe=False, st
+         img = FaceDatasetImage(dataset_id=dataset_id, source='import', status='keep',
+                                filename=fn, framing=framing_at(index),
+                                upscale_ratio=scale, caption=cap,
++                               caption_origin=caption_origin_at(index, cap),
+                                bank_image_id=bank_id_at(index),
+                                bank_analysis_snapshot=analysis_snapshot,
+                                watermark_state=watermark_state_at(index),
+@@ -5177,7 +5234,13 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
+                         if stats is not None:
+                             stats['captions_kept'] = stats.get('captions_kept', 0) + 1
+                     else:
+-                        row.caption = _cap_caption(incoming)
++                        # A .txt sidecar is work done by a human in another tool —
++                        # the whole point of the round-trip. It lands 'asserted',
++                        # which is the same rule the branch above already applies by
++                        # hand ("a caption written HERE is never overwritten"),
++                        # generalised so a LATER forced pass honours it too.
++                        caption_origin.stamp(row, _cap_caption(incoming),
++                                             caption_origin.ASSERTED)
+                         db.session.commit()
+                         if stats is not None:
+                             stats['captions_applied'] = \
+@@ -5188,8 +5251,10 @@ def _merge_training_images(user_id, dataset_id, entries, captions, stats=None):
+         cap = _cap_caption(incoming) if incoming else None
+         if cap and stats is not None:
+             stats['captions'] = stats.get('captions', 0) + 1
+-        img = FaceDatasetImage(dataset_id=dataset_id, source='import', status='keep',
+-                               filename=fn, caption=cap)
++        img = FaceDatasetImage(
++            dataset_id=dataset_id, source='import', status='keep', filename=fn,
++            caption=cap,
++            caption_origin=caption_origin.ASSERTED if cap else None)
+         db.session.add(img)
+         db.session.commit()
+         if fp is not None:
+@@ -6100,7 +6165,7 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+             except OSError:
+                 data = b''
+             final = _enforce_concept_omission(joycap, leak_re, data, concept_desc) or joycap
+-            img.caption = _cap_caption(final)
++            caption_origin.stamp(img, _cap_caption(final), caption_origin.JOYCAPTION)
+             db.session.commit()
+             n += 1
+         return n
+@@ -6151,8 +6216,13 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                 except Exception as e:  # noqa: BLE001 - refine best-effort
+                     logger.warning('caption concept: Qwen refine failed (%s)', e)
+                 refined = (refined or '').strip().strip('"').strip()
++                # Which engine gets the credit follows the text through the three
++                # outcomes below, rather than being decided by the branch we are in:
++                # a Joy draft kept because the refine was unusable is JoyCaption's
++                # sentence, not Qwen's.
+                 if _refine_output_ok(refined, joycap):
+                     final = refined
++                    origin = caption_origin.OLLAMA
+                 else:
+                     # Unusable refine (reasoning trace / loop) -> direct Qwen caption
+                     # (natively omits the concept), else keep the Joy draft.
+@@ -6167,6 +6237,7 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                         alt = ''
+                     alt = (alt or '').strip().strip('"').strip()
+                     final = alt or joycap
++                    origin = caption_origin.OLLAMA if alt else caption_origin.JOYCAPTION
+                 final = _enforce_concept_omission(final, leak_re, data, concept_desc,
+                                                   describe=describe) or final
+                 # Re-read only now: everything above is model work measured in
+@@ -6180,16 +6251,19 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                     # prose), scrubbed of any leak; leave blank if even that fails.
+                     final = _enforce_concept_omission(joycap, leak_re, data, concept_desc,
+                                                       describe=describe) or joycap
++                    origin = caption_origin.JOYCAPTION
+                     if not _usable_caption(final):
+                         # force=re-do-all: overwrite any stale pre-fix caption with blank
+                         # (trigger-only is valid for a concept LoRA) rather than retain it.
++                        # The stamp is cleared WITH the text: a blanked row must not keep
++                        # an origin describing a sentence that no longer exists.
+                         if force and (img.caption or ''):
+-                            img.caption = ''
++                            caption_origin.stamp(img, '', None)
+                             db.session.commit()
+                         logger.info('caption concept: no usable caption for image %s '
+                                     '-> left blank', image_id)
+                         continue
+-                img.caption = _cap_caption(final)
++                caption_origin.stamp(img, _cap_caption(final), origin)
+                 db.session.commit()
+                 n += 1
+             for image_id, p in remaining:
+@@ -6212,12 +6286,12 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                     vanished += 1
+                     continue
+                 if _usable_caption(cap):
+-                    img.caption = _cap_caption(cap)
++                    caption_origin.stamp(img, _cap_caption(cap), caption_origin.OLLAMA)
+                     db.session.commit()
+                     n += 1
+                 else:
+                     if force and (img.caption or ''):
+-                        img.caption = ''
++                        caption_origin.stamp(img, '', None)
+                         db.session.commit()
+                     logger.info('caption concept: no usable direct caption for image '
+                                 '%s -> left blank', image_id)
+@@ -6394,7 +6468,8 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None):
+                         dataset_activity.bump(token)
+                         continue
+                     cleaned = cleaner(cap) or cap
+-                    img.caption = _cap_caption(cleaned)
++                    caption_origin.stamp(img, _cap_caption(cleaned),
++                                         caption_origin.JOYCAPTION)
+                     db.session.commit()
+                     n += 1
+                     dataset_activity.bump(token)   # this image is captioned (done)
+@@ -6441,7 +6516,10 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None):
+                             dataset_activity.bump(token)
+                             continue
+                         cleaned = cleaner(cap) or cap
+-                        img.caption = _cap_caption(cleaned)
++                        # Which engine wrote THIS row, not which backend was asked
++                        # for: in 'auto' the two branches both write inside one run.
++                        caption_origin.stamp(img, _cap_caption(cleaned),
++                                             caption_origin.OLLAMA)
+                         db.session.commit()
+                         n += 1
+                     dataset_activity.bump(token)   # image handled (captioned or not)
+@@ -6489,9 +6567,12 @@ def caption_paths(paths, *, prompt=None, backend=None, ollama_model=None,
+                       same as the dataset pass). The Ollama phase overlaps several calls
+                       (see vision_pool), so a stop drains what is in flight — a couple of
+                       seconds — and every drained answer is still handed to on_caption.
+-    on_caption(path, caption) : fired as each caption lands, for incremental persistence.
+-                      ALWAYS called on the caller's own thread, never on a worker, so it
+-                      is free to use the database session.
++    on_caption(path, caption, engine) : fired as each caption lands, for incremental
++                      persistence. ALWAYS called on the caller's own thread, never on a
++                      worker, so it is free to use the database session. `engine` is the
++                      one that ACTUALLY wrote this caption ('joycaption' | 'ollama'),
++                      which under the 'auto' backend differs from image to image inside
++                      one run — the caller records it as the caption's origin.
+     progress(done, total)     : progress callback (every handled image, captioned or not).
+ 
+     Best-effort: a totally unavailable engine raises RuntimeError (so the caller can
+@@ -6514,11 +6595,14 @@ def caption_paths(paths, *, prompt=None, backend=None, ollama_model=None,
+     ollama_model = (ollama_model or '').strip() or None
+     done = 0
+ 
+-    def _emit(p, cap):
++    def _emit(p, cap, engine=None):
+         nonlocal done
+         out[p] = cap
+         if on_caption:
+-            on_caption(p, cap)
++            # The ENGINE rides with the caption so the caller can record who wrote
++            # it. Third argument, defaulted on the callback side, so a handler
++            # written before this seam existed still works unchanged.
++            on_caption(p, cap, engine)
+         done += 1
+         if progress:
+             progress(done, total)
+@@ -6549,7 +6633,7 @@ def caption_paths(paths, *, prompt=None, backend=None, ollama_model=None,
+         for p in remaining:
+             cap = (jc.get(p) or '').strip().strip('"').strip()
+             if cap:
+-                _emit(p, _cap_caption(cap))
++                _emit(p, _cap_caption(cap), caption_origin.JOYCAPTION)
+             else:
+                 still.append(p)
+         remaining = still
+@@ -6579,7 +6663,7 @@ def caption_paths(paths, *, prompt=None, backend=None, ollama_model=None,
+             nonlocal done
+             cap = (cap or '').strip().strip('"').strip()
+             if cap:
+-                _emit(path, _cap_caption(cap))
++                _emit(path, _cap_caption(cap), caption_origin.OLLAMA)
+             else:
+                 done += 1  # handled-but-empty still advances the bar
+                 if progress:
+@@ -6848,7 +6932,11 @@ def derive_short_captions(user_id, dataset_id, image_ids=None, force=False, mode
+             if img is None:      # deleted DURING its own generation
+                 vanished += 1
+                 continue
+-            img.caption_short = _cap_caption(short) or None
++            # The SHORT gets its own stamp, on its own column: this pass derives it
++            # with a text model while the long caption above it may well have been
++            # typed by hand. One origin for the two would mislabel one of them.
++            caption_origin.stamp(img, _cap_caption(short) or None,
++                                 caption_origin.OLLAMA, field='caption_short')
+             db.session.commit()
+             n += 1
+     finally:
+@@ -8372,7 +8460,12 @@ def _improve_existing_image_locked(user_id, image_id, engine=None):
+     candidate = FaceDatasetImage(
+         dataset_id=img.dataset_id, source='generated', status='pending',
+         parent_image_id=img.id, derivation_kind=KLEIN_IMAGE_IMPROVE,
++        # The stamp travels with the sentence it describes: a candidate that
++        # inherits a hand-written caption inherits the protection on it, or the
++        # first forced pass would rewrite the words on the copy while sparing them
++        # on the original.
+         framing=img.framing, caption=img.caption,
++        caption_origin=img.caption_origin,
+         variation_label=label, variation_prompt=stored_prompt,
+         # The generated candidate remains derived from the credited source.
+         # Revalidate before copying so a malformed legacy row cannot surface.
+@@ -8501,11 +8594,18 @@ def _reimprove_image_locked(user_id, image_id):
+     # refusal must leave the current result on screen, not a broken tile.
+     from ..job_queue import queue_manager
+     old_state = {field: getattr(img, field) for field in (
+-        'filename', 'caption', 'status', 'fail_reason', 'fail_kind', 'job_id',
++        'filename', 'caption', 'caption_origin', 'status', 'fail_reason',
++        'fail_kind', 'job_id',
+         'variation_label', 'variation_prompt', 'framing',
+         'watermark_state', 'watermark_bbox', 'watermark_regions')}
++    # The caption the transition will write, AND who wrote it — the two are read
++    # from the same row so an inherited parent caption arrives with the parent's
++    # authorship rather than as an anonymous string.
+     expected_transition_caption = (old_state['caption']
+                                    if old_state['caption'] else parent.caption)
++    expected_transition_caption_origin = (old_state['caption_origin']
++                                          if old_state['caption']
++                                          else parent.caption_origin)
+     old_path = _img_path(img) if img.filename else None
+     job_id = _enqueue_improve(
+         engine, user_id=user_id, source=parent, source_path=source_path,
+@@ -8519,7 +8619,8 @@ def _reimprove_image_locked(user_id, image_id):
+         parent_rekept = _rekeep_pending_parent_for_reimprove(img)
+         if not _transition_reimprove_candidate(
+                 img, old_state, parent, label, prompt, job_id,
+-                expected_transition_caption):
++                expected_transition_caption,
++                expected_transition_caption_origin):
+             # The status/file/job snapshot changed after enqueue. Rolling back
+             # also undoes a just-applied parent fallback; the except path below
+             # cancels this unlinked job and maps the race to a 409.
+@@ -8921,7 +9022,9 @@ def regenerate_image(user_id, image_id, lora_strength=None, prompt=None, app=Non
+         img.klein_model = (engine if target in API_ENGINES or target == KREA_ENGINE
+                            else model)
+         img.filename = None
+-        img.caption = None
++        # The row loses its file AND its words; the stamp goes with them, or the
++        # regenerated image would be born already protected against captioning.
++        caption_origin.stamp(img, None, None)
+         img.status = 'pending'
+         img.job_id = new_job_id
+         img.fail_reason = None
+diff --git a/backend/app/services/image_bank_service.py b/backend/app/services/image_bank_service.py
+index 1eb551ba..f125da5b 100644
+--- a/backend/app/services/image_bank_service.py
++++ b/backend/app/services/image_bank_service.py
+@@ -52,8 +52,8 @@ from sqlalchemy import and_, case, func, or_
+ from .. import config as cfg
+ from ..extensions import db
+ from ..models import BankImage, FaceDataset, FaceDatasetImage, ImageBank
+-from . import (bank_jobs, bank_transfer_metadata, bank_undo, image_encoding,
+-               path_guard, trash)
++from . import (bank_jobs, bank_transfer_metadata, bank_undo, caption_origin,
++               image_encoding, path_guard, trash)
+ from .face_dataset_service import (SCRAPE_IMPORT_MAX, _dhash, _download_scrape_item,
+                                    _dataset_ingest_lock,
+                                    _existing_dhash_rows, _hamming, _SCRAPE_DL_WORKERS,
+@@ -1249,14 +1249,31 @@ def bank_payload(user_id, bank_id) -> dict | None:
+     # moves 0 reads as a broken feature, and it is the counter's fault. One query,
+     # two conditional sums, so telling the truth costs nothing on a 100 000-image
+     # bank.
+-    todo_keep, todo_pending = (
++    #
++    # THREE figures per pile, not one, because 🔄 Re-caption has three different
++    # things to say and folding any two of them would be a lie of a familiar kind:
++    #   caption_todo_*     : no caption at all — what a normal pass writes;
++    #   caption_asserted_* : a caption a HUMAN wrote — what a forced pass now SKIPS
++    #                        (services/caption_origin.py), so "keeping the 3 you
++    #                        wrote" is a measured number and not a hope;
++    #   caption_unrecorded_*: a caption whose author was never recorded — rewritten
++    #                        like any other, but it is NOT "machine-written", and
++    #                        the screen must not claim it is.
++    # Whatever is left (pile − the three) is machine-written and rewritten in silence.
++    def _cap_sum(status, condition):
++        return func.coalesce(func.sum(
++            case((and_(BankImage.status == status, condition), 1), else_=0)), 0)
++
++    no_caption = or_(BankImage.caption.is_(None), BankImage.caption == '')
++    asserted = caption_origin.protected_clause(BankImage)
++    unrecorded = caption_origin.unrecorded_clause(BankImage)
++    (todo_keep, todo_pending, asserted_keep, asserted_pending,
++     unrecorded_keep, unrecorded_pending) = (
+         db.session.query(
+-            func.coalesce(
+-                func.sum(case((BankImage.status == 'keep', 1), else_=0)), 0),
+-            func.coalesce(
+-                func.sum(case((BankImage.status == 'pending', 1), else_=0)), 0))
+-        .filter(BankImage.bank_id == bank_id)
+-        .filter(or_(BankImage.caption.is_(None), BankImage.caption == '')).one())
++            _cap_sum('keep', no_caption), _cap_sum('pending', no_caption),
++            _cap_sum('keep', asserted), _cap_sum('pending', asserted),
++            _cap_sum('keep', unrecorded), _cap_sum('pending', unrecorded))
++        .filter(BankImage.bank_id == bank_id).one())
+     counts = {
+         'total': total,
+         'scanned': base.filter(BankImage.quality_state.isnot(None)).count(),
+@@ -1278,6 +1295,12 @@ def bank_payload(user_id, bank_id) -> dict | None:
+         # …and the caption-pass sizes of the two scopes it can be aimed at.
+         'caption_todo_keep': int(todo_keep or 0),
+         'caption_todo_pending': int(todo_pending or 0),
++        # …and the two figures 🔄 Re-caption needs to stop lumping "what you wrote"
++        # together with "what nobody recorded".
++        'caption_asserted_keep': int(asserted_keep or 0),
++        'caption_asserted_pending': int(asserted_pending or 0),
++        'caption_unrecorded_keep': int(unrecorded_keep or 0),
++        'caption_unrecorded_pending': int(unrecorded_pending or 0),
+         # Images a dataset REALLY holds today (back-link), plus the ones promoted
+         # before that link existed (legacy flag). Counting the flag alone kept
+         # advertising copies the user had since deleted.
+@@ -5629,7 +5652,8 @@ def _caption_scope_q(bank_id, statuses):
+ 
+ 
+ def start_caption(app, user_id, bank_id, ids=None, force=False, vocabulary=None,
+-                  length=None, backend=None, ollama_model=None, statuses=None):
++                  length=None, backend=None, ollama_model=None, statuses=None,
++                  include_asserted=False):
+     """Launch the caption pass over a selection (``ids``) or, when empty, every
+     non-rejected readable image. Reuses the dataset caption engines (JoyCaption /
+     Ollama per Settings) through a dataset-free descriptive brick; the captions
+@@ -5663,7 +5687,18 @@ def start_caption(app, user_id, bank_id, ids=None, force=False, vocabulary=None,
+     ``statuses`` picks the SCOPE of the run: ['keep'], ['pending'] or ['keep','pending']
+     (CAPTION_SCOPES). None = the historical non-rejected set, byte-identical to before.
+     'reject' is refused — the bin is never captioned. When ``ids`` are also given the
+-    two INTERSECT (the selection is narrowed by the scope, never widened)."""
++    two INTERSECT (the selection is narrowed by the scope, never widened).
++
++    ``force`` rewrites captions that already exist — and, since captions carry an
++    origin (services/caption_origin.py), it now SPARES the ones a human wrote or
++    corrected, the way the embeddings pass spares an asserted face cluster. Rows
++    whose origin was never recorded (every row that predates the column) are
++    rewritten: their authorship cannot be recovered, and sparing them would make
++    this button inert on every bank that exists today. ``include_asserted`` is the
++    explicit way OUT of that protection — a separate opt-in, never a default,
++    for the person who does want their own captions redone by a better model.
++    It means nothing without ``force`` and is ignored there (an unforced pass
++    only ever touches rows with no caption at all)."""
+     bank = get_bank(user_id, bank_id)
+     if not bank:
+         raise ValueError('bank not found')
+@@ -5696,18 +5731,26 @@ def start_caption(app, user_id, bank_id, ids=None, force=False, vocabulary=None,
+     q = _caption_scope_q(bank_id, want)
+     if ids is not None:
+         q = q.filter(BankImage.id.in_(ids[:_SQL_IN_CHUNK]))
++    keep_asserted = bool(force) and not include_asserted
+     if not force:
+         q = q.filter(or_(BankImage.caption.is_(None), BankImage.caption == ''))
++    elif keep_asserted:
++        # The protection, in the SAME query that prices the run — so the number
++        # the button quotes is the number the job walks. Two definitions of this
++        # filter is exactly how a button comes to announce work it does not do.
++        q = q.filter(caption_origin.unprotected_clause(BankImage))
+     total = q.count()
+     return bank_jobs.start(app, bank_id, 'caption',
+                            _caption_job(bank_id, ids, force, vocab, size,
+                                         backend=engine, ollama_model=model,
+-                                        statuses=want),
++                                        statuses=want,
++                                        keep_asserted=keep_asserted),
+                            total=total)
+ 
+ 
+ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+-                 backend=None, ollama_model=None, statuses=None):
++                 backend=None, ollama_model=None, statuses=None,
++                 keep_asserted=False):
+     def run(job):
+         from .face_dataset_service import caption_paths, caption_preset_instructions
+         from ..gpu_window import gpu_exclusive_vision_window
+@@ -5722,8 +5765,16 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+             rows.sort(key=lambda r: r.id)
+         else:
+             rows = q.order_by(BankImage.id.asc()).all()
++        skipped_asserted = 0
+         if not force:
+             rows = [r for r in rows if not (r.caption or '').strip()]
++        elif keep_asserted:
++            # Same rule as the launch filter, re-applied on the rows the job
++            # actually loaded: a caption can be typed in the seconds between
++            # pricing the run and starting it, and the newer word wins.
++            spared = [r for r in rows if caption_origin.is_protected(r)]
++            skipped_asserted = len(spared)
++            rows = [r for r in rows if not caption_origin.is_protected(r)]
+         by_path = {}
+         for r in rows:
+             p = abs_image_path(bank, r)
+@@ -5735,7 +5786,7 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+             return
+         captioned = vanished = 0
+ 
+-        def _on_caption(path, caption):
++        def _on_caption(path, caption, engine=None):
+             nonlocal captioned, vanished
+             image_id = by_path.get(path)
+             if image_id is None:
+@@ -5746,7 +5797,10 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+                             'skipping its caption', image_id)
+                 vanished += 1
+                 return
+-            row.caption = caption
++            # WHICH engine wrote this row, reported by the engine that wrote it —
++            # not the backend that was asked for. 'auto' chains both, so the
++            # requested value would mislabel roughly half the bank.
++            caption_origin.stamp(row, caption, caption_origin.engine_origin(engine))
+             db.session.commit()
+             captioned += 1
+ 
+@@ -5772,6 +5826,11 @@ def _caption_job(bank_id, ids, force, vocabulary=None, length=None, *,
+             bank_jobs.progress(job, detail=f'cancelled — {captioned} captioned so far')
+             return
+         detail = f'done — {captioned} captioned'
++        if skipped_asserted:
++            # Named in the RESULT, not only in the warning before the click: the
++            # user has to be able to see afterwards that the protection did
++            # something, otherwise it is a promise with no evidence.
++            detail += f', {skipped_asserted} kept (written by you)'
+         if vanished:
+             detail += f', {vanished} skipped (deleted while the pass ran)'
+         bank_jobs.progress(job, detail=detail)
+@@ -6669,6 +6728,11 @@ def _dataset_row_bank_values(row: FaceDatasetImage, copied_path, preserve_analys
+     """
+     values = {
+         'caption': row.caption,
++        # WHO wrote that caption travels with it. This is THE path that used to
++        # destroy hand-written work: a caption typed in the Dataset editor landed
++        # in the Bank as an anonymous string, and the Bank's forced pass had no
++        # way left to tell it from one of its own.
++        'caption_origin': row.caption_origin,
+         'framing': row.framing if row.framing in _BANK_TRANSFER_FRAMINGS else None,
+         'watermark_state': (row.watermark_state
+                             if row.watermark_state in _BANK_TRANSFER_WATERMARK_STATES
+@@ -6949,6 +7013,11 @@ def _bank_copy_values(row: BankImage, copied_path) -> dict:
+                    for name in bank_transfer_metadata.MODEL_ANALYSIS_FIELDS})
+     values.update({
+         'caption': row.caption,
++        # Beside 'caption', deliberately NOT among the fields blanked above: the
++        # analysis results are about pixels this Bank has not looked at, but the
++        # authorship of a sentence is a fact about the sentence and copying it
++        # without its author is what turns a protected caption into a rewritable one.
++        'caption_origin': row.caption_origin,
+         'source_metadata': _source_metadata_storage(row.source_metadata),
+         # Both are image-specific review outputs.  The copied image may have
+         # been cleaned, rotated, or replaced after the source verdict, so no
+@@ -7098,7 +7167,7 @@ def _promote_job(user_id, bank_id, ids, dataset_id):
+                 break
+             chunk = rows[c0:c0 + _PROMOTE_CHUNK]
+             blobs, chunk_rows = [], []
+-            caps, frms, source_meta, snapshots = [], [], [], []
++            caps, cap_origins, frms, source_meta, snapshots = [], [], [], [], []
+             watermark_states, watermark_bboxes, watermark_regions = [], [], []
+             for r in chunk:
+                 # RESOLVED path: a watermark-cleaned image must reach the dataset
+@@ -7111,6 +7180,11 @@ def _promote_job(user_id, bank_id, ids, dataset_id):
+                     # Carry the bank caption onto the dataset image (parallel to blobs),
+                     # so a captioned selection lands already captioned.
+                     caps.append(r.caption)
++                    # ...and WHO wrote it, in the list parallel to it. A caption
++                    # the user corrected in the Bank must come back to a Dataset
++                    # still marked as theirs, or the round-trip launders it into
++                    # something the next forced pass overwrites.
++                    cap_origins.append(r.caption_origin)
+                     # Carry the framing the bank's classify pass already wrote, so
+                     # the dataset's Composition counter is right the moment the
+                     # promotion lands (it only tallies rows that HAVE a framing).
+@@ -7133,7 +7207,8 @@ def _promote_job(user_id, bank_id, ids, dataset_id):
+             if blobs:
+                 new_ids, bad = import_images(
+                     user_id, dataset_id, blobs, dedupe=True, stats=stats,
+-                    captions=caps, bank_image_ids=[r.id for r in chunk_rows],
++                    captions=caps, caption_origins=cap_origins,
++                    bank_image_ids=[r.id for r in chunk_rows],
+                     framings=frms, source_metadata=source_meta,
+                     bank_analysis_snapshots=snapshots,
+                     watermark_states=watermark_states,
+diff --git a/backend/tests/test_caption_provenance.py b/backend/tests/test_caption_provenance.py
+new file mode 100644
+index 00000000..21c6a8c6
+--- /dev/null
++++ b/backend/tests/test_caption_provenance.py
+@@ -0,0 +1,448 @@
++"""WHO wrote a caption, and what 🔄 Re-caption is therefore allowed to destroy.
++
++These tests measure THE PROPERTY, not the arguments: they build one bank holding
++machine-written captions, hand-written ones, captions with no recorded origin and
++rejected rows, run the forced pass once, and then check ROW BY ROW which text
++changed and which did not.  A test that only asserted "force=True was forwarded"
++would pass just as happily on a pass that overwrites everything.
++"""
++import os
++import random
++import sqlite3
++
++from PIL import Image
++
++
++# --- factories ---------------------------------------------------------------
++def _flat(value=128, size=64):
++    """A picture whose TOP-LEFT pixel is ``value`` (the mock captioner's key) and
++    whose body is a value-dependent pattern — flat squares all share one perceptual
++    hash, so the promotion paths would dedupe them down to a single row and the
++    transfer assertions would pass on an empty result."""
++    rnd = random.Random(value)
++    im = Image.new('RGB', (size, size))
++    px = im.load()
++    for y in range(size):
++        for x in range(size):
++            px[x, y] = (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
++    px[0, 0] = (value, value, value)
++    return im
++
++
++def _save(path, im):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    im.save(path)
++
++
++def _mkbank(client, tmp_path, files, name='B'):
++    src = tmp_path / name
++    for rel, im in files.items():
++        _save(str(src / rel), im)
++    r = client.post('/api/bank/create', json={'name': name, 'folder': str(src)})
++    assert r.status_code == 200, r.get_json()
++    return r.get_json()['id'], src
++
++
++def _use_ollama_backend(app):
++    with app.app_context():
++        import app.config as cfg
++        cfg.save_config({'captioning': {'backend': 'ollama'}})
++
++
++def _mock_vision(monkeypatch, caption_by_pixel):
++    """The Ollama seam caption_paths uses, keyed by the image's top-left pixel."""
++    import io
++
++    from app.services import vision_ollama
++
++    def fake_describe(image_bytes, *a, **k):
++        v = Image.open(io.BytesIO(image_bytes)).convert('L').getpixel((0, 0))
++        return caption_by_pixel.get(v, '')
++
++    monkeypatch.setattr(vision_ollama, 'describe_image_ollama', fake_describe)
++    monkeypatch.setattr(vision_ollama, 'unload_vision_model', lambda *a, **k: True)
++
++
++def _rows(app, bank_id):
++    from app.models import BankImage
++    with app.app_context():
++        return {r.relpath: (r.caption, r.caption_origin, r.status)
++                for r in BankImage.query.filter_by(bank_id=bank_id).all()}
++
++
++def _seed_mixed_bank(client, app, tmp_path):
++    """One bank, four rows, four different provenances — the whole point.
++
++    Pixel values double as the mock captioner's key, so each row can be told
++    apart by the text it would receive if it were rewritten.
++    """
++    from app.extensions import db
++    from app.models import BankImage
++    from app.services import caption_origin
++
++    bank_id, _ = _mkbank(client, tmp_path, {
++        'machine.png': _flat(10), 'mine.png': _flat(20),
++        'unknown.png': _flat(30), 'binned.png': _flat(40),
++        'blank.png': _flat(50)})
++    with app.app_context():
++        by = {r.relpath: r
++              for r in BankImage.query.filter_by(bank_id=bank_id).all()}
++        by['machine.png'].caption = 'written by a model'
++        by['machine.png'].caption_origin = caption_origin.OLLAMA
++        by['machine.png'].status = 'keep'
++        by['mine.png'].caption = 'written by me'
++        by['mine.png'].caption_origin = caption_origin.ASSERTED
++        by['mine.png'].status = 'keep'
++        # No origin at all: every row that predates the column looks like this.
++        by['unknown.png'].caption = 'nobody knows who wrote this'
++        by['unknown.png'].caption_origin = None
++        by['unknown.png'].status = 'keep'
++        # The bin is out of every pass's reach, whatever its caption says.
++        by['binned.png'].caption = 'in the bin'
++        by['binned.png'].caption_origin = caption_origin.ASSERTED
++        by['binned.png'].status = 'reject'
++        by['blank.png'].caption = None
++        by['blank.png'].status = 'keep'
++        db.session.commit()
++    return bank_id
++
++
++# --- the protection ----------------------------------------------------------
++def test_forced_recaption_rewrites_everything_except_what_the_user_wrote(
++        client, app, tmp_path, monkeypatch):
++    _use_ollama_backend(app)
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    _mock_vision(monkeypatch, {10: 'fresh 10', 20: 'fresh 20', 30: 'fresh 30',
++                               40: 'fresh 40', 50: 'fresh 50'})
++
++    r = client.post(f'/api/bank/{bank_id}/caption', json={'force': True})
++    assert r.status_code == 202
++    assert client.get(f'/api/bank/{bank_id}').get_json()['activity']['error'] is None
++
++    after = _rows(app, bank_id)
++    # Rewritten: a model wrote it, so nothing of the user's is lost.
++    assert after['machine.png'][0] == 'fresh 10'
++    assert after['machine.png'][1] == 'ollama'
++    # SPARED — the whole feature. Text AND stamp untouched.
++    assert after['mine.png'] == ('written by me', 'asserted', 'keep')
++    # Rewritten: the decision on record is that an unrecorded origin is
++    # re-captionable, because it can never be recovered and sparing it would
++    # freeze this button on every bank that already exists.
++    assert after['unknown.png'][0] == 'fresh 30'
++    assert after['unknown.png'][1] == 'ollama'
++    # The bin is untouched even though it is 'asserted' — a different rule,
++    # older than this one, and this change must not have leaned on it.
++    assert after['binned.png'] == ('in the bin', 'asserted', 'reject')
++    # A blank row is captioned by a forced pass exactly as before.
++    assert after['blank.png'][0] == 'fresh 50'
++
++
++def test_the_escape_hatch_rewrites_the_users_own_captions_and_only_on_request(
++        client, app, tmp_path, monkeypatch):
++    _use_ollama_backend(app)
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    _mock_vision(monkeypatch, {10: 'fresh 10', 20: 'fresh 20', 30: 'fresh 30',
++                               40: 'fresh 40', 50: 'fresh 50'})
++
++    r = client.post(f'/api/bank/{bank_id}/caption',
++                    json={'force': True, 'include_asserted': True})
++    assert r.status_code == 202
++    after = _rows(app, bank_id)
++    assert after['mine.png'][0] == 'fresh 20'
++    assert after['mine.png'][1] == 'ollama'
++    # Still not the bin.
++    assert after['binned.png'][0] == 'in the bin'
++
++
++def test_the_unforced_pass_is_byte_identical_to_what_it_always_was(
++        client, app, tmp_path, monkeypatch):
++    """No force, no option: only the rows with no caption at all are touched."""
++    _use_ollama_backend(app)
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    _mock_vision(monkeypatch, {10: 'fresh 10', 20: 'fresh 20', 30: 'fresh 30',
++                               40: 'fresh 40', 50: 'fresh 50'})
++
++    before = _rows(app, bank_id)
++    assert client.post(f'/api/bank/{bank_id}/caption', json={}).status_code == 202
++    after = _rows(app, bank_id)
++    for name in ('machine.png', 'mine.png', 'unknown.png', 'binned.png'):
++        assert after[name] == before[name], name
++    assert after['blank.png'][0] == 'fresh 50'
++    # …and the pass records WHICH engine wrote it, not which backend was asked for.
++    assert after['blank.png'][1] == 'ollama'
++
++
++def test_the_number_on_the_button_is_the_number_of_rows_that_change(
++        client, app, tmp_path, monkeypatch):
++    """The defect this whole row exists to avoid: announce N, act on M.
++
++    The counts payload is what the button quotes; the pass is what happens.  They
++    are asserted against each other here rather than each against a constant.
++    """
++    _use_ollama_backend(app)
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    _mock_vision(monkeypatch, {10: 'fresh 10', 20: 'fresh 20', 30: 'fresh 30',
++                               40: 'fresh 40', 50: 'fresh 50'})
++    counts = client.get(f'/api/bank/{bank_id}').get_json()['counts']
++    # The three figures the screen must never merge, per pile.
++    assert counts['caption_asserted_keep'] == 1        # mine.png
++    assert counts['caption_unrecorded_keep'] == 1      # unknown.png
++    assert counts['caption_todo_keep'] == 1            # blank.png
++    assert counts['keep'] == 4
++    # What the button will say: pile minus what it spares.
++    announced = counts['keep'] + counts['pending'] - (
++        counts['caption_asserted_keep'] + counts['caption_asserted_pending'])
++
++    before = _rows(app, bank_id)
++    client.post(f'/api/bank/{bank_id}/caption', json={'force': True})
++    after = _rows(app, bank_id)
++    changed = sum(1 for k in after if after[k][0] != before[k][0])
++    assert changed == announced == 3
++
++
++def test_a_caption_typed_while_the_run_was_being_priced_still_wins(
++        client, app, tmp_path, monkeypatch):
++    """The launch filter prices the run; the job re-reads the rows.
++
++    Both must apply the rule, or a caption written in the seconds between the two
++    is destroyed by a run that had already decided it was fair game.  Exercised
++    directly on the job, which is where the second filter lives.
++    """
++    from app.extensions import db
++    from app.models import BankImage
++    from app.services import caption_origin
++    from app.services import image_bank_service as banks
++
++    _use_ollama_backend(app)
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    _mock_vision(monkeypatch, {10: 'fresh 10', 20: 'fresh 20', 30: 'fresh 30',
++                               40: 'fresh 40', 50: 'fresh 50'})
++    with app.app_context():
++        # Priced while 'unknown.png' was anonymous; asserted a moment later.
++        row = BankImage.query.filter_by(bank_id=bank_id,
++                                        relpath='unknown.png').one()
++        row.caption_origin = caption_origin.ASSERTED
++        db.session.commit()
++        job = banks._caption_job(bank_id, None, True, keep_asserted=True)
++        job({'id': 'test', 'cancelled': False})
++    after = _rows(app, bank_id)
++    assert after['unknown.png'][0] == 'nobody knows who wrote this'
++
++
++# --- the three copy paths ----------------------------------------------------
++def _dataset_with_one_captioned_image(app, tmp_path, caption, origin):
++    from app.extensions import db
++    from app.services import face_dataset_service as datasets
++    from app.services.dataset_storage import dataset_path
++
++    ds = datasets.create_dataset('local', 'origin ds', 'trigger')
++    src = tmp_path / 'ds-src.png'
++    _save(str(src), _flat(200))
++    with open(src, 'rb') as fh:
++        ids, _ = datasets.import_images('local', ds.id, [fh.read()])
++    from app.models import FaceDatasetImage
++    row = db.session.get(FaceDatasetImage, ids[0])
++    row.caption = caption
++    row.caption_origin = origin
++    row.status = 'keep'
++    db.session.commit()
++    assert os.path.isfile(os.path.join(str(dataset_path(ds.id)), row.filename))
++    return ds, row
++
++
++def test_dataset_to_bank_import_carries_who_wrote_the_caption(app, tmp_path):
++    """THE bug this whole change exists for.
++
++    A caption typed in the Dataset editor used to arrive in the Bank as an
++    anonymous string, and the Bank's forced pass then had no way left to spare it.
++    """
++    from app.models import BankImage
++    from app.services import caption_origin
++    from app.services import image_bank_service as banks
++
++    with app.app_context():
++        ds, _ = _dataset_with_one_captioned_image(
++            app, tmp_path, 'I typed this', caption_origin.ASSERTED)
++        bank_id = banks.start_dataset_import(app, 'local', ds.id, 'from dataset')
++        rows = BankImage.query.filter_by(bank_id=bank_id).all()
++        assert len(rows) == 1
++        assert rows[0].caption == 'I typed this'
++        assert rows[0].caption_origin == 'asserted'
++
++
++def test_bank_to_bank_copy_carries_it_too(client, app, tmp_path):
++    from app.models import BankImage
++    from app.services import image_bank_service as banks
++
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    with app.app_context():
++        ids = [r.id for r in BankImage.query.filter_by(bank_id=bank_id)
++               .filter(BankImage.status == 'keep').all()]
++        new_id = banks.start_bank_promote(app, 'local', bank_id, ids, 'copy')
++        copied = {r.relpath: (r.caption, r.caption_origin)
++                  for r in BankImage.query.filter_by(bank_id=new_id).all()}
++    assert copied['mine.png'] == ('written by me', 'asserted')
++    assert copied['machine.png'] == ('written by a model', 'ollama')
++    assert copied['unknown.png'] == ('nobody knows who wrote this', None)
++
++
++def test_promote_to_dataset_carries_it_back(client, app, tmp_path):
++    """The return leg. Without it a Dataset -> Bank -> Dataset round-trip
++    launders a hand-written caption into a rewritable one."""
++    from app.models import BankImage, FaceDatasetImage
++    from app.services import face_dataset_service as datasets
++    from app.services import image_bank_service as banks
++
++    bank_id = _seed_mixed_bank(client, app, tmp_path)
++    with app.app_context():
++        ds = datasets.create_dataset('local', 'target', 'trg')
++        ids = [r.id for r in BankImage.query.filter_by(bank_id=bank_id)
++               .filter(BankImage.status == 'keep').all()]
++        banks.start_promote(app, 'local', bank_id, ids, ds.id)
++        got = sorted((r.caption, r.caption_origin)
++                     for r in FaceDatasetImage.query.filter_by(dataset_id=ds.id).all()
++                     if r.caption)
++    assert ('written by me', 'asserted') in got
++    assert ('written by a model', 'ollama') in got
++    assert ('nobody knows who wrote this', None) in got
++
++
++def test_an_unknown_origin_on_the_wire_is_stored_as_nothing(app, tmp_path):
++    """import_images validates the stamp instead of trusting it.
++
++    An unrecognised token would sit in the column forever, never matching
++    'asserted' — a protection that silently is not one.
++    """
++    from app.models import FaceDatasetImage
++    from app.services import face_dataset_service as datasets
++
++    with app.app_context():
++        ds = datasets.create_dataset('local', 'wire', 'trg')
++        src = tmp_path / 'wire.png'
++        _save(str(src), _flat(210))
++        with open(src, 'rb') as fh:
++            ids, _ = datasets.import_images(
++                'local', ds.id, [fh.read()], captions=['text'],
++                caption_origins=['definitely-not-a-real-value'])
++        row = FaceDatasetImage.query.get(ids[0])
++        assert row.caption == 'text'
++        assert row.caption_origin is None
++
++
++# --- the dataset-side writers ------------------------------------------------
++def test_the_caption_editor_claims_authorship_and_clearing_it_gives_it_back(
++        app, tmp_path):
++    from app.models import FaceDatasetImage
++    from app.services import face_dataset_service as datasets
++
++    with app.app_context():
++        ds, row = _dataset_with_one_captioned_image(app, tmp_path, None, None)
++        datasets.set_image_caption('local', row.id, 'my words', short='my short')
++        row = FaceDatasetImage.query.get(row.id)
++        assert (row.caption_origin, row.caption_short_origin) == ('asserted', 'asserted')
++        # Emptying the box empties the stamp: an 'asserted' marker on a blank
++        # caption would be a row every future pass skips, forever.
++        datasets.set_image_caption('local', row.id, '', short='')
++        row = FaceDatasetImage.query.get(row.id)
++        assert (row.caption, row.caption_origin) == (None, None)
++        assert (row.caption_short, row.caption_short_origin) == (None, None)
++
++
++def test_a_backup_round_trip_does_not_lose_the_protection(app, tmp_path):
++    """The silent, expensive one: the column names live only in _BACKUP_IMG_FIELDS.
++
++    Dropping them there would not lose a caption — it would lose the protection on
++    every hand-written caption, at the first restore, with nothing on screen.
++    """
++    from app.services import face_dataset_service as datasets
++
++    assert 'caption_origin' in datasets._BACKUP_IMG_FIELDS
++    assert 'caption_short_origin' in datasets._BACKUP_IMG_FIELDS
++
++
++# --- the migration -----------------------------------------------------------
++def test_the_migration_lands_on_an_existing_database_and_old_rows_stay_null(
++        tmp_path, monkeypatch):
++    """A database created BEFORE the column, opened by this build.
++
++    The rows it already holds must come back NULL — not 'asserted' (which would
++    freeze Re-caption on every bank in the wild) and not an engine name (which
++    would be an attribution nobody measured, on the side that destroys work).
++    """
++    db_path = tmp_path / 'legacy.sqlite3'
++    con = sqlite3.connect(db_path)
++    con.executescript(
++        """
++        CREATE TABLE bank_image (
++            id INTEGER PRIMARY KEY, bank_id INTEGER NOT NULL,
++            relpath TEXT NOT NULL, file_size INTEGER, status VARCHAR(10),
++            caption TEXT);
++        INSERT INTO bank_image (bank_id, relpath, status, caption)
++            VALUES (1, 'old.png', 'keep', 'a caption from before all this');
++        """)
++    con.commit()
++    con.close()
++
++    from app import create_app
++    monkeypatch.setenv('LDS_TESTING', '1')
++    application = create_app({
++        'TESTING': True,
++        'SQLALCHEMY_DATABASE_URI': f'sqlite:///{db_path}',
++    })
++    with application.app_context():
++        from app.extensions import db as _db
++        cols = {row[1] for row in _db.session.execute(
++            __import__('sqlalchemy').text('PRAGMA table_info(bank_image)'))}
++        assert 'caption_origin' in cols, 'the ALTER never ran'
++        got = _db.session.execute(__import__('sqlalchemy').text(
++            'SELECT caption, caption_origin FROM bank_image')).fetchone()
++    assert got[0] == 'a caption from before all this'
++    assert got[1] is None
++    # …and the dataset side gained both of its columns the same way.
++    con = sqlite3.connect(db_path)
++    names = {r[1] for r in con.execute('PRAGMA table_info(face_dataset_image)')}
++    con.close()
++    assert {'caption_origin', 'caption_short_origin'} <= names
++
++
++def test_the_vocabulary_is_frozen_and_borrowed_from_columns_that_exist(app):
++    """Stored values never get renamed without an alias table (repo rule).
++
++    They are also deliberately not new words: 'asserted' is
++    BankImage.face_cluster_origin's, the engine names are watermark_source's idea.
++    """
++    from app.services import caption_origin
++
++    assert caption_origin.ASSERTED == 'asserted'
++    assert caption_origin.ENGINES == ('joycaption', 'ollama')
++    # 'auto' is a CHAIN, not an engine: recording it would name a policy and
++    # mislabel roughly half of an 'auto' run.
++    assert caption_origin.engine_origin('auto') is None
++    assert caption_origin.engine_origin(None) is None
++    assert caption_origin.engine_origin('OLLAMA') == 'ollama'
++
++
++def test_the_unprotected_clause_still_selects_rows_with_no_recorded_origin(app):
++    """A NOT() over three-valued logic would drop every legacy row in silence.
++
++    That is the bug the explicit clause exists to prevent, and it is invisible
++    in every fixture where the column happens to be filled in.
++    """
++    from app.extensions import db
++    from app.models import BankImage, ImageBank
++    from app.services import caption_origin
++
++    with app.app_context():
++        bank = ImageBank(user_id='local', name='clause', source_path='nowhere')
++        db.session.add(bank)
++        db.session.flush()
++        db.session.add(BankImage(bank_id=bank.id, relpath='legacy.png', file_size=1,
++                                 status='keep', caption='old text',
++                                 caption_origin=None))
++        db.session.add(BankImage(bank_id=bank.id, relpath='mine.png', file_size=1,
++                                 status='keep', caption='my text',
++                                 caption_origin='asserted'))
++        db.session.commit()
++        got = {r.relpath for r in BankImage.query.filter_by(bank_id=bank.id).filter(
++            caption_origin.unprotected_clause(BankImage)).all()}
++    assert got == {'legacy.png'}
+diff --git a/docs/guide/using-the-app.md b/docs/guide/using-the-app.md
+index 1940f09b..e3f4f666 100644
+--- a/docs/guide/using-the-app.md
++++ b/docs/guide/using-the-app.md
+@@ -1126,23 +1126,36 @@ runs the same pass with the same engine, model, register and length you picked o
+ that row, on the pile the scope select names — and it **overwrites** the captions
+ that are already there.
+ 
+-**It tells you the number before you click, in two places.** The button quotes
+-what it will rewrite ("🔄 Re-caption 1 240 kept" — the whole pile, captioned or
+-not), and the amber line under the row quotes what it will *destroy*: how many of
+-those images already carry a caption. The confirmation repeats both. Neither
+-number is an estimate; both come from the same count the pass itself uses.
+-
+-**There is no undo, and no way to spare hand-written captions.** This app stores
+-one caption per image and records nothing about who wrote it — a caption you typed
+-or corrected yourself and one a model produced are the same text in the same
+-column. So a guard that "protected your edits" would have to guess, and would
+-guess wrong in both directions. The honest version is the one you get: it
+-overwrites everything in the pile and says so first. The bank's ↩ Undo covers
+-keep/reject decisions only; it has never covered captions.
+-
+-The case to be careful about is a bank built with **Import to bank** from a
+-dataset whose captions you had corrected by hand: those corrections came along,
+-and nothing on screen marks them.
++**It keeps the captions you wrote yourself.** Every caption now records who wrote
++it — JoyCaption, Ollama, or you. "You" means: typed or corrected in a dataset's
++caption box, changed by a find/replace across a dataset, or brought back as `.txt`
++sidecars from another tool. That record travels with the text through
++**Import to bank**, bank-to-bank copies, promotion back to a dataset, and backup
++restores, so a caption you wrote in a dataset three steps ago is still recognised
++as yours here. Re-caption skips those rows, exactly as the person pass skips a
++subfolder you declared to hold one person.
++
++**It tells you three numbers before you click, and never merges two of them.**
++The button quotes what it will rewrite (the pile, minus what it spares). The amber
++line under the row breaks the rest apart: how many captions it *keeps* because you
++wrote them, how many it overwrites **whose author was never recorded**, and how
++many a model wrote. The confirmation repeats them. None is an estimate; they all
++come from the same count the pass itself uses, so the figure on the button is the
++number of images that change.
++
++**"Origin never recorded" is the one to read carefully.** Captions written before
++the app started keeping track carry no author, and there is no way to work one out
++after the fact. Those are re-captioned — sparing them would make this button do
++nothing at all on any bank that already exists — so if you hand-wrote captions in
++an older version, they are in that count. It is stated separately from the
++machine-written ones for exactly that reason.
++
++**If you do want your own captions redone**, tick **"Also rewrite the N caption(s)
++I wrote"** next to the button. It only appears when there is something to protect,
++it is never pre-ticked, and the confirmation names it again.
++
++**There is still no undo.** The bank's ↩ Undo covers keep/reject decisions only;
++it has never covered captions, and this change does not add one.
+ 
+ **It works by pile, never on a selection.** With images selected the button goes
+ inert and says why: a selection can cover pages that were never loaded, so the
+diff --git a/frontend/src/components/bank/BankWorkspace.jsx b/frontend/src/components/bank/BankWorkspace.jsx
+index fb71427a..713caeb6 100644
+--- a/frontend/src/components/bank/BankWorkspace.jsx
++++ b/frontend/src/components/bank/BankWorkspace.jsx
+@@ -45,6 +45,7 @@ import {
+ // Which pile the caption pass is aimed at, and the number the button quotes (pure).
+ import {
+   CAPTION_SCOPE_OPTIONS, captionButtonLabel, captionCountsKnown,
++  captionIncludeAssertedLabel,
+   captionRecaptionConfirmation, captionRecaptionDisabledReason, captionRecaptionLabel,
+   captionRecaptionNote, captionScopeCount,
+   captionScopeDisabledReason, captionScopeNote, captionScopeStatuses,
+@@ -686,6 +687,10 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
+   // WHICH PILE this run captions: '' = kept + undecided (today's behaviour, sends
+   // nothing), 'keep', or 'pending'. Never 'reject' — the bin is not curated from.
+   const [captionScope, setCaptionScope] = useState('')
++  /* The ESCAPE HATCH, and the reason it is a piece of state and not a request key: it has
++     to be visible, deliberate and re-read in the confirmation. Never persisted, so it
++     resets with the panel — an opt-out of a protection is not a preference. */
++  const [captionIncludeAsserted, setCaptionIncludeAsserted] = useState(false)
+   // Coverage advice (idea by @antonp) — a collapsible read-only panel, fetched
+   // on demand (and refreshed whenever it's open and the bank changes).
+   const [coverageOpen, setCoverageOpen] = useState(false)
+@@ -1105,10 +1110,16 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
+      - `statuses` rides WITHOUT the `!selected.size` guard the normal pass needs,
+        precisely because a selection makes this button inert instead. */
+   const startRecaption = () => {
+-    if (captionRecaptionDisabledReason(selected.size, live, counts, captionScope)) return
+-    if (!window.confirm(captionRecaptionConfirmation(counts, captionScope))) return
++    if (captionRecaptionDisabledReason(selected.size, live, counts, captionScope,
++                                       captionIncludeAsserted)) return
++    if (!window.confirm(captionRecaptionConfirmation(counts, captionScope,
++                                                     captionIncludeAsserted))) return
+     return act(() => postJson(`/api/bank/${bankId}/caption`, {
+       force: true,
++      // Sent ONLY when ticked. Omitting the key is the protected reading, on this
++      // side as on the server's — the destructive one is never the default shape
++      // of the request.
++      ...(captionIncludeAsserted ? { include_asserted: true } : {}),
+       ...(captionVocab ? { vocabulary: captionVocab } : {}),
+       ...(captionLength ? { length: captionLength } : {}),
+       ...(captionEngine ? { backend: captionEngine } : {}),
+@@ -1458,9 +1469,11 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
+   const captionScopeInert = captionScopeDisabledReason(selected.size, live)
+   const captionRunSize = captionScopeCount(counts, captionScope)
+   // 🔄 Re-caption: inert (and why), plus the sentence that names what it destroys.
++  const includeAssertedLabel = captionIncludeAssertedLabel(counts, captionScope)
+   const recaptionInert = captionRecaptionDisabledReason(
+-    selected.size, live, counts, captionScope)
+-  const recaptionNote = captionRecaptionNote(selected.size, live, counts, captionScope)
++    selected.size, live, counts, captionScope, captionIncludeAsserted)
++  const recaptionNote = captionRecaptionNote(selected.size, live, counts, captionScope,
++                                             captionIncludeAsserted)
+   const scored = counts?.scored || 0
+   // ⚖️ Can a balanced pick even run? Answered BEFORE the click when we already
+   // know (Score missing; coverage says nothing is classified) — otherwise the
+@@ -1731,8 +1744,23 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
+             aria-label="Re-caption"
+             title={recaptionInert || recaptionNote}
+             className="px-2 py-1 rounded-lg bg-surface border border-border text-content text-xs disabled:opacity-40">
+-            {captionRecaptionLabel(counts, captionScope, recaptionInert)}
++            {captionRecaptionLabel(counts, captionScope, recaptionInert,
++                                   captionIncludeAsserted)}
+           </button>
++          {/* 🔓 The way out of the protection — rendered ONLY when there is something to
++              protect, so the row gains no width on a bank where nobody has written a
++              caption. It sits AFTER the button it modifies and names its own cost, and
++              the confirmation repeats it: an opt-out of a safeguard must be read twice
++              and reached on purpose, never by leaving a key out of a request. */}
++          {includeAssertedLabel && (
++            <label className="flex items-center gap-1 text-xs text-amber-400/90">
++              <input type="checkbox" checked={captionIncludeAsserted} disabled={live}
++                onChange={(e) => setCaptionIncludeAsserted(e.target.checked)}
++                aria-label="Also re-caption the captions I wrote by hand"
++                className="accent-amber-500" />
++              {includeAssertedLabel}
++            </label>
++          )}
+         </div>
+         {/* What the run will do, spelled out — including the two things a count alone
+             never says: already-captioned images are skipped, and the bin is out of
+diff --git a/frontend/src/components/bank/bankCaptionScope.js b/frontend/src/components/bank/bankCaptionScope.js
+index ccf76f6d..4002ae79 100644
+--- a/frontend/src/components/bank/bankCaptionScope.js
++++ b/frontend/src/components/bank/bankCaptionScope.js
+@@ -116,16 +116,26 @@ export function captionScopeNote(selectedSize, counts, scopeId) {
+  * model and the pile selects down with it. The dials added beside them would be unreachable
+  * on exactly the bank whose captions you want to redo with a better model.
+  *
+- * WHAT IT DESTROYS, and why we can only count it, never spare it: nothing in this app records
+- * WHO wrote a caption. BankImage.caption is one column, written by the pass and copied as-is
+- * by the dataset→bank and bank→bank imports; there is no `edited` flag, no second column, no
+- * per-caption timestamp. A guard that "protected the hand-written ones" would have to guess
+- * from the text — it would mostly skip captions written by a different model and let real
+- * short corrections through, and its rule would be invisible from the screen. So the honest
+- * design is the one the Dataset already ships: overwrite, but say the number first, and say
+- * that hand-edits are in it. bank_undo covers (status, reject_reason) and says in its own
+- * header that it offers undo for nothing else — so there is no undo to promise here either.
+- */
++ * WHAT IT NOW SPARES. Captions carry an origin (backend services/caption_origin.py, the
++ * 'asserted' token BankImage.face_cluster_origin already uses), so the pass SKIPS the ones a
++ * human wrote or corrected instead of warning that it cannot tell them apart. That warning
++ * used to be the honest thing to say; it is now the wrong thing to do.
++ *
++ * THREE COUNTS, THREE SENTENCES, and they are never merged:
++ *   - what the run REWRITES — the number the button quotes, and the number the job walks;
++ *   - what it KEEPS BECAUSE YOU WROTE IT — the protection, stated as a measured figure;
++ *   - what it rewrites WHOSE ORIGIN WAS NEVER RECORDED — every caption written before the
++ *     column existed. Those are re-captioned (their authorship cannot be recovered, and
++ *     sparing them would make this button inert on every bank that exists today) but they
++ *     are NOT "generated captions", and calling them that would be the app claiming to know
++ *     something it does not. On a bank that predates the column this figure is the whole
++ *     overwrite, which is exactly the warning the user needs.
++ *
++ * THE WAY OUT is a separate tick (`includeAsserted`), offered only when there is something
++ * to protect, never pre-ticked, and named in its own confirmation. Someone who deliberately
++ * wants their own captions redone by a better model must be able to; they must not get there
++ * by leaving a key out of a request. bank_undo covers (status, reject_reason) and says in its
++ * own header that it offers undo for nothing else — there is no undo to promise here either. */
+ 
+ /** How many images a FORCED run of this scope really walks — captioned or not.
+  *
+@@ -144,28 +154,99 @@ export function captionForcePileSize(counts, scopeId) {
+   return keep + pending;
+ }
+ 
+-/** How many EXISTING captions a forced run of this scope would overwrite.
++/** How many EXISTING captions this scope holds, whoever wrote them.
+  *
+  *  The pile minus the part of it that has no caption yet. Both terms come from the same
+  *  payload, computed by the same server filter the job uses, so this is arithmetic on
+  *  measured numbers rather than a second definition of "captioned". */
+-export function captionOverwriteCount(counts, scopeId) {
++export function captionExistingCount(counts, scopeId) {
+   return Math.max(
+     0, captionForcePileSize(counts, scopeId) - captionScopeCount(counts, scopeId));
+ }
+ 
+-/** The re-caption button's words: the number it will REWRITE (the whole pile), never the
+- *  smaller overwrite figure — the button must not quote less than it touches. The count of
+- *  destroyed captions belongs to the sentence and the confirmation, which have the room to
+- *  name it for what it is.
++/** Per-scope reader for the two provenance figures the server sends.
++ *
++ *  Both DEFAULT TO 0 when the keys are absent, which is what a server that predates them
++ *  sends — and 0 is the truthful reading there: nothing is marked, so nothing is spared,
++ *  and every sentence below degrades to what it said before this existed. */
++function scopedProvenance(counts, scopeId, prefix) {
++  const keep = Number(counts?.[`${prefix}_keep`]) || 0;
++  const pending = Number(counts?.[`${prefix}_pending`]) || 0;
++  const id = captionScopeOption(scopeId).id;
++  if (id === 'keep') return keep;
++  if (id === 'pending') return pending;
++  return keep + pending;
++}
++
++/** Captions a human wrote or corrected — what a forced run KEEPS. */
++export function captionAssertedCount(counts, scopeId) {
++  return scopedProvenance(counts, scopeId, 'caption_asserted');
++}
++
++/** Has the server sent the provenance breakdown at all?
++ *
++ *  A payload that predates it is not a bank of machine-written captions — it is a bank
++ *  whose captions have no recorded author, which is the SAME state the column stores as
++ *  NULL. Reading the absence as "generated" would put an attribution on screen that
++ *  nothing measured, on the exact side that costs the user work. */
++export function captionProvenanceKnown(counts) {
++  return counts != null && counts.caption_unrecorded_keep !== undefined;
++}
++
++/** Captions whose author was never recorded — rewritten, and counted apart.
++ *
++ *  With no breakdown at all, EVERY existing caption falls here: unknown is what we
++ *  actually know. That also makes the fallback the safe one — the sentence the user
++ *  reads is the cautious one, not the confident one. */
++export function captionUnrecordedCount(counts, scopeId) {
++  if (!captionProvenanceKnown(counts)) {
++    return Math.max(0, captionExistingCount(counts, scopeId)
++      - captionAssertedCount(counts, scopeId));
++  }
++  return scopedProvenance(counts, scopeId, 'caption_unrecorded');
++}
++
++/** Captions a model wrote, on the record — rewritten without ceremony.
++ *
++ *  A REMAINDER, deliberately: the pile is partitioned into blank / asserted / unrecorded /
++ *  the rest, so these four always add up to it. Asking the server for a fifth number that
++ *  could disagree with the other four is how two counts of the same thing start to drift. */
++export function captionGeneratedCount(counts, scopeId) {
++  return Math.max(0, captionExistingCount(counts, scopeId)
++    - captionAssertedCount(counts, scopeId)
++    - captionUnrecordedCount(counts, scopeId));
++}
++
++/** How many images the forced run REALLY walks — the pile, minus what it spares.
++ *
++ *  This is the number the button quotes, and it must equal the number the server's own
++ *  filter selects (image_bank_service.start_caption). `includeAsserted` is the opt-out:
++ *  with it the run is the whole pile again. */
++export function captionRecaptionRunSize(counts, scopeId, includeAsserted = false) {
++  const pile = captionForcePileSize(counts, scopeId);
++  if (includeAsserted) return pile;
++  return Math.max(0, pile - captionAssertedCount(counts, scopeId));
++}
++
++/** How many existing captions the run DESTROYS — what it rewrites, minus the blanks. */
++export function captionOverwriteCount(counts, scopeId, includeAsserted = false) {
++  const existing = captionExistingCount(counts, scopeId);
++  if (includeAsserted) return existing;
++  return Math.max(0, existing - captionAssertedCount(counts, scopeId));
++}
++
++/** The re-caption button's words: the number of images it will REWRITE — the pile minus
++ *  what it spares, never the pile itself once a protection exists. A button that says 40
++ *  and moves 37 is the same defect as one that says 5 930 and moves 0, just smaller.
+  *
+  *  AND IT DROPS THE NUMBER WHEN IT CANNOT RUN. An inert button still quoting "24 images"
+- *  is the same defect one rung down: a figure on screen that no click will act on. Pass
++ *  is that defect one rung down: a figure on screen that no click will act on. Pass
+  *  the inert reason (or '') and the label falls back to the bare verb. */
+-export function captionRecaptionLabel(counts, scopeId, inertReason = '') {
++export function captionRecaptionLabel(counts, scopeId, inertReason = '',
++                                      includeAsserted = false) {
+   if (inertReason || !captionCountsKnown(counts)) return '🔄 Re-caption';
+   const opt = captionScopeOption(scopeId);
+-  return `🔄 Re-caption ${captionForcePileSize(counts, scopeId)} ${opt.short}`;
++  return `🔄 Re-caption ${captionRecaptionRunSize(counts, scopeId, includeAsserted)} ${opt.short}`;
+ }
+ 
+ /** Is the re-caption button inert right now, and why? '' when it is live.
+@@ -175,7 +256,8 @@ export function captionRecaptionLabel(counts, scopeId, inertReason = '') {
+  *  selected images already carry a caption. For a destructive button, "I cannot give you
+  *  the number" means "I do not run": re-caption works by pile, and says so. 🏷️ Caption
+  *  still honours the selection, so nothing the user could do before is lost. */
+-export function captionRecaptionDisabledReason(selectedSize, live, counts, scopeId) {
++export function captionRecaptionDisabledReason(selectedSize, live, counts, scopeId,
++                                               includeAsserted = false) {
+   if (live) return 'A pass is already running on this bank.';
+   if (selectedSize > 0) {
+     return 'Re-caption works on a whole pile, not on a selection: how many of the '
+@@ -184,40 +266,97 @@ export function captionRecaptionDisabledReason(selectedSize, live, counts, scope
+       + 'cannot state. Clear the selection to re-caption by pile.';
+   }
+   if (!captionCountsKnown(counts)) return 'Waiting for this bank\'s counts.';
+-  if (captionOverwriteCount(counts, scopeId) === 0) {
++  if (captionOverwriteCount(counts, scopeId, includeAsserted) === 0) {
+     const opt = captionScopeOption(scopeId);
+     const pile = opt.id === '' ? 'kept or undecided' : opt.short;
++    const mine = captionAssertedCount(counts, scopeId);
++    // TWO different zeros, and telling them apart is the whole point of the column:
++    // "there is nothing captioned here" sends you to 🏷️ Caption, "the only captions
++    // here are yours and I am keeping them" sends you to the tick box. Rendering
++    // both as "nothing to re-caption" would hide the protection at the one moment
++    // it is doing all the work.
++    if (mine > 0 && !includeAsserted) {
++      return `Nothing left to re-caption — the only ${mine} caption(s) in this pile are `
++        + 'ones you wrote or corrected, and Re-caption keeps those. Tick '
++        + '"Also rewrite the ones I wrote" to redo them anyway.';
++    }
+     return `Nothing to re-caption — no ${pile} image has a caption yet. `
+       + 'Use 🏷️ Caption to write them first.';
+   }
+   return '';
+ }
+ 
+-/** The warning under the row. '' when the button is inert, because a warning about an
+- *  action that cannot happen is noise that teaches people to skip warnings. */
+-export function captionRecaptionNote(selectedSize, live, counts, scopeId) {
+-  if (captionRecaptionDisabledReason(selectedSize, live, counts, scopeId)) return '';
++/** The warning under the row: THREE facts, never folded into one number.
++ *
++ *  '' when the button is inert, because a warning about an action that cannot happen is
++ *  noise that teaches people to skip warnings. */
++export function captionRecaptionNote(selectedSize, live, counts, scopeId,
++                                     includeAsserted = false) {
++  if (captionRecaptionDisabledReason(selectedSize, live, counts, scopeId, includeAsserted)) {
++    return '';
++  }
+   const opt = captionScopeOption(scopeId);
+   const pile = captionForcePileSize(counts, scopeId);
+-  const n = captionOverwriteCount(counts, scopeId);
++  const run = captionRecaptionRunSize(counts, scopeId, includeAsserted);
++  const mine = captionAssertedCount(counts, scopeId);
++  const unknown = captionUnrecordedCount(counts, scopeId);
++  const generated = captionGeneratedCount(counts, scopeId);
+   const what = opt.id === '' ? 'kept and undecided' : opt.short;
+-  return `🔄 Re-caption rewrites all ${pile} ${what} image(s) with the engine and model `
+-    + `picked here, overwriting the ${n} caption(s) they already carry. Captions you `
+-    + 'wrote or corrected by hand look exactly like generated ones to this app — they '
+-    + 'are overwritten too, and no undo covers captions.';
++  const parts = [`🔄 Re-caption rewrites ${run} of the ${pile} ${what} image(s) with the `
++    + 'engine and model picked here.'];
++  // What it KEEPS comes first when it keeps anything: the reassurance is the news.
++  if (mine > 0 && !includeAsserted) {
++    parts.push(`It keeps the ${mine} caption(s) you wrote or corrected by hand.`);
++  } else if (mine > 0) {
++    parts.push(`Including the ${mine} caption(s) you wrote or corrected by hand, because `
++      + 'you ticked the box.');
++  }
++  if (unknown > 0) {
++    parts.push(`It overwrites ${unknown} caption(s) whose origin was never recorded — `
++      + 'written before this app tracked who writes a caption, so anything you typed back '
++      + 'then is among them.');
++  }
++  if (generated > 0) {
++    parts.push(`It overwrites ${generated} caption(s) a model wrote.`);
++  }
++  parts.push('No undo covers captions.');
++  return parts.join(' ');
+ }
+ 
+ /** The confirmation, worded on the Dataset's own re-caption prompt
+  *  (dataset/captionCategory.js: "Re-captioning overwrites the N existing caption(s).
+- *  <rule> Continue?") so the app asks this question one way, not two. The bank adds the
+- *  two facts the dataset does not have to state: which pile, and that hand-edits are
+- *  indistinguishable and unrecoverable. */
+-export function captionRecaptionConfirmation(counts, scopeId) {
++ *  <rule> Continue?") so the app asks this question one way, not two. The bank adds what
++ *  the dataset does not have to state: which pile, what is spared, and which part of the
++ *  loss is the app admitting it does not know who wrote what. */
++export function captionRecaptionConfirmation(counts, scopeId, includeAsserted = false) {
+   const opt = captionScopeOption(scopeId);
+   const pile = captionForcePileSize(counts, scopeId);
+-  const n = captionOverwriteCount(counts, scopeId);
++  const n = captionOverwriteCount(counts, scopeId, includeAsserted);
++  const mine = captionAssertedCount(counts, scopeId);
++  const unknown = captionUnrecordedCount(counts, scopeId);
+   const what = opt.id === '' ? 'kept and undecided' : opt.short;
+-  return `Re-captioning overwrites the ${n} existing caption(s) among the ${pile} `
+-    + `${what} image(s). Captions you wrote or corrected by hand cannot be told apart `
+-    + 'from generated ones and are overwritten too. This cannot be undone. Continue?';
++  let out = `Re-captioning overwrites the ${n} existing caption(s) among the ${pile} `
++    + `${what} image(s).`;
++  if (mine > 0 && !includeAsserted) {
++    out += ` The ${mine} caption(s) you wrote or corrected by hand are kept.`;
++  } else if (mine > 0) {
++    out += ` The ${mine} caption(s) you wrote or corrected by hand are overwritten too — `
++      + 'that is what the box you ticked does.';
++  }
++  if (unknown > 0) {
++    out += ` ${unknown} of them have no recorded author and may include captions you `
++      + 'wrote before this app started keeping track.';
++  }
++  return `${out} This cannot be undone. Continue?`;
++}
++
++/** The opt-out's own label, and whether to offer it at all.
++ *
++ *  Returns '' when there is nothing to protect — a tick box that would change nothing is
++ *  a control that teaches people to tick boxes. It also quotes the number, so the gesture
++ *  and its cost are read in one line rather than one being buried in a warning. */
++export function captionIncludeAssertedLabel(counts, scopeId) {
++  const mine = captionAssertedCount(counts, scopeId);
++  if (!captionCountsKnown(counts) || mine <= 0) return '';
++  return `Also rewrite the ${mine} caption(s) I wrote`;
+ }
+diff --git a/frontend/src/components/bank/bankCaptionScope.test.js b/frontend/src/components/bank/bankCaptionScope.test.js
+index e95267f8..f769fd82 100644
+--- a/frontend/src/components/bank/bankCaptionScope.test.js
++++ b/frontend/src/components/bank/bankCaptionScope.test.js
+@@ -1,11 +1,13 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import {
+-  CAPTION_SCOPE_OPTIONS, captionButtonLabel, captionCountsKnown,
+-  captionForcePileSize, captionOverwriteCount, captionRecaptionConfirmation,
++  CAPTION_SCOPE_OPTIONS, captionAssertedCount, captionButtonLabel, captionCountsKnown,
++  captionExistingCount, captionForcePileSize, captionGeneratedCount,
++  captionIncludeAssertedLabel, captionOverwriteCount, captionProvenanceKnown,
++  captionRecaptionConfirmation,
+   captionRecaptionDisabledReason, captionRecaptionLabel, captionRecaptionNote,
+-  captionScopeCount, captionScopeDisabledReason, captionScopeNote,
+-  captionScopeStatuses,
++  captionRecaptionRunSize, captionScopeCount, captionScopeDisabledReason,
++  captionScopeNote, captionScopeStatuses, captionUnrecordedCount,
+ } from './bankCaptionScope.js';
+ 
+ /* The bank caption scope: three options, two vocabularies, and one number that has to
+@@ -180,11 +182,15 @@ test('re-caption is inert when there is no caption to overwrite', () => {
+   assert.equal(captionRecaptionDisabledReason(0, false, counts, 'keep'), '');
+ });
+ 
+-test('the warning names both numbers, the hand-edits and the missing undo', () => {
++test('with nothing recorded, the warning says so instead of claiming "generated"', () => {
++  // This payload carries NO provenance breakdown, which is exactly what a bank
++  // captioned before the column looks like. The honest reading of that is "nobody
++  // recorded who wrote these", never "a model wrote these".
+   const note = captionRecaptionNote(0, false, counts, 'keep');
+   assert.match(note, /40/);                       // what it rewrites
+   assert.match(note, /28/);                       // what it destroys
+-  assert.match(note, /by hand/i);
++  assert.match(note, /never recorded/i);
++  assert.ok(!/a model wrote/i.test(note), 'unknown authorship must not read as generated');
+   assert.match(note, /no undo/i);
+ });
+ 
+@@ -206,7 +212,9 @@ test('the confirmation is the Dataset\'s sentence, plus the two bank facts', ()
+   assert.match(q, /Continue\?$/);
+   // …and the two things the dataset never has to say.
+   assert.match(q, /40 kept image\(s\)/);
+-  assert.match(q, /cannot be told apart/i);
++  // The bank's own admission: this payload records no author for any of them, and the
++  // question says that rather than pretending the losses are all machine-written.
++  assert.match(q, /no recorded author/i);
+   assert.match(q, /cannot be undone/i);
+ });
+ 
+@@ -216,3 +224,103 @@ test('the confirmation names the right pile for each scope', () => {
+   assert.match(captionRecaptionConfirmation(counts, ''),
+     /940 kept and undecided image\(s\)/);
+ });
++
++/* 🔒 PROVENANCE — three counts that must never be folded into two.
++
++   The fixture below is the interesting bank: of 40 kept images, 12 have no caption,
++   5 carry one the user wrote, 9 carry one whose author was never recorded, and the
++   remaining 14 were written by a model. Every assertion here is arithmetic on that
++   partition, so a helper that started double-counting would break several at once. */
++const mixed = {
++  keep: 40, pending: 900, reject: 60,
++  caption_todo_keep: 12, caption_todo_pending: 300,
++  caption_asserted_keep: 5, caption_asserted_pending: 100,
++  caption_unrecorded_keep: 9, caption_unrecorded_pending: 200,
++};
++
++test('the four provenance buckets partition the pile exactly', () => {
++  // blank + yours + unknown + machine = the pile. If these ever stopped adding up,
++  // one of the sentences on screen would be describing images that are not there.
++  const sum = captionScopeCount(mixed, 'keep')
++    + captionAssertedCount(mixed, 'keep')
++    + captionUnrecordedCount(mixed, 'keep')
++    + captionGeneratedCount(mixed, 'keep');
++  assert.equal(sum, captionForcePileSize(mixed, 'keep'));
++  assert.equal(captionGeneratedCount(mixed, 'keep'), 14);
++});
++
++test('the run size is the pile MINUS what the pass spares', () => {
++  // The number on the button has to be the number of rows that change. Quoting the
++  // pile while sparing 5 of it is the same defect as quoting 5 930 and moving 0.
++  assert.equal(captionRecaptionRunSize(mixed, 'keep'), 35);
++  assert.equal(captionRecaptionLabel(mixed, 'keep'), '🔄 Re-caption 35 kept');
++  // …and with the opt-out, the pile again — because that is what will really run.
++  assert.equal(captionRecaptionRunSize(mixed, 'keep', true), 40);
++  assert.equal(captionRecaptionLabel(mixed, 'keep', '', true), '🔄 Re-caption 40 kept');
++});
++
++test('the overwrite count drops the captions the pass keeps', () => {
++  assert.equal(captionExistingCount(mixed, 'keep'), 28);   // 40 - 12
++  assert.equal(captionOverwriteCount(mixed, 'keep'), 23);  // 28 - 5 spared
++  assert.equal(captionOverwriteCount(mixed, 'keep', true), 28);
++});
++
++test('the warning names all three things, and never merges two of them', () => {
++  const note = captionRecaptionNote(0, false, mixed, 'keep');
++  assert.match(note, /rewrites 35 of the 40/);
++  assert.match(note, /keeps the 5 caption\(s\) you wrote/i);
++  assert.match(note, /overwrites 9 caption\(s\) whose origin was never recorded/i);
++  assert.match(note, /overwrites 14 caption\(s\) a model wrote/i);
++  assert.match(note, /no undo/i);
++});
++
++test('ticking the opt-out changes the warning instead of hiding it', () => {
++  const note = captionRecaptionNote(0, false, mixed, 'keep', true);
++  assert.match(note, /rewrites 40 of the 40/);
++  assert.match(note, /because you ticked the box/i);
++  assert.ok(!/keeps the 5/i.test(note), 'it must not still promise to keep them');
++});
++
++test('the confirmation says what is kept, and what has no known author', () => {
++  const q = captionRecaptionConfirmation(mixed, 'keep');
++  assert.match(q, /^Re-captioning overwrites the 23 existing caption\(s\)/);
++  assert.match(q, /5 caption\(s\) you wrote or corrected by hand are kept/i);
++  assert.match(q, /9 of them have no recorded author/i);
++  const opted = captionRecaptionConfirmation(mixed, 'keep', true);
++  assert.match(opted, /^Re-captioning overwrites the 28 existing caption\(s\)/);
++  assert.match(opted, /are overwritten too/i);
++});
++
++test('the opt-out is offered only when there is something to protect', () => {
++  // A tick box that would change nothing is a control that teaches people to tick
++  // boxes. '' is the signal not to render it at all.
++  assert.equal(captionIncludeAssertedLabel(mixed, 'keep'),
++    'Also rewrite the 5 caption(s) I wrote');
++  assert.equal(captionIncludeAssertedLabel(counts, 'keep'), '');
++  assert.equal(captionIncludeAssertedLabel(null, 'keep'), '');
++});
++
++test('a pile whose only captions are yours says so, and points at the way out', () => {
++  // Two different zeros. "Nothing is captioned here" sends you to 🏷️ Caption;
++  // "the only captions here are yours" sends you to the tick box. Rendering both
++  // as one message hides the protection at the moment it does all the work.
++  const mineOnly = { keep: 10, pending: 0, caption_todo_keep: 7,
++    caption_todo_pending: 0, caption_asserted_keep: 3, caption_asserted_pending: 0,
++    caption_unrecorded_keep: 0, caption_unrecorded_pending: 0 };
++  const why = captionRecaptionDisabledReason(0, false, mineOnly, 'keep');
++  assert.match(why, /only 3 caption\(s\)/i);
++  assert.match(why, /Also rewrite/i);
++  // …and ticking it makes the button live again.
++  assert.equal(captionRecaptionDisabledReason(0, false, mineOnly, 'keep', true), '');
++});
++
++test('a payload with no provenance at all degrades to "never recorded"', () => {
++  // A server that predates the breakdown is not a bank of machine-written captions.
++  // Reading its silence as "generated" would put an attribution on screen that
++  // nothing measured, on the exact side that costs the user work.
++  assert.equal(captionProvenanceKnown(counts), false);
++  assert.equal(captionUnrecordedCount(counts, 'keep'), 28);
++  assert.equal(captionGeneratedCount(counts, 'keep'), 0);
++  // …and nothing is spared, so the button quotes the whole pile exactly as before.
++  assert.equal(captionRecaptionLabel(counts, 'keep'), '🔄 Re-caption 40 kept');
++});
+diff --git a/frontend/src/components/bank/captionOptionsRow-ui.test.js b/frontend/src/components/bank/captionOptionsRow-ui.test.js
+index 232572fa..e39109f1 100644
+--- a/frontend/src/components/bank/captionOptionsRow-ui.test.js
++++ b/frontend/src/components/bank/captionOptionsRow-ui.test.js
+@@ -147,7 +147,7 @@ test('re-caption carries the same per-run options as the normal pass', () => {
+ 
+ test('the button and the amber warning both live on the options row', () => {
+   const eyebrow = ws.indexOf('<GroupLabel>Caption options</GroupLabel>');
+-  const button = ws.indexOf('{captionRecaptionLabel(counts, captionScope, recaptionInert)}');
++  const button = ws.indexOf('{captionRecaptionLabel(counts, captionScope, recaptionInert,');
+   assert.ok(button > eyebrow, 're-caption must sit on the options row');
+   // The pass row above it must not have grown a ninth button.
+   assert.ok(ws.indexOf('onClick={startRecaption}') > eyebrow);
+@@ -156,7 +156,9 @@ test('the button and the amber warning both live on the options row', () => {
+   assert.match(ws, /text-amber-400\/90">\{recaptionNote\}/);
+   // The label is handed the inert reason, so a button that cannot run stops quoting
+   // a number — the tooltip carries the reason instead.
+-  assert.match(ws, /captionRecaptionLabel\(counts, captionScope, recaptionInert\)/);
++  // ...and the opt-out state, so the number on the button follows the tick box
++  // rather than quoting the whole pile while the run spares part of it.
++  assert.match(ws, /captionRecaptionLabel\(counts, captionScope, recaptionInert,\s+captionIncludeAsserted\)/);
+   assert.match(ws, /title=\{recaptionInert \|\| recaptionNote\}/);
+ });
+ 
+@@ -177,3 +179,24 @@ test('re-caption has a help topic pointing at a real guide anchor', () => {
+   assert.ok(headings.includes(anchor[1]),
+     `no guide heading resolves to #${anchor[1]}`);
+ });
++
++test('the opt-out is a separate, unticked gesture that only shows when it matters', () => {
++  // The protection's way out. Three properties, and each one is a way this could
++  // quietly become the default instead of an exception:
++  //   - it starts false, so the destructive reading is never what you get by
++  //     doing nothing;
++  const boot = ws.slice(ws.indexOf('const [captionIncludeAsserted'),
++    ws.indexOf('const [captionIncludeAsserted') + 120);
++  assert.match(boot, /useState\(false\)/);
++  //   - the key is spread in ONLY when ticked, so an untouched panel posts the
++  //     same body it posted before this existed;
++  const call = ws.slice(ws.indexOf('const startRecaption'),
++    ws.indexOf('const startRecaption') + 1600);
++  assert.match(call, /captionIncludeAsserted \? \{ include_asserted: true \} : \{\}/);
++  //   - and the control is rendered only when the helper has a label, i.e. only
++  //     when there is something to protect.
++  assert.match(ws, /\{includeAssertedLabel && \(/);
++  assert.match(ws, /const includeAssertedLabel = captionIncludeAssertedLabel\(/);
++  // The confirmation is handed the same state, so what it says matches what runs.
++  assert.match(call, /captionRecaptionConfirmation\(counts, captionScope,\s+captionIncludeAsserted\)/);
++});
+diff --git a/frontend/src/help/helpRegistry.js b/frontend/src/help/helpRegistry.js
+index 91e88798..7e4f908e 100644
+--- a/frontend/src/help/helpRegistry.js
++++ b/frontend/src/help/helpRegistry.js
+@@ -479,7 +479,13 @@ const TOPICS = [
+      'button greyed out', 'greyed out', 'disabled', 'cannot caption',
+      'already captioned', 'nothing to caption', 'model picker does nothing',
+      'undo captions', 'undo', 'lost my captions', 'destroyed', 'edited by hand',
+-     'hand written', 'manual caption', 'bank', 'triage', 'caption', 'captions'],
++     'hand written', 'manual caption', 'bank', 'triage', 'caption', 'captions',
++     // The protection and its way out: what someone types when they want to know
++     // whether their own words are safe, or when they want them redone anyway.
++     'who wrote this caption', 'caption origin', 'provenance', 'authorship',
++     'skipped my captions', 'it kept my captions', 'why was it skipped',
++     'origin never recorded', 'unknown origin', 'also rewrite the ones i wrote',
++     'include my captions', 'rewrite my own captions', 'asserted'],
+     '/bank', 'using-the-app', 'redo-the-captions-of-a-bank-with-a-different-model'),
+   action('bank-exclude-words', 'Hide bank images that already carry a word',
+     ['exclude', 'exclude words', 'hide', 'hide images', 'without', 'not',
+diff --git a/frontend/src/whatsNew.js b/frontend/src/whatsNew.js
+index e61f6265..96ff42ff 100644
+--- a/frontend/src/whatsNew.js
++++ b/frontend/src/whatsNew.js
+@@ -47,6 +47,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
+ 
+ // Newest first. Prepend new waves at the top.
+ export const WHATS_NEW = [
++  {
++    id: '2026-08-05-re-caption-keeps-the-captions-you-wrote-yourself',
++    date: '2026-08-05',
++    title: 'Re-caption no longer destroys the captions you wrote yourself',
++    blurb:
++      '🔄 Re-caption used to warn you, honestly, that it could not tell a caption you had typed from one a model had written — one column, one string, no author. It can now: every caption records who wrote it, whether that is JoyCaption, Ollama, or you (typing one in a dataset, running a find/replace, or bringing .txt files back from another tool), and that record travels with the text through dataset → bank, bank → bank, promotion and backups. So a forced run keeps your own words and says so, the way the face pass already skips a person you declared yourself. The button now tells you three separate things instead of two: how many images it rewrites, how many captions it keeps because you wrote them, and how many it overwrites whose author was never recorded — captions written before this existed, which cannot be recovered and are re-captioned, so you learn that before the click and not after. If you actually want your own captions redone by a better model there is a tick box for it, offered only when you have something to lose.',
++    to: '/bank',
++  },
+   {
+     id: '2026-08-04-the-app-stops-claiming-a-full-model-it-has-not-checked',
+     date: '2026-08-04',

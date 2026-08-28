@@ -1,0 +1,421 @@
+commit 14a2aedb26dc9ab9cbe6473926c9e17b1b96ea18
+Author: lora-dataset-studio <noreply@lora-dataset-studio.dev>
+Date:   Tue Aug 18 15:10:03 2026 +0200
+
+    fix(captions): a forced dataset pass now keeps its promise to hand-written captions
+    
+    The caption editor's tooltip and models.py have promised since the origin
+    column shipped that a forced 🔄 Re-caption SKIPS 'asserted' rows. The bank pass
+    kept that promise from day one; the dataset pass overwrote everything — a
+    hand-typed caption included — on every forced batch. Two-surfaces drift, now
+    closed on the dataset side:
+    
+    - a forced BATCH filters caption_origin.unprotected_clause in the same query
+      that sizes the run, on both the character/style and concept lanes;
+    - naming images (image_ids) is the explicit opt-out: the leak panel re-captions
+      a leaking caption no matter who wrote it;
+    - a caption typed WHILE an image sits in inference wins over the answer that
+      inference returns (the bank's mid-pass guard, ported to every write site);
+    - the dual-caption derive pass extends the same promise to hand-written shorts;
+    - the Re-caption confirm quotes only what the pass will actually rewrite, and
+      the button disables itself when every caption is hand-written instead of
+      offering a run that would do nothing.
+---
+ backend/app/routes/datasets.py                     |   8 +-
+ backend/app/services/face_dataset_service.py       |  61 ++++++++-
+ backend/tests/test_caption_asserted_protection.py  | 140 +++++++++++++++++++++
+ .../src/components/dataset/DatasetWorkspace.jsx    |  13 +-
+ frontend/src/components/dataset/captionCategory.js |  10 +-
+ 5 files changed, 223 insertions(+), 9 deletions(-)
+
+diff --git a/backend/app/routes/datasets.py b/backend/app/routes/datasets.py
+index e63df65f..e50e57b4 100644
+--- a/backend/app/routes/datasets.py
++++ b/backend/app/routes/datasets.py
+@@ -1018,8 +1018,12 @@ def dataset_caption(dataset_id):
+     """Caption the kept images. Optional {image_ids:[...]} scopes the pass to a subset
+     (the Identity-leak panel re-captions one leaking image, or all of them, in place) —
+     a targeted call always OVERWRITES (those captions already exist), so it implies
+-    force. Omitted → the whole-dataset batch, gated by {force} as before. Same engine,
+-    mode and kind rules for both; serialized against training by the vision window."""
++    force. Omitted → the whole-dataset batch, gated by {force} as before. A forced
++    BATCH spares the captions a human wrote or corrected (caption_origin 'asserted'),
++    exactly as the caption editor promises; naming images is the explicit opt-out
++    that rewrites those too — same protection shape as the bank's caption endpoint.
++    Same engine, mode and kind rules for both; serialized against training by the
++    vision window."""
+     ds = svc.get_dataset(LOCAL_USER, dataset_id)
+     if not ds:
+         return jsonify({'error': 'not found'}), 404
+diff --git a/backend/app/services/face_dataset_service.py b/backend/app/services/face_dataset_service.py
+index 39132af0..c9481534 100644
+--- a/backend/app/services/face_dataset_service.py
++++ b/backend/app/services/face_dataset_service.py
+@@ -7288,6 +7288,16 @@ def _enforce_concept_omission(caption, leak_re, image_bytes, concept_desc, descr
+     return caption
+ 
+ 
++def _caption_write_blocked(img, *, force, spare_asserted, field='caption'):
++    """A caption that appeared on the row while its image sat in inference wins
++    over the machine's answer: the pass planned its work minutes ago, and a
++    human has typed since. Mirror of the bank pass's mid-pass guard — the two
++    surfaces must spare hand-written words the same way."""
++    if not force and (getattr(img, field, None) or '').strip():
++        return True
++    return spare_asserted and caption_origin.is_protected(img, field=field)
++
++
+ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                      ollama_model=None, extra_instructions='', report=None,
+                      outcome=None):
+@@ -7312,8 +7322,15 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+     q = FaceDatasetImage.query.filter_by(dataset_id=ds.id, status='keep')
+     if image_ids is not None:
+         q = q.filter(FaceDatasetImage.id.in_(image_ids))
++    # A forced BATCH spares the captions a human wrote or corrected ('asserted')
++    # — the promise the caption editor's tooltip makes. Naming images is the
++    # explicit opt-out: the leak panel re-captions a leaking caption no matter
++    # who wrote it. Same shape as the bank pass (start_caption).
++    spare_asserted = bool(force) and image_ids is None
+     if not force:
+         q = q.filter((FaceDatasetImage.caption.is_(None)) | (FaceDatasetImage.caption == ''))
++    elif spare_asserted:
++        q = q.filter(caption_origin.unprotected_clause(FaceDatasetImage))
+     # (image_id, path), not (row, path): the loops below commit per image and
+     # this pass runs for a long time over a live grid. See _live_image_row.
+     todo = [(img.id, _img_path(img)) for img in q.all() if img.filename]
+@@ -7325,6 +7342,7 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                               detail=f'Preparing {len(todo)} concept caption(s)…')
+     n = 0
+     vanished = 0
++    spared = 0           # hand-written ('asserted') captions left untouched
+     remaining = list(todo)
+     refine_targets = []  # (image_id, p, joycap) -> Joy draft refined by Qwen
+     # 1) JoyCaption batch (draft) when the backend allows it.
+@@ -7377,6 +7395,9 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+             if img is None:      # deleted while the pass ran
+                 vanished += 1
+                 continue
++            if _caption_write_blocked(img, force=force, spare_asserted=spare_asserted):
++                spared += 1
++                continue
+             try:
+                 with open(p, 'rb') as fh:
+                     data = fh.read()
+@@ -7467,6 +7488,9 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                 if img is None:
+                     vanished += 1
+                     continue
++                if _caption_write_blocked(img, force=force, spare_asserted=spare_asserted):
++                    spared += 1
++                    continue
+                 if not _usable_caption(final):
+                     # Refine AND direct both unusable → fall back to the Joy draft (clean
+                     # prose), scrubbed of any leak; leave blank if even that fails.
+@@ -7508,6 +7532,9 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+                 if img is None:
+                     vanished += 1
+                     continue
++                if _caption_write_blocked(img, force=force, spare_asserted=spare_asserted):
++                    spared += 1
++                    continue
+                 if _usable_caption(cap):
+                     caption_origin.stamp(img, _cap_caption(cap), caption_origin.OLLAMA)
+                     db.session.commit()
+@@ -7527,6 +7554,8 @@ def _caption_concept(ds, force, backend, token=None, image_ids=None,
+     if vanished:
+         logger.info('caption concept: %s image(s) were deleted while the pass ran, '
+                     'skipped', vanished)
++    if spared:
++        logger.info('caption concept: %s hand-written caption(s) spared', spared)
+     return n
+ 
+ 
+@@ -7644,8 +7673,15 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None,
+     q = FaceDatasetImage.query.filter_by(dataset_id=dataset_id, status='keep')
+     if ids is not None:
+         q = q.filter(FaceDatasetImage.id.in_(ids))
++    # A forced BATCH spares the captions a human wrote or corrected ('asserted')
++    # — the promise the caption editor's tooltip makes. Naming images is the
++    # explicit opt-out: the leak panel re-captions a leaking caption no matter
++    # who wrote it. Same shape as the bank pass (start_caption).
++    spare_asserted = bool(force) and ids is None
+     if not force:
+         q = q.filter((FaceDatasetImage.caption.is_(None)) | (FaceDatasetImage.caption == ''))
++    elif spare_asserted:
++        q = q.filter(caption_origin.unprotected_clause(FaceDatasetImage))
+     rows = q.all()
+     # (image_id, path), not (row, path): both loops below commit per image, which
+     # expires every row still to come, and this pass runs for minutes-to-hours
+@@ -7666,6 +7702,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None,
+     try:
+         n = 0
+         vanished = 0
++        spared = 0           # hand-written ('asserted') captions left untouched
+         remaining = todo
+         # In 'auto', why JoyCaption didn't contribute (deps missing / crash). Kept so a
+         # LATER Ollama failure reports BOTH reasons instead of only the Ollama one —
+@@ -7715,6 +7752,11 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None,
+                         vanished += 1
+                         dataset_activity.bump(token)
+                         continue
++                    if _caption_write_blocked(img, force=force,
++                                              spare_asserted=spare_asserted):
++                        spared += 1
++                        dataset_activity.bump(token)
++                        continue
+                     cleaned = cleaner(cap) or cap
+                     caption_origin.stamp(img, _cap_caption(cleaned),
+                                          caption_origin.JOYCAPTION)
+@@ -7776,6 +7818,11 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None,
+                             vanished += 1
+                             dataset_activity.bump(token)
+                             continue
++                        if _caption_write_blocked(img, force=force,
++                                                  spare_asserted=spare_asserted):
++                            spared += 1
++                            dataset_activity.bump(token)
++                            continue
+                         cleaned = cleaner(cap) or cap
+                         # Which engine wrote THIS row, not which backend was asked
+                         # for: in 'auto' the two branches both write inside one run.
+@@ -7796,8 +7843,9 @@ def caption_images(user_id, dataset_id, force=False, mode=None, image_ids=None,
+             finally:
+                 unload_vision_model()  # libère la VRAM pour ComfyUI en fin de batch
+         logger.info('captioning finished: dataset=%s backend=%s captioned=%s '
+-                    'deleted_mid_pass=%s elapsed=%.1fs',
+-                    dataset_id, backend, n, vanished, time.monotonic() - started)
++                    'deleted_mid_pass=%s spared_asserted=%s elapsed=%.1fs',
++                    dataset_id, backend, n, vanished, spared,
++                    time.monotonic() - started)
+         return n
+     except Exception:
+         logger.exception('captioning failed: dataset=%s backend=%s elapsed=%.1fs',
+@@ -8151,8 +8199,14 @@ def derive_short_captions(user_id, dataset_id, image_ids=None, force=False, mode
+             return 0
+         q = q.filter(FaceDatasetImage.id.in_(ids))
+     rows = [i for i in q.all() if (i.caption or '').strip()]
++    # Same promise as the long pass: a forced batch never rewrites a short a
++    # human typed in the expanded editor; naming images is the explicit opt-out.
++    spare_asserted = bool(force) and image_ids is None
+     if not force:
+         rows = [i for i in rows if not (i.caption_short or '').strip()]
++    elif spare_asserted:
++        rows = [i for i in rows
++                if not caption_origin.is_protected(i, field='caption_short')]
+     if not rows:
+         return 0
+     if generate is None:
+@@ -8202,6 +8256,9 @@ def derive_short_captions(user_id, dataset_id, image_ids=None, force=False, mode
+             if img is None:      # deleted DURING its own generation
+                 vanished += 1
+                 continue
++            if _caption_write_blocked(img, force=force, spare_asserted=spare_asserted,
++                                      field='caption_short'):
++                continue
+             # The SHORT gets its own stamp, on its own column: this pass derives it
+             # with a text model while the long caption above it may well have been
+             # typed by hand. One origin for the two would mislabel one of them.
+diff --git a/backend/tests/test_caption_asserted_protection.py b/backend/tests/test_caption_asserted_protection.py
+new file mode 100644
+index 00000000..51fa33a1
+--- /dev/null
++++ b/backend/tests/test_caption_asserted_protection.py
+@@ -0,0 +1,140 @@
++"""A forced caption pass never rewrites a human's words.
++
++The caption editor is where 'asserted' is born, and its tooltip has promised
++since the origin column shipped that "a forced 🔄 Re-caption then skips it".
++The bank pass kept that promise from day one (``start_caption`` prices and
++walks a query filtered by ``caption_origin.unprotected_clause``); the dataset
++pass did not — ``force=True`` overwrote every kept caption, hand-written ones
++included. Classic two-surfaces drift (CLAUDE.md): the protection existed once,
++on one of two passes that make the same promise to the user.
++
++Pinned here, on the dataset side:
++
++* a forced BATCH spares 'asserted' rows and rewrites everything else — a NULL
++  origin stays re-captionable on purpose (``models.py`` says why);
++* naming images (``image_ids``) is the explicit opt-out — the leak panel
++  re-captions a leaking caption no matter who wrote it;
++* a caption the user types WHILE an image sits in inference wins over the
++  answer that inference returns (the bank's mid-pass guard, ported);
++* the dual-caption derive pass extends the same promise to hand-written shorts.
++"""
++import json
++import os
++
++from PIL import Image
++
++from app.extensions import db
++from app.models import FaceDatasetImage
++from app.services import caption_origin
++from app.services import face_dataset_service as svc
++from app.config import LOCAL_USER, save_config
++
++
++def _kept_image(ds, fn, caption=None, origin=None):
++    img_dir = svc._dataset_dir(ds.id)
++    os.makedirs(img_dir, exist_ok=True)
++    Image.new('RGB', (32, 32)).save(os.path.join(img_dir, fn))
++    row = FaceDatasetImage(dataset_id=ds.id, status='keep', filename=fn,
++                           caption=caption, caption_origin=origin)
++    db.session.add(row)
++    db.session.commit()
++    return row.id
++
++
++def _ollama(monkeypatch, text='an ollama caption of a person in a room'):
++    from app.services import vision_ollama
++    monkeypatch.setattr(vision_ollama, 'describe_image_ollama',
++                        lambda *a, **k: text)
++    monkeypatch.setattr(vision_ollama, 'unload_vision_model', lambda *a, **k: True)
++
++
++def test_forced_batch_spares_hand_written_captions(app, monkeypatch):
++    _ollama(monkeypatch)
++    with app.app_context():
++        save_config({'captioning': {'backend': 'ollama'}})
++        ds = svc.create_dataset(LOCAL_USER, 'Emma', 'zchar_emma')
++        asserted = _kept_image(ds, 'a.png', caption='my own words',
++                               origin=caption_origin.ASSERTED)
++        machine = _kept_image(ds, 'b.png', caption='machine words',
++                              origin=caption_origin.OLLAMA)
++        legacy = _kept_image(ds, 'c.png', caption='pre-origin words', origin=None)
++        n = svc.caption_images(LOCAL_USER, ds.id, force=True)
++        assert n == 2, 'the forced batch must rewrite exactly the non-asserted rows'
++        assert db.session.get(FaceDatasetImage, asserted).caption == 'my own words', (
++            "the editor's tooltip promises a forced Re-caption skips hand-written "
++            'captions — the dataset pass just overwrote one')
++        assert db.session.get(FaceDatasetImage, machine).caption != 'machine words'
++        assert db.session.get(FaceDatasetImage, legacy).caption != 'pre-origin words', (
++            'a NULL origin is re-captionable on purpose — sparing it would make '
++            'Re-caption inert on every dataset that predates the origin column')
++
++
++def test_targeted_recaption_rewrites_an_asserted_caption(app, monkeypatch):
++    """Pointing at the image IS the ask: the Identity-leak panel re-captions a
++    leaking caption regardless of who wrote it."""
++    _ollama(monkeypatch)
++    with app.app_context():
++        save_config({'captioning': {'backend': 'ollama'}})
++        ds = svc.create_dataset(LOCAL_USER, 'Emma', 'zchar_emma')
++        asserted = _kept_image(ds, 'a.png', caption='my leaking words',
++                               origin=caption_origin.ASSERTED)
++        n = svc.caption_images(LOCAL_USER, ds.id, force=True, image_ids=[asserted])
++        assert n == 1
++        assert db.session.get(FaceDatasetImage, asserted).caption != 'my leaking words'
++
++
++def test_a_caption_typed_mid_pass_survives_the_pass(app, monkeypatch):
++    """The pass plans its work before inference starts; a human can type into
++    the editor while the model is still thinking. Their words win — on both
++    surfaces (this is the bank's mid-pass guard, ported)."""
++    from app.services import vision_ollama
++
++    with app.app_context():
++        save_config({'captioning': {'backend': 'ollama'}})
++        ds = svc.create_dataset(LOCAL_USER, 'Emma', 'zchar_emma')
++        image_id = _kept_image(ds, 'a.png', caption='machine words',
++                               origin=caption_origin.OLLAMA)
++
++        def type_during_inference(*a, **k):
++            row = db.session.get(FaceDatasetImage, image_id)
++            caption_origin.stamp(row, 'typed while the model was thinking',
++                                 caption_origin.ASSERTED)
++            db.session.commit()
++            return 'the answer inference returns'
++
++        monkeypatch.setattr(vision_ollama, 'describe_image_ollama',
++                            type_during_inference)
++        monkeypatch.setattr(vision_ollama, 'unload_vision_model',
++                            lambda *a, **k: True)
++        svc.caption_images(LOCAL_USER, ds.id, force=True)
++        assert (db.session.get(FaceDatasetImage, image_id).caption
++                == 'typed while the model was thinking'), (
++            'a caption written during inference must not be replaced by the '
++            'answer that inference returns')
++
++
++def test_derive_short_spares_a_hand_written_short(app):
++    with app.app_context():
++        ds = svc.create_dataset(LOCAL_USER, 'Emma', 'zchar_emma')
++        ds.train_settings = json.dumps({'dual_captions': True})
++        db.session.commit()
++        yours = _kept_image(ds, 'a.png', caption='a long machine caption',
++                            origin=caption_origin.OLLAMA)
++        row = db.session.get(FaceDatasetImage, yours)
++        caption_origin.stamp(row, 'my own short', caption_origin.ASSERTED,
++                             field='caption_short')
++        machine = _kept_image(ds, 'b.png', caption='another long caption',
++                              origin=caption_origin.OLLAMA)
++        row = db.session.get(FaceDatasetImage, machine)
++        caption_origin.stamp(row, 'machine short', caption_origin.OLLAMA,
++                             field='caption_short')
++        db.session.commit()
++        n = svc.derive_short_captions(LOCAL_USER, ds.id, force=True,
++                                      generate=lambda p: 'a derived short')
++        assert n == 1, 'the forced derive must rewrite exactly the machine short'
++        assert (db.session.get(FaceDatasetImage, yours).caption_short
++                == 'my own short'), (
++            'the expanded editor stamps shorts asserted too — the derive pass '
++            'must spare them like the long pass spares longs')
++        assert (db.session.get(FaceDatasetImage, machine).caption_short
++                == 'a derived short')
+diff --git a/frontend/src/components/dataset/DatasetWorkspace.jsx b/frontend/src/components/dataset/DatasetWorkspace.jsx
+index a8578ee9..2a5d1f10 100644
+--- a/frontend/src/components/dataset/DatasetWorkspace.jsx
++++ b/frontend/src/components/dataset/DatasetWorkspace.jsx
+@@ -600,6 +600,11 @@ export default function DatasetWorkspace({ ds, onBack }) {
+     && !isSmallImageRescueRow(i)).length;
+   const keptUncaptioned = images.filter((i) => i.status === 'keep' && !i.caption).length;
+   const keptCaptioned = kept - keptUncaptioned;
++  // Hand-written captions ('asserted'): a forced 🔄 Re-caption spares them, so the
++  // confirm and the button must count only what the pass will actually rewrite.
++  const keptAsserted = images.filter((i) => i.status === 'keep' && i.caption
++    && i.caption_origin === 'asserted').length;
++  const recaptionable = keptCaptioned - keptAsserted;
+   // Captions that still leak identity/concept — the Identity-leak panel lists them for
+   // in-place edit AND targeted 🔄 Re-caption (per row + a "Re-caption all leaking" header).
+   const leakingImages = images.filter((i) => i.leak);
+@@ -1693,11 +1698,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
+                   {ds.captioning ? `✨ ${keptCaptioned}/${kept} captioned…` : '✨ Caption the kept ones'}
+                 </button>
+                 <HelpBadge topic="action-caption-generate" />
+-                <button type="button" disabled={ds.busy || !keptCaptioned}
++                <button type="button" disabled={ds.busy || !recaptionable}
+                   onClick={() => {
+-                    if (window.confirm(recaptionConfirmation(d.kind || 'character', keptCaptioned))) ds.recaption(effCaptionMode);
++                    if (window.confirm(recaptionConfirmation(d.kind || 'character', recaptionable, keptAsserted))) ds.recaption(effCaptionMode);
+                   }}
+-                  title={isConcept
++                  title={keptCaptioned && !recaptionable
++                    ? 'Every existing caption is hand-written — a forced pass never rewrites those. Edit or clear them on their tiles instead.'
++                    : isConcept
+                     ? "Re-generates every caption while keeping the recurring concept unspoken"
+                     : isStyle
+                       ? "Re-generates every caption as content-only text without naming the aesthetic"
+diff --git a/frontend/src/components/dataset/captionCategory.js b/frontend/src/components/dataset/captionCategory.js
+index 489b1ea2..41644d2d 100644
+--- a/frontend/src/components/dataset/captionCategory.js
++++ b/frontend/src/components/dataset/captionCategory.js
+@@ -54,11 +54,17 @@ export function captionCategoryCopy(kind = 'character', mode = 'prose') {
+   }
+ }
+ 
+-export function recaptionConfirmation(kind = 'character', count = 0) {
++export function recaptionConfirmation(kind = 'character', count = 0, asserted = 0) {
+   const rule = kind === 'concept'
+     ? 'The new captions will describe the scene while leaving the recurring concept unspoken.'
+     : kind === 'style'
+       ? 'The new captions will describe image content while leaving the aesthetic/style unspoken.'
+       : 'The new captions will describe the scene without describing the character identity.'
+-  return `Re-captioning overwrites the ${count} existing caption(s). ${rule} Continue?`
++  // `count` is what the pass will actually rewrite: hand-written ('asserted')
++  // captions are spared by the server, so quoting them here would announce work
++  // the pass refuses to do.
++  const overwrite = asserted > 0
++    ? `Re-captioning overwrites the ${count} machine-written caption(s) — your ${asserted} hand-written one(s) are kept.`
++    : `Re-captioning overwrites the ${count} existing caption(s).`
++  return `${overwrite} ${rule} Continue?`
+ }
