@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -173,6 +174,10 @@ def test_omitted_regeneration_engine_uses_stored_api_origin(
 
 def test_images_endpoint_is_cursor_paginated(client, app):
     ds_id = _create(client).get_json()['id']
+    legacy_analysis = json.dumps({
+        'analysis_version': 1,
+        'metrics': {'sharpness': 33, 'exposure': 70, 'resolution': 55},
+    }, separators=(',', ':'))
     with app.app_context():
         from app.extensions import db
         from app.models import FaceDatasetImage
@@ -180,6 +185,9 @@ def test_images_endpoint_is_cursor_paginated(client, app):
             db.session.add(FaceDatasetImage(
                 dataset_id=ds_id, source='generated', status='pending',
                 variation_label=f'row-{index}', caption=f'caption-{index}',
+                analysis_json=(
+                    legacy_analysis if index == 0 else
+                    json.dumps({'analysis_version': 2}) if index == 1 else None),
                 caption_origin=(
                     'asserted' if index == 0 else
                     'joycaption' if index == 1 else None),
@@ -206,6 +214,14 @@ def test_images_endpoint_is_cursor_paginated(client, app):
     assert [row['caption_origin'] for row in paged] == [None, None, None,
                                                         'joycaption', 'asserted']
     assert all('caption_provenance' not in row for row in paged + full)
+    assert [row['analysis'] for row in paged] == [row['analysis'] for row in full]
+    assert sum(row['analysis'].get('analysis_version') == 2 for row in paged) == 1
+    assert sum(row['analysis'].get('analysis_version') == 1 for row in paged) == 1
+    assert sum('analysis_version' not in row['analysis'] for row in paged) == 3
+    with app.app_context():
+        legacy = FaceDatasetImage.query.filter_by(
+            dataset_id=ds_id, variation_label='row-0').one()
+        assert legacy.analysis_json == legacy_analysis
 
 
 def test_images_endpoint_validates_cursor_and_status(client):
@@ -295,7 +311,7 @@ def test_dataset_event_stream_exposes_revision_and_activity(client):
     assert '"metadata_revision":' in body
 
 
-def test_corpus_workbench_routes(client):
+def test_corpus_workbench_routes(client, app):
     ds_id = _create(client, 'Corpus API', 'corpus_api').get_json()['id']
     files = {'files': (io.BytesIO(_png_bytes((40, 80, 120))), 'portrait.png')}
     imported = client.post(f'/api/dataset/{ds_id}/import', data=files,
@@ -316,6 +332,16 @@ def test_corpus_workbench_routes(client):
     assert client.post(f'/api/dataset/image/{image_id}/rights', json={
         'basis': 'owned', 'consent_confirmed': True,
     }).status_code == 200
+    with app.app_context():
+        from app.extensions import db
+        from app.models import FaceDatasetImage
+        row = db.session.get(FaceDatasetImage, image_id)
+        row.analysis_json = json.dumps({
+            'analysis_version': 1,
+            'metrics': {'sharpness': 1, 'exposure': 2, 'resolution': 3},
+            'face': {'quality': 'green', 'face_sharpness': 81},
+        })
+        db.session.commit()
     assert client.post(f'/api/dataset/{ds_id}/coverage-policy', json={
         'profile': 'experimental', 'targets': {'framing': {'face': 5}},
     }).status_code == 200
@@ -326,7 +352,14 @@ def test_corpus_workbench_routes(client):
     assert payload['images'][0]['coverage']['lighting'] == 'studio'
     assert payload['images'][0]['coverage_provenance']['source'] == 'manual'
     assert payload['images'][0]['source_rights']['basis'] == 'owned'
+    assert payload['images'][0]['analysis']['analysis_version'] == 2
+    assert payload['images'][0]['analysis']['face'] == {
+        'quality': 'green', 'face_sharpness': 81,
+    }
     assert payload['coverage_profile'] == 'experimental'
+    paged = client.get(f'/api/dataset/{ds_id}/images?limit=1').get_json()
+    assert paged['images'][0]['analysis']['analysis_version'] == 2
+    assert paged['images'][0]['coverage']['lighting'] == 'studio'
 
 
 def test_list_carries_library_stats(client, app):

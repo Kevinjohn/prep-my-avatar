@@ -1,11 +1,19 @@
 """Deterministic sharpness contracts for the local import analysis pass."""
 
+import io
 import math
 
 import pytest
 from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
-from backend.app.services.import_analysis import _bounded_score, _sharpness_score
+from backend.app.services.import_analysis import (
+    ANALYSIS_VERSION,
+    _bounded_score,
+    _nearest_rank_percentile,
+    _sharpness_score,
+    _sharpness_tile_boxes,
+    analyse_image_bytes,
+)
 
 
 LOW_SHARPNESS_MAX = 34
@@ -89,6 +97,12 @@ def _v1_whole_frame_score(image):
     return _bounded_score(math.sqrt(max(variance, 0)) * 3.2)
 
 
+def _png_bytes(image):
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
 def test_fixture_reproduces_the_whole_frame_bokeh_failure():
     bokeh = _bokeh_fixture()
 
@@ -120,3 +134,44 @@ def test_sharpness_category_contract_is_bounded_and_deterministic(
     assert type(first) is int
     assert minimum <= first <= maximum
     assert second == first
+
+
+def test_sharpness_grid_and_nearest_rank_contract():
+    boxes = _sharpness_tile_boxes((1, 1, 767, 511))
+
+    assert len(boxes) == 64
+    assert all(right - left >= 32 for left, _top, right, _bottom in boxes)
+    assert all(bottom - top >= 32 for _left, top, _right, bottom in boxes)
+    assert _sharpness_tile_boxes((1, 1, 31, 25)) == [(1, 1, 31, 25)]
+    assert _nearest_rank_percentile(list(range(1, 11)), 0.90) == 9
+    assert _nearest_rank_percentile(list(range(1, 65)), 0.90) == 58
+
+
+def test_sharpness_filters_once_per_signed_half_and_ignores_outer_border(monkeypatch):
+    calls = 0
+    original = Image.Image.filter
+
+    def tracked_filter(image, image_filter):
+        nonlocal calls
+        if isinstance(image_filter, ImageFilter.Kernel):
+            calls += 1
+        return original(image, image_filter)
+
+    monkeypatch.setattr(Image.Image, "filter", tracked_filter)
+
+    assert _sharpness_score(Image.new("RGB", (128, 128), "grey")) == 0
+    assert calls == 2
+
+
+def test_new_analysis_version_is_two():
+    assert ANALYSIS_VERSION == 2
+
+    bokeh = analyse_image_bytes(_png_bytes(_bokeh_fixture()), "bokeh.png")
+    blurred = analyse_image_bytes(_png_bytes(_uniform_blur_fixture()), "blurred.png")
+
+    assert bokeh["analysis_version"] == 2
+    assert bokeh["source_name"] == "bokeh.png"
+    assert "low sharpness" not in bokeh["reasons"]
+    assert "borderline sharpness" not in bokeh["reasons"]
+    assert blurred["metrics"]["sharpness"] <= LOW_SHARPNESS_MAX
+    assert "low sharpness" in blurred["reasons"]

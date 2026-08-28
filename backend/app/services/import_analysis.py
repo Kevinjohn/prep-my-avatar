@@ -13,10 +13,26 @@ import json
 import math
 from typing import Any
 
-from PIL import Image, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageFilter, ImageOps
 
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
+
+_SHARPNESS_THUMBNAIL_SIDE = 768
+_LAPLACIAN = (0, 1, 0, 1, -4, 1, 0, 1, 0)
+_LAPLACIAN_NEG = tuple(-coefficient for coefficient in _LAPLACIAN)
+# Scaling each signed half by four keeps the complete 4-neighbour response in
+# Pillow's 8-bit output without clipping. The original magnitude is restored
+# when the histogram moments are combined below.
+_LAPLACIAN_SCALE = 4
+_SHARPNESS_TILE_GRID = 8
+_SHARPNESS_TILE_MIN_SIDE = 32
+_SHARPNESS_PERCENTILE = 0.90
+# PROVISIONAL: separates the deterministic contract corpus while preserving the
+# existing 35/55 public bands. Checkpoint QS cannot sign this off until the same
+# mapping is recalibrated against rights-cleared real photographs as documented
+# in tasks/reference-corpus/README.md.
+_SHARPNESS_SCORE_SCALE = 13.5
 
 
 def _bounded_score(value: float) -> int:
@@ -36,11 +52,90 @@ def _grey_thumbnail(image: Image.Image, side: int) -> Image.Image:
     return grey
 
 
+def _histogram_moments(histogram: list[int]) -> tuple[float, float]:
+    total = sum(histogram)
+    if not total:
+        return 0.0, 0.0
+    mean = sum(value * count for value, count in enumerate(histogram)) / total
+    mean_square = (
+        sum(value * value * count for value, count in enumerate(histogram)) / total
+    )
+    return mean, mean_square
+
+
+def _laplacian_variance(
+    positive: Image.Image, negative: Image.Image, box: tuple[int, int, int, int]
+) -> float:
+    """Recover signed Laplacian variance inside one already-filtered tile."""
+    positive_mean, positive_square = _histogram_moments(
+        positive.crop(box).histogram()
+    )
+    negative_mean, negative_square = _histogram_moments(
+        negative.crop(box).histogram()
+    )
+    mean = _LAPLACIAN_SCALE * (positive_mean - negative_mean)
+    mean_square = _LAPLACIAN_SCALE**2 * (
+        positive_square + negative_square
+    )
+    return max(0.0, mean_square - mean * mean)
+
+
+def _sharpness_tile_boxes(
+    box: tuple[int, int, int, int],
+) -> list[tuple[int, int, int, int]]:
+    """Split an interior into at most 8x8 tiles without creating tiny tiles."""
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    columns = max(
+        1, min(_SHARPNESS_TILE_GRID, width // _SHARPNESS_TILE_MIN_SIDE)
+    )
+    rows = max(1, min(_SHARPNESS_TILE_GRID, height // _SHARPNESS_TILE_MIN_SIDE))
+    xs = [left + round(index * width / columns) for index in range(columns + 1)]
+    ys = [top + round(index * height / rows) for index in range(rows + 1)]
+    return [
+        (xs[column], ys[row], xs[column + 1], ys[row + 1])
+        for row in range(rows)
+        for column in range(columns)
+    ]
+
+
+def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if not 0 < percentile <= 1:
+        raise ValueError("percentile must be in (0, 1]")
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1)
+    return ordered[index]
+
+
 def _sharpness_score(image: Image.Image) -> int:
-    thumbnail = _grey_thumbnail(image, 768)
-    edges = thumbnail.filter(ImageFilter.FIND_EDGES)
-    variance = ImageStat.Stat(edges).var[0]
-    return _bounded_score(math.sqrt(max(variance, 0)) * 3.2)
+    thumbnail = _grey_thumbnail(image, _SHARPNESS_THUMBNAIL_SIDE)
+    width, height = thumbnail.size
+    # Pillow leaves a one-pixel Kernel border unfiltered. Including that raw
+    # border makes a flat image appear sharp, so images without an interior have
+    # no usable focus signal.
+    if width < 3 or height < 3:
+        return 0
+    interior = (1, 1, width - 1, height - 1)
+    positive = thumbnail.filter(
+        ImageFilter.Kernel(
+            (3, 3), _LAPLACIAN, scale=_LAPLACIAN_SCALE
+        )
+    )
+    negative = thumbnail.filter(
+        ImageFilter.Kernel(
+            (3, 3), _LAPLACIAN_NEG, scale=_LAPLACIAN_SCALE
+        )
+    )
+    tile_variances = [
+        _laplacian_variance(positive, negative, tile)
+        for tile in _sharpness_tile_boxes(interior)
+    ]
+    regional_variance = _nearest_rank_percentile(
+        tile_variances, _SHARPNESS_PERCENTILE
+    )
+    return _bounded_score(math.sqrt(regional_variance) * _SHARPNESS_SCORE_SCALE)
 
 
 def _exposure_score(image: Image.Image) -> int:
