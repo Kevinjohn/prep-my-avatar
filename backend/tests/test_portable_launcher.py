@@ -99,6 +99,25 @@ def test_start_server_passes_supervision_contract_and_closes_parent_log(
     assert Path(captured['command'][-1]) == tmp_path / 'backend' / 'run.py'
 
 
+def test_start_server_bootstraps_private_env_once_from_bundle_template(
+        launcher, tmp_path, monkeypatch):
+    (tmp_path / 'python' / 'bin').mkdir(parents=True)
+    (tmp_path / 'python' / 'bin' / 'python').touch()
+    (tmp_path / 'backend').mkdir()
+    (tmp_path / 'backend' / 'run.py').touch()
+    (tmp_path / '.env.example').write_text(
+        'OPENAI_API_KEY=\nLDS_DEFAULT_GENERATION_ENGINE=klein\n', encoding='utf-8')
+    monkeypatch.setattr(launcher.subprocess, 'Popen', lambda *args, **kwargs: object())
+
+    launcher.start_server(tmp_path, '127.0.0.1', 5050)
+    env_path = tmp_path / 'data' / '.env'
+    assert env_path.read_text(encoding='utf-8').startswith('OPENAI_API_KEY=')
+
+    env_path.write_text('OPENAI_API_KEY=kept\n', encoding='utf-8')
+    launcher.start_server(tmp_path, '127.0.0.1', 5050)
+    assert env_path.read_text(encoding='utf-8') == 'OPENAI_API_KEY=kept\n'
+
+
 def test_restart_readiness_requires_acknowledged_nonce(launcher, monkeypatch):
     responses = iter((
         {'ok': True, 'restart_acknowledged': True, 'restart_nonce': 'b' * 32},

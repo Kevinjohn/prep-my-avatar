@@ -432,7 +432,7 @@ def _autostart_optional_klein():
 @bp.post('/dataset/<int:dataset_id>/generate')
 def dataset_generate(dataset_id):
     data = request.get_json(silent=True) or {}
-    generator = data.get('generator') or 'klein'
+    generator = data.get('generator') or cfg.get('engines.default') or 'klein'
     if generator not in {'klein', *svc.API_ENGINES}:
         return jsonify({'error': f'unsupported generator: {generator}'}), 400
     variations = data.get('variations') or []
@@ -449,6 +449,8 @@ def dataset_generate(dataset_id):
         return jsonify({'ok': False,
                         'error': 'NSFW variations run on the local Klein engine only — '
                                  'switch the generator to Klein.'}), 400
+    if generator not in (cfg.get('engines.enabled') or []):
+        return jsonify({'error': f'generator is disabled in Settings: {generator}'}), 400
     if generator in svc.API_ENGINES and not cfg.get('privacy.allow_remote_generation'):
         return jsonify({
             'ok': False,

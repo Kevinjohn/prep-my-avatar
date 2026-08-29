@@ -7,7 +7,9 @@ import secrets as _secrets
 import tempfile
 import threading
 from pathlib import Path
-from dotenv import load_dotenv
+from urllib.parse import urlparse
+
+from dotenv import dotenv_values, load_dotenv, set_key, unset_key
 
 LOCAL_USER = 'local'
 
@@ -20,8 +22,24 @@ def _data_dir() -> Path:
 def _config_path() -> Path:
     return Path(os.environ.get('LDS_CONFIG', str(REPO_ROOT / 'config.json')))
 
+# ``importlib.reload`` is used by the config tests and by a few integration
+# tools. Remove only values that a previous import injected from its dotenv;
+# real process variables are never touched.
+for _name, _value in globals().get('_DOTENV_INJECTED', {}).items():
+    if os.environ.get(_name) == _value:
+        os.environ.pop(_name, None)
+
 ENV_PATH = Path(os.environ.get('LDS_ENV', str(REPO_ROOT / '.env')))
-load_dotenv(ENV_PATH)
+_PROCESS_ENV = dict(os.environ)
+_DOTENV_VALUES = {
+    key: value for key, value in dotenv_values(ENV_PATH, interpolate=False).items()
+    if value is not None
+}
+load_dotenv(ENV_PATH, override=False, interpolate=False)
+_DOTENV_INJECTED = {
+    key: value for key, value in _DOTENV_VALUES.items()
+    if key not in _PROCESS_ENV and os.environ.get(key) == value
+}
 
 # REDDIT_CLIENT_ID / CIVITAI_API_KEY: scraping credentials (Settings > Scraping &
 # sources). Both scrape sources read their env var first, and set_secrets() stamps
@@ -52,7 +70,10 @@ DEFAULTS = {
     'engines': {'default': 'klein', 'enabled': ['klein'],
                 # chatgpt_auth: 'auto' = subscription when connected, else API key.
                 'chatgpt_auth': 'auto',            # auto|api|subscription
-                'chatgpt_subscription_model': 'gpt-5.4-mini'},   # Codex router model (image model is gpt-image-2 regardless)
+                'chatgpt_subscription_model': 'gpt-5.4-mini',
+                'openai_image_model': 'gpt-image-2',
+                'openai_image_quality': 'high',
+                'google_image_model': 'gemini-3-pro-image'},
     # Reference pixels and prompts stay on-device until the user explicitly
     # enables third-party generation in Settings.
     'privacy': {'allow_remote_generation': False},
@@ -113,6 +134,137 @@ _cache = None
 
 class ConfigError(ValueError):
     """The persisted configuration cannot be safely loaded or updated."""
+
+
+_ALLOWED_ENGINES = {'klein', 'nanobanana', 'chatgpt'}
+
+
+def _parse_text(name: str, value: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f'{name} must be a string')
+    result = value.strip()
+    if not result or any(character in result for character in '\r\n\x00'):
+        raise ConfigError(f'{name} must be a non-empty single-line value')
+    return result
+
+
+def _parse_choice(*choices):
+    allowed = set(choices)
+
+    def parse(name: str, value: str) -> str:
+        result = _parse_text(name, value)
+        if result not in allowed:
+            raise ConfigError(f'{name} must be one of {sorted(allowed)}')
+        return result
+
+    return parse
+
+
+def _parse_engines(name: str, value: str) -> list[str]:
+    engines = [item.strip() for item in value.split(',') if item.strip()]
+    if not engines or any(item not in _ALLOWED_ENGINES for item in engines) \
+            or len(engines) != len(set(engines)):
+        raise ConfigError(
+            f'{name} must contain unique valid engines from {sorted(_ALLOWED_ENGINES)}')
+    return engines
+
+
+def _parse_engine(name: str, value: str) -> str:
+    engine = _parse_text(name, value)
+    if engine not in _ALLOWED_ENGINES:
+        raise ConfigError(
+            f'{name} must be a valid engine from {sorted(_ALLOWED_ENGINES)}')
+    return engine
+
+
+def _parse_http_url(name: str, value: str) -> str:
+    result = _parse_text(name, value).rstrip('/')
+    parsed = urlparse(result)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc \
+            or parsed.username or parsed.password:
+        raise ConfigError(f'{name} must be an http(s) URL without credentials')
+    return result
+
+
+def _parse_optional_http_url(name: str, value: str) -> str:
+    if value == '':
+        return ''
+    return _parse_http_url(name, value)
+
+
+# Canonical names are intentionally LDS-prefixed. The three historical model
+# variables remain read-only aliases for compatibility; canonical names win.
+_ENV_SETTINGS = {
+    'engines.default': ('LDS_DEFAULT_GENERATION_ENGINE', (), _parse_engine),
+    'engines.enabled': ('LDS_ENABLED_GENERATION_ENGINES', (), _parse_engines),
+    'engines.chatgpt_auth': ('LDS_CHATGPT_AUTH', (),
+                             _parse_choice('auto', 'api', 'subscription')),
+    'engines.chatgpt_subscription_model': ('LDS_CHATGPT_SUBSCRIPTION_MODEL', (),
+                                             _parse_text),
+    'engines.openai_image_model': ('LDS_OPENAI_IMAGE_MODEL',
+                                    ('CHATGPT_IMAGE_MODEL',), _parse_text),
+    'engines.openai_image_quality': ('LDS_OPENAI_IMAGE_QUALITY',
+                                      ('CHATGPT_IMAGE_QUALITY',),
+                                      _parse_choice('low', 'medium', 'high')),
+    'engines.google_image_model': ('LDS_GOOGLE_IMAGE_MODEL',
+                                    ('NANOBANANA_MODEL',), _parse_text),
+    'ollama.url': ('LDS_OLLAMA_URL', (), _parse_http_url),
+    'ollama.vision_model': ('LDS_OLLAMA_VISION_MODEL',
+                            ('VISION_OLLAMA_MODEL',), _parse_text),
+    'comfyui.api_url': ('LDS_COMFYUI_API_URL', (), _parse_http_url),
+    'comfyui.base_dir': ('LDS_COMFYUI_BASE_DIR', (), _parse_text),
+}
+
+# Configurable defaults are parsed from the immutable snapshots above. Do not
+# leave dotenv copies in ``os.environ``: that would make provenance ambiguous
+# and would let a module reload mistake a file value for an operator override.
+for _canonical, _aliases, _parser in _ENV_SETTINGS.values():
+    for _name in (_canonical, *_aliases):
+        if _name not in _PROCESS_ENV and os.environ.get(_name) == _DOTENV_VALUES.get(_name):
+            os.environ.pop(_name, None)
+            _DOTENV_INJECTED.pop(_name, None)
+
+
+def _set_dotted(target: dict, dotted: str, value) -> None:
+    node = target
+    parts = dotted.split('.')
+    for part in parts[:-1]:
+        node = node.setdefault(part, {})
+    node[parts[-1]] = copy.deepcopy(value)
+
+
+def _has_dotted(target: dict, dotted: str) -> bool:
+    node = target
+    for part in dotted.split('.'):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _environment_layer() -> tuple[dict, dict]:
+    layer = {}
+    sources = {}
+    for dotted, (canonical, aliases, parser) in _ENV_SETTINGS.items():
+        selected = None
+        raw = None
+        source = None
+        for candidate in (canonical, *aliases):
+            if _PROCESS_ENV.get(candidate) not in (None, ''):
+                selected, raw, source = candidate, _PROCESS_ENV[candidate], 'environment'
+                break
+            if _DOTENV_VALUES.get(candidate) not in (None, ''):
+                selected, raw, source = candidate, _DOTENV_VALUES[candidate], 'dotenv'
+                break
+        if raw is None:
+            continue
+        value = parser(selected, raw)
+        _set_dotted(layer, dotted, value)
+        sources[dotted] = source
+        if selected != canonical:
+            logging.getLogger(__name__).warning(
+                '%s is deprecated; use %s instead', selected, canonical)
+    return layer, sources
 
 
 def _read_user_config(path: Path) -> dict:
@@ -178,6 +330,44 @@ def _write_private_text(path: Path, value: str) -> None:
             pass
         raise
 
+
+def _edited_dotenv_text(original: str, updates=None, removals=None) -> str:
+    """Use python-dotenv's writer so comments, export lines, and quoting survive."""
+    descriptor, temporary = tempfile.mkstemp(prefix='.lds-env-edit-', suffix='.env')
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(original)
+        for name in removals or ():
+            unset_key(str(temporary_path), name, quote_mode='always')
+        for name, value in (updates or {}).items():
+            set_key(str(temporary_path), name, value, quote_mode='always')
+        return temporary_path.read_text(encoding='utf-8')
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _refresh_dotenv_state() -> None:
+    global _DOTENV_VALUES, _DOTENV_INJECTED
+    _DOTENV_VALUES = {
+        key: value for key, value in dotenv_values(ENV_PATH, interpolate=False).items()
+        if value is not None
+    }
+    for name in SECRET_KEYS:
+        if (_PROCESS_ENV.get(name) or '').strip():
+            os.environ[name] = _PROCESS_ENV[name]
+        elif (_DOTENV_VALUES.get(name) or '').strip():
+            os.environ[name] = _DOTENV_VALUES[name]
+        else:
+            os.environ.pop(name, None)
+    _DOTENV_INJECTED = {
+        key: value for key, value in _DOTENV_VALUES.items()
+        if key not in _PROCESS_ENV and key not in {
+            name for canonical, aliases, _parser in _ENV_SETTINGS.values()
+            for name in (canonical, *aliases)
+        } and os.environ.get(key) == value
+    }
+
 def _deep_merge(base, override):
     out = copy.deepcopy(base)
     for k, v in (override or {}).items():
@@ -186,6 +376,39 @@ def _deep_merge(base, override):
         else:
             out[k] = copy.deepcopy(v)
     return out
+
+
+def _resolve_config(user: dict) -> dict:
+    environment, _ = _environment_layer()
+    resolved = _deep_merge(_deep_merge(DEFAULTS, environment), user)
+    if resolved.get('updates', {}).get('repo') == _LEGACY_UPDATE_REPO:
+        resolved['updates']['repo'] = DEFAULT_UPDATE_REPO
+    engines = resolved.get('engines', {})
+    enabled = engines.get('enabled')
+    if enabled == []:
+        # Historical empty lists meant "use legacy defaults" in the backend
+        # but "disable all" in the browser. Preserve that one migration.
+        engines['enabled'] = ['klein']
+        engines['default'] = 'klein'
+        enabled = engines['enabled']
+    if (not isinstance(enabled, list) or not enabled
+            or any(not isinstance(item, str) or item not in _ALLOWED_ENGINES
+                   for item in enabled)
+            or len(enabled) != len(set(enabled))):
+        raise ConfigError('engines.enabled must contain unique valid engines')
+    if engines.get('default') not in enabled:
+        raise ConfigError('engines.default must be included in engines.enabled')
+    _parse_choice('auto', 'api', 'subscription')(
+        'engines.chatgpt_auth', engines.get('chatgpt_auth'))
+    _parse_choice('low', 'medium', 'high')(
+        'engines.openai_image_quality', engines.get('openai_image_quality'))
+    for key in ('chatgpt_subscription_model', 'openai_image_model',
+                'google_image_model'):
+        _parse_text(f'engines.{key}', engines.get(key))
+    _parse_optional_http_url('ollama.url', resolved.get('ollama', {}).get('url'))
+    _parse_optional_http_url(
+        'comfyui.api_url', resolved.get('comfyui', {}).get('api_url'))
+    return resolved
 
 def load_config(force=False) -> dict:
     global _cache
@@ -196,20 +419,22 @@ def load_config(force=False) -> dict:
         p = _config_path()
         if p.exists():
             user = _read_user_config(p)
-        _cache = _deep_merge(DEFAULTS, user)
-        if _cache.get('updates', {}).get('repo') == _LEGACY_UPDATE_REPO:
-            _cache['updates']['repo'] = DEFAULT_UPDATE_REPO
-        engines = _cache.get('engines', {})
-        enabled = engines.get('enabled')
-        if enabled == []:
-            # Historical empty lists meant "use legacy defaults" in the
-            # backend but "disable all" in the browser. Migrate to the safest
-            # explicit local default so every consumer sees the same state.
-            engines['enabled'] = ['klein']
-            enabled = engines['enabled']
-        if isinstance(enabled, list) and enabled and engines.get('default') not in enabled:
-            engines['default'] = enabled[0]
+        _cache = _resolve_config(user)
         return copy.deepcopy(_cache)
+
+
+def config_sources() -> dict[str, str]:
+    """Return the winning source for every dotenv-configurable setting."""
+    user = {}
+    path = _config_path()
+    if path.exists():
+        user = _read_user_config(path)
+    _, environment_sources = _environment_layer()
+    return {
+        dotted: ('settings' if _has_dotted(user, dotted)
+                 else environment_sources.get(dotted, 'default'))
+        for dotted in _ENV_SETTINGS
+    }
 
 def save_config(partial: dict) -> dict:
     global _cache
@@ -219,9 +444,45 @@ def save_config(partial: dict) -> dict:
         if p.exists():
             current = _read_user_config(p)
         merged = _deep_merge(current, partial or {})
+        _resolve_config(merged)
         _write_private_text(p, json.dumps(merged, indent=2, ensure_ascii=False))
         _cache = None
     return load_config()
+
+
+def delete_config_override(dotted: str):
+    """Delete one supported config.json leaf and reveal its lower-priority value."""
+    if dotted not in _ENV_SETTINGS:
+        raise ValueError(f'unsupported configurable setting: {dotted}')
+    global _cache
+    with _lock:
+        path = _config_path()
+        current = _read_user_config(path) if path.exists() else {}
+        node = current
+        parts = dotted.split('.')
+        found = True
+        for part in parts[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                found = False
+                break
+            node = child
+        if found:
+            node.pop(parts[-1], None)
+            for index in range(len(parts) - 1, 0, -1):
+                parent = current
+                for part in parts[:index - 1]:
+                    parent = parent[part]
+                child_name = parts[index - 1]
+                if parent.get(child_name) == {}:
+                    parent.pop(child_name)
+            _resolve_config(current)
+            if current:
+                _write_private_text(path, json.dumps(current, indent=2, ensure_ascii=False))
+            elif path.exists():
+                _write_private_text(path, '{}')
+        _cache = None
+    return get(dotted)
 
 
 def save_settings(config_partial: dict, secrets_partial: dict) -> dict:
@@ -250,15 +511,12 @@ def save_settings(config_partial: dict, secrets_partial: dict) -> dict:
         )
         current = _read_user_config(config_path) if config_path.exists() else {}
         merged = _deep_merge(current, config_partial or {})
+        _resolve_config(merged)
         config_text = json.dumps(merged, indent=2, ensure_ascii=False)
 
         previous_env = ENV_PATH.read_text(encoding='utf-8') if ENV_PATH.exists() else None
-        env_lines = previous_env.splitlines() if previous_env is not None else []
         accepted_secrets = validated_secrets
-        for name, value in accepted_secrets.items():
-            env_lines = [line for line in env_lines if not line.startswith(f'{name}=')]
-            env_lines.append(f'{name}={value}')
-        env_text = '\n'.join(env_lines) + '\n'
+        env_text = _edited_dotenv_text(previous_env or '', accepted_secrets)
 
         wrote_config = False
         try:
@@ -277,8 +535,8 @@ def save_settings(config_partial: dict, secrets_partial: dict) -> dict:
             raise
 
         _cache = None
-        for name, value in accepted_secrets.items():
-            os.environ[name] = value
+        if secrets_partial:
+            _refresh_dotenv_state()
     return load_config()
 
 def get(dotted: str, default=None):
@@ -300,27 +558,38 @@ def is_configured() -> bool:
     return True
 
 def secret(name: str):
-    val = (os.environ.get(name) or '').strip()
+    runtime_value = (os.environ.get(name) or '').strip()
+    if runtime_value:
+        return runtime_value
+    values = dotenv_values(ENV_PATH, interpolate=False) if ENV_PATH.exists() else {}
+    val = (values.get(name) or '').strip()
     return val or None
+
+
+def secret_source(name: str) -> str:
+    runtime_value = (os.environ.get(name) or '').strip()
+    values = dotenv_values(ENV_PATH, interpolate=False) if ENV_PATH.exists() else {}
+    dotenv_value = (values.get(name) or '').strip()
+    if runtime_value and (
+            (_PROCESS_ENV.get(name) or '').strip()
+            or runtime_value != dotenv_value):
+        return 'environment'
+    if dotenv_value:
+        return 'dotenv'
+    return 'absent'
 
 def set_secrets(d: dict) -> None:
     # Settings requests run in parallel. Keep the read/modify/replace cycle
     # inside one critical section so two simultaneous key saves cannot silently
     # discard each other's update.
     with _lock:
-        lines = []
-        if ENV_PATH.exists():
-            lines = ENV_PATH.read_text(encoding='utf-8').splitlines()
-        for name, value in (d or {}).items():
-            if name not in SECRET_KEYS or not value:
-                continue
-            lines = [line for line in lines if not line.startswith(f'{name}=')]
-            lines.append(f'{name}={value}')
-        _write_private_text(ENV_PATH, '\n'.join(lines) + '\n')
-        for name, value in (d or {}).items():
-            if name in SECRET_KEYS and value:
-                os.environ[name] = value
-        load_dotenv(ENV_PATH, override=True)
+        updates = {
+            name: value for name, value in (d or {}).items()
+            if name in SECRET_KEYS and value
+        }
+        original = ENV_PATH.read_text(encoding='utf-8') if ENV_PATH.exists() else ''
+        _write_private_text(ENV_PATH, _edited_dotenv_text(original, updates))
+        _refresh_dotenv_state()
 
 def delete_secrets(names) -> None:
     """Remove saved secrets outright (clear a key). Separate from set_secrets,
@@ -330,13 +599,9 @@ def delete_secrets(names) -> None:
     if not names:
         return
     with _lock:
-        lines = ENV_PATH.read_text(encoding='utf-8').splitlines() if ENV_PATH.exists() else []
-        for name in names:
-            lines = [line for line in lines if not line.startswith(f'{name}=')]
-        _write_private_text(ENV_PATH, '\n'.join(lines) + '\n')
-        for name in names:
-            os.environ.pop(name, None)   # load_dotenv won't unset a removed line, so drop it here
-        load_dotenv(ENV_PATH, override=True)
+        original = ENV_PATH.read_text(encoding='utf-8') if ENV_PATH.exists() else ''
+        _write_private_text(ENV_PATH, _edited_dotenv_text(original, removals=names))
+        _refresh_dotenv_state()
 
 _COMFY_DERIVED = {'output': ('output_dir', 'output'), 'input': ('input_dir', 'input'),
                   'models': ('models_dir', 'models'), 'loras': ('loras_dir', 'models/loras')}

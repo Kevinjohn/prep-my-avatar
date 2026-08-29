@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../api/fetchClient'
 import { usePersistedPreference } from './usePersistedPreference'
+import { resolveGeneratorSelection } from './variationEngineSelection.js'
 
 /** Own persisted generator selection and settings/capability reconciliation. */
 export function useVariationEngines(caps) {
+  const hadStoredGenerator = useRef((() => {
+    try { return globalThis.localStorage.getItem('datasetGenerator') !== null } catch { return false }
+  })()).current
   const { value: generator, setValue: setGenerator } = usePersistedPreference(
     'datasetGenerator', 'klein', { parse: (value) => value || 'klein' },
   )
@@ -16,7 +20,12 @@ export function useVariationEngines(caps) {
     let cancelled = false
     apiFetch('/api/settings').then((data) => {
       if (cancelled) return
-      setEnabledEngines(data.config?.engines?.enabled || [])
+      const enabled = data.config?.engines?.enabled || []
+      const configuredDefault = data.config?.engines?.default || 'klein'
+      setEnabledEngines(enabled)
+      setGenerator((current) => resolveGeneratorSelection(
+        current, hadStoredGenerator, configuredDefault, enabled,
+      ))
       setChatgptAuth(data.config?.engines?.chatgpt_auth || 'auto')
       setRemoteAllowed(!!data.config?.privacy?.allow_remote_generation)
       setSettingsLoaded(true); setSettingsError(false)
@@ -24,7 +33,7 @@ export function useVariationEngines(caps) {
       if (!cancelled) { setSettingsLoaded(false); setSettingsError(true) }
     })
     return () => { cancelled = true }
-  }, [])
+  }, [hadStoredGenerator, setGenerator])
   const isNB = generator === 'nanobanana'
   const isGPT = generator === 'chatgpt'
   const isKlein = !isNB && !isGPT
@@ -32,11 +41,6 @@ export function useVariationEngines(caps) {
   const gptAvailable = remoteAllowed && enabledEngines.includes('chatgpt') && caps.engines.chatgpt
   const klAvailable = enabledEngines.includes('klein') && caps.engines.klein
   const currentAvailable = settingsLoaded && (isKlein ? klAvailable : isNB ? nbAvailable : gptAvailable)
-  useEffect(() => {
-    if (currentAvailable || !settingsLoaded) return
-    const first = nbAvailable ? 'nanobanana' : gptAvailable ? 'chatgpt' : klAvailable ? 'klein' : null
-    if (first && first !== generator) setGenerator(first)
-  }, [currentAvailable, nbAvailable, gptAvailable, klAvailable, generator, setGenerator, settingsLoaded])
   const subscription = caps.chatgpt_subscription || {}
   const gptViaSub = chatgptAuth === 'subscription'
     || (chatgptAuth === 'auto' && !!subscription.connected)

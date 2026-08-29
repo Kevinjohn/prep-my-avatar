@@ -22,6 +22,7 @@ from .base import Capabilities
 from .gdl_source import GalleryDlSource, resolve_cookies
 from . import gdl
 from . import registry
+from ... import config as cfg
 
 # token.txt hérité d’un outil local (dernier recours si ni
 # l'env ni le dossier cookies admin ne fournissent la clé.
@@ -33,7 +34,7 @@ def civitai_api_key():
 
     Précédence : env `CIVITAI_API_KEY` > `<SCRAPE_COOKIES_DIR>/civitai_api_key.txt`
     > token.txt du skill civitai-download. Jamais committé (lu au runtime)."""
-    env = (os.environ.get('CIVITAI_API_KEY') or '').strip()
+    env = cfg.secret('CIVITAI_API_KEY')
     if env:
         return env
     for path in (resolve_cookies('civitai_api_key'), _SKILL_TOKEN_PATH):

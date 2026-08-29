@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import uuid
 
 import requests
@@ -19,12 +18,8 @@ from .. import config as cfg
 
 logger = logging.getLogger(__name__)
 
-# gpt-image-2 = the only current model usable without OpenAI organization
-# verification (gpt-image-1.5 / chatgpt-image-latest 403 without it).
-CHATGPT_IMAGE_MODEL = os.environ.get('CHATGPT_IMAGE_MODEL', 'gpt-image-2')
-# Dataset images are final training material -> default to 'high' (≈ Nano
-# Banana's price point). Override with CHATGPT_IMAGE_QUALITY=medium to iterate.
-CHATGPT_IMAGE_QUALITY = os.environ.get('CHATGPT_IMAGE_QUALITY', 'high')
+CHATGPT_IMAGE_MODEL = 'gpt-image-2'
+CHATGPT_IMAGE_QUALITY = 'high'
 _API = "https://api.openai.com/v1/images/edits"
 
 # --- Subscription lane (Codex OAuth) -----------------------------------------
@@ -79,7 +74,7 @@ def parse_image_response(data) -> bytes | None:
 
 
 def _generate_via_api(ref_bytes: bytes | list[bytes], prompt: str, model: str | None = None,
-                      aspect_ratio: str = '1:1') -> bytes | None:
+                      aspect_ratio: str = '1:1', quality: str | None = None) -> bytes | None:
     """Reference photo(s) + variation prompt -> generated image bytes, or None.
     API-key lane: the multipart /images/edits endpoint.
 
@@ -94,10 +89,10 @@ def _generate_via_api(ref_bytes: bytes | list[bytes], prompt: str, model: str | 
     refs = refs[:16]
     files = [('image[]', (f'ref{i}.webp', rb, 'image/webp')) for i, rb in enumerate(refs)]
     data = {
-        'model': model or CHATGPT_IMAGE_MODEL,
+        'model': model or cfg.get('engines.openai_image_model') or CHATGPT_IMAGE_MODEL,
         'prompt': prompt,
         'size': size_for_aspect(aspect_ratio),
-        'quality': CHATGPT_IMAGE_QUALITY,
+        'quality': quality or cfg.get('engines.openai_image_quality') or CHATGPT_IMAGE_QUALITY,
     }
     try:
         # 'high' renders take 1-3 min -> generous read timeout (connect stays short).
@@ -133,7 +128,9 @@ def _use_subscription() -> bool:
 
 
 def generate_variation(ref_bytes: bytes | list[bytes], prompt: str, model: str | None = None,
-                       aspect_ratio: str = '1:1', force_lane: str | None = None) -> bytes | None:
+                       aspect_ratio: str = '1:1', force_lane: str | None = None,
+                       quality: str | None = None,
+                       router_model: str | None = None) -> bytes | None:
     """Reference photo(s) + variation prompt -> generated image bytes, or None.
     Routes on engines.chatgpt_auth: API key (default lane) or ChatGPT
     subscription (Codex OAuth). Raises SubscriptionQuotaExceeded on a
@@ -147,8 +144,9 @@ def generate_variation(ref_bytes: bytes | list[bytes], prompt: str, model: str |
     use_sub = (force_lane == 'subscription') or (force_lane is None and _use_subscription())
     if use_sub:
         refs = list(ref_bytes) if isinstance(ref_bytes, (list, tuple)) else [ref_bytes]
-        return _generate_via_subscription(refs, prompt, aspect_ratio)
-    return _generate_via_api(ref_bytes, prompt, model, aspect_ratio)
+        return _generate_via_subscription(
+            refs, prompt, aspect_ratio, quality=quality, router_model=router_model)
+    return _generate_via_api(ref_bytes, prompt, model, aspect_ratio, quality=quality)
 
 
 def _image_from_output(output) -> bytes | None:
@@ -183,7 +181,9 @@ def _parse_sse_for_image(text: str) -> bytes | None:
     return None
 
 
-def _generate_via_subscription(refs: list, prompt: str, aspect_ratio: str) -> bytes | None:
+def _generate_via_subscription(refs: list, prompt: str, aspect_ratio: str, *,
+                               quality: str | None = None,
+                               router_model: str | None = None) -> bytes | None:
     from . import chatgpt_oauth
     refs = refs[:SUBSCRIPTION_MAX_REFS]              # primary first, extras ride along
     content = [{'type': 'input_image',
@@ -191,10 +191,11 @@ def _generate_via_subscription(refs: list, prompt: str, aspect_ratio: str) -> by
                for rb in refs]
     content.append({'type': 'input_text', 'text': prompt})
     body = {
-        'model': cfg.get('engines.chatgpt_subscription_model') or SUBSCRIPTION_ROUTER_MODEL,
+        'model': router_model or cfg.get('engines.chatgpt_subscription_model') or SUBSCRIPTION_ROUTER_MODEL,
         'input': [{'role': 'user', 'content': content}],
         'tools': [{'type': 'image_generation', 'size': size_for_aspect(aspect_ratio),
-                   'quality': CHATGPT_IMAGE_QUALITY, 'moderation': 'auto'}],
+                   'quality': quality or cfg.get('engines.openai_image_quality') or CHATGPT_IMAGE_QUALITY,
+                   'moderation': 'auto'}],
         'tool_choice': 'required',
         # The Codex responses backend has two hard requirements or it 400s:
         # store:false ({"detail":"Store must be set to false"}) and stream:true

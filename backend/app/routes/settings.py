@@ -43,6 +43,7 @@ def _validate_cloud_settings(cloud: dict) -> str | None:
 _ENUM_VALUES = {
     'server.host': {'127.0.0.1', '0.0.0.0'},
     'engines.chatgpt_auth': {'auto', 'api', 'subscription'},
+    'engines.openai_image_quality': {'low', 'medium', 'high'},
     'captioning.backend': {'auto', 'joycaption', 'ollama', 'none'},
     'training.default_family': {'zimage', 'sdxl', 'krea', 'flux2klein'},
     'watermark.device': {'auto', 'cuda', 'cpu'},
@@ -163,6 +164,10 @@ def _tailscale_ip():
 def _settings_payload() -> dict:
     return {
         'config': cfg.load_config(), 'secrets': _secret_presence(),
+        'config_sources': cfg.config_sources(),
+        'secret_sources': {
+            name: cfg.secret_source(name) for name in cfg.SECRET_KEYS
+        },
         # What THIS running process is actually bound to — run.py stamps these
         # before app.run(); a dev/test boot that never went through run.py (or a
         # WSGI launch) leaves them unset, so the Server card just hides the
@@ -270,6 +275,16 @@ def delete_secret(name):
     if name not in cfg.SECRET_KEYS:
         return jsonify({'error': 'unknown secret'}), 400
     cfg.delete_secrets([name])
+    return jsonify(_settings_payload())
+
+
+@bp.delete('/settings/config/<path:dotted>')
+def delete_config_override(dotted):
+    """Remove one Settings override so dotenv/environment/default can win."""
+    try:
+        cfg.delete_config_override(dotted)
+    except ValueError:
+        return jsonify({'error': f"config field '{dotted}' cannot be reset"}), 400
     return jsonify(_settings_payload())
 
 

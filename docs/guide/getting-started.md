@@ -94,9 +94,31 @@ Then open `http://127.0.0.1:5050/` in your browser.
 
 On Windows, the equivalent manual commands use `.venv\Scripts\activate` and `python` rather than `python3`.
 
+### Configure keys and defaults with `.env`
+
+Copy `.env.example` to `.env` for a source or Docker install. The portable
+launcher creates `data/.env` from the same template on first launch. You can put
+provider keys there and preselect the enabled/default generation engines, image
+models, OpenAI quality, Ollama model, and local service URLs.
+
+Effective settings resolve in this order:
+
+1. a value explicitly saved in `config.json` or the Settings screen;
+2. a process environment variable supplied by the launcher or operator;
+3. the matching value in `.env`;
+4. the built-in safe default.
+
+Settings shows the winning source for configurable provider/model fields. Use
+**Follow environment/default** to remove a `config.json` override, or **Pin in
+Settings** to preserve the current effective value in `config.json`. API keys
+remain write-only and are never returned to the browser.
+
 ### Docker: API-only mode
 
-Docker runs the core app and does not include ComfyUI or ai-toolkit. Create a `.env` file next to `docker-compose.yml`, add a long random access token, and start the container:
+Docker runs the core app and does not include ComfyUI or ai-toolkit. Copy
+`.env.example` to `.env`, add a long random access token, and start the container.
+Docker reads this root file as operator-managed startup environment; keys saved
+through Settings are written separately to `data-docker/.env`:
 
 Put this in `.env`:
 

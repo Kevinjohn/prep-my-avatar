@@ -93,6 +93,31 @@ def python_exe(bundle: Path) -> Path:
     return win if win.exists() else bundle / "python" / "bin" / "python"
 
 
+def ensure_env_file(bundle: Path) -> Path:
+    """Create the portable writable dotenv once, without racing two launchers."""
+    data = bundle / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    target = data / ".env"
+    if target.exists():
+        return target
+    template = bundle / ".env.example"
+    payload = template.read_bytes() if template.is_file() else b""
+    try:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return target
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(data)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def run_recovery_bootstrap(
         bundle: Path, restart_nonce: str | None = None) -> tuple[bool, str]:
     """Run the pre-update recovery copy before importing checkout code."""
@@ -116,12 +141,13 @@ def start_server(bundle: Path, host: str, port: int,
                  restart_nonce: str | None = None) -> subprocess.Popen:
     data = bundle / "data"
     data.mkdir(parents=True, exist_ok=True)
+    env_path = ensure_env_file(bundle)
     env = dict(os.environ)
     # Keep every writable file under data/ so the bundle is portable (nothing written
     # next to the code, nothing in %APPDATA%). These overrides are read by config.py.
     env["LDS_CONFIG"] = str(data / "config.json")
     env["LDS_DATA_DIR"] = str(data)
-    env["LDS_ENV"] = str(data / ".env")
+    env["LDS_ENV"] = str(env_path)
     env["LDS_HOST"] = host
     env["LDS_PORT"] = str(port)
     env["LDS_LAUNCHER_SUPERVISED"] = "1"

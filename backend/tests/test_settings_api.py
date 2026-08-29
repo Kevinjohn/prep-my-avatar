@@ -25,6 +25,45 @@ def test_get_settings_masks_secrets(client, monkeypatch):
     assert data['secrets']['OPENAI_API_KEY'] is True
     assert 'sk-secret' not in str(data)
 
+
+def test_get_settings_reports_config_and_secret_sources(client, monkeypatch):
+    from app import config as cfg
+    monkeypatch.setenv('OPENAI_API_KEY', 'external-secret')
+    monkeypatch.setitem(cfg._PROCESS_ENV, 'OPENAI_API_KEY', 'external-secret')
+    monkeypatch.setitem(cfg._PROCESS_ENV, 'LDS_CHATGPT_AUTH', 'api')
+    monkeypatch.setattr(cfg, '_cache', None)
+
+    data = client.get('/api/settings').get_json()
+
+    assert data['config_sources']['engines.chatgpt_auth'] == 'environment'
+    assert data['config_sources']['engines.default'] == 'default'
+    assert data['secret_sources']['OPENAI_API_KEY'] == 'environment'
+    assert 'external-secret' not in str(data)
+
+
+def test_delete_config_override_reveals_dotenv_default(client, monkeypatch):
+    from app import config as cfg
+    monkeypatch.setitem(cfg._DOTENV_VALUES, 'LDS_OLLAMA_VISION_MODEL', 'dotenv-vlm')
+    monkeypatch.setattr(cfg, '_cache', None)
+    saved = client.put('/api/settings', json={
+        'config': {'ollama': {'vision_model': 'settings-vlm'}},
+    })
+    assert saved.status_code == 200
+    assert saved.get_json()['config_sources']['ollama.vision_model'] == 'settings'
+
+    response = client.delete('/api/settings/config/ollama.vision_model')
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data['config']['ollama']['vision_model'] == 'dotenv-vlm'
+    assert data['config_sources']['ollama.vision_model'] == 'dotenv'
+
+
+def test_delete_config_override_rejects_non_environment_setting(client):
+    response = client.delete('/api/settings/config/server.port')
+    assert response.status_code == 400
+    assert 'cannot be reset' in response.get_json()['error']
+
 def test_put_settings_persists_config_and_secret(client, tmp_path):
     r = client.put('/api/settings', json={
         'config': {'ollama': {'url': 'http://127.0.0.1:11500'}},

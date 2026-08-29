@@ -362,7 +362,14 @@ def test_generation_anchor_pack_uses_imported_corpus_and_records_ids(app, monkey
     from app.config import LOCAL_USER
     from app import config as cfg
     with app.app_context():
-        cfg.save_config({'privacy': {'allow_remote_generation': True}})
+        cfg.save_config({
+            'privacy': {'allow_remote_generation': True},
+            'engines': {
+                'chatgpt_auth': 'api',
+                'openai_image_model': 'snapshot-image-model',
+                'openai_image_quality': 'medium',
+            },
+        })
         ds = svc.create_dataset(LOCAL_USER, 'Anchors', 'anchors')
         imported = []
         for name, color, framing in (
@@ -401,6 +408,13 @@ def test_generation_anchor_pack_uses_imported_corpus_and_records_ids(app, monkey
         assert row.generation_engine == 'chatgpt'
         assert json.loads(row.generation_gap_ids) == ['face_front_neutral']
         assert dispatched
+        provenance = json.loads(row.generation_provenance)
+        assert provenance['model'] == 'snapshot-image-model'
+        assert provenance['quality'] == 'medium'
+        assert provenance['auth_lane'] == 'api'
+        assert provenance['reference_limit'] == 16
+        assert provenance['reference_count'] == 3
+        assert dispatched[0][-1]['model'] == 'snapshot-image-model'
 
 
 def test_corpus_workbench_metadata_anchor_decisions_and_coverage(app):
@@ -1372,10 +1386,8 @@ def test_regenerate_switch_to_klein_uses_picker_model(app, monkeypatch):
                 == 'flux-2-klein.safetensors')
 
 
-def test_regenerate_nsfw_stays_local_despite_api_engine(app, monkeypatch):
-    """Fail-closed: an NSFW-labelled tile regenerates on the LOCAL Klein path
-    even when the workspace's selected engine is an API one (mirrors the batch
-    rule — NSFW never reaches a third-party API)."""
+def test_regenerate_nsfw_rejects_explicit_api_engine(app, monkeypatch):
+    """An explicit remote choice must error, never silently become Klein."""
     from app.services import face_dataset_service as svc
     from app.services import klein_edit_helper
     from app.models import FaceDatasetImage
@@ -1392,9 +1404,22 @@ def test_regenerate_nsfw_stays_local_despite_api_engine(app, monkeypatch):
                                              engine='flux-2-klein.safetensors')
         img.variation_label = '🔞 custom shot'    # is_nsfw_label() -> True
         svc.db.session.commit()
-        job = svc.regenerate_image(LOCAL_USER, img.id, engine='nanobanana')
-        assert job == seen['job_id']                # Klein path, not the API one
-        assert seen['klein_model'] == 'flux-2-klein.safetensors'
+        with pytest.raises(ValueError, match='local Klein'):
+            svc.regenerate_image(LOCAL_USER, img.id, engine='nanobanana')
+
+
+def test_regenerate_rejects_explicit_disabled_engine(app):
+    from app.services import face_dataset_service as svc
+    from app import config as cfg
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        cfg.save_config({'engines': {'enabled': ['klein'], 'default': 'klein'},
+                         'privacy': {'allow_remote_generation': True}})
+        _ds, img = _ds_with_ref_and_generated(
+            svc, FaceDatasetImage, LOCAL_USER, engine='flux-2-klein.safetensors')
+        with pytest.raises(ValueError, match='disabled'):
+            svc.regenerate_image(LOCAL_USER, img.id, engine='chatgpt')
 
 
 def test_regenerate_skips_engines_disabled_in_settings(app, monkeypatch):

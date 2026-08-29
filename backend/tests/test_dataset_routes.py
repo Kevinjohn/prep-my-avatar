@@ -68,6 +68,9 @@ def test_get_unknown_id_404(client):
 
 
 def test_remote_generation_requires_explicit_privacy_consent(client):
+    client.put('/api/settings', json={'config': {
+        'engines': {'enabled': ['klein', 'nanobanana'], 'default': 'klein'},
+    }})
     response = client.post('/api/dataset/999/generate', json={
         'generator': 'nanobanana',
         'variations': [{'label': 'Portrait', 'prompt': 'portrait'}],
@@ -626,8 +629,10 @@ def test_generate_chatgpt_no_key_accepts_and_creates_pending_rows(client, monkey
     calls = []
     monkeypatch.setattr('app.services.face_dataset_service.threading.Thread',
                         lambda target, args=(), daemon=True: type('T', (), {'start': lambda s: calls.append(args)})())
-    client.put('/api/settings', json={
-        'config': {'privacy': {'allow_remote_generation': True}}})
+    client.put('/api/settings', json={'config': {
+        'privacy': {'allow_remote_generation': True},
+        'engines': {'enabled': ['klein', 'chatgpt'], 'default': 'klein'},
+    }})
     ds_id = _create(client, 'Nyx', 'nyx').get_json()['id']
     data = {'file': (io.BytesIO(_png_bytes()), 'ref.png')}
     client.post(f'/api/dataset/{ds_id}/ref', data=data, content_type='multipart/form-data')
@@ -760,6 +765,37 @@ def test_generate_rejects_non_object_variation_elements(client):
                        content_type='application/json')
     assert resp.status_code == 400
     assert 'object' in resp.get_json().get('error', '')
+
+
+def test_generate_rejects_explicit_disabled_generator(client):
+    response = client.post('/api/dataset/1/generate', json={
+        'generator': 'chatgpt',
+        'variations': [{'label': 'portrait', 'prompt': 'portrait'}],
+    })
+    assert response.status_code == 400
+    assert 'disabled' in response.get_json()['error']
+
+
+def test_generate_without_generator_uses_configured_default(client, monkeypatch):
+    from app.services import face_dataset_service as svc
+    seen = {}
+    monkeypatch.setattr(
+        svc, 'generate_variations_nanobanana',
+        lambda app, user, dataset, variations, multiplier, engine: (
+            seen.setdefault('engine', engine), [1])[1],
+    )
+    client.put('/api/settings', json={'config': {
+        'engines': {'enabled': ['klein', 'chatgpt'], 'default': 'chatgpt'},
+        'privacy': {'allow_remote_generation': True},
+    }})
+
+    response = client.post('/api/dataset/1/generate', json={
+        'variations': [{'label': 'portrait', 'prompt': 'portrait'}],
+        'multiplier': 1,
+    })
+
+    assert response.status_code == 200
+    assert seen['engine'] == 'chatgpt'
 
 
 def test_backup_route_answers_404_for_missing_dataset(client):

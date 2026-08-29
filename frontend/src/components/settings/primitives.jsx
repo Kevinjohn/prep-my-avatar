@@ -109,8 +109,11 @@ export function TextField({ id, label, value, onChange, placeholder, help = null
 export function SecretField({
   field, secretsPresence, secretInputs, setSecretInputs,
   testResults, recordTestResult, saveSecretIfPending, handleDeleteSecret,
+  secretSources,
 }) {
   const f = field
+  const source = secretSources?.[f.key] || (secretsPresence[f.key] ? 'dotenv' : 'absent')
+  const externallyManaged = source === 'environment'
   return (
     <div className="flex items-end gap-3">
       <div className="flex-1">
@@ -119,14 +122,17 @@ export function SecretField({
           <StatusBadge ok={!!secretsPresence[f.key]} />
         </div>
         <p className="mb-1 text-xs text-content-muted">{f.help}</p>
+        <p className="mb-1 text-xs text-content-subtle">Source: {source}</p>
         {f.guide}
         <input
           id={f.key}
           type="password"
           autoComplete="off"
+          disabled={externallyManaged}
           value={secretInputs[f.key] ?? ''}
           onChange={(e) => setSecretInputs((prev) => ({ ...prev, [f.key]: e.target.value }))}
-          placeholder={secretsPresence[f.key] ? 'Already set — enter a new value to replace it' : 'Not set'}
+          placeholder={externallyManaged ? 'Managed by the process environment'
+            : secretsPresence[f.key] ? 'Already set — enter a new value to replace it' : 'Not set'}
           className={INPUT_CLASS}
         />
         {f.testTarget && <TestResult result={testResults[f.testTarget]} />}
@@ -135,7 +141,7 @@ export function SecretField({
         <TestButton target={f.testTarget} beforeTest={() => saveSecretIfPending(f.key)}
           onResult={(r) => recordTestResult(f.testTarget, r)} />
       )}
-      {secretsPresence[f.key] && (
+      {secretsPresence[f.key] && !externallyManaged && (
         <button
           type="button"
           onClick={() => handleDeleteSecret(f.key, f.label)}

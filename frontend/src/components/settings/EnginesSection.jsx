@@ -20,10 +20,28 @@ const CHATGPT_AUTH_OPTIONS = [
   { id: 'subscription', label: 'Subscription only' },
 ]
 
+function SettingSource({ dotted, sources, onReset, onPin }) {
+  const source = sources?.[dotted] || 'default'
+  const [section, key] = dotted.split('.')
+  return (
+    <p className="mt-1 flex items-center gap-2 text-xs text-content-muted">
+      <span>Source: {source}</span>
+      {source === 'settings' ? (
+        <button type="button" className="underline hover:text-content"
+          onClick={() => onReset(section, key)}>Follow environment/default</button>
+      ) : (
+        <button type="button" className="underline hover:text-content"
+          onClick={() => onPin(section, key)}>Pin in Settings</button>
+      )}
+    </p>
+  )
+}
+
 /* ChatGPT subscription (Codex OAuth) — EXPERIMENTAL lane. Device-code login:
    the user opens the verification URL from ANY device and types the one-time
    code; we poll the backend until it reports connected. */
-function ChatgptSubscriptionCard({ caps, config, setField, refreshCaps, toast }) {
+function ChatgptSubscriptionCard({ caps, config, setField, refreshCaps, toast,
+  configSources, resetConfig, pinConfig }) {
   const sub = caps.chatgpt_subscription || {}
   const [device, setDevice] = useState(null)     // {verification_url, user_code}
   const [busy, setBusy] = useState(false)
@@ -158,20 +176,34 @@ function ChatgptSubscriptionCard({ caps, config, setField, refreshCaps, toast })
         <p className="mt-1 text-xs text-content-muted">
           When the subscription quota runs out mid-batch, remaining rows fail with a clear message — the app never silently switches to your paid API key.
         </p>
+        <SettingSource dotted="engines.chatgpt_auth" sources={configSources}
+          onReset={resetConfig} onPin={pinConfig} />
+      </div>
+
+      <div>
+        <label htmlFor="chatgpt-router-model" className="block text-sm font-medium text-content">Subscription routing model</label>
+        <input id="chatgpt-router-model" className={INPUT_CLASS}
+          value={config.engines.chatgpt_subscription_model || ''}
+          onChange={(e) => setField('engines', 'chatgpt_subscription_model', e.target.value)} />
+        <SettingSource dotted="engines.chatgpt_subscription_model" sources={configSources}
+          onReset={resetConfig} onPin={pinConfig} />
       </div>
     </Card>
   )
 }
 
 export default function EnginesSection(props) {
-  const { config, setField, toggleEngine, caps, refreshCaps, toast } = props
+  const { config, setField, toggleEngine, caps, refreshCaps, toast,
+    configSources, resetConfig, pinConfig } = props
   return (
     <div className="space-y-6">
       <Card title="API keys" help="Keys are write-only — fields stay blank even when a key is already saved.">
         {ENGINE_SECRETS.map((f) => <SecretField key={f.key} field={f} {...props} />)}
       </Card>
 
-      <ChatgptSubscriptionCard caps={caps} config={config} setField={setField} refreshCaps={refreshCaps} toast={toast} />
+      <ChatgptSubscriptionCard caps={caps} config={config} setField={setField}
+        refreshCaps={refreshCaps} toast={toast} configSources={configSources}
+        resetConfig={resetConfig} pinConfig={pinConfig} />
 
       <Card title="Remote-generation privacy" help="API engines send the selected identity-reference images and prompts to their provider. Local Klein never leaves this computer.">
         <div className="flex items-start justify-between gap-4">
@@ -206,6 +238,39 @@ export default function EnginesSection(props) {
               </option>
             ))}
           </select>
+          <SettingSource dotted="engines.default" sources={configSources}
+            onReset={resetConfig} onPin={pinConfig} />
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label htmlFor="openai-image-model" className="block text-sm font-medium text-content">OpenAI API image model</label>
+            <input id="openai-image-model" className={INPUT_CLASS}
+              value={config.engines.openai_image_model || ''}
+              onChange={(e) => setField('engines', 'openai_image_model', e.target.value)} />
+            <SettingSource dotted="engines.openai_image_model" sources={configSources}
+              onReset={resetConfig} onPin={pinConfig} />
+          </div>
+          <div>
+            <label htmlFor="openai-image-quality" className="block text-sm font-medium text-content">OpenAI image quality</label>
+            <select id="openai-image-quality" className={INPUT_CLASS}
+              value={config.engines.openai_image_quality || 'high'}
+              onChange={(e) => setField('engines', 'openai_image_quality', e.target.value)}>
+              {['low', 'medium', 'high'].map((quality) => (
+                <option key={quality} value={quality}>{quality}</option>
+              ))}
+            </select>
+            <SettingSource dotted="engines.openai_image_quality" sources={configSources}
+              onReset={resetConfig} onPin={pinConfig} />
+          </div>
+          <div className="sm:col-span-2">
+            <label htmlFor="google-image-model" className="block text-sm font-medium text-content">Gemini image model</label>
+            <input id="google-image-model" className={INPUT_CLASS}
+              value={config.engines.google_image_model || ''}
+              onChange={(e) => setField('engines', 'google_image_model', e.target.value)} />
+            <SettingSource dotted="engines.google_image_model" sources={configSources}
+              onReset={resetConfig} onPin={pinConfig} />
+          </div>
         </div>
 
         <fieldset>
@@ -224,6 +289,8 @@ export default function EnginesSection(props) {
               </label>
             ))}
           </div>
+          <SettingSource dotted="engines.enabled" sources={configSources}
+            onReset={resetConfig} onPin={pinConfig} />
         </fieldset>
       </Card>
     </div>

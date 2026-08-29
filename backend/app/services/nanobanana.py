@@ -8,7 +8,6 @@ SFW only by provider policy (fits the face-dataset use case by design).
 from __future__ import annotations
 import base64
 import logging
-import os
 
 import requests
 
@@ -16,8 +15,7 @@ from .. import config as cfg
 
 logger = logging.getLogger(__name__)
 
-# Nano Banana Pro (GA) — best-in-class face consistency. Overridable via env.
-NANOBANANA_MODEL = os.environ.get('NANOBANANA_MODEL', 'gemini-3-pro-image')
+NANOBANANA_MODEL = 'gemini-3-pro-image'
 _API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -52,7 +50,7 @@ def generate_variation(ref_bytes: bytes | list[bytes], prompt: str, model: str |
     if not key:
         logger.warning("nanobanana: GEMINI_API_KEY missing in environment")
         return None
-    mdl = model or NANOBANANA_MODEL
+    mdl = model or cfg.get('engines.google_image_model') or NANOBANANA_MODEL
     refs = list(ref_bytes)[:14] if isinstance(ref_bytes, (list, tuple)) else [ref_bytes]
     parts = [{"text": prompt}]
     for rb in refs:

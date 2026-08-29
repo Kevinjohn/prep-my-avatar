@@ -486,6 +486,10 @@ def _apply_schema_migrations(backup_path=None):
                 f'to protect the dataset.{backup}') from exc
 
 def create_app(config_object=None):
+    # Validate the complete DEFAULTS < dotenv/environment < config.json stack
+    # before acquiring locks, creating directories, or migrating the database.
+    # Every supported WSGI/launcher entry point goes through this factory.
+    cfg.load_config(force=True)
     app = Flask(__name__, static_folder=None)
     data_dir = Path(os.environ.get('LDS_DATA_DIR', str(cfg.REPO_ROOT / 'data')))
     supplied_lock = (config_object or {}).get('PROCESS_LOCK_HANDLE')

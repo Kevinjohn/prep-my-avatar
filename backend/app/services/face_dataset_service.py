@@ -7,6 +7,7 @@ output dir is resolved via `cfg.comfyui_dir('output')` so tests can monkeypatch 
 from __future__ import annotations
 from decimal import Decimal
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -5859,6 +5860,8 @@ def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None,
         raise ValueError(f'unknown engine: {requested}')
     target = requested or (img.klein_model if img.klein_model in API_ENGINES else 'klein')
     if is_nsfw_label(img.variation_label):
+        if requested in API_ENGINES:
+            raise ValueError('NSFW variations run on the local Klein engine only')
         target = 'klein'              # fail-closed: NSFW never reaches an API engine
     else:
         # Engines disabled in Settings must not be used even when the row (or a
@@ -5868,6 +5871,8 @@ def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None,
         enabled = [e for e in (cfg.get('engines.enabled') or [])
                    if e == 'klein' or e in API_ENGINES]
         if enabled and target not in enabled:
+            if requested is not None:
+                raise ValueError(f'engine is disabled in Settings: {requested}')
             default = cfg.get('engines.default')
             target = default if default in enabled else enabled[0]
     if target in API_ENGINES and not cfg.get('privacy.allow_remote_generation'):
@@ -5886,11 +5891,13 @@ def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None,
     # callers).
     if target in API_ENGINES:
         engine = target
+        profile = _remote_generation_profile(engine)
         previous_state = _replacement_state(img) if img.filename else None
         img.klein_model = engine      # the row's engine tag follows the switch
         api_generate = _api_generate_fn(engine)
         anchors = select_generation_references(
-            ds, preferred_ids=_parse_generation_anchor_ids(img.generation_anchor_ids))
+            ds, preferred_ids=_parse_generation_anchor_ids(img.generation_anchor_ids),
+            max_images=min(MAX_GENERATION_REFERENCES, profile['reference_limit']))
         ref_bytes = [anchor['bytes'] for anchor in anchors]
         if not ref_bytes:
             raise ValueError('reference image required — import a photo corpus or set a primary reference')
@@ -5900,7 +5907,7 @@ def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None,
         img.status = 'pending'
         img.fail_reason = None   # fresh attempt: drop the previous failure message
         img.generation_provenance = _replacement_provenance(
-            img, _remote_generation_provenance(engine, anchors), previous_state)
+            img, _remote_generation_provenance(engine, anchors, profile), previous_state)
         db.session.commit()
         aspect = aspect_for_label(img.variation_label, img.framing)
         if app is not None:
@@ -5909,7 +5916,7 @@ def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None,
             # batch — every concurrent action stays disabled until it finishes.
             threading.Thread(target=_run_nanobanana_batch,
                              args=(app, [(img.id, prompt, aspect)], ref_bytes, engine,
-                                   img.dataset_id),
+                                   img.dataset_id, profile),
                              daemon=True).start()
             return engine
         # Synchronous path (legacy / no-app callers): guard the same 'generate'
@@ -5917,13 +5924,21 @@ def _regenerate_image_locked(user_id, image_id, lora_strength=None, prompt=None,
         # raise never leaks the entry (finally end()).
         token = dataset_activity.begin(img.dataset_id, 'generate', total=1, engine=engine)
         try:
-            gen_kwargs = {'aspect_ratio': aspect}
-            if engine == 'chatgpt':
-                from .chatgpt_image import _use_subscription
-                gen_kwargs['force_lane'] = 'subscription' if _use_subscription() else 'api'
+            wrapped_prompt = wrap_variation(prompt, ref_count=len(ref_bytes))
+            provenance = _safe_json(img.generation_provenance) or {}
+            provenance.update({
+                'request_started_at': datetime.now(timezone.utc).isoformat(),
+                'actual_auth_lane': profile['auth_lane'],
+                'aspect_ratio': aspect,
+                'wrapped_prompt_sha256': hashlib.sha256(
+                    wrapped_prompt.encode('utf-8')).hexdigest(),
+            })
+            img.generation_provenance = json.dumps(
+                provenance, ensure_ascii=False, sort_keys=True)
+            db.session.commit()
             try:
-                out = api_generate(ref_bytes, wrap_variation(prompt, ref_count=len(ref_bytes)),
-                                   **gen_kwargs)
+                out = _call_remote_generator(
+                    api_generate, ref_bytes, wrapped_prompt, aspect, engine, profile)
             except SubscriptionQuotaExceeded:
                 out = None
                 _restore_replacement_after_failure(img, _QUOTA_MSG)
@@ -6052,18 +6067,66 @@ def _api_generate_fn(engine):
     return generate_variation
 
 
-def _remote_generation_provenance(engine, anchors) -> str:
+def _call_remote_generator(generate, refs, prompt, aspect, engine, profile):
+    """Pass a pinned profile while preserving the compact adapter test seam."""
+    supported = inspect.signature(generate).parameters
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in supported.values()
+    )
+    candidates = {'model': profile['model']}
     if engine == 'chatgpt':
-        from .chatgpt_image import CHATGPT_IMAGE_MODEL
-        provider, model = 'openai', CHATGPT_IMAGE_MODEL
-    else:
-        from .nanobanana import NANOBANANA_MODEL
-        provider, model = 'google', NANOBANANA_MODEL
+        candidates.update({
+            'force_lane': profile['auth_lane'],
+            'quality': profile.get('quality'),
+            'router_model': profile.get('routing_model'),
+        })
+    kwargs = {'aspect_ratio': aspect}
+    kwargs.update({
+        key: value for key, value in candidates.items()
+        if accepts_kwargs or key in supported
+    })
+    return generate(refs, prompt, **kwargs)
+
+
+def _remote_generation_profile(engine) -> dict:
+    if engine == 'chatgpt':
+        from .chatgpt_image import _use_subscription
+        lane = 'subscription' if _use_subscription() else 'api'
+        return {
+            'provider': 'openai',
+            # The subscription tool chooses GPT Image 2; only the direct API
+            # lane accepts the configurable OpenAI image-model identifier.
+            'model': ('gpt-image-2' if lane == 'subscription'
+                      else cfg.get('engines.openai_image_model') or 'gpt-image-2'),
+            'quality': cfg.get('engines.openai_image_quality') or 'high',
+            'auth_lane': lane,
+            'routing_model': (cfg.get('engines.chatgpt_subscription_model')
+                              if lane == 'subscription' else None),
+            'reference_limit': 5 if lane == 'subscription' else 16,
+        }
+    return {
+        'provider': 'google',
+        'model': cfg.get('engines.google_image_model') or 'gemini-3-pro-image',
+        'quality': None,
+        'auth_lane': 'api',
+        'routing_model': None,
+        'reference_limit': 14,
+    }
+
+
+def _remote_generation_provenance(engine, anchors, profile=None) -> str:
+    profile = profile or _remote_generation_profile(engine)
     return json.dumps({
         'schema_version': 1,
-        'provider': provider,
+        'provider': profile['provider'],
         'engine': engine,
-        'model': model,
+        'model': profile['model'],
+        'quality': profile.get('quality'),
+        'auth_lane': profile['auth_lane'],
+        'routing_model': profile.get('routing_model'),
+        'reference_limit': profile['reference_limit'],
+        'reference_count': len(anchors),
         'client_request_id': str(uuid.uuid4()),
         'created_at': datetime.now(timezone.utc).isoformat(),
         'remote_generation_consent': bool(cfg.get('privacy.allow_remote_generation')),
@@ -6073,7 +6136,8 @@ def _remote_generation_provenance(engine, anchors) -> str:
     }, ensure_ascii=False, sort_keys=True)
 
 
-def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id=None):
+def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id=None,
+                          profile=None):
     """Worker body: generate each (image_id, prompt) via the selected API engine
     and link the result. Runs in a background thread (factored out so tests can
     call it synchronously). Each row commits independently; an API failure marks
@@ -6086,6 +6150,7 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
     even if a row raises. Also used for single-image API regenerate (items=1),
     which therefore takes the same lock. ``None`` = no indicator (legacy callers)."""
     api_generate = _api_generate_fn(engine)
+    profile = dict(profile or _remote_generation_profile(engine))
     from concurrent.futures import ThreadPoolExecutor
     # Guard d'identité adapté au nombre de références (multi = « use EVERY ref »).
     n_refs = len(ref_bytes) if isinstance(ref_bytes, (list, tuple)) else 1
@@ -6096,10 +6161,7 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
     # connected=False and silently reroute onto the paid API key — breaking
     # the feature's headline invariant. Pinning + stopping the batch instead
     # (via SubscriptionUnavailable below) closes that hole.
-    force_lane = None
-    if engine == 'chatgpt':
-        from .chatgpt_image import _use_subscription
-        force_lane = 'subscription' if _use_subscription() else 'api'
+    force_lane = profile['auth_lane'] if engine == 'chatgpt' else None
     # Set the moment ANY row hits the plan quota (or the pinned subscription
     # lane loses its token) — every later row would fail too, so the rest of
     # the batch fails fast instead of burning one call each.
@@ -6134,9 +6196,6 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
             return
         out = None
         fail_reason = None
-        gen_kwargs = {'aspect_ratio': aspect}
-        if engine == 'chatgpt':
-            gen_kwargs['force_lane'] = force_lane
         try:
             wrapped_prompt = wrap_variation(prompt, ref_count=n_refs)
             with app.app_context():
@@ -6153,8 +6212,8 @@ def _run_nanobanana_batch(app, items, ref_bytes, engine='nanobanana', dataset_id
                     tracked.generation_provenance = json.dumps(
                         provenance, ensure_ascii=False, sort_keys=True)
                     db.session.commit()
-            out = api_generate(ref_bytes, wrapped_prompt,
-                               **gen_kwargs)
+            out = _call_remote_generator(
+                api_generate, ref_bytes, wrapped_prompt, aspect, engine, profile)
             if not out:
                 # api_generate signale certains refus/vides par un retour falsy
                 # sans lever — sans raison, la tuile "failed" resterait muette.
@@ -6263,9 +6322,11 @@ def _generate_variations_nanobanana_locked(app, user_id, dataset_id, variations,
     if total > MAX_FANOUT:
         raise ValueError(f'fan-out too large ({total} > {MAX_FANOUT})')
     _check_fanout_capacity(dataset_id, total)
+    profile = _remote_generation_profile(engine)
     # The full imported corpus stays on the dataset; only a bounded, diverse
     # anchor set is sent to the provider for this request.
-    anchors = select_generation_references(ds)
+    anchors = select_generation_references(
+        ds, max_images=min(MAX_GENERATION_REFERENCES, profile['reference_limit']))
     ref_bytes = [anchor['bytes'] for anchor in anchors]
     if not ref_bytes:
         raise ValueError('reference image required — import a photo corpus or set a primary reference')
@@ -6284,7 +6345,7 @@ def _generate_variations_nanobanana_locked(app, user_id, dataset_id, variations,
                                    generation_engine=engine,
                                    generation_gap_ids=_variation_gap_ids_json(v),
                                    generation_provenance=_remote_generation_provenance(
-                                       engine, anchors))
+                                       engine, anchors, profile))
             db.session.add(img)
             db.session.flush()
             ids.append(img.id)
@@ -6292,7 +6353,7 @@ def _generate_variations_nanobanana_locked(app, user_id, dataset_id, variations,
     db.session.commit()
 
     worker = threading.Thread(target=_run_nanobanana_batch,
-                              args=(app, items, ref_bytes, engine, dataset_id),
+                              args=(app, items, ref_bytes, engine, dataset_id, profile),
                               daemon=True)
     try:
         worker.start()

@@ -26,7 +26,6 @@ Sécurité : seuls des hôtes reddit sont contactés (jeton + API) ; les images 
 téléchargées par le flux d'import durci (fetch_hardened_bytes, anti-SSRF, magic-bytes).
 """
 import logging
-import os
 from pathlib import Path
 from collections import OrderedDict
 from threading import Lock
@@ -249,7 +248,8 @@ def _items_from_post(p: dict) -> list:
 def _client_id() -> str:
     """client-id Reddit : env (y compris Settings, qui écrit os.environ) > fichier
     admin > client-id public de gallery-dl."""
-    env = (os.environ.get('REDDIT_CLIENT_ID') or '').strip()
+    from ... import config as cfg
+    env = cfg.secret('REDDIT_CLIENT_ID')
     if env:
         return env
     path = resolve_cookies('reddit_client_id')   # <SCRAPE_COOKIES_DIR>/reddit_client_id.txt

@@ -58,6 +58,8 @@ export default function SettingsPage() {
   const [savedConfig, setSavedConfig] = useState(null)
   const [runtime, setRuntime] = useState({ host: null, port: null })
   const [secretsPresence, setSecretsPresence] = useState({})
+  const [configSources, setConfigSources] = useState({})
+  const [secretSources, setSecretSources] = useState({})
   const [secretInputs, setSecretInputs] = useState({})
   const [testResults, setTestResults] = useState({})
   const [loading, setLoading] = useState(true)
@@ -78,6 +80,8 @@ export default function SettingsPage() {
       setSavedConfig(data.config)
       setRuntime(data.runtime || { host: null, port: null })
       setSecretsPresence(data.secrets)
+      setConfigSources(data.config_sources || {})
+      setSecretSources(data.secret_sources || {})
       setLoadError(null)
     } catch (e) {
       setLoadError(e)
@@ -129,11 +133,52 @@ export default function SettingsPage() {
     try {
       const data = await del(`/api/settings/secret/${key}`)
       setSecretsPresence(data.secrets)
+      setSecretSources(data.secret_sources || {})
       setSecretInputs((prev) => { const next = { ...prev }; delete next[key]; return next })
       await refresh(true)
       toast.success(`${label} removed.`)
     } catch (e) {
       toast.error(`Remove failed: ${e.message}`)
+    }
+  }
+
+  const resetConfig = async (section, key) => {
+    const dotted = `${section}.${key}`
+    try {
+      const data = await del(`/api/settings/config/${dotted}`)
+      setConfig((previous) => ({
+        ...previous,
+        [section]: { ...previous[section], [key]: data.config[section][key] },
+      }))
+      setSavedConfig((previous) => ({
+        ...previous,
+        [section]: { ...previous[section], [key]: data.config[section][key] },
+      }))
+      setConfigSources(data.config_sources || {})
+      toast.success(`${dotted} now follows ${data.config_sources?.[dotted] || 'the default'}.`)
+    } catch (e) {
+      toast.error(`Reset failed: ${e.message}`)
+    }
+  }
+
+  const pinConfig = async (section, key) => {
+    const value = config?.[section]?.[key]
+    try {
+      const data = await putJson('/api/settings', {
+        config: { [section]: { [key]: value } },
+      })
+      setConfig((previous) => ({
+        ...previous,
+        [section]: { ...previous[section], [key]: data.config[section][key] },
+      }))
+      setSavedConfig((previous) => ({
+        ...previous,
+        [section]: { ...previous[section], [key]: data.config[section][key] },
+      }))
+      setConfigSources(data.config_sources || {})
+      toast.success(`${section}.${key} is now pinned in Settings.`)
+    } catch (e) {
+      toast.error(`Pin failed: ${e.message}`)
     }
   }
 
@@ -184,6 +229,7 @@ export default function SettingsPage() {
       [section]: data.config[section],
     }))
     setRuntime(data.runtime || { host: null, port: null })
+    setConfigSources(data.config_sources || {})
   }
 
   const handleSave = async () => {
@@ -211,6 +257,8 @@ export default function SettingsPage() {
       setSavedConfig(data.config)
       setRuntime(data.runtime || { host: null, port: null })
       setSecretsPresence(data.secrets)
+      setConfigSources(data.config_sources || {})
+      setSecretSources(data.secret_sources || {})
       setSecretInputs((current) => Object.fromEntries(
         Object.entries(current).filter(([key, value]) => value !== submittedSecrets[key])
       ))
@@ -269,7 +317,8 @@ export default function SettingsPage() {
   }
 
   const sectionProps = {
-    config, setField, secretsPresence, secretInputs, setSecretInputs: editSecretInputs,
+    config, setField, configSources, secretSources, resetConfig, pinConfig,
+    secretsPresence, secretInputs, setSecretInputs: editSecretInputs,
     testResults, recordTestResult, saveSecretIfPending, saveConfigSection, handleDeleteSecret,
     toggleEngine, handleSave, saving, runtime, caps, refreshCaps: refresh, toast,
   }

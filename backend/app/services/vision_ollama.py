@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import os as _os
 
 import requests
 
@@ -37,9 +36,6 @@ def get_vision_model() -> str:
     ("So the shot type is... Wait, is that the shared element?") - benchmarked 2/8 usable vs
     8/8 for -instruct, and ~8x slower (13s vs 1.6s/image). The 30b-a3b-instruct ties -instruct
     on quality at 3x the VRAM, so -instruct is the default; upgrade via config without code."""
-    env = (_os.environ.get('VISION_OLLAMA_MODEL') or '').strip()
-    if env:
-        return env
     return cfg.get('ollama.vision_model') or 'huihui_ai/qwen3-vl-abliterated:8b-instruct'
 
 

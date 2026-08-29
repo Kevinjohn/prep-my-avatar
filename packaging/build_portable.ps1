@@ -98,6 +98,7 @@ Copy-Item -Force (Join-Path $Here 'icon.ico') $Stage
 Copy-Item -Force (Join-Path $Root 'README.md') $Stage -ErrorAction SilentlyContinue
 Copy-Item -Force (Join-Path $Root 'LICENSE')   $Stage -ErrorAction SilentlyContinue
 Copy-Item -Force (Join-Path $Root 'NOTICE.md') $Stage
+Copy-Item -Force (Join-Path $Root '.env.example') $Stage
 
 # 4) Launcher exe (host python + PyInstaller; tkinter is bundled automatically).
 #    PyInstaller needs CPython 3.9-3.12 — bare `python` may resolve to a newer one

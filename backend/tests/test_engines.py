@@ -24,6 +24,41 @@ def test_chatgpt_never_sends_input_fidelity(app, monkeypatch):
     assert '/images/edits' in sent.args[0]
 
 
+def test_chatgpt_uses_effective_config_model_and_quality(app, monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {
+        'openai_image_model': 'configured-image-model',
+        'openai_image_quality': 'medium',
+        'chatgpt_auth': 'api',
+    }})
+    from app.services import chatgpt_image
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        'data': [{'b64_json': base64.b64encode(b'png').decode()}],
+    }
+
+    with patch('app.services.chatgpt_image.requests.post', return_value=response) as post:
+        assert chatgpt_image.generate_variation(b'ref', 'prompt') == b'png'
+
+    assert post.call_args.kwargs['data']['model'] == 'configured-image-model'
+    assert post.call_args.kwargs['data']['quality'] == 'medium'
+
+
+def test_nanobanana_uses_effective_config_model(app, monkeypatch):
+    monkeypatch.setenv('GEMINI_API_KEY', 'g-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {'google_image_model': 'configured-google-model'}})
+    from app.services import nanobanana
+    response = MagicMock(status_code=200)
+    response.json.return_value = {'candidates': []}
+
+    with patch('app.services.nanobanana.requests.post', return_value=response) as post:
+        nanobanana.generate_variation(b'ref', 'prompt')
+
+    assert '/models/configured-google-model:generateContent' in post.call_args.args[0]
+
+
 def test_chatgpt_returns_none_without_key(app, monkeypatch):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     from app.services import chatgpt_image
