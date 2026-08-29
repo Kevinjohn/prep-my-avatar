@@ -3,7 +3,7 @@ import { INPUT_CLASS, Card } from './primitives'
 const CAPTIONING_OPTIONS = [
   { id: 'auto', label: 'Auto (best available)' },
   { id: 'joycaption', label: 'JoyCaption' },
-  { id: 'ollama', label: 'Ollama vision' },
+  { id: 'ollama', label: 'Selected local vision backend' },
   { id: 'none', label: 'None' },
 ]
 
@@ -15,7 +15,7 @@ export default function CaptioningSection({ config, setField }) {
     <div className="space-y-6">
       <Card
         title="Captioning"
-        help="Who writes the captions. Auto prefers JoyCaption (via ai-toolkit) and falls back to the Ollama vision model."
+        help="Who writes the captions. Auto prefers JoyCaption (via ai-toolkit) and falls back to the selected local vision model."
       >
         <div>
           <label htmlFor="captioning-backend" className="block text-sm font-medium text-content">Captioning backend</label>

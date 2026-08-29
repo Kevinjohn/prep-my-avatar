@@ -263,10 +263,10 @@ def dataset_set_ref(dataset_id):
     if want_auto and not head_detected:
         # GUARD-RAIL: don't silently ship a body-centered crop when auto WAS asked.
         # Tell the user WHY it didn't run — the usual cause on a fresh install is the
-        # Ollama vision model not being pulled — and how to recover (Setup + Crop).
+        # selected local vision model not being ready — and how to recover.
         # (Manual mode: the centered crop is the intended behavior, no warning.)
         resp['warning'] = _head_crop_warning(
-            'Finish the Ollama step in Setup, then click Crop to re-center on the face.',
+            'Finish the Local vision step in Setup, then click Crop to re-center on the face.',
             'Use the Crop button to adjust it manually.')
     if low_res_warning:
         resp['warning'] = f"{resp['warning']} {low_res_warning}" if resp.get('warning') else low_res_warning
@@ -280,8 +280,8 @@ def _head_crop_warning(setup_cta, adjust_cta):
     demandé. Les deux appelants passent leur propre fin de phrase — la formulation
     visible diffère entre l'upload et le re-crop — donc ce helper factorise la
     RÈGLE (quel diagnostic pour quel état), pas le texte."""
-    if not capabilities.probe_ollama_model()['ok']:
-        return ("Auto head-crop needs the Ollama vision model, which isn't ready yet — "
+    if not capabilities.probe_local_vision()['ok']:
+        return ("Auto head-crop needs the selected local vision model, which isn't ready yet — "
                 f'used a centered crop. {setup_cta}')
     return f"Couldn't detect a face — used a centered crop. {adjust_cta}"
 
@@ -335,7 +335,7 @@ def dataset_ref_recrop_auto(dataset_id):
     resp = {'ok': True, 'head_crop': head_detected}
     if not head_detected:
         resp['warning'] = _head_crop_warning(
-            'Finish the Ollama step in Setup, then adjust with Crop.',
+            'Finish the Local vision step in Setup, then adjust with Crop.',
             'Use Crop to adjust it manually.')
     return jsonify(resp)
 

@@ -3,7 +3,7 @@ import { deriveCapabilitySummary } from '../../hooks/useSetupSteps'
 
 const FIX_LINKS = [
   { to: '/settings/engines', label: 'Image engines', hint: 'API keys, ChatGPT subscription, default engine' },
-  { to: '/settings/local-tools', label: 'Local tools', hint: 'ComfyUI, Ollama, ai-toolkit' },
+  { to: '/settings/local-tools', label: 'Local tools', hint: 'ComfyUI, local vision, ai-toolkit' },
   { to: '/settings/training', label: 'Training', hint: 'Default family, cloud GPU' },
   { to: '/setup', label: 'Setup wizard', hint: 'Guided scan + install of everything above' },
 ]

@@ -128,7 +128,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               ? ` (${analysisCounts.outdated} outdated)` : ''}
           </button>
           {showCoverage && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
-            title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up Ollama vision, or classify images manually below'}
+            title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up local vision, or classify images manually below'}
             className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
             👁 Map visual coverage
           </button>}

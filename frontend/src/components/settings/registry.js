@@ -7,15 +7,15 @@ export const SETTINGS_SECTIONS = [
     keywords: ['status', 'summary', 'capabilities', 'ready', 'configured', 'next steps'] },
   { id: 'engines', title: 'Image engines', icon: '🎨', eyebrow: 'generation',
     description: 'API keys and engines used to generate dataset images.',
-    keywords: ['gemini', 'openai', 'api key', 'chatgpt', 'nano banana', 'klein', 'engine', 'subscription', 'gpt-image',
+    keywords: ['gemini', 'replicate', 'openai', 'api key', 'chatgpt', 'nano banana', 'klein', 'engine', 'subscription', 'gpt-image',
       'remote generation', 'privacy', 'third-party', 'default engine'] },
   { id: 'scraping', title: 'Scraping & sources', icon: '🔎', eyebrow: 'sources',
     description: 'Optional credentials used when scanning image sources.',
     keywords: ['reddit', 'client id', 'civitai', 'scrape', 'scraper', 'rate limit', '429', 'quota', 'nsfw', 'source', 'import',
       'klein', 'small image', 'rescue', 'upscale', 'source credentials', 'image improvement', 'prompt'] },
   { id: 'local-tools', title: 'Local tools', icon: '🖥️', eyebrow: 'integrations',
-    description: 'ComfyUI, Ollama and ai-toolkit — where they run and where they live.',
-    keywords: ['comfyui', 'ollama', 'ai-toolkit', 'vision model', 'path', 'url', 'hugging face', 'hf token', 'directory', 'install',
+    description: 'ComfyUI, local vision and ai-toolkit — where they run and where they live.',
+    keywords: ['comfyui', 'ollama', 'lm studio', 'llama.cpp', 'llamacpp', 'ai-toolkit', 'vision model', 'path', 'url', 'hugging face', 'hf token', 'directory', 'install',
       'python interpreter', 'datasets directory', 'output directory', 'cache override'] },
   { id: 'captioning', title: 'Captioning & quality', icon: '✍️', eyebrow: 'pipeline',
     description: 'How captions are written and how face similarity is judged.',
@@ -43,9 +43,10 @@ export function sectionStatus(id, caps) {
     case 'engines':
       return (e.nanobanana || e.chatgpt || e.klein) ? 'ready' : 'off'
     case 'local-tools': {
+      const localVision = c.local_vision || c.ollama || {}
       const parts = [
         !!(c.comfyui && c.comfyui.reachable),
-        !!(c.ollama && c.ollama.reachable),
+        !!(localVision.reachable && (localVision.model_ready ?? localVision.vision_model_ready)),
         !!(c.aitoolkit && c.aitoolkit.valid),
       ]
       const n = parts.filter(Boolean).length
@@ -53,7 +54,7 @@ export function sectionStatus(id, caps) {
     }
     case 'captioning': {
       const cap = c.captioners || {}
-      return (cap.joycaption || cap.ollama) ? 'ready' : 'off'
+      return (cap.joycaption || cap.local_vision || cap.ollama) ? 'ready' : 'off'
     }
     case 'training':
       return c.training_visible ? 'ready' : 'off'

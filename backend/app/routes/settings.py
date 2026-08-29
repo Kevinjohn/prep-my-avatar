@@ -44,6 +44,8 @@ _ENUM_VALUES = {
     'server.host': {'127.0.0.1', '0.0.0.0'},
     'engines.chatgpt_auth': {'auto', 'api', 'subscription'},
     'engines.openai_image_quality': {'low', 'medium', 'high'},
+    'engines.nanobanana_provider': {'google', 'replicate'},
+    'local_vision.backend': {'ollama', 'lmstudio', 'llamacpp'},
     'captioning.backend': {'auto', 'joycaption', 'ollama', 'none'},
     'training.default_family': {'zimage', 'sdxl', 'krea', 'flux2klein'},
     'watermark.device': {'auto', 'cuda', 'cpu'},
@@ -89,9 +91,11 @@ def _validate_config_values(partial: dict, defaults: dict, prefix: str = '') -> 
 
 _TEST_TARGETS = {
     'gemini': capabilities.probe_gemini,
+    'replicate': capabilities.probe_replicate,
     'openai': capabilities.probe_openai,
     'comfyui': capabilities.probe_comfyui,
     'ollama': capabilities.probe_ollama,
+    'local_vision': capabilities.probe_local_vision,
     'aitoolkit': capabilities.probe_aitoolkit,
     'face_scoring': capabilities.probe_face_scoring,
     'masks': capabilities.probe_masks,
@@ -535,6 +539,11 @@ def diagnostic():
     e = caps.get('engines') or {}
     comfy = caps.get('comfyui') or {}
     oll = caps.get('ollama') or {}
+    local_vision = caps.get('local_vision') or {
+        'provider': 'ollama',
+        'reachable': oll.get('reachable'),
+        'model_ready': oll.get('vision_model_ready'),
+    }
     # Redact ONLY in this paste-safe payload — /api/logs/tail (the in-app log
     # viewer) keeps the raw lines, they're local-only and never meant to be
     # copy-pasted into a public thread.
@@ -574,6 +583,9 @@ def diagnostic():
             'klein_model': bool((comfy.get('models') or {}).get('klein')),
             'ollama_reachable': bool(oll.get('reachable')),
             'vision_model_ready': bool(oll.get('vision_model_ready')),
+            'local_vision_backend': local_vision.get('provider', 'ollama'),
+            'local_vision_reachable': bool(local_vision.get('reachable')),
+            'local_vision_model_ready': bool(local_vision.get('model_ready')),
             'face_scoring': bool(caps.get('face_scoring')),
             'masks': bool(caps.get('masks')),
             'aitoolkit_valid': bool((caps.get('aitoolkit') or {}).get('valid')),

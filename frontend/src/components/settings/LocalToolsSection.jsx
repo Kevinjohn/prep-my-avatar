@@ -2,6 +2,12 @@ import { useState } from 'react'
 import { Card, TextField, TestResult, TestButton, SecretField } from './primitives'
 import { postJson } from '../../api/fetchClient'
 
+const LOCAL_VISION_OPTIONS = [
+  { id: 'ollama', label: 'Ollama', placeholder: 'http://127.0.0.1:11434' },
+  { id: 'lmstudio', label: 'LM Studio', placeholder: 'http://127.0.0.1:1234/v1' },
+  { id: 'llamacpp', label: 'llama.cpp', placeholder: 'http://127.0.0.1:8080/v1' },
+]
+
 /* HF token unlocks the auto-download of license-gated models (Klein fp8) that
    the ComfyUI setup step offers — which is why it lives with the ComfyUI card
    rather than in the engines' API-keys list. */
@@ -78,6 +84,13 @@ function OllamaStatus({ caps, refreshCaps, toast }) {
 
 export default function LocalToolsSection(props) {
   const { config, setField, testResults, recordTestResult, saveConfigSection, caps, refreshCaps, toast } = props
+  const visionProvider = config.local_vision?.backend || 'ollama'
+  const visionOption = LOCAL_VISION_OPTIONS.find((item) => item.id === visionProvider) || LOCAL_VISION_OPTIONS[0]
+  const visionConfig = config[visionProvider] || { url: '', vision_model: '' }
+  const saveLocalVision = async () => {
+    await saveConfigSection('local_vision')
+    await saveConfigSection(visionProvider)
+  }
   return (
     <div className="space-y-6">
       <Card
@@ -109,31 +122,46 @@ export default function LocalToolsSection(props) {
         <SecretField field={HF_SECRET} {...props} />
       </Card>
 
-      <Card
-        title="Ollama"
-        help="Lightweight local vision backend — captioning, framing auto-classify and head-crop."
-      >
-        <OllamaStatus caps={caps} refreshCaps={refreshCaps} toast={toast} />
+      <Card title="Local vision"
+        help="Choose the local server used for captioning, framing auto-classify and head-crop.">
+        <div>
+          <label htmlFor="local-vision-provider" className="block text-sm font-medium text-content">
+            Backend
+          </label>
+          <select id="local-vision-provider"
+            value={visionProvider}
+            onChange={(event) => setField('local_vision', 'backend', event.target.value)}
+            className="mt-1 w-full rounded-md border border-border-strong bg-surface-raised px-3 py-2 text-sm text-content focus:border-primary focus:outline-none">
+            {LOCAL_VISION_OPTIONS.map((item) => (
+              <option key={item.id} value={item.id}>{item.label}</option>
+            ))}
+          </select>
+        </div>
+        {visionProvider === 'ollama' && (
+          <OllamaStatus caps={caps} refreshCaps={refreshCaps} toast={toast} />
+        )}
         <div className="flex items-end gap-3">
           <div className="flex-1 space-y-4">
             <TextField
-              id="ollama-url"
-              label="Ollama URL"
-              value={config.ollama.url}
-              onChange={(v) => setField('ollama', 'url', v)}
-              placeholder="http://127.0.0.1:11434"
+              id="local-vision-url"
+              label={`${visionOption.label} URL`}
+              value={visionConfig.url}
+              onChange={(v) => setField(visionProvider, 'url', v)}
+              placeholder={visionOption.placeholder}
             />
             <TextField
-              id="ollama-vision-model"
-              label="Ollama vision model"
-              value={config.ollama.vision_model}
-              onChange={(v) => setField('ollama', 'vision_model', v)}
-              placeholder="huihui_ai/qwen3-vl-abliterated:8b-instruct"
+              id="local-vision-model"
+              label={`${visionOption.label} vision model`}
+              value={visionConfig.vision_model}
+              onChange={(v) => setField(visionProvider, 'vision_model', v)}
+              placeholder={visionProvider === 'ollama'
+                ? 'huihui_ai/qwen3-vl-abliterated:8b-instruct'
+                : 'Loaded vision model identifier'}
             />
-            <TestResult result={testResults.ollama} />
+            <TestResult result={testResults.local_vision} />
           </div>
-          <TestButton target="ollama" beforeTest={() => saveConfigSection('ollama')}
-            onResult={(r) => recordTestResult('ollama', r)} />
+          <TestButton target="local_vision" beforeTest={saveLocalVision}
+            onResult={(r) => recordTestResult('local_vision', r)} />
         </div>
       </Card>
 

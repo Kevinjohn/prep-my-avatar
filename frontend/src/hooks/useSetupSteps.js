@@ -15,7 +15,7 @@ function imageStep(caps) {
   const ready = e.nanobanana || e.chatgpt || e.klein
   return {
     id: 'image', title: 'Image generation', recommended: true,
-    unlocks: ['Nano Banana (Gemini)', 'ChatGPT (gpt-image-2)', 'Klein (local)'],
+    unlocks: ['Nano Banana (Google or Replicate)', 'ChatGPT (gpt-image-2)', 'Klein (local)'],
     status: ready ? 'ready' : 'available',
     engines: { nanobanana: !!e.nanobanana, chatgpt: !!e.chatgpt, klein: !!e.klein },
   }
@@ -40,15 +40,21 @@ function comfyuiStep(caps) {
 
 function ollamaStep(caps) {
   const o = caps.ollama || {}
-  const status = gateStatus(o.reachable, o.vision_model_ready)
+  const local = caps.local_vision || {
+    provider: 'ollama', label: 'Ollama', reachable: o.reachable,
+    model_ready: o.vision_model_ready, url: o.url, vision_model: o.vision_model,
+  }
+  const status = gateStatus(local.reachable, local.model_ready)
   return {
-    id: 'ollama', title: 'Ollama — captioning & auto-framing', recommended: false,
+    // Keep the historical id so saved wizard navigation remains compatible.
+    id: 'ollama', title: 'Local vision — Ollama, LM Studio, or llama.cpp', recommended: false,
     unlocks: ['Captioning', 'Auto-classify framing', 'Auto head-crop'],
-    status, reachable: !!o.reachable, visionModelReady: !!o.vision_model_ready,
-    url: o.url || '', visionModel: o.vision_model || '',
+    status, provider: local.provider || 'ollama', providerLabel: local.label || 'Ollama',
+    reachable: !!local.reachable, visionModelReady: !!local.model_ready,
+    url: local.url || '', visionModel: local.vision_model || '',
     // Execution-independent install signal (binary on disk) vs `reachable` (server
     // answering): installed && !reachable -> "installed but stopped", offer a Start.
-    installed: !!o.installed, binaryPath: o.binary_path || '',
+    installed: local.provider === 'ollama' && !!o.installed, binaryPath: o.binary_path || '',
   }
 }
 
@@ -88,14 +94,14 @@ export function deriveSetupSteps(caps) {
 export function deriveCapabilitySummary(caps) {
   const c = caps || {}
   const e = c.engines || {}
-  const o = c.ollama || {}
+  const o = c.local_vision || c.ollama || {}
   const cap = c.captioners || {}
   return [
-    { label: 'Nano Banana (Gemini)', ok: !!e.nanobanana },
+    { label: 'Nano Banana (Google or Replicate)', ok: !!e.nanobanana },
     { label: 'ChatGPT (gpt-image-2)', ok: !!e.chatgpt },
     { label: 'Klein (local)', ok: !!e.klein },
     { label: 'Captioning', ok: !!(cap.joycaption || cap.ollama) },
-    { label: 'Auto-framing & head-crop', ok: !!(o.reachable && o.vision_model_ready) },
+    { label: 'Auto-framing & head-crop', ok: !!(o.reachable && (o.model_ready ?? o.vision_model_ready)) },
     { label: 'Face-similarity scoring', ok: !!c.face_scoring },
     { label: 'Person masks', ok: !!c.masks },
     { label: 'Watermark inpainting', ok: !!c.watermark_inpaint },

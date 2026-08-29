@@ -4156,7 +4156,7 @@ def classify_images(user_id, dataset_id):
     try:
         from .vision_ollama import describe_image_ollama, unload_vision_model
     except ImportError:
-        raise RuntimeError('vision (Ollama) service not configured/available yet')
+        raise RuntimeError('local vision service not configured/available yet')
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return 0
@@ -4164,6 +4164,8 @@ def classify_images(user_id, dataset_id):
         dataset_id=dataset_id, source='import').all()
     rows = [row for row in candidates
             if row.filename and (not row.framing or len(parse_coverage(row.coverage_json)) < 6)]
+    vision_provider = cfg.get('local_vision.backend') or 'ollama'
+    vision_model = cfg.get(f'{vision_provider}.vision_model')
     n = 0
     # Persistent progress indicator (survives a page reload): try/finally guarantees
     # end() runs even if the batch raises → no phantom "Classifying…" spinner.
@@ -4193,7 +4195,8 @@ def classify_images(user_id, dataset_id):
             img.coverage_value = 'green' if coverage else 'unknown'
             img.coverage_provenance = json.dumps({
                 'source': 'vision',
-                'model': cfg.get('ollama.vision_model'),
+                'provider': vision_provider,
+                'model': vision_model,
                 'recorded_at': datetime.now(timezone.utc).isoformat(),
                 'confidence': confidence,
             }, ensure_ascii=False, sort_keys=True)
@@ -4804,12 +4807,12 @@ def caption_images(user_id, dataset_id, force=False, mode=None, include_asserted
             try:
                 from .vision_ollama import describe_image_ollama, unload_vision_model
             except ImportError:
-                raise RuntimeError('vision (Ollama) service not configured/available yet')
+                raise RuntimeError('local vision service not configured/available yet')
             try:
                 for index, (image_id, p, planned) in enumerate(remaining, 1):
                     dataset_activity.progress(
                         token,
-                        detail=f'Captioning with Ollama — image {index}/{len(remaining)}…')
+                        detail=f'Captioning with local vision — image {index}/{len(remaining)}…')
                     data = _read_caption_input(image_id, planned, p)
                     if data is None:
                         dataset_activity.bump(token)
@@ -5133,7 +5136,7 @@ def detect_watermarks(user_id, dataset_id, *, include_dismissed=False):
     try:
         from .vision_ollama import describe_image_ollama, unload_vision_model
     except ImportError:
-        raise RuntimeError('vision (Ollama) service not configured/available yet')
+        raise RuntimeError('local vision service not configured/available yet')
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return {'detected': 0, 'none': 0, 'checked': 0}
@@ -6105,9 +6108,14 @@ def _remote_generation_profile(engine) -> dict:
                               if lane == 'subscription' else None),
             'reference_limit': 5 if lane == 'subscription' else 16,
         }
+    provider = cfg.get('engines.nanobanana_provider') or 'google'
+    if provider == 'replicate':
+        model = cfg.get('engines.replicate_image_model') or 'google/nano-banana-pro'
+    else:
+        model = cfg.get('engines.google_image_model') or 'gemini-3-pro-image'
     return {
-        'provider': 'google',
-        'model': cfg.get('engines.google_image_model') or 'gemini-3-pro-image',
+        'provider': provider,
+        'model': model,
         'quality': None,
         'auth_lane': 'api',
         'routing_model': None,

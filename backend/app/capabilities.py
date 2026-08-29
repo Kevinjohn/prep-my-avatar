@@ -85,6 +85,17 @@ def probe_gemini() -> dict:
     return {'ok': ok, 'detail': 'key set' if ok else 'key missing'}
 
 
+def probe_replicate() -> dict:
+    ok = bool(cfg.secret('REPLICATE_API_TOKEN'))
+    return {'ok': ok, 'detail': 'token set' if ok else 'token missing'}
+
+
+def probe_nanobanana_provider() -> dict:
+    if cfg.get('engines.nanobanana_provider') == 'replicate':
+        return probe_replicate()
+    return probe_gemini()
+
+
 def probe_openai(subscription_status=None) -> dict:
     """ChatGPT engine readiness: a pay-per-use API key OR a connected ChatGPT
     subscription (Codex OAuth) both light the engine up."""
@@ -195,6 +206,59 @@ def probe_ollama_model(reachable=None) -> dict:
         return {'ok': False, 'detail': f'ollama unreachable: {url}'}
     ok = _model_present(model, _ollama_tags(url))
     return {'ok': ok, 'detail': f'{model} ready' if ok else f'{model} not pulled'}
+
+
+_LOCAL_VISION_LABELS = {
+    'ollama': 'Ollama',
+    'lmstudio': 'LM Studio',
+    'llamacpp': 'llama.cpp',
+}
+
+
+def probe_local_vision() -> dict:
+    """Probe the selected local vision server and its configured loaded model."""
+    provider = cfg.get('local_vision.backend') or 'ollama'
+    label = _LOCAL_VISION_LABELS.get(provider, provider)
+    if provider == 'ollama':
+        service = probe_ollama()
+        model = cfg.get('ollama.vision_model') or ''
+        result = {
+            'provider': provider, 'label': label,
+            'reachable': service['ok'],
+            'model_ready': probe_ollama_model(reachable=service['ok'])['ok'],
+            'url': cfg.get('ollama.url') or '', 'vision_model': model,
+        }
+        result['ok'] = result['reachable'] and result['model_ready']
+        result['detail'] = (f'{label} and {model} ready' if result['ok']
+                            else f'{label} or its vision model is unavailable')
+        return result
+    if provider not in ('lmstudio', 'llamacpp'):
+        return {'provider': provider, 'label': label, 'reachable': False,
+                'model_ready': False, 'url': '', 'vision_model': '',
+                'ok': False, 'detail': 'unsupported local vision backend'}
+    url = (cfg.get(f'{provider}.url') or '').rstrip('/')
+    model = cfg.get(f'{provider}.vision_model') or ''
+    if not url:
+        return {'provider': provider, 'label': label, 'reachable': False,
+                'model_ready': False, 'url': '', 'vision_model': model,
+                'ok': False, 'detail': f'{label} URL not configured'}
+    try:
+        response = requests.get(f'{url}/models', timeout=3)
+        reachable = response.status_code < 400
+        data = response.json() if reachable else {}
+        rows = data.get('data') if isinstance(data, dict) else None
+        names = [row.get('id') for row in (rows or []) if isinstance(row, dict)]
+        model_ready = bool(model and model in names)
+    except Exception:
+        reachable = False
+        model_ready = False
+    ok = reachable and model_ready
+    detail = (f'{label} and {model} ready' if ok else
+              f'{label} reachable but {model or "the vision model"} is not loaded'
+              if reachable else f'{label} is unreachable')
+    return {'provider': provider, 'label': label, 'reachable': reachable,
+            'model_ready': model_ready, 'url': url, 'vision_model': model,
+            'ok': ok, 'detail': detail}
 
 
 def clear_import_cache() -> None:
@@ -519,8 +583,9 @@ def _probe_locked(force=False, request_generation=0) -> dict:
     comfy = probe_comfyui()
     ollama = probe_ollama()
     ollama_installed = probe_ollama_installed()
+    local_vision = probe_local_vision()
     aitoolkit = probe_aitoolkit()
-    gemini = probe_gemini()
+    nanobanana = probe_nanobanana_provider()
     from .services import chatgpt_oauth
     sub_status = chatgpt_oauth.status()
     openai_ = probe_openai(subscription_status=sub_status)
@@ -541,7 +606,7 @@ def _probe_locked(force=False, request_generation=0) -> dict:
     caps = {
         'configured': cfg.is_configured(),
         'engines': {
-            'nanobanana': gemini['ok'],
+            'nanobanana': nanobanana['ok'],
             'chatgpt': openai_['ok'],
             'klein': comfy['ok'] and bool(models['klein']),
         },
@@ -571,6 +636,7 @@ def _probe_locked(force=False, request_generation=0) -> dict:
             'vision_model': cfg.get('ollama.vision_model') or '',
             'vision_model_ready': probe_ollama_model(reachable=ollama['ok'])['ok'],
         },
+        'local_vision': local_vision,
         'aitoolkit': {
             'configured': bool(cfg.get('aitoolkit.dir')),
             'valid': aitoolkit['ok'],
@@ -582,7 +648,10 @@ def _probe_locked(force=False, request_generation=0) -> dict:
         'hf_publish': bool(cfg.secret('HF_TOKEN')),
         'captioners': {
             'joycaption': aitoolkit['ok'] and (cfg.BACKEND_DIR / 'infer' / 'joycaption_infer.py').exists(),
-            'ollama': ollama['ok'],
+            # Keep the historical key for existing clients while routing it through
+            # whichever local vision backend the user selected.
+            'ollama': local_vision['reachable'] and local_vision['model_ready'],
+            'local_vision': local_vision['reachable'] and local_vision['model_ready'],
         },
         'face_scoring': face_scoring['ok'],
         'masks': masks['ok'],

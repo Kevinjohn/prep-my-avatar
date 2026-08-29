@@ -20,6 +20,17 @@
     "url": "http://127.0.0.1:11434",
     "vision_model": "huihui_ai/qwen3-vl-abliterated:8b-instruct"
   },
+  "local_vision": {
+    "backend": "ollama"
+  },
+  "lmstudio": {
+    "url": "http://127.0.0.1:1234/v1",
+    "vision_model": ""
+  },
+  "llamacpp": {
+    "url": "http://127.0.0.1:8080/v1",
+    "vision_model": ""
+  },
   "aitoolkit": {
     "dir": "",
     "datasets_dir": "",
@@ -36,7 +47,9 @@
     "chatgpt_subscription_model": "gpt-5.4-mini",
     "openai_image_model": "gpt-image-2",
     "openai_image_quality": "high",
-    "google_image_model": "gemini-3-pro-image"
+    "google_image_model": "gemini-3-pro-image",
+    "nanobanana_provider": "google",
+    "replicate_image_model": "google/nano-banana-pro"
   },
   "privacy": {
     "allow_remote_generation": false

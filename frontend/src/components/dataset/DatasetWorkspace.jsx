@@ -921,7 +921,9 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   onStatus={ds.setStatus} onBatch={ds.batchImages}
                   reviewPairIds={unresolvedExclusiveIds} faceThresholds={d.face_thresholds}
                   busy={ds.busy}
-                  visionAvailable={!!(caps.ollama?.reachable && caps.ollama?.vision_model_ready)} />
+                  visionAvailable={!!((caps.local_vision || caps.ollama)?.reachable
+                    && ((caps.local_vision || caps.ollama)?.model_ready
+                      ?? (caps.local_vision || caps.ollama)?.vision_model_ready))} />
 
                 <CoveragePlan plan={d.coverage_plan} onPolicyChange={ds.setCoveragePolicy}
                   onGoToGenerate={() => jumpTo({ targetId: 'ds-add-generate' })} />

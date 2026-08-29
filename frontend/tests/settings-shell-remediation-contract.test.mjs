@@ -61,6 +61,23 @@ test('setup labels secrets and cannot advance without a successful save and prob
   assert.match(setup, /if \(!fresh\)/)
 })
 
+test('setup names all five steps and exposes every requested provider choice', () => {
+  const setup = read('pages/SetupPage.jsx')
+  const tool = read('components/setup/SetupToolBody.jsx')
+  const engines = read('components/settings/EnginesSection.jsx')
+  const localTools = read('components/settings/LocalToolsSection.jsx')
+
+  assert.match(setup, /steps\.map\(\(step, index\)/)
+  assert.match(setup, /Step \{r\.index \+ 1\} of \{TOTAL_TOOLS\}/)
+  for (const label of ['Ollama', 'LM Studio', 'llama.cpp']) {
+    assert.match(tool, new RegExp(label.replace('.', '\\.')))
+    assert.match(localTools, new RegExp(label.replace('.', '\\.')))
+  }
+  assert.match(tool, /REPLICATE_API_TOKEN/)
+  assert.match(engines, /REPLICATE_API_TOKEN/)
+  assert.match(engines, /nanobanana_provider/)
+})
+
 test('queued confirmations insert an activation boundary', () => {
   const dialog = read('components/common/ConfirmDialog.jsx')
   assert.match(dialog, /activationPendingRef\.current = true/)

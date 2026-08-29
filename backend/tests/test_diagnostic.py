@@ -15,6 +15,9 @@ def test_diagnostic_ok_and_shape(client):
     assert isinstance(j['secrets_present'], dict)
     assert isinstance(j['capabilities'], dict)
     assert isinstance(j['capabilities']['engines'], dict)
+    assert j['capabilities']['local_vision_backend'] in {'ollama', 'lmstudio', 'llamacpp'}
+    assert isinstance(j['capabilities']['local_vision_reachable'], bool)
+    assert isinstance(j['capabilities']['local_vision_model_ready'], bool)
     assert isinstance(j['config'], dict)
     assert isinstance(j['log_tail'], list)
     assert isinstance(j['generated_at'], int)

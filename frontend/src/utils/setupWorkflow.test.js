@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ollamaGateReason, setupNavigation } from './setupWorkflow.js'
+import { localVisionGateReason, ollamaGateReason, setupNavigation } from './setupWorkflow.js'
 
 test('setup navigation skips ready steps in both directions', () => {
   const model = setupNavigation(['a', 'b', 'c'], {
@@ -11,6 +11,16 @@ test('setup navigation skips ready steps in both directions', () => {
   assert.equal(model.nextUnfinished(0), 'b')
   assert.equal(model.previousUnfinished(2), 'b')
   assert.equal(model.allReady, false)
+})
+
+test('local vision gate names the selected OpenAI-compatible server', () => {
+  assert.match(localVisionGateReason({
+    status: 'partial', provider: 'lmstudio', providerLabel: 'LM Studio', reachable: false,
+  }), /LM Studio is not reachable/)
+  assert.match(localVisionGateReason({
+    status: 'partial', provider: 'llamacpp', providerLabel: 'llama.cpp', reachable: true,
+    visionModelReady: false,
+  }), /Load the configured vision model in llama\.cpp/)
 })
 
 test('Ollama gate distinguishes absent, stopped, and missing model states', () => {

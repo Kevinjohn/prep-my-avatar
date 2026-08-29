@@ -112,6 +112,68 @@ def test_nanobanana_caps_references_at_provider_limit(app, monkeypatch):
     assert len([part for part in parts if 'inlineData' in part]) == 14
 
 
+def test_nanobanana_routes_through_replicate_when_selected(app, monkeypatch):
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'r8-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {
+        'nanobanana_provider': 'replicate',
+        'replicate_image_model': 'google/nano-banana-pro',
+    }})
+    from app.services import nanobanana
+    prediction = MagicMock(status_code=200)
+    prediction.json.return_value = {
+        'id': 'prediction-1',
+        'status': 'succeeded',
+        'output': 'https://replicate.delivery/output.webp',
+    }
+    output = MagicMock(status_code=200, content=b'replicate-image')
+
+    with patch('app.services.nanobanana.requests.post', return_value=prediction) as post:
+        with patch('app.services.nanobanana.requests.get', return_value=output) as get:
+            result = nanobanana.generate_variation([b'a', b'b'], 'portrait', aspect_ratio='3:4')
+
+    assert result == b'replicate-image'
+    assert post.call_args.args[0].endswith('/v1/models/google/nano-banana-pro/predictions')
+    assert post.call_args.kwargs['headers']['Authorization'] == 'Bearer r8-x'
+    sent = post.call_args.kwargs['json']['input']
+    assert sent['aspect_ratio'] == '3:4'
+    assert len(sent['image_input']) == 2
+    assert sent['image_input'][0].startswith('data:image/webp;base64,')
+    assert get.call_args.args[0] == 'https://replicate.delivery/output.webp'
+
+
+def test_nanobanana_dataset_profile_uses_selected_replicate_model(app):
+    import app.config as cfg
+    cfg.save_config({'engines': {
+        'nanobanana_provider': 'replicate',
+        'replicate_image_model': 'google/nano-banana-pro',
+    }})
+    from app.services.face_dataset_service import _remote_generation_profile
+
+    profile = _remote_generation_profile('nanobanana')
+
+    assert profile['provider'] == 'replicate'
+    assert profile['model'] == 'google/nano-banana-pro'
+    assert profile['reference_limit'] == 14
+
+
+def test_nanobanana_rejects_untrusted_replicate_output_url(app, monkeypatch):
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'r8-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {'nanobanana_provider': 'replicate'}})
+    from app.services import nanobanana
+    prediction = MagicMock(status_code=200)
+    prediction.json.return_value = {
+        'id': 'prediction-1', 'status': 'succeeded',
+        'output': 'http://127.0.0.1/private',
+    }
+
+    with patch('app.services.nanobanana.requests.post', return_value=prediction):
+        with patch('app.services.nanobanana.requests.get') as get:
+            assert nanobanana.generate_variation(b'a', 'portrait') is None
+    get.assert_not_called()
+
+
 def _sub_connected(monkeypatch):
     """Wire a fake connected subscription into chatgpt_image's oauth module."""
     from app.services import chatgpt_oauth

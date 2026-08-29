@@ -89,7 +89,9 @@ def test_ref_route_warns_when_model_not_ready(client, monkeypatch):
     # head-crop falls back (no detection) AND the vision model probes as not-ready
     monkeypatch.setattr(dr.svc, 'face_crop_to_square_webp', lambda raw, **k: (b'RIFFwebp', False))
     monkeypatch.setattr(dr, 'gpu_exclusive_vision_window', lambda: contextlib.nullcontext())
-    monkeypatch.setattr(caps, 'probe_ollama_model', lambda *a, **k: {'ok': False, 'detail': 'not pulled'})
+    monkeypatch.setattr(caps, 'probe_local_vision', lambda: {
+        'provider': 'ollama', 'ok': False, 'detail': 'not pulled',
+    })
 
     resp = client.post(f'/api/dataset/{did}/ref',
                        data={'file': (io.BytesIO(_png()), 'ref.png'), 'crop': '1'},
@@ -106,7 +108,9 @@ def test_ref_route_warns_face_not_found_when_model_ready(client, monkeypatch):
     did = _create_concept_free_dataset(client)
     monkeypatch.setattr(dr.svc, 'face_crop_to_square_webp', lambda raw, **k: (b'RIFFwebp', False))
     monkeypatch.setattr(dr, 'gpu_exclusive_vision_window', lambda: contextlib.nullcontext())
-    monkeypatch.setattr(caps, 'probe_ollama_model', lambda *a, **k: {'ok': True, 'detail': 'ready'})
+    monkeypatch.setattr(caps, 'probe_local_vision', lambda: {
+        'provider': 'lmstudio', 'ok': True, 'detail': 'ready',
+    })
 
     resp = client.post(f'/api/dataset/{did}/ref',
                        data={'file': (io.BytesIO(_png()), 'ref.png'), 'crop': '1'},

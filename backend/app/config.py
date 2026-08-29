@@ -44,7 +44,8 @@ _DOTENV_INJECTED = {
 # REDDIT_CLIENT_ID / CIVITAI_API_KEY: scraping credentials (Settings > Scraping &
 # sources). Both scrape sources read their env var first, and set_secrets() stamps
 # os.environ on save — so a key saved in the UI takes effect without a restart.
-SECRET_KEYS = ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'HF_TOKEN', 'VAST_API_KEY',
+SECRET_KEYS = ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'REPLICATE_API_TOKEN',
+               'HF_TOKEN', 'VAST_API_KEY',
                'REDDIT_CLIENT_ID', 'CIVITAI_API_KEY')
 
 DEFAULT_UPDATE_REPO = 'Kevinjohn/prep-my-avatar'
@@ -63,6 +64,9 @@ DEFAULTS = {
     'comfyui': {'api_url': 'http://127.0.0.1:8188', 'base_dir': '',
                 'output_dir': '', 'input_dir': '', 'models_dir': '', 'loras_dir': ''},
     'ollama': {'url': 'http://127.0.0.1:11434', 'vision_model': 'huihui_ai/qwen3-vl-abliterated:8b-instruct'},  # -instruct, NOT ':8b' (=thinking): see get_vision_model()
+    'local_vision': {'backend': 'ollama'},  # ollama|lmstudio|llamacpp
+    'lmstudio': {'url': 'http://127.0.0.1:1234/v1', 'vision_model': ''},
+    'llamacpp': {'url': 'http://127.0.0.1:8080/v1', 'vision_model': ''},
     'aitoolkit': {'dir': '', 'datasets_dir': '', 'output_dir': '', 'hf_home': '',
                   # Explicit interpreter for installs without venv/.venv
                   # (conda, uv, system python). Empty = auto-detect.
@@ -73,7 +77,9 @@ DEFAULTS = {
                 'chatgpt_subscription_model': 'gpt-5.4-mini',
                 'openai_image_model': 'gpt-image-2',
                 'openai_image_quality': 'high',
-                'google_image_model': 'gemini-3-pro-image'},
+                'google_image_model': 'gemini-3-pro-image',
+                'nanobanana_provider': 'google',       # google|replicate
+                'replicate_image_model': 'google/nano-banana-pro'},
     # Reference pixels and prompts stay on-device until the user explicitly
     # enables third-party generation in Settings.
     'privacy': {'allow_remote_generation': False},
@@ -208,9 +214,18 @@ _ENV_SETTINGS = {
                                       _parse_choice('low', 'medium', 'high')),
     'engines.google_image_model': ('LDS_GOOGLE_IMAGE_MODEL',
                                     ('NANOBANANA_MODEL',), _parse_text),
+    'engines.nanobanana_provider': ('LDS_NANOBANANA_PROVIDER', (),
+                                     _parse_choice('google', 'replicate')),
+    'engines.replicate_image_model': ('LDS_REPLICATE_IMAGE_MODEL', (), _parse_text),
+    'local_vision.backend': ('LDS_LOCAL_VISION_BACKEND', (),
+                             _parse_choice('ollama', 'lmstudio', 'llamacpp')),
     'ollama.url': ('LDS_OLLAMA_URL', (), _parse_http_url),
     'ollama.vision_model': ('LDS_OLLAMA_VISION_MODEL',
                             ('VISION_OLLAMA_MODEL',), _parse_text),
+    'lmstudio.url': ('LDS_LMSTUDIO_URL', (), _parse_http_url),
+    'lmstudio.vision_model': ('LDS_LMSTUDIO_VISION_MODEL', (), _parse_text),
+    'llamacpp.url': ('LDS_LLAMACPP_URL', (), _parse_http_url),
+    'llamacpp.vision_model': ('LDS_LLAMACPP_VISION_MODEL', (), _parse_text),
     'comfyui.api_url': ('LDS_COMFYUI_API_URL', (), _parse_http_url),
     'comfyui.base_dir': ('LDS_COMFYUI_BASE_DIR', (), _parse_text),
 }
@@ -402,10 +417,16 @@ def _resolve_config(user: dict) -> dict:
         'engines.chatgpt_auth', engines.get('chatgpt_auth'))
     _parse_choice('low', 'medium', 'high')(
         'engines.openai_image_quality', engines.get('openai_image_quality'))
+    _parse_choice('google', 'replicate')(
+        'engines.nanobanana_provider', engines.get('nanobanana_provider'))
     for key in ('chatgpt_subscription_model', 'openai_image_model',
-                'google_image_model'):
+                'google_image_model', 'replicate_image_model'):
         _parse_text(f'engines.{key}', engines.get(key))
+    _parse_choice('ollama', 'lmstudio', 'llamacpp')(
+        'local_vision.backend', resolved.get('local_vision', {}).get('backend'))
     _parse_optional_http_url('ollama.url', resolved.get('ollama', {}).get('url'))
+    _parse_optional_http_url('lmstudio.url', resolved.get('lmstudio', {}).get('url'))
+    _parse_optional_http_url('llamacpp.url', resolved.get('llamacpp', {}).get('url'))
     _parse_optional_http_url(
         'comfyui.api_url', resolved.get('comfyui', {}).get('api_url'))
     return resolved

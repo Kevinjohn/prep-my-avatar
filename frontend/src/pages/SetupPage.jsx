@@ -7,7 +7,7 @@ import { useCapabilities } from '../context/CapabilitiesContext'
 import { deriveSetupSteps, deriveCapabilitySummary, SETUP_STEP_IDS } from '../hooks/useSetupSteps'
 import { useSetupSettings } from '../hooks/useSetupSettings'
 import SetupToolBody from '../components/setup/SetupToolBody'
-import { ollamaGateReason, setupNavigation } from '../utils/setupWorkflow'
+import { localVisionGateReason, setupNavigation } from '../utils/setupWorkflow'
 
 // A wizard "screen" is the welcome/scan, one per setup tool, then done.
 const TOTAL_TOOLS = SETUP_STEP_IDS.length
@@ -28,7 +28,7 @@ const STATUS_META = {
 // note pointing at ComfyUI. "Auto-framing & head-crop" is the ollama step's other two
 // unlocks (Auto-classify framing / Auto head-crop), just phrased differently here.
 const CAPABILITY_STEP_ID = {
-  'Nano Banana (Gemini)': 'image',
+  'Nano Banana (Google or Replicate)': 'image',
   'ChatGPT (gpt-image-2)': 'image',
   'Klein (local)': 'comfyui',
   'Captioning': 'ollama',
@@ -82,7 +82,7 @@ export default function SetupPage() {
   // The global "Skip setup" link is still the deliberate bail-out.
   // Pure gate check on a derived step object, so it can be re-evaluated against FRESH
   // capabilities after a save (not just the render-time snapshot).
-  const blockReason = (id) => (id === 'ollama' ? ollamaGateReason(stepById.ollama) : null)
+  const blockReason = (id) => (id === 'ollama' ? localVisionGateReason(stepById.ollama) : null)
   // The scan already knows what's installed — so "Start setup" / Next land on the
   // first tool that still needs attention and skip the ones already ready. No
   // re-walking ComfyUI/Ollama when they were just detected as running.
@@ -126,7 +126,7 @@ export default function SetupPage() {
         return
       }
       if (kind === 'ollama') {
-        const reason = ollamaGateReason(deriveSetupSteps(fresh).find((x) => x.id === 'ollama'))
+        const reason = localVisionGateReason(deriveSetupSteps(fresh).find((x) => x.id === 'ollama'))
         if (reason) { toast.warning(reason); return }
       }
       goNext()
@@ -169,29 +169,36 @@ export default function SetupPage() {
     // ready — you can build a dataset from your own photos + API engines and export
     // to train elsewhere. They render neutral (grey ○ + "optional"), not amber/✗.
     const triState = (reachable, complete) => reachable ? (complete ? 'ready' : 'partial') : 'missing'
-    // Ollama now has THREE scan outcomes: running (ready, or amber "pull the model"),
-    // installed-but-STOPPED (amber "installed — not running" → the ollama step's ▶ Start
-    // button fixes it), and genuinely absent (✗). The old triState collapsed the stopped
-    // case into "✗ not found", which read as "you don't have Ollama".
-    const oll = stepById.ollama
-    const ollamaScan = oll.reachable
-      ? { state: oll.visionModelReady ? 'ready' : 'partial', partial: 'running — pull the vision model' }
-      : oll.installed
-        ? { state: 'partial', partial: 'installed — not running' }
-        : { state: 'missing', partial: '' }
-    // stepId: which wizard step (SETUP_STEP_IDS) installs/configures this capability —
-    // each row is a direct link to that step's screen, whether or not it's ready yet.
-    const scanRows = [
-      { label: 'Local generation — ComfyUI', optional: true, stepId: 'comfyui',
-        state: triState(stepById.comfyui.reachable, stepById.comfyui.hasKlein),
-        partial: 'running — Klein model optional' },
-      { label: 'Captioning — Ollama + vision model', stepId: 'ollama',
-        state: ollamaScan.state, partial: ollamaScan.partial },
-      { label: 'LoRA training — ai-toolkit', stepId: 'training',
-        state: stepById.training.valid ? 'ready'
-          : (detected && detected.aitoolkit && detected.aitoolkit.dir ? 'partial' : 'missing'),
-        partial: 'found on disk — one click to use' },
-    ]
+    // The welcome page mirrors the actual wizard: one named row per step, in the
+    // same order. This keeps the pre-flight promise in sync as steps are added.
+    const scanRows = steps.map((step, index) => {
+      if (step.id === 'image') {
+        return { index, label: 'Image generation — API keys & provider', optional: true,
+          stepId: step.id, state: step.status === 'ready' ? 'ready' : 'missing', partial: '' }
+      }
+      if (step.id === 'comfyui') {
+        return { index, label: 'Local generation — ComfyUI', optional: true, stepId: step.id,
+          state: triState(step.reachable, step.hasKlein), partial: 'running — Klein model optional' }
+      }
+      if (step.id === 'ollama') {
+        const partial = step.reachable
+          ? `running — load ${step.visionModel || 'a vision model'}`
+          : step.provider === 'ollama' && step.installed ? 'installed — not running' : ''
+        return { index, label: `Local vision — ${step.providerLabel}`, optional: true,
+          stepId: step.id, state: step.reachable
+            ? (step.visionModelReady ? 'ready' : 'partial')
+            : (step.installed ? 'partial' : 'missing'), partial }
+      }
+      if (step.id === 'quality') {
+        return { index, label: 'Quality tools — ML extras', optional: true, stepId: step.id,
+          state: step.status === 'ready' ? 'ready' : step.status === 'partial' ? 'partial' : 'missing',
+          partial: 'some helpers installed' }
+      }
+      return { index, label: 'LoRA training — ai-toolkit', optional: true, stepId: step.id,
+        state: step.valid ? 'ready'
+          : (detected?.aitoolkit?.dir ? 'partial' : 'missing'),
+        partial: 'found on disk — one click to use' }
+    })
     const SCAN_META = {
       ready: { glyph: '✓', cls: 'text-emerald-400', word: 'ready' },
       partial: { glyph: '⚠', cls: 'text-amber-400', word: '' },
@@ -242,6 +249,9 @@ export default function SetupPage() {
                     <span className="flex items-center gap-2">
                       <span aria-hidden="true" className={detecting ? 'text-content-subtle' : m.cls}>
                         {detecting ? '…' : m.glyph}
+                      </span>
+                      <span className="w-16 shrink-0 text-[10px] font-medium uppercase tracking-wide text-content-subtle">
+                        Step {r.index + 1} of {TOTAL_TOOLS}
                       </span>
                       <span className={r.state === 'ready' ? 'text-content' : 'text-content-muted'}>{r.label}</span>
                       {r.optional && (

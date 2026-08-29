@@ -31,7 +31,8 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
   const unclassified = coveragePlan?.summary?.unclassified || 0;
   const recommended = coveragePlan?.recommended_variation_ids || [];
   const anchorPlan = d && d.anchor_plan;
-  const visionReady = !!(caps?.ollama?.reachable && caps?.ollama?.vision_model_ready);
+  const vision = caps?.local_vision || caps?.ollama;
+  const visionReady = !!(vision?.reachable && (vision?.model_ready ?? vision?.vision_model_ready));
 
   /** @type {any[]} */
   const steps = [

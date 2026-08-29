@@ -3,13 +3,15 @@ import { apiFetch, postJson } from '../../api/fetchClient'
 import { INPUT_CLASS, Card, StatusBadge, SecretField, ToggleSwitch } from './primitives'
 
 const ENGINE_SECRETS = [
-  { key: 'GEMINI_API_KEY', label: 'Gemini API key', testTarget: 'gemini', help: 'Powers the Nano Banana engine.' },
+  { key: 'GEMINI_API_KEY', label: 'Gemini API key', testTarget: 'gemini', help: 'Powers Nano Banana through Google direct.' },
   { key: 'OPENAI_API_KEY', label: 'OpenAI API key', testTarget: 'openai',
     help: 'Powers the ChatGPT (gpt-image-2) engine. Optional if you connect a ChatGPT subscription below.' },
+  { key: 'REPLICATE_API_TOKEN', label: 'Replicate API token', testTarget: 'replicate',
+    help: 'Powers Nano Banana Pro when Replicate is selected as its provider.' },
 ]
 
 const ENGINE_OPTIONS = [
-  { id: 'nanobanana', label: 'Nano Banana (Gemini)' },
+  { id: 'nanobanana', label: 'Nano Banana (Google or Replicate)' },
   { id: 'chatgpt', label: 'ChatGPT (gpt-image-2)' },
   { id: 'klein', label: 'Klein (ComfyUI, local)' },
 ]
@@ -211,7 +213,7 @@ export default function EnginesSection(props) {
             <p className="text-sm font-medium text-content">Allow third-party image generation</p>
             <p className="mt-1 text-xs text-content-muted">
               {config.privacy?.allow_remote_generation
-                ? 'Allowed: Nano Banana and ChatGPT may receive the bounded reference pack and prompt when you select them.'
+                ? 'Allowed: Google, Replicate, or OpenAI may receive the bounded reference pack and prompt when you select their engine.'
                 : 'Off (default): reference pixels and prompts stay on this computer; only local Klein can generate.'}
             </p>
           </div>
@@ -243,6 +245,20 @@ export default function EnginesSection(props) {
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <label htmlFor="nanobanana-provider" className="block text-sm font-medium text-content">Nano Banana provider</label>
+            <select id="nanobanana-provider" className={INPUT_CLASS}
+              value={config.engines.nanobanana_provider || 'google'}
+              onChange={(e) => setField('engines', 'nanobanana_provider', e.target.value)}>
+              <option value="google">Google direct</option>
+              <option value="replicate">Replicate</option>
+            </select>
+            <p className="mt-1 text-xs text-content-muted">
+              Only the selected provider receives the prompt and bounded reference pack.
+            </p>
+            <SettingSource dotted="engines.nanobanana_provider" sources={configSources}
+              onReset={resetConfig} onPin={pinConfig} />
+          </div>
           <div>
             <label htmlFor="openai-image-model" className="block text-sm font-medium text-content">OpenAI API image model</label>
             <input id="openai-image-model" className={INPUT_CLASS}
@@ -269,6 +285,14 @@ export default function EnginesSection(props) {
               value={config.engines.google_image_model || ''}
               onChange={(e) => setField('engines', 'google_image_model', e.target.value)} />
             <SettingSource dotted="engines.google_image_model" sources={configSources}
+              onReset={resetConfig} onPin={pinConfig} />
+          </div>
+          <div className="sm:col-span-2">
+            <label htmlFor="replicate-image-model" className="block text-sm font-medium text-content">Replicate image model</label>
+            <input id="replicate-image-model" className={INPUT_CLASS}
+              value={config.engines.replicate_image_model || ''}
+              onChange={(e) => setField('engines', 'replicate_image_model', e.target.value)} />
+            <SettingSource dotted="engines.replicate_image_model" sources={configSources}
               onReset={resetConfig} onPin={pinConfig} />
           </div>
         </div>

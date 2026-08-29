@@ -8,8 +8,14 @@ const INPUT_CLASS =
   'mt-1 w-full rounded-md border border-border-strong bg-surface-raised px-3 py-2 text-sm text-content ' +
   'placeholder:text-content-subtle focus:border-primary focus:outline-none'
 const KEY_FIELDS = [
-  { key: 'GEMINI_API_KEY', label: 'Gemini API key', engine: 'nanobanana', href: 'https://aistudio.google.com/apikey', help: 'Powers Nano Banana.' },
-  { key: 'OPENAI_API_KEY', label: 'OpenAI API key', engine: 'chatgpt', href: 'https://platform.openai.com/api-keys', help: 'Powers ChatGPT (gpt-image-2).' },
+  { key: 'GEMINI_API_KEY', label: 'Gemini API key', testTarget: 'gemini', href: 'https://aistudio.google.com/apikey', help: 'Powers Nano Banana through Google direct.' },
+  { key: 'REPLICATE_API_TOKEN', label: 'Replicate API token', testTarget: 'replicate', href: 'https://replicate.com/account/api-tokens', help: 'Powers Nano Banana through Replicate.' },
+  { key: 'OPENAI_API_KEY', label: 'OpenAI API key', testTarget: 'openai', href: 'https://platform.openai.com/api-keys', help: 'Powers ChatGPT (gpt-image-2).' },
+]
+const LOCAL_VISION_OPTIONS = [
+  { id: 'ollama', label: 'Ollama' },
+  { id: 'lmstudio', label: 'LM Studio' },
+  { id: 'llamacpp', label: 'llama.cpp' },
 ]
 const DEFAULT_VISION_MODEL = 'huihui_ai/qwen3-vl-abliterated:8b-instruct'
 const VISION_MODEL_VRAM = '≈ 8 GB VRAM'
@@ -83,12 +89,26 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
     if (id === 'image') {
       return (
         <div className="space-y-4">
+          <div>
+            <label htmlFor="setup-nanobanana-provider" className="text-sm font-medium text-content">
+              Nano Banana provider
+            </label>
+            <select id="setup-nanobanana-provider" className={INPUT_CLASS}
+              value={config.engines.nanobanana_provider || 'google'}
+              onChange={(event) => setField('engines', 'nanobanana_provider', event.target.value)}>
+              <option value="google">Google direct</option>
+              <option value="replicate">Replicate</option>
+            </select>
+            <p className="mt-1 text-xs text-content-subtle">
+              Your selected reference images and prompt go only to the provider you choose.
+            </p>
+          </div>
           {KEY_FIELDS.map((f) => (
             <div key={f.key}>
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium text-content">{f.label}</span>
-                <span className={`text-xs ${step.engines[f.engine] ? 'text-emerald-400' : 'text-content-subtle'}`}>
-                  {step.engines[f.engine] ? '✓ Ready' : '○ Not set'}
+                <span className={`text-xs ${secretsPresence[f.key] ? 'text-emerald-400' : 'text-content-subtle'}`}>
+                  {secretsPresence[f.key] ? '✓ Saved' : '○ Not set'}
                 </span>
               </div>
               <p className="text-xs text-content-muted">{f.help}</p>
@@ -99,7 +119,7 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
                 onChange={(e) => setSecretInputs((p) => ({ ...p, [f.key]: e.target.value }))} />
               <div className="mt-1 flex items-center gap-3">
                 <a href={f.href} target="_blank" rel="noreferrer" className="text-xs text-primary underline">Get a key</a>
-                <button type="button" onClick={() => saveSecretThenTest(f.key, f.engine === 'nanobanana' ? 'gemini' : 'openai')}
+                <button type="button" onClick={() => saveSecretThenTest(f.key, f.testTarget)}
                   className="text-xs text-content-muted underline">Save &amp; test</button>
               </div>
             </div>
@@ -236,9 +256,63 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
       )
     }
     if (id === 'ollama') {
+      const provider = config.local_vision?.backend || 'ollama'
+      const providerLabel = LOCAL_VISION_OPTIONS.find((item) => item.id === provider)?.label || provider
+      const providerConfig = config[provider] || {}
+      const providerIsChecked = provider === step.provider
+        && providerConfig.url === step.url
+        && providerConfig.vision_model === step.visionModel
+      const providerSelect = (
+        <div>
+          <label htmlFor="setup-local-vision-provider" className="text-sm font-medium text-content">
+            Local vision backend
+          </label>
+          <select id="setup-local-vision-provider" className={INPUT_CLASS} value={provider}
+            onChange={(event) => setField('local_vision', 'backend', event.target.value)}>
+            {LOCAL_VISION_OPTIONS.map((item) => (
+              <option key={item.id} value={item.id}>{item.label}</option>
+            ))}
+          </select>
+        </div>
+      )
+      if (provider !== 'ollama') {
+        const defaults = provider === 'lmstudio'
+          ? { url: 'http://127.0.0.1:1234/v1', link: 'https://lmstudio.ai/docs/developer/local-server' }
+          : { url: 'http://127.0.0.1:8080/v1', link: 'https://github.com/ggml-org/llama.cpp/tree/master/tools/server' }
+        return (
+          <div className="space-y-4">
+            {providerSelect}
+            {!providerIsChecked ? (
+              <p className="rounded-md border border-border bg-surface-raised px-3 py-2 text-sm text-content-muted">
+                Backend not checked yet — save and re-check to test {providerLabel}.
+              </p>
+            ) : step.reachable && step.visionModelReady ? (
+              <p className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-content">
+                ✓ {providerLabel} is running and the configured vision model is loaded.
+              </p>
+            ) : (
+              <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-content">
+                Start {providerLabel}'s local server and load a vision-capable model, then save and re-check.
+              </p>
+            )}
+            {guidedField(`${providerLabel} OpenAI-compatible URL`, provider, 'url', defaults.url)}
+            {guidedField(`${providerLabel} vision model`, provider, 'vision_model', 'Loaded model identifier')}
+            <p className="text-xs text-content-subtle">
+              The server must expose <span className="font-mono">/v1/models</span> and multimodal{' '}
+              <span className="font-mono">/v1/chat/completions</span>.{' '}
+              <a href={defaults.link} target="_blank" rel="noreferrer" className="text-primary underline">
+                Setup guide →
+              </a>
+            </p>
+            {saveRecheckBtn}
+          </div>
+        )
+      }
       // The vision MODEL is the point, not just Ollama being up. When reachable but
       // the model isn't pulled, lead with the pull action (this is the required gate).
-      const model = step.visionModel || DEFAULT_VISION_MODEL
+      const model = providerIsChecked
+        ? step.visionModel || DEFAULT_VISION_MODEL
+        : config.ollama?.vision_model || DEFAULT_VISION_MODEL
       const pullBlock = step.reachable && !step.visionModelReady && (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
           <p className="mb-1 text-sm font-medium text-content">
@@ -254,6 +328,7 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
       )
       const fields = (
         <>
+          {providerSelect}
           {guidedField('Ollama URL', 'ollama', 'url', 'http://127.0.0.1:11434')}
           {guidedField('Vision model', 'ollama', 'vision_model', DEFAULT_VISION_MODEL)}
           <p className="text-xs text-content-subtle">
@@ -263,6 +338,16 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
           {saveRecheckBtn}
         </>
       )
+      if (!providerIsChecked) {
+        return (
+          <div className="space-y-4">
+            <p className="rounded-md border border-border bg-surface-raised px-3 py-2 text-sm text-content-muted">
+              Backend not checked yet — save and re-check to test Ollama.
+            </p>
+            {fields}
+          </div>
+        )
+      }
       if (step.reachable) {
         return (
           <div className="space-y-4">

@@ -13,9 +13,9 @@ export const CAPTION_ORIGINS = [
   },
   {
     key: 'ollama',
-    chip: 'Ollama',
-    short: 'Written by the Ollama vision model',
-    title: 'Written by the locally configured Ollama vision model.',
+    chip: 'Local vision',
+    short: 'Written by the local vision model',
+    title: 'Written by the configured local vision model.',
   },
 ];
 

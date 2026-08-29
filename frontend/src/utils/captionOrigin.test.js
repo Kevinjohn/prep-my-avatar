@@ -10,7 +10,7 @@ import {
 test('known caption origins have stable honest labels', () => {
   assert.deepEqual(
     ['asserted', 'joycaption', 'ollama'].map((origin) => captionOriginInfo(origin).short),
-    ['You wrote this', 'Written by JoyCaption', 'Written by the Ollama vision model'],
+    ['You wrote this', 'Written by JoyCaption', 'Written by the local vision model'],
   );
   assert.equal(captionIsAsserted('asserted'), true);
   assert.equal(captionIsAsserted('joycaption'), false);

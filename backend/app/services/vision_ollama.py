@@ -18,6 +18,68 @@ from .. import config as cfg
 
 logger = logging.getLogger(__name__)
 
+_OPENAI_COMPATIBLE_PROVIDERS = {
+    'lmstudio': 'LM Studio',
+    'llamacpp': 'llama.cpp',
+}
+
+
+def _local_vision_backend() -> str:
+    return cfg.get('local_vision.backend') or 'ollama'
+
+
+def _openai_compatible_settings(provider: str) -> tuple[str, str]:
+    url = (cfg.get(f'{provider}.url') or '').rstrip('/')
+    model = cfg.get(f'{provider}.vision_model') or ''
+    if not url or not model:
+        raise RuntimeError(
+            f'{_OPENAI_COMPATIBLE_PROVIDERS[provider]} URL and vision model must be configured')
+    return url, model
+
+
+def _describe_openai_compatible(image_bytes: bytes, prompt: str, *,
+                                provider: str, model: str | None,
+                                num_predict: int, prefer_json: bool,
+                                fmt: str | None, auto_start_local: bool,
+                                timeout) -> str:
+    """Run a vision pass through LM Studio or llama.cpp's OpenAI-compatible API."""
+    label = _OPENAI_COMPATIBLE_PROVIDERS[provider]
+    try:
+        url, configured_model = _openai_compatible_settings(provider)
+        encoded = base64.b64encode(image_bytes).decode('ascii')
+        payload = {
+            'model': model or configured_model,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {
+                        'url': f'data:image/webp;base64,{encoded}',
+                    }},
+                ],
+            }],
+            'temperature': 0.3,
+            'max_tokens': int(num_predict),
+            'stream': False,
+        }
+        if prefer_json or fmt:
+            payload['response_format'] = {'type': 'json_object'}
+        response = requests.post(
+            f'{url}/chat/completions', json=payload, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get('choices') if isinstance(data, dict) else None
+        content = ((choices or [{}])[0].get('message') or {}).get('content')
+        if not isinstance(content, str):
+            raise ValueError('response did not contain assistant text')
+        return content.strip()
+    except Exception as exc:
+        if auto_start_local:
+            raise RuntimeError(
+                f'{label} is unavailable or its configured vision model is not loaded') from exc
+        logger.warning('vision_local: %s describe skipped: %s', label, exc)
+        return ''
+
 
 def _ollama_url() -> str:
     # Total accessor: cfg.get() can return None (missing/corrupted config
@@ -74,6 +136,12 @@ def describe_image_ollama(image_bytes: bytes, prompt: str, *,
     passer une durée (ex. '5m') pour garder le modèle chaud entre les images, PUIS
     appeler unload_vision_model() en fin de batch pour rendre la VRAM à ComfyUI.
     """
+    provider = _local_vision_backend()
+    if provider in _OPENAI_COMPATIBLE_PROVIDERS:
+        return _describe_openai_compatible(
+            image_bytes, prompt, provider=provider, model=model,
+            num_predict=num_predict, prefer_json=prefer_json, fmt=fmt,
+            auto_start_local=auto_start_local, timeout=timeout)
     try:
         url = (ollama_url or _ollama_url()).rstrip('/')
         b64 = base64.b64encode(image_bytes).decode('ascii')
@@ -150,6 +218,9 @@ def unload_vision_model(*, ollama_url: str | None = None, model: str | None = No
     AVANT que ComfyUI reprenne le GPU, sinon le modèle resterait chargé et ComfyUI
     pourrait manquer de VRAM. Retente une fois car un unload raté = ~5 min résident
     (keep_alive). Retourne True si l'appel a réussi."""
+    if _local_vision_backend() != 'ollama':
+        # The OpenAI-compatible contract has no portable unload operation.
+        return True
     try:
         url = (ollama_url or _ollama_url()).rstrip('/')
         payload = {'model': model or get_vision_model(), 'keep_alive': 0}
