@@ -1,4 +1,6 @@
 from unittest.mock import patch
+import multiprocessing
+import os
 import pathlib
 import threading
 import time
@@ -447,38 +449,129 @@ def test_ollama_tagged_model_does_not_match_different_tag():
     assert _model_present('qwen3-vl:8b-instruct', ['qwen3-vl:8b-thinking']) is False
 
 
-def test_concurrent_forced_probes_share_one_refresh(app, monkeypatch):
-    from app import capabilities
+def _concurrent_forced_probe_harness(connection, temp_root):
+    """Run the thread-level proof in a process the parent can terminate safely."""
+    os.environ['LDS_DATA_DIR'] = str(pathlib.Path(temp_root) / 'data')
+    os.environ['LDS_CONFIG'] = str(pathlib.Path(temp_root) / 'config.json')
+    os.environ['LDS_ENV'] = str(pathlib.Path(temp_root) / '.env')
 
-    calls = 0
+    from app import capabilities, config, create_app
+
+    config.ENV_PATH = pathlib.Path(temp_root) / '.env'
+    config._cache = None
+    application = create_app({
+        'TESTING': True,
+        'WTF_CSRF_ENABLED': False,
+        'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:',
+    })
+    capabilities._import_cache.clear()
+    capabilities._cache = None
+    capabilities._cache_ts = 0.0
+
+    import_calls = []
     calls_lock = threading.Lock()
 
-    def slow_import(*args, **kwargs):
-        nonlocal calls
+    def counted_import(python, module_expr, timeout=60):
         with calls_lock:
-            calls += 1
-        time.sleep(0.05)
+            import_calls.append((python, module_expr, timeout))
         return False
 
-    monkeypatch.setattr(capabilities, '_import_ok', slow_import)
-    barrier = threading.Barrier(4)
+    worker_count = 3
+    deadline = time.monotonic() + 5
+
+    class CoordinatedLock:
+        def __init__(self):
+            self._backing = threading.Lock()
+            self._entrants = threading.Barrier(worker_count)
+
+        def __enter__(self):
+            # probe() captures _cache_generation immediately before entering
+            # this lock. The barrier therefore proves every caller captured
+            # the same generation before any caller can start the refresh.
+            self._entrants.wait(timeout=max(0, deadline - time.monotonic()))
+            self._backing.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self._backing.release()
+
+    generation_before = capabilities._cache_generation
+    capabilities._probe_lock = CoordinatedLock()
+    capabilities._http_ok = lambda *args, **kwargs: False
+
+    def disabled_request(*args, **kwargs):
+        raise capabilities.requests.ConnectionError('network disabled in test')
+
+    capabilities.requests.get = disabled_request
+    capabilities._import_ok = counted_import
     results = []
+    worker_errors = []
 
     def run_probe():
-        with app.app_context():
-            barrier.wait()
-            results.append(capabilities.probe(force=True))
+        try:
+            with application.app_context():
+                results.append(capabilities.probe(force=True))
+        except BaseException as exc:
+            worker_errors.append(repr(exc))
 
-    workers = [threading.Thread(target=run_probe) for _ in range(3)]
+    connection.send({'status': 'ready'})
+    workers = [threading.Thread(target=run_probe, daemon=True)
+               for _ in range(worker_count)]
     for worker in workers:
         worker.start()
-    barrier.wait()
     for worker in workers:
-        worker.join(timeout=5)
+        worker.join(timeout=max(0, deadline - time.monotonic()))
 
-    assert all(not worker.is_alive() for worker in workers)
-    assert len(results) == 3
-    assert calls == 3  # one refresh, one call for each independent import key
+    connection.send({
+        'status': 'result',
+        'finished': all(not worker.is_alive() for worker in workers),
+        'worker_errors': worker_errors,
+        'result_count': len(results),
+        'snapshots_equal': len(results) == worker_count and results[1:] == results[:-1],
+        'generation_delta': capabilities._cache_generation - generation_before,
+        'module_exprs': sorted(call[1] for call in import_calls),
+        'timeouts': [call[2] for call in import_calls],
+    })
+    connection.close()
+
+
+def test_concurrent_forced_probes_share_one_refresh(tmp_path):
+    context = multiprocessing.get_context('spawn')
+    parent_connection, child_connection = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_concurrent_forced_probe_harness,
+        args=(child_connection, str(tmp_path)),
+    )
+    process.start()
+    child_connection.close()
+
+    try:
+        assert parent_connection.poll(10), 'probe harness did not initialize'
+        assert parent_connection.recv() == {'status': 'ready'}
+        assert parent_connection.poll(5), 'concurrent probe harness exceeded 5 seconds'
+        result = parent_connection.recv()
+        process.join(timeout=1)
+        exited_cleanly = not process.is_alive()
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        parent_connection.close()
+
+    assert exited_cleanly
+    assert process.exitcode == 0
+    assert result['status'] == 'result'
+    assert result['finished'] is True
+    assert result['worker_errors'] == []
+    assert result['result_count'] == 3
+    assert result['snapshots_equal'] is True
+    assert result['generation_delta'] == 1
+    assert result['module_exprs'] == sorted((
+        'import insightface, onnxruntime',
+        'import rembg',
+        'import cv2, numpy, torch; from PIL import Image',
+    ))
+    assert result['timeouts'] == [60, 60, 60]
 
 def test_ollama_vision_model_false_when_unreachable(app, monkeypatch):
     with app.app_context():

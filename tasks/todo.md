@@ -1189,3 +1189,79 @@ Checkpoint ST-A is an automated merged-tree parity checkpoint only; the human re
 - [ ] README/guide/release notes describe only shipped and verified behavior.
 - [ ] Deferred epics remain disabled/unadvertised and retain their explicit gates.
 - [ ] Human signs off release scope, rollback plan, and known limitations.
+
+---
+
+## CI Recovery Tasks — 2026-08-29
+
+Implementation is in progress. The detailed design, current state, and verification commands are in the `CI Recovery Plan` section of `tasks/plan.md`.
+
+### CI-01: Restore the canonical guide launch reference
+
+- [x] Replace the redundant `#open-the-app` Markdown link with the exact absolute README `#installation-and-launch` target.
+- [x] Add a repository-contract regression test for a missing or altered canonical target.
+- [x] Rebuild generated `frontend/dist` output and verify its asset graph has no missing or stale files.
+- [x] Run the focused governance and frontend DOM-link tests.
+
+**Files:** `docs/guide/getting-started.md`, `tests/test_repository_contracts.py`, generated `frontend/dist/**`.
+
+**Done when:** both the frontend guide-link contract and repository governance validator pass from the same source wording.
+
+### CI-02: Make the forced-probe concurrency test hermetic
+
+- [x] Stub the live `_http_ok` network seam and give the spawned child isolated config/data paths under `tmp_path`.
+- [x] Stub direct provider `requests.get` calls so environment-selected LM Studio or llama.cpp cannot reach the network.
+- [x] Replace fixed sleeps with an instrumented `_probe_lock` entry barrier that proves all callers captured the same cache generation before refresh begins.
+- [x] Isolate the thread harness in a spawned process, capture worker exceptions, and terminate the child safely if the five-second parent deadline expires.
+- [x] Assert an exact cache-generation delta so three callers provably share one refresh.
+- [ ] Pass the Windows Python 3.10 CI job, then rerun that successful job twice through `gh`.
+
+**Files:** `backend/tests/test_capabilities.py` initially; `backend/app/capabilities.py` only after a deterministic production-bug reproduction.
+
+**Depends on:** CI-01 may run independently; complete both before the full gate.
+
+**Done when:** repeated focused runs pass without increasing timeouts or weakening the single-refresh assertion.
+
+### CI-03: Validate and push the atomic recovery
+
+- [x] Run the complete supported backend and frontend validation suites for the atomic recovery change.
+- [x] Use the exact repository-native commands listed in Phase 3 of `tasks/plan.md`.
+- [ ] Confirm generated output is current and the worktree is clean after commits.
+- [ ] Inspect outgoing commit metadata for neutral, task-focused wording.
+- [ ] Push `main` and watch every GitHub Actions job to completion.
+- [ ] Record any remaining non-blocking warning with its upstream constraint.
+
+**Depends on:** CI-01 and CI-02.
+
+**Done when:** the recovery GitHub Actions run and both Windows Python 3.10 reruns are green, establishing the baseline required by CI-04.
+
+### CI-04: Refresh GitHub Actions runtime pins
+
+- [ ] Verify the smallest maintained Node 24-compatible releases and immutable SHAs from official action sources.
+- [ ] Read intervening release notes and migration guidance for every upgraded action.
+- [ ] Update matching pins and version comments in CI and release workflows.
+- [ ] Preserve action inputs and document any warning that has no released compatible upgrade.
+- [ ] Run workflow syntax and repository-governance validation.
+
+**Files:** `.github/workflows/ci.yml`, `.github/workflows/release.yml`.
+
+**Depends on:** CI-03 establishes a green pushed recovery run plus two green Windows 3.10 reruns; land as a separate maintenance commit.
+
+**Done when:** supported action pins are current, immutable, consistent, and the workflows validate.
+
+### CI-05: Validate and push the action-pin maintenance
+
+- [ ] Run the focused workflow/governance checks and applicable complete local gate.
+- [ ] Commit only the reviewed action pins, migration-required input changes, and final checklist state.
+- [ ] Push `main` and watch every ordinary CI job to completion.
+- [ ] Confirm the governance actionlint step executes successfully.
+- [ ] Record the tag-only release workflow's remaining live-release verification boundary.
+
+**Depends on:** CI-04.
+
+**Done when:** the post-maintenance GitHub Actions run is green and every in-scope Node 20 warning is gone or explicitly accepted because no maintained compatible release exists.
+
+### Accepted warning follow-ups
+
+- [ ] Plan React Router v7 future-flag/migration work separately from CI recovery.
+- [ ] Review pnpm's ignored-build-script policy separately and explicitly approve only dependency scripts the project requires.

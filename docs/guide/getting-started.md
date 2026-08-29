@@ -101,9 +101,10 @@ The safest first step is to import your photos, review them, and export a small 
 
 ## Install and launch
 
-The [Open the app](#open-the-app) section above is the shortest route. The
-following sections add platform notes, environment configuration, and Docker's
-API-only route.
+The **Open the app** section near the top is the shortest route. The repository README's
+[Installation and launch](https://github.com/Kevinjohn/prep-my-avatar#installation-and-launch)
+section is the canonical launch reference; the following sections add platform
+notes, environment configuration, and Docker's API-only route.
 
 ### Windows: use the bundled launcher
 

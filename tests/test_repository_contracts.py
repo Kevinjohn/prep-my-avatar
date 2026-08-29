@@ -74,6 +74,28 @@ def test_docs_contract_rejects_upstream_support_and_missing_named_target(tmp_pat
     assert any('no Installation and launch section' in error for error in errors)
 
 
+def test_docs_contract_requires_canonical_installation_target(tmp_path, monkeypatch):
+    root = _docs_fixture(tmp_path)
+    getting_started = root / 'docs/guide/getting-started.md'
+    canonical_target = (
+        f'https://github.com/{contracts.CANONICAL_REPOSITORY}#installation-and-launch'
+    )
+    source = getting_started.read_text()
+    assert canonical_target in source
+    getting_started.write_text(source.replace(
+        canonical_target,
+        'https://github.com/perfectgf/lora-dataset-studio#installation-and-launch',
+    ))
+    monkeypatch.setattr(contracts, 'ROOT', root)
+
+    errors = contracts.validate_governance()
+
+    assert any(
+        'does not target the canonical Installation and launch section' in error
+        for error in errors
+    )
+
+
 def test_governance_contract_enforces_backend_frontend_catalog_label_parity(
         tmp_path, monkeypatch):
     root = _docs_fixture(tmp_path)
