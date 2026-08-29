@@ -97,6 +97,17 @@ test('shell owns the only main landmark and sliders have accessible names', () =
   assert.match(read('components/shared/LockableSlider.jsx'), /aria-label=\{label\}/)
 })
 
+test('dataset routes receive the wider workspace shell without widening other pages', () => {
+  const app = read('App.jsx')
+  const datasets = read('pages/DatasetPage.jsx')
+  assert.match(app, /useLocation/)
+  assert.match(app, /location\.pathname\.startsWith\('\/datasets'\)/)
+  assert.match(app, /max-w-7xl/)
+  assert.match(app, /max-w-5xl/)
+  assert.match(datasets, /<div className="p-4">/)
+  assert.doesNotMatch(datasets, /max-w-6xl/)
+})
+
 test('update polling has one nav owner and restart attempts are bounded', () => {
   const app = read('App.jsx')
   const readiness = read('utils/restartReadiness.js')

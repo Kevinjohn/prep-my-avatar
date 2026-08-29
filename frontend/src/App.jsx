@@ -1,5 +1,7 @@
 import { Suspense, useEffect, useRef, useState } from 'react'
-import { HashRouter, Routes, Route, Navigate, Outlet, NavLink, useNavigate } from 'react-router-dom'
+import {
+  HashRouter, Routes, Route, Navigate, Outlet, NavLink, useLocation, useNavigate,
+} from 'react-router-dom'
 import { apiFetch, postJson } from './api/fetchClient'
 import { restartTarget, waitForRestart } from './utils/restartReadiness'
 import { ToastProvider, useToast } from './components/common/Toast'
@@ -305,12 +307,15 @@ function OnboardingRedirect() {
 }
 
 function Shell() {
+  const location = useLocation()
+  const mainWidth = location.pathname.startsWith('/datasets') ? 'max-w-7xl' : 'max-w-5xl'
+
   return (
     <>
       <NavBar />
       <OnboardingRedirect />
       <UpdateBanner />
-      <main id="main-content" tabIndex={-1} className="mx-auto max-w-5xl px-4 py-6">
+      <main id="main-content" tabIndex={-1} className={`mx-auto ${mainWidth} px-4 py-6`}>
         <Suspense fallback={<div role="status" className="p-6 text-sm text-content-muted">Loading…</div>}>
           <Outlet />
         </Suspense>

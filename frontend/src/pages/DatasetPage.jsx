@@ -10,7 +10,7 @@ import DatasetWorkspace from '../components/dataset/DatasetWorkspace';
 export default function DatasetPage() {
   const ds = useDataset();
   return (
-    <div className="p-4 max-w-6xl mx-auto">
+    <div className="p-4">
       {ds.currentId ? (
         <DatasetWorkspace ds={ds} onBack={ds.close} />
       ) : (
