@@ -31,6 +31,8 @@ def test_get_settings_reports_config_and_secret_sources(client, monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'external-secret')
     monkeypatch.setitem(cfg._PROCESS_ENV, 'OPENAI_API_KEY', 'external-secret')
     monkeypatch.setitem(cfg._PROCESS_ENV, 'LDS_CHATGPT_AUTH', 'api')
+    monkeypatch.delitem(cfg._PROCESS_ENV, 'LDS_DEFAULT_GENERATION_ENGINE', raising=False)
+    monkeypatch.delitem(cfg._DOTENV_VALUES, 'LDS_DEFAULT_GENERATION_ENGINE', raising=False)
     monkeypatch.setattr(cfg, '_cache', None)
 
     data = client.get('/api/settings').get_json()
@@ -71,6 +73,34 @@ def test_put_settings_persists_config_and_secret(client, tmp_path):
     assert r.status_code == 200
     assert r.get_json()['config']['ollama']['url'] == 'http://127.0.0.1:11500'
     assert r.get_json()['secrets']['GEMINI_API_KEY'] is True
+
+
+def test_put_settings_persists_provider_routing_without_exposing_replicate_token(client):
+    response = client.put('/api/settings', json={
+        'config': {
+            'engines': {
+                'nanobanana_provider': 'replicate',
+                'replicate_image_model': 'google/nano-banana-pro',
+            },
+            'local_vision': {'backend': 'lmstudio'},
+            'lmstudio': {
+                'url': 'http://127.0.0.1:1234/v1',
+                'vision_model': 'qwen-vl',
+            },
+        },
+        'secrets': {'REPLICATE_API_TOKEN': 'r8-private-token'},
+    })
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['config']['engines']['nanobanana_provider'] == 'replicate'
+    assert body['config']['engines']['replicate_image_model'] == 'google/nano-banana-pro'
+    assert body['config']['local_vision']['backend'] == 'lmstudio'
+    assert body['config']['lmstudio'] == {
+        'url': 'http://127.0.0.1:1234/v1', 'vision_model': 'qwen-vl',
+    }
+    assert body['secrets']['REPLICATE_API_TOKEN'] is True
+    assert 'r8-private-token' not in response.get_data(as_text=True)
 
 
 def test_field_level_settings_writes_preserve_another_tabs_unrelated_change(client):
@@ -306,6 +336,37 @@ def test_capabilities_endpoint(client):
 
 def test_test_connection_unknown_target(client):
     assert client.post('/api/settings/test/nope').status_code == 404
+
+
+def test_replicate_connection_target_uses_saved_token(client, monkeypatch):
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'r8-test-token')
+    response = client.post('/api/settings/test/replicate')
+    assert response.status_code == 200
+    assert response.get_json() == {'ok': True, 'detail': 'token set'}
+
+
+def test_local_vision_connection_target_probes_selected_model(client, monkeypatch):
+    from unittest.mock import MagicMock
+    saved = client.put('/api/settings', json={'config': {
+        'local_vision': {'backend': 'lmstudio'},
+        'lmstudio': {
+            'url': 'http://127.0.0.1:1234/v1', 'vision_model': 'qwen-vl',
+        },
+    }})
+    assert saved.status_code == 200
+    model_list = MagicMock(status_code=200)
+    model_list.json.return_value = {'data': [{'id': 'qwen-vl'}]}
+    monkeypatch.setattr('app.capabilities.requests.get', lambda *args, **kwargs: model_list)
+
+    response = client.post('/api/settings/test/local_vision')
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        'ok': True, 'detail': 'LM Studio and qwen-vl ready',
+        'provider': 'lmstudio', 'label': 'LM Studio', 'reachable': True,
+        'model_ready': True, 'url': 'http://127.0.0.1:1234/v1',
+        'vision_model': 'qwen-vl',
+    }
 
 
 # --- CSRF cookie freshness (long-lived SPA session) ---------------------------

@@ -174,6 +174,64 @@ def test_nanobanana_rejects_untrusted_replicate_output_url(app, monkeypatch):
     get.assert_not_called()
 
 
+def test_nanobanana_polls_replicate_prediction_until_success(app, monkeypatch):
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'r8-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {'nanobanana_provider': 'replicate'}})
+    from app.services import nanobanana
+    created = MagicMock(status_code=201)
+    created.json.return_value = {'id': 'prediction1', 'status': 'starting'}
+    processing = MagicMock(status_code=200)
+    processing.json.return_value = {'id': 'prediction1', 'status': 'processing'}
+    succeeded = MagicMock(status_code=200)
+    succeeded.json.return_value = {
+        'id': 'prediction1', 'status': 'succeeded',
+        'output': 'https://cdn.replicate.delivery/result.jpg',
+    }
+    output = MagicMock(status_code=200, content=b'completed-image')
+
+    with patch('app.services.nanobanana.time.sleep'):
+        with patch('app.services.nanobanana.requests.post', return_value=created):
+            with patch('app.services.nanobanana.requests.get',
+                       side_effect=[processing, succeeded, output]) as get:
+                result = nanobanana.generate_variation(b'reference', 'portrait')
+
+    assert result == b'completed-image'
+    assert get.call_args_list[0].args[0].endswith('/v1/predictions/prediction1')
+    assert get.call_args_list[0].kwargs['allow_redirects'] is False
+    assert get.call_args_list[-1].args[0] == 'https://cdn.replicate.delivery/result.jpg'
+
+
+def test_nanobanana_returns_none_for_failed_replicate_prediction(app, monkeypatch):
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'r8-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {'nanobanana_provider': 'replicate'}})
+    from app.services import nanobanana
+    failed = MagicMock(status_code=200)
+    failed.json.return_value = {
+        'id': 'prediction1', 'status': 'failed', 'error': 'provider rejected input',
+    }
+
+    with patch('app.services.nanobanana.requests.post', return_value=failed):
+        with patch('app.services.nanobanana.requests.get') as get:
+            assert nanobanana.generate_variation(b'reference', 'portrait') is None
+    get.assert_not_called()
+
+
+def test_nanobanana_caps_replicate_references_at_provider_limit(app, monkeypatch):
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'r8-x')
+    import app.config as cfg
+    cfg.save_config({'engines': {'nanobanana_provider': 'replicate'}})
+    from app.services import nanobanana
+    failed = MagicMock(status_code=200)
+    failed.json.return_value = {'id': 'prediction1', 'status': 'failed', 'error': 'stop'}
+
+    with patch('app.services.nanobanana.requests.post', return_value=failed) as post:
+        nanobanana.generate_variation([bytes([index]) for index in range(20)], 'portrait')
+
+    assert len(post.call_args.kwargs['json']['input']['image_input']) == 14
+
+
 def _sub_connected(monkeypatch):
     """Wire a fake connected subscription into chatgpt_image's oauth module."""
     from app.services import chatgpt_oauth

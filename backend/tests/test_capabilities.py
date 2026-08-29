@@ -98,6 +98,22 @@ def test_probe_gemini_with_key(app, monkeypatch):
         result = capabilities.probe_gemini()
     assert result == {'ok': True, 'detail': 'key set'}
 
+
+def test_selected_replicate_provider_controls_nanobanana_readiness(app, monkeypatch):
+    from app import capabilities, config
+    config.save_config({'engines': {'nanobanana_provider': 'replicate'}})
+    monkeypatch.setenv('GEMINI_API_KEY', 'google-key-is-not-selected')
+    monkeypatch.delenv('REPLICATE_API_TOKEN', raising=False)
+
+    with patch('app.capabilities._http_ok', return_value=False):
+        unavailable = capabilities.probe(force=True)
+    assert unavailable['engines']['nanobanana'] is False
+
+    monkeypatch.setenv('REPLICATE_API_TOKEN', 'replicate-token')
+    with patch('app.capabilities._http_ok', return_value=False):
+        available = capabilities.probe(force=True)
+    assert available['engines']['nanobanana'] is True
+
 def test_probe_openai_missing_key(app, monkeypatch):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     with app.app_context():

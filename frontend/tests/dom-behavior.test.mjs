@@ -383,8 +383,102 @@ test('assembled SetupPage recovers its initial request and reports autodetection
   await waitFor(() => assert.ok(screen.getByText("Couldn't load setup.")))
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
   await waitFor(() => assert.ok(screen.getByRole('heading', { name: 'Welcome to Prep My Avatar' })))
-    await waitFor(() => assert.ok(screen.getByText(/Machine scan failed:/)))
+  await waitFor(() => assert.ok(screen.getByText(/Machine scan failed:/)))
+  assert.equal(screen.getAllByText(/Step \d of 5/).length, 5)
+  for (const label of [
+    /Image generation — API keys & provider/,
+    /Local generation — ComfyUI/,
+    /Local vision — Ollama/,
+    /Quality tools — ML extras/,
+    /LoRA training — ai-toolkit/,
+  ]) assert.ok(screen.getByText(label))
   assert.ok(screen.getByRole('button', { name: 'Retry scan' }))
+})
+
+test('setup local vision selector exposes provider-specific fields without stale readiness', async () => {
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  const user = userEvent.setup({ document })
+  const changes = []
+  let saves = 0
+  const stepById = {
+    ollama: {
+      provider: 'ollama', providerLabel: 'Ollama', status: 'ready', reachable: true,
+      visionModelReady: true, url: 'http://127.0.0.1:11434', visionModel: 'ollama-vl',
+      installed: true,
+    },
+  }
+  function Harness() {
+    const [config, setConfig] = React.useState({
+      local_vision: { backend: 'ollama' },
+      ollama: { url: 'http://127.0.0.1:11434', vision_model: 'ollama-vl' },
+      lmstudio: { url: 'http://127.0.0.1:1234/v1', vision_model: '' },
+      llamacpp: { url: 'http://127.0.0.1:8080/v1', vision_model: '' },
+    })
+    const setField = (section, key, value) => {
+      changes.push([section, key, value])
+      setConfig((current) => ({
+        ...current, [section]: { ...current[section], [key]: value },
+      }))
+    }
+    return React.createElement(SetupToolBody, {
+      id: 'ollama', stepById, config, setField,
+      secretsPresence: {}, setSecretsPresence: () => {},
+      secretInputs: {}, setSecretInputs: () => {}, detected: {}, busy: false, caps: {},
+      refresh: async () => {}, toast: { success() {}, warning() {}, error() {} },
+      persist: async () => { saves += 1 }, applyDetectedPath: () => {},
+    })
+  }
+
+  render(React.createElement(Harness))
+  await user.selectOptions(screen.getByLabelText('Local vision backend'), 'lmstudio')
+
+  assert.ok(screen.getByText(/Backend not checked yet/))
+  assert.ok(screen.getByLabelText('LM Studio OpenAI-compatible URL'))
+  const model = screen.getByLabelText('LM Studio vision model')
+  await user.type(model, 'qwen-vl')
+  assert.deepEqual(changes.at(-1), ['lmstudio', 'vision_model', 'qwen-vl'])
+  await user.click(screen.getByRole('button', { name: 'Save & re-check' }))
+  assert.equal(saves, 1)
+  assert.equal(screen.queryByText(/Ollama is running at/), null)
+})
+
+test('setup image step renders independent provider credentials and changes Nano Banana provider', async () => {
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  const user = userEvent.setup({ document })
+  const changes = []
+  function Harness() {
+    const [config, setConfig] = React.useState({
+      engines: { nanobanana_provider: 'google' },
+    })
+    const setField = (section, key, value) => {
+      changes.push([section, key, value])
+      setConfig((current) => ({
+        ...current, [section]: { ...current[section], [key]: value },
+      }))
+    }
+    return React.createElement(SetupToolBody, {
+      id: 'image', stepById: { image: { engines: {} } }, config, setField,
+      secretsPresence: {
+        GEMINI_API_KEY: true, REPLICATE_API_TOKEN: false, OPENAI_API_KEY: true,
+      },
+      setSecretsPresence: () => {}, secretInputs: {}, setSecretInputs: () => {},
+      detected: {}, busy: false, caps: {}, refresh: async () => {},
+      toast: { success() {}, warning() {}, error() {} }, persist: async () => {},
+      applyDetectedPath: () => {},
+    })
+  }
+
+  render(React.createElement(Harness))
+
+  assert.ok(screen.getByLabelText('Gemini API key'))
+  assert.ok(screen.getByLabelText('Replicate API token'))
+  assert.ok(screen.getByLabelText('OpenAI API key'))
+  assert.equal(screen.getAllByText('✓ Saved').length, 2)
+  assert.equal(screen.getAllByText('○ Not set').length, 1)
+  await user.selectOptions(screen.getByLabelText('Nano Banana provider'), 'replicate')
+  assert.deepEqual(changes.at(-1), ['engines', 'nanobanana_provider', 'replicate'])
 })
 
 test('assembled SettingsPage recovers an initial settings request failure', async () => {

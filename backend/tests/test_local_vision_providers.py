@@ -88,3 +88,42 @@ def test_local_vision_probe_requires_configured_model_to_be_loaded(app):
     assert result['reachable'] is True
     assert result['model_ready'] is False
     assert result['provider'] == 'lmstudio'
+
+
+def test_local_vision_probe_reports_loaded_llamacpp_model_ready(app):
+    from app import capabilities, config as cfg
+
+    cfg.save_config({
+        'local_vision': {'backend': 'llamacpp'},
+        'llamacpp': {'url': 'http://127.0.0.1:8080/v1', 'vision_model': 'qwen-vl.gguf'},
+    })
+    response = MagicMock(status_code=200)
+    response.json.return_value = {'data': [{'id': 'qwen-vl.gguf'}]}
+
+    with patch('app.capabilities.requests.get', return_value=response) as get:
+        result = capabilities.probe_local_vision()
+
+    assert result == {
+        'provider': 'llamacpp', 'label': 'llama.cpp', 'reachable': True,
+        'model_ready': True, 'url': 'http://127.0.0.1:8080/v1',
+        'vision_model': 'qwen-vl.gguf', 'ok': True,
+        'detail': 'llama.cpp and qwen-vl.gguf ready',
+    }
+    assert get.call_args.args[0] == 'http://127.0.0.1:8080/v1/models'
+
+
+def test_local_vision_probe_contains_unreachable_server_errors(app):
+    from app import capabilities, config as cfg
+
+    cfg.save_config({
+        'local_vision': {'backend': 'lmstudio'},
+        'lmstudio': {'url': 'http://127.0.0.1:1234/v1', 'vision_model': 'qwen-vl'},
+    })
+
+    with patch('app.capabilities.requests.get', side_effect=OSError('offline')):
+        result = capabilities.probe_local_vision()
+
+    assert result['ok'] is False
+    assert result['reachable'] is False
+    assert result['model_ready'] is False
+    assert result['detail'] == 'LM Studio is unreachable'

@@ -100,7 +100,7 @@ export function deriveCapabilitySummary(caps) {
     { label: 'Nano Banana (Google or Replicate)', ok: !!e.nanobanana },
     { label: 'ChatGPT (gpt-image-2)', ok: !!e.chatgpt },
     { label: 'Klein (local)', ok: !!e.klein },
-    { label: 'Captioning', ok: !!(cap.joycaption || cap.ollama) },
+    { label: 'Captioning', ok: !!(cap.joycaption || cap.local_vision || cap.ollama) },
     { label: 'Auto-framing & head-crop', ok: !!(o.reachable && (o.model_ready ?? o.vision_model_ready)) },
     { label: 'Face-similarity scoring', ok: !!c.face_scoring },
     { label: 'Person masks', ok: !!c.masks },

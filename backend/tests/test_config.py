@@ -33,6 +33,13 @@ def test_dotenv_can_select_current_provider_and_models(tmp_path, monkeypatch):
         'LDS_OPENAI_IMAGE_MODEL=gpt-image-2\n'
         'LDS_OPENAI_IMAGE_QUALITY=high\n'
         'LDS_GOOGLE_IMAGE_MODEL=gemini-2.5-flash-image\n'
+        'LDS_NANOBANANA_PROVIDER=replicate\n'
+        'LDS_REPLICATE_IMAGE_MODEL=google/nano-banana-pro\n'
+        'LDS_LOCAL_VISION_BACKEND=lmstudio\n'
+        'LDS_LMSTUDIO_URL=http://127.0.0.1:1234/v1\n'
+        'LDS_LMSTUDIO_VISION_MODEL=qwen-vl\n'
+        'LDS_LLAMACPP_URL=http://127.0.0.1:8080/v1\n'
+        'LDS_LLAMACPP_VISION_MODEL=qwen-vl.gguf\n'
         'LDS_OLLAMA_URL=http://ollama.internal:11434\n'
         'LDS_OLLAMA_VISION_MODEL=qwen3-vl:8b\n',
         encoding='utf-8',
@@ -45,6 +52,13 @@ def test_dotenv_can_select_current_provider_and_models(tmp_path, monkeypatch):
     assert config.get('engines.openai_image_model') == 'gpt-image-2'
     assert config.get('engines.openai_image_quality') == 'high'
     assert config.get('engines.google_image_model') == 'gemini-2.5-flash-image'
+    assert config.get('engines.nanobanana_provider') == 'replicate'
+    assert config.get('engines.replicate_image_model') == 'google/nano-banana-pro'
+    assert config.get('local_vision.backend') == 'lmstudio'
+    assert config.get('lmstudio.url') == 'http://127.0.0.1:1234/v1'
+    assert config.get('lmstudio.vision_model') == 'qwen-vl'
+    assert config.get('llamacpp.url') == 'http://127.0.0.1:8080/v1'
+    assert config.get('llamacpp.vision_model') == 'qwen-vl.gguf'
     assert config.get('ollama.url') == 'http://ollama.internal:11434'
     assert config.get('ollama.vision_model') == 'qwen3-vl:8b'
 
@@ -78,6 +92,10 @@ def test_canonical_model_environment_name_wins_over_legacy_alias(
     ('LDS_ENABLED_GENERATION_ENGINES', 'klein,unknown', 'valid engines'),
     ('LDS_DEFAULT_GENERATION_ENGINE', 'unknown', 'valid engine'),
     ('LDS_OPENAI_IMAGE_QUALITY', 'ultra', 'one of'),
+    ('LDS_NANOBANANA_PROVIDER', 'unknown', 'one of'),
+    ('LDS_LOCAL_VISION_BACKEND', 'unknown', 'one of'),
+    ('LDS_LMSTUDIO_URL', 'file:///tmp/server', 'http'),
+    ('LDS_LLAMACPP_URL', 'http://user:pass@localhost:8080/v1', 'credentials'),
     ('LDS_OLLAMA_URL', 'not a url', 'http'),
 ])
 def test_invalid_environment_defaults_fail_closed(
