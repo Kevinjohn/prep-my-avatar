@@ -2,6 +2,41 @@
 
 > Prefer a visual walkthrough? Launch the app and choose **Guide → Getting started**, or open `docs/guide/getting-started.html` from your local copy of the repository. This Markdown file is the plain-text reference.
 
+## Open the app
+
+Prep My Avatar is a local web app. It runs on your computer and you use it in a
+web browser; opening this guide does not start the app.
+
+### Windows
+
+Clone or download the repository, then double-click **`start.bat`**.
+
+### macOS or Linux
+
+Open a terminal in the repository folder and run these commands for the first
+launch:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+python backend/source_launcher.py --install --root . --data-dir data
+python data/source-launcher.py --root . --data-dir data
+```
+
+For later launches, run only:
+
+```bash
+source .venv/bin/activate
+python data/source-launcher.py --root . --data-dir data
+```
+
+Then open **<http://127.0.0.1:5050/>**. Keep the terminal window open while you
+use the app; press `Ctrl+C` there to stop it.
+
+The first launch opens the Setup wizard. You can skip optional integrations and
+start by importing and reviewing your photos.
+
 ## The problem this solves
 
 You need recognisable photos or videos of yourself repeatedly—for a website, social post, presentation, campaign, thumbnail, or story. Another photoshoot every time is slow, and starting from scratch with an image tool can produce a different-looking person on every attempt. The goal is not to own an avatar. The goal is to make useful new material featuring your likeness without rebuilding that likeness for every image, video, or service.
@@ -66,7 +101,9 @@ The safest first step is to import your photos, review them, and export a small 
 
 ## Install and launch
 
-See the repository's canonical [Installation and launch](https://github.com/Kevinjohn/prep-my-avatar#installation-and-launch) section for the supported installation routes.
+The [Open the app](#open-the-app) section above is the shortest route. The
+following sections add platform notes, environment configuration, and Docker's
+API-only route.
 
 ### Windows: use the bundled launcher
 

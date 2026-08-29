@@ -4,6 +4,41 @@ Personal, noncommercial fork of [LoRA Dataset Studio](https://github.com/perfect
 focused on preparing a large, imperfect photo corpus before using generation
 to fill specific coverage gaps.
 
+## Open the app
+
+Prep My Avatar is a local web app. It runs on your computer and you use it in a
+web browser; there is no macOS or Linux application icon to open.
+
+### Windows
+
+Clone or download this repository, then double-click **`start.bat`**.
+
+### macOS or Linux
+
+Open a terminal in the repository folder and run these commands for the first
+launch:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+python backend/source_launcher.py --install --root . --data-dir data
+python data/source-launcher.py --root . --data-dir data
+```
+
+For later launches, run only:
+
+```bash
+source .venv/bin/activate
+python data/source-launcher.py --root . --data-dir data
+```
+
+Then open **<http://127.0.0.1:5050/>**. Keep the terminal window open while you
+use the app; press `Ctrl+C` there to stop it.
+
+The first launch opens the Setup wizard. You can import and review photos
+without installing the optional generation, analysis, or training tools.
+
 The upstream application provides the guided workspace, curation, captioning,
 training, export, setup, and documentation foundation. This fork changes the
 front of the journey:
@@ -14,7 +49,7 @@ large photo corpus → analyse → plan coverage → generate missing combinatio
 
 ## Workflow at a glance
 
-If you are new to the project, open the [standalone visual getting-started guide](docs/guide/getting-started.html). It begins with the actual outcome: reference images, a family-specific Character LoRA, a provider-owned avatar such as Gemini’s, or a portable training pack. It then explains what this app can create, where each result can be reused, and why every preparation step exists. The same orientation is available inside the app at **Guide → Getting started**. The Markdown file at [`docs/guide/getting-started.md`](docs/guide/getting-started.md) remains available as an operational plain-text reference.
+If you are new to the project, open the [standalone visual getting-started guide](docs/guide/getting-started.html). It begins with the launch instructions, then explains the possible outcomes: reference images, a family-specific Character LoRA, a provider-owned avatar such as Gemini’s, or a portable training pack. It also explains what this app can create, where each result can be reused, and why every preparation step exists. The same orientation is available inside the app at **Guide → Getting started**. The Markdown file at [`docs/guide/getting-started.md`](docs/guide/getting-started.md) remains available as an operational plain-text reference.
 
 ### 1. Import and review the source corpus
 
@@ -104,8 +139,8 @@ for the fork-specific architecture and data contracts.
 
 ## Installation and launch
 
-For the shortest path on Windows, clone this repository and run `start.bat`.
-For macOS, Linux, and Docker's API-only mode, follow the step-by-step commands in
+Use the [Open the app](#open-the-app) instructions above for Windows, macOS, or
+Linux. Docker's API-only mode and optional configuration are documented in
 [`docs/guide/getting-started.md`](docs/guide/getting-started.md#install-and-launch).
 Once the app is open, **Guide → Getting started** explains which optional tools
 and API keys unlock generation, automatic analysis, and training.

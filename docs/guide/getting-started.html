@@ -68,6 +68,13 @@
     .jump { display: inline-flex; align-items: center; gap: 8px; padding: 9px 13px; border: 1px solid var(--blue); border-radius: 5px; color: #fff; background: var(--blue); font-size: 14px; font-weight: 650; text-decoration: none; }
     .jump:hover { color: #fff; background: #1746ae; }
 
+    .launch { margin: 36px 0 0; padding: 28px; border: 1px solid var(--rule); background: var(--wash); }
+    .launch h2 { margin: 0 0 10px; font-size: 21px; }
+    .launch h2:not(:first-child) { margin-top: 30px; }
+    .launch p { margin-bottom: 14px; color: var(--muted); }
+    .launch pre { margin: 14px 0; padding: 16px; overflow-x: auto; border-radius: 4px; color: #f5f7fa; background: #20242c; font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .launch .open-url { margin: 24px 0 0; color: var(--ink); }
+
     .intro-note { margin: 88px 0; padding: 24px 26px; border-left: 3px solid var(--blue); background: var(--wash); }
     .intro-note strong { display: block; margin-bottom: 8px; font-size: 15px; }
     .intro-note p { margin: 0; color: var(--muted); }
@@ -202,11 +209,11 @@
     <div class="wrap">
       <a class="wordmark" href="../../README.md">Prep <span>My Avatar</span></a>
       <nav class="header-links" aria-label="Page navigation">
+        <a href="#open-app">Open the app</a>
         <a href="#why-avatar">The problem</a>
         <a href="#outputs">What it can make</a>
         <a href="#choose">Choose an outcome</a>
         <a href="#why">Why the steps exist</a>
-        <a href="http://127.0.0.1:5050/">Open the app ↗</a>
       </nav>
     </div>
   </header>
@@ -215,7 +222,8 @@
     <aside class="side-nav" aria-label="Guide chapters">
       <h2>Getting started</h2>
       <ol>
-        <li><a class="current" href="#why-avatar">The problem this solves</a></li>
+        <li><a class="current" href="#open-app">Open the app</a></li>
+        <li><a href="#why-avatar">The problem this solves</a></li>
         <li><a href="#outputs">What this app can make</a></li>
         <li><a href="#choose">Choose your outcome</a></li>
         <li class="sub"><a href="#reference">Still-image likeness</a></li>
@@ -226,14 +234,33 @@
         <li><a href="#why">Why the steps exist</a></li>
         <li><a href="#screens">What you will see</a></li>
       </ol>
-      <p class="side-note">Start with the repeated work you want to make. The technology comes later.</p>
+      <p class="side-note">First launch the local app, then start with the repeated work you want to make.</p>
     </aside>
 
     <main id="top">
-      <p class="kicker">The problem this solves</p>
-      <h1>Make new images of yourself without starting over every time</h1>
-      <p class="lead">You need recognisable photos or videos of yourself again and again—for a website, social post, presentation, campaign, thumbnail, or story. Another photoshoot every time is slow, and asking an image tool from scratch can produce a different-looking person on every attempt.</p>
-      <a class="jump" href="#why-avatar">See how to make your likeness reusable ↓</a>
+      <div id="open-app">
+        <p class="kicker">Start here</p>
+        <h1>Open Prep My Avatar</h1>
+        <p class="lead">Prep My Avatar is a local web app. It runs on your computer and you use it in a web browser; opening this guide does not start the app.</p>
+        <div class="launch">
+          <h2>Windows</h2>
+          <p>Clone or download the repository, then double-click <strong>start.bat</strong>.</p>
+
+          <h2>macOS or Linux</h2>
+          <p>Open a terminal in the repository folder and run these commands for the first launch:</p>
+          <pre><code>python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+python backend/source_launcher.py --install --root . --data-dir data
+python data/source-launcher.py --root . --data-dir data</code></pre>
+          <p>For later launches, run only:</p>
+          <pre><code>source .venv/bin/activate
+python data/source-launcher.py --root . --data-dir data</code></pre>
+
+          <p class="open-url">Then open <strong><a href="http://127.0.0.1:5050/">http://127.0.0.1:5050/</a></strong>. Keep the terminal open while you use the app; press <code>Ctrl+C</code> there to stop it.</p>
+        </div>
+        <p class="small-note">The first launch opens the Setup wizard. You can skip optional integrations and start by importing and reviewing your photos.</p>
+      </div>
 
       <section id="why-avatar" class="section">
         <div class="section-heading">
@@ -441,6 +468,7 @@
 
     <aside class="outline" aria-label="On this page">
       <h2>On this page</h2>
+      <a href="#open-app">Open the app</a>
       <a href="#why-avatar">The problem</a>
       <a href="#outputs">What it can make</a>
       <a href="#choose">Choose an outcome</a>
