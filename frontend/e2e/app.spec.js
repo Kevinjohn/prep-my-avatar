@@ -318,7 +318,7 @@ test('primary pages fit the viewport without horizontal overflow', async ({ page
   const routes = [
     ['datasets', 'Datasets'],
     ['settings', 'Overview'],
-    ['guide', 'Getting started'],
+    ['guide', 'Open the app'],
     ['help', 'Getting help'],
   ];
   for (const [route, heading] of routes) {
