@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 15: Caption images in the Prep My Avatar first-run guide.">
+  <title>Step 15: Caption images — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 15 of 21</p>
+      <h1>Step 15: Caption images</h1>
+      <p>A caption tells the training model what is visible in each image. The thing you are teaching must be left out: Character captions omit identity traits, Concept captions omit the concept, and Style captions describe content rather than the visual style.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/15_caption_images.jpg" alt="Caption images screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Keep and reject images before captioning. Automatic captioning needs a ready local-vision backend. Without one, you can type captions manually on each kept image.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Caption images</strong> in the dataset step navigator. Its URL ends in <code>/captions</code>.</li><li>Confirm the caption style. Use prose for the prose-based model families; use booru tags for an SDXL booru workflow.</li><li>Select <strong>Caption the kept ones</strong> and wait for the count to finish.</li><li>Read every caption. Correct factual mistakes and remove descriptions of the training target.</li><li>For a Character or Concept dataset, open the identity- or concept-leak badge and fix every highlighted caption. Style datasets have no automatic style-term scanner: review them manually and remove aesthetic, medium, artist, or other style names so each caption describes content only.</li><li>Use <strong>Caption tools</strong> for a repeated find-and-replace across the set.</li><li>If another trainer needs sidecar files, use <strong>Write .txt files</strong> after the captions are final.</li><li>Select <strong>Continue</strong>. Character datasets open <strong>Score face similarity</strong>; Concept and Style datasets open <strong>Export dataset</strong>.</li></ol>
+      <h2>You are finished when</h2>
+      <p>The kept and captioned counts match, every caption is accurate, target-leak review is clear where applicable, and the navigator marks <strong>Caption images — Complete</strong>.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="14_curate_images.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="16_score_face_similarity.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

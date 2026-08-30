@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 17: Export dataset in the Prep My Avatar first-run guide.">
+  <title>Step 17: Export dataset — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 17 of 21</p>
+      <h1>Step 17: Export dataset</h1>
+      <p>Export creates a standard training package from the images currently marked <strong>kept</strong>. It does not include rejected or undecided images.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/17_export_dataset.jpg" alt="Export dataset screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Finish curation and captions first. An export can be useful even if you never train inside Prep My Avatar.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Export dataset</strong> in the dataset step navigator. Its URL ends in <code>/export</code>.</li><li>Check the kept count beside <strong>Export ZIP</strong>.</li><li>Select <strong>Export ZIP</strong>.</li><li>Choose a destination folder if your browser asks.</li><li>Wait for the download to finish, then open the ZIP to verify it contains image files and matching <code>.txt</code> caption files.</li><li>Keep <code>_prep_my_avatar_manifest.json</code>. Training tools can ignore it, but it records the source mix, coverage, and provenance.</li><li>Select <strong>Continue to Train a LoRA</strong>.</li></ol>
+      <p>An export ZIP is a training package, not a complete backup of the project. The final guide step explains the separate <strong>Backup</strong> action.</p>
+      <h2>You are finished when</h2>
+      <p>A ZIP file exists in your chosen download folder and its image/text pairs match the kept set. If export is your goal, skip the optional training, checkpoint-review, and Studio work in Steps 18–20, then continue to Step 21 to back up the dataset.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="16_score_face_similarity.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="18_train_lora.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

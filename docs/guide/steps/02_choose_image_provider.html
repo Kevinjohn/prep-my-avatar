@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 2: Choose an image provider in the Prep My Avatar first-run guide.">
+  <title>Step 2: Choose an image provider — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 2 of 21</p>
+      <h1>Step 2: Choose an image provider</h1>
+      <p>This optional setup page enables the app to create new images for missing poses or framings. You can use imported photos and export a dataset without configuring any provider.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/02_choose_image_provider.jpg" alt="Choose an image provider screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Choose at most one provider for your first test. Provider accounts and API use may cost money. A key is a private password: paste it only into the labelled field and never put it in screenshots or support reports.</p>
+      <ul><li><strong>Gemini API key</strong> uses Nano Banana through Google.</li><li><strong>Replicate API token</strong> uses Nano Banana through Replicate.</li><li><strong>OpenAI API key</strong> uses OpenAI image generation. An OpenAI Platform API account and API billing are separate from a ChatGPT subscription.</li><li>Local Klein is configured on the next page instead of using one of these keys.</li></ul>
+      <h2>Do this</h2>
+      <ol><li>On <strong>Step 1 of 5 — Image generation</strong>, use <strong>Nano Banana provider</strong> only if you chose Gemini or Replicate: select <strong>Google direct</strong> for a Gemini key or <strong>Replicate</strong> for a Replicate token. OpenAI does not use this selector.</li><li>Open the account link beside your chosen provider.</li><li>Sign in to that provider, create a key or token, and copy it.</li><li>Paste it into the matching field: <strong>Gemini API key</strong>, <strong>Replicate API token</strong>, or <strong>OpenAI API key</strong>.</li><li>Select <strong>Save &amp; test</strong> beside that field.</li><li>Wait for a successful connection result.</li><li>Select <strong>Save &amp; continue →</strong>.</li></ol>
+      <p>If you do not want remote generation, leave every field empty and select <strong>Save &amp; continue →</strong>. You can add a provider later under <strong>Settings → Image engines</strong>.</p>
+      <h2>You are finished when</h2>
+      <p>Your chosen key shows <strong>Saved</strong> and its test succeeds, or you have deliberately left all keys empty. The wizard then shows <strong>Step 2 of 5 — Local generation — ComfyUI</strong>.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="01_open_app.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="03_configure_comfyui.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

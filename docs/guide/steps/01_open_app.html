@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 1: Open Prep My Avatar in the Prep My Avatar first-run guide.">
+  <title>Step 1: Open Prep My Avatar — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 1 of 21</p>
+      <h1>Step 1: Open Prep My Avatar</h1>
+      <p>Prep My Avatar runs on your computer and opens in a web browser. You do not need an API key, a graphics card, or any AI tools to open it and begin reviewing photos.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/01_open_app.jpg" alt="Open Prep My Avatar screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>You need a Windows, macOS, or Linux computer and an internet connection for the first installation. Keep five or more clear photos ready for your first test. Use photos you own or have permission to process.</p>
+      <p>On macOS or Linux, install <a href="https://www.python.org/downloads/" target="_blank" rel="noreferrer">Python</a> before continuing. Python 3.10 can run the core app. If you may install the optional machine-learning tools, use Python 3.11 or 3.12. Open Terminal and run <code>python3 --version</code>. If Terminal says the command was not found, install Python 3.11 or 3.12, close and reopen Terminal, then run the check again. If <code>python3</code> reports another version after you installed one of those, run the matching <code>python3.11 --version</code> or <code>python3.12 --version</code>, then replace <code>python3 -m venv .venv</code> below with that matching command—for example, <code>python3.11 -m venv .venv</code>.</p>
+      <h2>Do this</h2>
+      <p>### Windows</p>
+      <ol><li>Download or clone the repository and extract it if it arrived as a ZIP file.</li><li>Open the extracted <code>prep-my-avatar</code> folder.</li><li>Double-click <code>start.bat</code>.</li><li>Leave the terminal window open while you use the app.</li></ol>
+      <p>### macOS or Linux</p>
+      <ol><li>Open the Terminal application.</li><li>Type <code>cd </code>, including the space, drag the <code>prep-my-avatar</code> folder into the Terminal window, and press Enter.</li><li>Run these commands one line at a time:</li></ol>
+      <pre><code>python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+python backend/source_launcher.py --install --root . --data-dir data
+python data/source-launcher.py --root . --data-dir data</code></pre>
+      <ol><li>Leave Terminal open. Open &lt;http://127.0.0.1:5050/&gt; if the browser does not open automatically.</li></ol>
+      <p>The repository README has the canonical <a href="https://github.com/Kevinjohn/prep-my-avatar#installation-and-launch" target="_blank" rel="noreferrer">Installation and launch</a> instructions, including later launches and Docker.</p>
+      <h2>You are finished when</h2>
+      <p>Your browser shows <strong>Welcome to Prep My Avatar</strong> or the <strong>Setup</strong> screen. On first launch, choose <strong>Start setup</strong> to configure tools now. The next five pages explain its five screens one at a time.</p>
+      <p>Setup is optional as a whole: <strong>Skip setup — I'll do it later</strong> takes you directly to <strong>Datasets</strong>. If you start Setup, its local-vision screen must be ready before the wizard can advance; Step 4 explains that choice exactly.</p>
+      <p>If the page does not open, keep the terminal visible and use the error message with the <strong>Troubleshooting</strong> reference in this guide.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="02_choose_image_provider.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

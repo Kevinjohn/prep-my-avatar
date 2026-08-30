@@ -3,48 +3,45 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Prep My Avatar — first-run guide</title>
-  <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #0b0b12; color: #f4f4f7; }
-    body { margin: 0; }
-    main { width: min(46rem, calc(100% - 2rem)); margin: 0 auto; padding: 3rem 0 5rem; }
-    h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin-bottom: .5rem; }
-    p { color: #b9b9c7; line-height: 1.65; }
-    ol { padding: 0; list-style: none; counter-reset: steps; }
-    li { counter-increment: steps; margin: .65rem 0; }
-    a { display: flex; gap: .9rem; align-items: baseline; padding: .9rem 1rem; border: 1px solid #303044; border-radius: .75rem; color: #f4f4f7; text-decoration: none; background: #151521; }
-    a::before { content: counter(steps, decimal-leading-zero); color: #a5a2ff; font: .78rem ui-monospace, monospace; }
-    a:hover, a:focus-visible { border-color: #7b74ff; background: #1b1b2b; }
-    .note { border-left: .2rem solid #7b74ff; padding-left: 1rem; }
-  </style>
+  <meta name="description" content="A complete, beginner-friendly first run through Prep My Avatar.">
+  <title>First-run guide — Prep My Avatar</title>
+  <link rel="stylesheet" href="first-run.css">
 </head>
 <body>
-<main>
-  <h1>Your first complete run</h1>
-  <p class="note">This is the guide index. Each link opens one step only. In the running app, choose <strong>Guide</strong> to get the same sequence with Previous and Next controls.</p>
-  <ol>
-    <li><a href="getting-started.md">Open Prep My Avatar</a></li>
-    <li><a href="steps/02-image-provider.md">Choose an image provider</a></li>
-    <li><a href="steps/03-comfyui.md">Configure ComfyUI</a></li>
-    <li><a href="steps/04-local-vision.md">Configure local vision</a></li>
-    <li><a href="steps/05-quality-tools.md">Install quality tools</a></li>
-    <li><a href="steps/06-training-tools.md">Configure training</a></li>
-    <li><a href="steps/07-create-dataset.md">Create a dataset</a></li>
-    <li><a href="steps/08-import-photos.md">Import photos</a></li>
-    <li><a href="steps/09-review-corpus.md">Review corpus</a></li>
-    <li><a href="steps/10-choose-anchors.md">Choose anchors</a></li>
-    <li><a href="steps/11-plan-coverage.md">Review coverage</a></li>
-    <li><a href="steps/12-primary-reference.md">Set a primary reference</a></li>
-    <li><a href="steps/13-generate-gaps.md">Generate missing views</a></li>
-    <li><a href="steps/14-curate-images.md">Curate images</a></li>
-    <li><a href="steps/15-caption-images.md">Caption images</a></li>
-    <li><a href="steps/16-score-images.md">Score face similarity</a></li>
-    <li><a href="steps/17-export-dataset.md">Export dataset</a></li>
-    <li><a href="steps/18-train-lora.md">Train a LoRA</a></li>
-    <li><a href="steps/19-review-checkpoints.md">Review checkpoints</a></li>
-    <li><a href="steps/20-test-studio.md">Test in Studio</a></li>
-    <li><a href="steps/21-back-up.md">Back up dataset</a></li>
-  </ol>
-</main>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="index-page">
+    <p class="eyebrow">Beginner guide · 21 steps</p>
+    <h1>Your first complete run</h1>
+    <p class="lede">Start with no assumed knowledge. Each page covers one action, shows the exact screen to use, and tells you how to know when you are finished.</p>
+    <p class="index-note">Setup has five optional tool pages before dataset creation. You can skip optional tools, but none of them are hidden from this guide.</p>
+    <ol class="step-list">
+      <li><a href="steps/01_open_app.html">Open Prep My Avatar</a></li>
+      <li><a href="steps/02_choose_image_provider.html">Choose an image provider</a></li>
+      <li><a href="steps/03_configure_comfyui.html">Configure ComfyUI</a></li>
+      <li><a href="steps/04_configure_local_vision.html">Configure local vision</a></li>
+      <li><a href="steps/05_install_quality_tools.html">Install quality tools</a></li>
+      <li><a href="steps/06_configure_training.html">Configure training</a></li>
+      <li><a href="steps/07_create_dataset.html">Create a dataset</a></li>
+      <li><a href="steps/08_import_photos.html">Import photos</a></li>
+      <li><a href="steps/09_review_corpus.html">Review corpus</a></li>
+      <li><a href="steps/10_choose_anchors.html">Choose anchors</a></li>
+      <li><a href="steps/11_review_coverage.html">Review coverage</a></li>
+      <li><a href="steps/12_set_primary_reference.html">Set a primary reference</a></li>
+      <li><a href="steps/13_generate_missing_views.html">Generate missing views</a></li>
+      <li><a href="steps/14_curate_images.html">Curate images</a></li>
+      <li><a href="steps/15_caption_images.html">Caption images</a></li>
+      <li><a href="steps/16_score_face_similarity.html">Score face similarity</a></li>
+      <li><a href="steps/17_export_dataset.html">Export dataset</a></li>
+      <li><a href="steps/18_train_lora.html">Train a LoRA</a></li>
+      <li><a href="steps/19_review_checkpoints.html">Review checkpoints</a></li>
+      <li><a href="steps/20_test_studio.html">Test in Studio</a></li>
+      <li><a href="steps/21_back_up_dataset.html">Back up dataset</a></li>
+    </ol>
+  </main>
 </body>
 </html>

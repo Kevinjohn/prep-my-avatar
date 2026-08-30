@@ -11,6 +11,7 @@
     "test:guided": "node --test src/hooks/useGuidedFlow.test.js",
     "build": "vite build",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "capture:guide": "pnpm run build && node scripts/capture-guide-screenshots.mjs",
     "preview": "vite preview",
     "test:navigation": "node --test src/components/dataset/datasetWorkflow.test.js src/components/dataset/DatasetWorkflowNav.test.js",
     "lint": "eslint . --max-warnings=0",

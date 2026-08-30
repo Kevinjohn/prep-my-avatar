@@ -182,11 +182,13 @@ def validate_governance() -> list[str]:
         if not expected.search(prose):
             errors.append("Implemented-flow specification does not match coverage limits")
 
-    errors.extend(_validate_screenshot_manifest(markdown_paths))
+    documentation_paths = [*markdown_paths]
+    documentation_paths.extend(sorted((ROOT / "docs").rglob("*.html")))
+    errors.extend(_validate_screenshot_manifest(documentation_paths))
     return errors
 
 
-def _validate_screenshot_manifest(markdown_paths: list[Path]) -> list[str]:
+def _validate_screenshot_manifest(documentation_paths: list[Path]) -> list[str]:
     errors: list[str] = []
     manifest_path = ROOT / SCREENSHOT_MANIFEST
     if not manifest_path.exists():
@@ -195,7 +197,6 @@ def _validate_screenshot_manifest(markdown_paths: list[Path]) -> list[str]:
     entries = payload.get("screenshots") if isinstance(payload, dict) else None
     if not isinstance(entries, list) or not entries:
         return [f"{SCREENSHOT_MANIFEST} has no screenshot records"]
-    referenced = "\n".join(path.read_text(encoding="utf-8") for path in markdown_paths)
     required = {
         "path", "status", "capture_revision", "page", "viewport", "sha256",
         "owner", "relevant_sources",
@@ -205,18 +206,20 @@ def _validate_screenshot_manifest(markdown_paths: list[Path]) -> list[str]:
         for entry in entries if isinstance(entry, dict) and entry.get('path')
     }
     screenshot_reference = re.compile(
-        r"(?:\[[^]]*\]\(|<img[^>]+src=['\"])([^)'\"]*docs/screenshots/[^)'\"]+)"
+        r"(?:!\[[^]]*\]\(|<img[^>]+src=['\"])([^)'\"]*screenshots/[^)'\"]+)"
     )
-    for markdown_path in markdown_paths:
+    referenced_paths: set[str] = set()
+    for documentation_path in documentation_paths:
         for target in screenshot_reference.findall(
-                markdown_path.read_text(encoding='utf-8')):
+                documentation_path.read_text(encoding='utf-8')):
             target_path = target.split('#', 1)[0]
             try:
                 normalized = str(
-                    (markdown_path.parent / target_path).resolve().relative_to(ROOT)
+                    (documentation_path.parent / target_path).resolve().relative_to(ROOT)
                 )
             except ValueError:
                 normalized = target_path
+            referenced_paths.add(normalized)
             if normalized not in manifested:
                 errors.append(
                     f"Referenced screenshot has no capture manifest: {normalized}")
@@ -258,7 +261,7 @@ def _validate_screenshot_manifest(markdown_paths: list[Path]) -> list[str]:
                         f"Current screenshot predates relevant source: {relative} "
                         f"({source['path']})"
                     )
-        if entry["status"] == "retired" and relative in referenced:
+        if entry["status"] == "retired" and relative in referenced_paths:
             errors.append(f"Retired screenshot is still referenced: {relative}")
         if entry["status"] not in {"current", "retired"}:
             errors.append(f"Screenshot has invalid status: {relative}")

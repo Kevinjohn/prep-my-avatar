@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 12: Set a primary reference in the Prep My Avatar first-run guide.">
+  <title>Step 12: Set a primary reference — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 12 of 21</p>
+      <h1>Step 12: Set a primary reference</h1>
+      <p>The primary reference is used by local FLUX.2 Klein and by optional face-similarity scoring. Remote API engines can use the reviewed anchor set instead.</p>
+      <p>This is a Character-only step. Concept and Style datasets do not show a primary-reference control; if you chose either kind, skip this page.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/12_set_primary_reference.jpg" alt="Set a primary reference screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Skip this page only if you will use neither local Klein nor face-similarity scoring. Otherwise, choose a sharp, accepted image with an unobstructed face and a neutral enough angle to identify the person reliably.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Set primary reference</strong> in the dataset step navigator. Its URL ends in <code>/reference</code> and it is labelled <strong>Optional</strong>.</li><li>Select or drop the best reference photo.</li><li>Open the crop control and keep the face clear without cutting off important features.</li><li>Add up to three extra references only when another angle adds useful identity evidence.</li><li>Remove any weak or incorrect extra reference.</li><li>Confirm the preview shows the intended person and no unrelated face dominates the frame.</li><li>Select <strong>Continue</strong>, or select <strong>Skip optional step</strong> if neither local Klein nor face scoring needs a reference.</li></ol>
+      <p>The reference is not automatically your entire training set. It is an identity input for local Klein and face scoring; accepted images still determine what is available for training.</p>
+      <h2>You are finished when</h2>
+      <p>For Character, the preview shows the intended image and the navigator marks <strong>Set primary reference — Complete</strong>, or you deliberately used <strong>Skip optional step</strong>. Concept and Style navigators omit this page.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="11_review_coverage.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="13_generate_missing_views.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

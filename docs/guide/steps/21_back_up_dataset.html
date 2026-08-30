@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 21: Back up dataset in the Prep My Avatar first-run guide.">
+  <title>Step 21: Back up dataset — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 21 of 21</p>
+      <h1>Step 21: Back up dataset</h1>
+      <p>A portable backup preserves the dataset itself: originals, working images, captions, settings, relationships, decisions, provenance, and starred best settings. It is different from the smaller training export ZIP.</p>
+      <p>The backup does not include raw training-run folders, <code>.safetensors</code> checkpoints, LoRAs copied into ComfyUI, or generated Studio comparison images. Save those separately if you need them.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/21_back_up_dataset.jpg" alt="Back up dataset screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Choose a storage location outside the app's data folder, such as an external drive or a backed-up folder. Treat the backup as sensitive because it contains the original images.</p>
+      <p>One dataset-backup ZIP supports at most 5,000 image records, 10,050 image/reference files, and 2 GB of uncompressed files. It also validates unusually large metadata before creating the ZIP. If <strong>Backup</strong> reports a limit, use the whole-data-folder procedure below instead; the app cannot split one dataset across backup ZIPs.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Back up dataset</strong> in the dataset step navigator. Its URL ends in <code>/backup</code>.</li><li>Select <strong>Download portable backup</strong>.</li><li>Save the backup ZIP outside the Prep My Avatar data directory.</li><li>If you trained locally, return to <strong>Review checkpoints</strong> and use <strong>Run folder</strong> and <strong>LoRA folder</strong> to locate and separately copy the training run and every <code>.safetensors</code> file you want to retain.</li><li>If you trained in the cloud, wait for the run to finish, open <strong>Runs</strong>, and select <strong>Download the LoRA</strong>. The dataset's <strong>Train a LoRA</strong> page also offers <strong>Download the cloud-trained LoRA (.safetensors)</strong> for its latest completed cloud run. Save the downloaded file outside the app's data folder.</li><li>In Studio, open each result image you need and select <strong>Download image</strong> in its preview.</li><li>Wait for the backup download to finish and confirm the file is not empty.</li><li>Keep at least one second copy if losing the dataset would matter.</li><li>To prove recovery before deleting or moving the original installation, return to <strong>Datasets</strong>, choose <strong>Restore backup</strong>, and restore the ZIP. Restore creates a new dataset rather than overwriting the existing one.</li><li>Delete the temporary restored copy only after comparing it with the original. Deleted datasets first move to <strong>Settings → Maintenance → Trash</strong>.</li></ol>
+      <p>If the dataset is above a ZIP limit, stop the app first: press <code>Ctrl+C</code> in its terminal, or close the Windows terminal window. Copy the entire <code>data</code> folder from inside <code>prep-my-avatar</code> to your safe location and verify the copied folder is not empty. To test that cold backup, get a separate clean checkout as described in Step 1 and keep both copies stopped. If the clean checkout already has a <code>data</code> folder, rename it; if it does not, no rename is needed. Copy the saved folder into the checkout as <code>data</code>, then start the app using Step 1. Never merge two <code>data</code> folders by hand.</p>
+      <h2>You are finished when</h2>
+      <p>You have completed one of the two recovery checks: the portable ZIP exists in a separate safe location and has been restored successfully once, or an over-limit cold copy of the entire <code>data</code> folder has opened successfully in a separate checkout. Any separately downloaded LoRAs and Studio images are also in safe storage. Your first complete run is now finished; use the reference pages for deeper dataset choices, troubleshooting, and support.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="20_test_studio.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"></div>
+    </nav>
+  </main>
+</body>
+</html>

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 19: Review checkpoints in the Prep My Avatar first-run guide.">
+  <title>Step 19: Review checkpoints — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 19 of 21</p>
+      <h1>Step 19: Review checkpoints</h1>
+      <p>A checkpoint is a saved LoRA from a particular point during training. The last checkpoint is not automatically the best; an earlier one may preserve identity while responding more flexibly to prompts. This step applies only when Step 18 produced checkpoints. Otherwise, continue to Step 21.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/19_review_checkpoints.jpg" alt="Review checkpoints screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Wait for training to produce checkpoints. Face scoring is helpful but optional. Do not delete intermediate checkpoints until you have compared their outputs.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Review checkpoints</strong> in the dataset step navigator. Its URL ends in <code>/checkpoints</code> and it is labelled <strong>Optional</strong>.</li><li>Choose the model family and training base used by the run.</li><li>Review the visible step and dataset-version badges. Select <strong>Run folder</strong> to inspect that run's raw checkpoints, sample images, training log, and other files.</li><li>If face scoring is available, run the checkpoint scoring action and treat its winner as a candidate—not a final decision.</li><li>Keep the checkpoints you want to test in Studio.</li><li>Select <strong>Import →</strong> on each checkpoint you want to test. This copies the raw run checkpoint into the labelled ComfyUI LoRA folder; a checkpoint left only in the run folder is not available to Studio.</li><li>Wait for the imported state to appear, then use <strong>LoRA folder</strong> if you want to verify the copied file.</li><li>Move an unwanted checkpoint to Trash only after you are sure it is not needed.</li><li>Use the cleanup action only after a best checkpoint has been established; it keeps the final and any scored winner described by the UI.</li><li>Select <strong>Continue to Test in Studio</strong>, or <strong>Skip optional step</strong> when no checkpoints exist.</li></ol>
+      <h2>You are finished when</h2>
+      <p>You have identified the small set worth testing, know which run produced each one, and imported at least one compatible checkpoint into ComfyUI for Studio. Continue to Step 20; if you are not using Studio, skip to Step 21.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="18_train_lora.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="20_test_studio.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

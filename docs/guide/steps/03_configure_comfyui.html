@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 3: Configure ComfyUI in the Prep My Avatar first-run guide.">
+  <title>Step 3: Configure ComfyUI — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 3 of 21</p>
+      <h1>Step 3: Configure ComfyUI</h1>
+      <p>ComfyUI is optional. It enables local FLUX.2 Klein image generation and the Test Studio. Skip it if you only want to import photos, use a remote image provider, or export data for another tool.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/03_configure_comfyui.jpg" alt="Configure ComfyUI screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Local image generation needs a compatible GPU, a separate ComfyUI installation, and large model downloads. Installing Prep My Avatar does not install ComfyUI automatically.</p>
+      <h2>Do this</h2>
+      <ol><li>On <strong>Step 2 of 5 — Local generation — ComfyUI</strong>, check whether the page says ComfyUI is already running.</li><li>If it is not installed, follow the <strong>ComfyUI on GitHub</strong> link, install it, and start it. Its usual address is <code>http://127.0.0.1:8188</code>.</li><li>Enter the <strong>ComfyUI install directory</strong> and <strong>ComfyUI API URL</strong> shown by your installation.</li><li>Select <strong>Save &amp; re-check</strong>. A classic ComfyUI directory contains <code>models</code> and <code>main.py</code>; ComfyUI Desktop uses the supported <code>models</code> and <code>custom_nodes</code> layout instead.</li><li>If you want local Klein generation, accept the model licence, add any required Hugging Face token in Settings, and use the offered model, text-encoder, VAE, and consistency-LoRA downloads.</li><li>Select <strong>Save &amp; continue →</strong>.</li></ol>
+      <p>To skip this step, leave the fields unchanged and continue. You can return through <strong>Setup</strong> or <strong>Settings → Local tools</strong>.</p>
+      <h2>You are finished when</h2>
+      <p>The page reports that ComfyUI is running at the configured URL, or you have deliberately skipped local generation. The wizard then shows the local-vision step.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="02_choose_image_provider.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="04_configure_local_vision.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

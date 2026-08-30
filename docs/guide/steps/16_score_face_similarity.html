@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 16: Score face similarity in the Prep My Avatar first-run guide.">
+  <title>Step 16: Score face similarity — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 16 of 21</p>
+      <h1>Step 16: Score face similarity</h1>
+      <p>Face scoring is an optional review aid for Character datasets. It compares each kept face with the reference and shows which images deserve closer inspection. A score is not permission to keep or delete an image automatically.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/16_score_face_similarity.jpg" alt="Score face similarity screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>This page applies only when <strong>Face-similarity scoring</strong> was installed during Setup and a suitable reference photo is set. Skip it for Concept or Style datasets.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Score face similarity</strong> in the dataset step navigator. Its URL ends in <code>/score</code> and it is labelled <strong>Optional</strong>.</li><li>Select <strong>Analyze faces</strong>.</li><li>Wait for every kept image to receive a result. ComfyUI may pause while this local analysis uses the GPU or CPU.</li><li>Review low or orange results at full size. Check whether the face is actually wrong, obscured, too small, or simply seen from a difficult angle.</li><li>Reject an off-identity image manually. Keep a useful image when your own inspection shows the score is misleading.</li><li>Review sharpness and exposure warnings separately; identity and technical quality are different questions.</li><li>Select <strong>Continue to Export dataset</strong>, or <strong>Skip optional step</strong> when scoring is not installed or not useful for this set.</li></ol>
+      <h2>You are finished when</h2>
+      <p>Every kept Character image you intended to score has a result and every suspicious result has been reviewed, or you deliberately skipped scoring. Concept and Style navigators omit this page.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="15_caption_images.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="17_export_dataset.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

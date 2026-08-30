@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 20: Test in Studio in the Prep My Avatar first-run guide.">
+  <title>Step 20: Test in Studio — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 20 of 21</p>
+      <h1>Step 20: Test in Studio</h1>
+      <p>Studio compares checkpoints and strengths with the same prompts and seeds. This separates the effect of the LoRA from random changes between generated images. This step is optional; if you have no compatible checkpoint or do not use Studio, continue to Step 21.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/20_test_studio.jpg" alt="Test in Studio screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Studio needs a working ComfyUI setup, compatible base models and nodes, and at least one checkpoint. If Studio cannot run, return to Setup and configure ComfyUI, or skip this optional page and continue to Step 21.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Test in Studio</strong> in the dataset step navigator. Its URL ends in <code>/studio</code> and it is labelled <strong>Optional</strong>.</li><li>Select the correct model family.</li><li>Choose one or more compatible checkpoints.</li><li>Enter a plain test prompt that includes the Character or Concept trigger word when one is required.</li><li>Keep the suggested strengths and fixed seed for the first comparison.</li><li>Run the test grid.</li><li>Compare identity, prompt obedience, artefacts, and flexibility across rows and strengths.</li><li>Vote or rate the results, then star the best settings.</li><li>Repeat with a different prompt before making a final choice.</li><li>Open any result image you need to keep and select <strong>Download image</strong> in its preview.</li><li>Return to the dataset step page and select <strong>Continue to Back up dataset</strong>, or use <strong>Skip optional step</strong> when Studio is unavailable.</li></ol>
+      <h2>You are finished when</h2>
+      <p>The dataset has starred <strong>best settings</strong> backed by more than one useful prompt. Record the winning checkpoint filename and strength. Return to <strong>Review checkpoints</strong> to use <strong>Run folder</strong> or <strong>LoRA folder</strong> when you need to locate and copy the checkpoint for another image-generation workflow, then continue to Step 21.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="19_review_checkpoints.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="21_back_up_dataset.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

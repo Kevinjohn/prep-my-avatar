@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 4: Configure local vision in the Prep My Avatar first-run guide.">
+  <title>Step 4: Configure local vision — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 4 of 21</p>
+      <h1>Step 4: Configure local vision</h1>
+      <p>Local vision can classify your photos, map coverage, and write first-draft captions without sending those photos to a remote captioning service. You may use <strong>Ollama</strong>, <strong>LM Studio</strong>, or <strong>llama.cpp</strong>.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/04_configure_local_vision.jpg" alt="Configure local vision screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Each choice needs a running local server and a vision-capable, or “multimodal,” model. A text-only model cannot inspect images.</p>
+      <p>The local-vision capability is required to advance once you enter Setup. If you do not want to configure it now, use the wizard's global <strong>Skip setup — I'll do it later</strong> action. That exits Setup and opens <strong>Datasets</strong>; you can configure local vision later from <strong>Setup</strong> or <strong>Settings</strong>.</p>
+      <h2>Do this</h2>
+      <ol><li>On <strong>Step 3 of 5 — Local vision</strong>, open <strong>Local vision backend</strong>.</li><li>Choose one backend:<ul><li><strong>Ollama:</strong> install and start Ollama, keep the default URL unless you changed it, then pull the model offered by the wizard.</li><li><strong>LM Studio:</strong> start its local server, load a vision model, and use its OpenAI-compatible URL, normally <code>http://127.0.0.1:1234/v1</code>.</li><li><strong>llama.cpp:</strong> start <code>llama-server</code> with a vision model and projector, then use its OpenAI-compatible URL, normally <code>http://127.0.0.1:8080/v1</code>.</li></ul></li><li>Enter the exact loaded model identifier in the <strong>vision model</strong> field.</li><li>Select <strong>Save &amp; re-check</strong>.</li><li>Correct the URL or loaded model if the check fails, then re-check.</li><li>Select <strong>Save &amp; continue →</strong>.</li></ol>
+      <p>If you want to work without automatic analysis and captioning, select <strong>Skip setup — I'll do it later</strong> instead of trying to continue from this screen. Manual photo classification and caption editing remain available.</p>
+      <h2>You are finished when</h2>
+      <p>The page says the selected backend is running and its vision model is loaded, then the wizard shows <strong>Quality tools — ML extras</strong>. If you used the global Setup skip, <strong>Datasets</strong> opens instead.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="03_configure_comfyui.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="05_install_quality_tools.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

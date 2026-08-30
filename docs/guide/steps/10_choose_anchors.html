@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 10: Choose anchors in the Prep My Avatar first-run guide.">
+  <title>Step 10: Choose anchors — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 10 of 21</p>
+      <h1>Step 10: Choose anchors</h1>
+      <p>Anchors are the small set of reviewed photos that a remote image provider may receive with a generation request. They help generated candidates keep the correct identity.</p>
+      <p>This is a Character-only step. Concept and Style datasets do not show anchor controls; if you chose either kind, skip this page.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/10_choose_anchors.jpg" alt="Choose anchors screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>Use only accepted, identity-accurate Character photos. An anchor should have a clear face, useful detail, and a viewpoint that adds something different from the other anchors.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Choose anchors</strong> in the dataset step navigator. Its URL ends in <code>/anchors</code>.</li><li>Filter to accepted images if necessary.</li><li>Leave strong ordinary candidates on <strong>Automatic</strong> so the app can choose a bounded set for each request.</li><li>Select <strong>📌 Pin</strong> for a small number of identity-critical photos that must always be considered.</li><li>Select <strong>⊘ Exclude</strong> for any photo that must never be sent to a remote provider. Excluding it from API use does not remove it from local training.</li><li>Avoid pinning several near-identical photos; varied angles provide better evidence.</li><li>Check the <strong>anchors/request</strong> and <strong>pinned</strong> counts, then select <strong>Continue to Review coverage</strong>.</li></ol>
+      <p>If you use only local tools or never generate images, you may leave every accepted image on Automatic.</p>
+      <h2>You are finished when</h2>
+      <p>For Character, the summary shows the expected automatic or pinned selection, every photo you do not consent to send is <strong>Excluded</strong>, and the step navigator marks <strong>Choose anchors — Complete</strong>. Concept and Style navigators omit this page.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="09_review_corpus.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="11_review_coverage.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

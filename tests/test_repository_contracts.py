@@ -55,11 +55,19 @@ def _docs_fixture(tmp_path):
         'docs/screenshots/readme/05-training-readiness.jpg',
         'frontend/src/components/dataset/DatasetWorkflowNav.jsx',
         'frontend/src/components/dataset/PreflightModal.jsx',
+        'frontend/src/components/dataset/DatasetListPanel.jsx',
+        'frontend/src/components/dataset/DatasetWorkspace.jsx',
+        'frontend/src/components/setup/SetupToolBody.jsx',
+        'frontend/src/pages/SetupPage.jsx',
         'frontend/src/utils/labels.js',
     ):
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / relative, destination)
+    shutil.copytree(
+        root / 'docs/screenshots', tmp_path / 'docs/screenshots', dirs_exist_ok=True
+    )
+    shutil.copytree(root / 'docs/guide', tmp_path / 'docs/guide', dirs_exist_ok=True)
     return tmp_path
 
 
@@ -213,6 +221,22 @@ def test_docs_contract_rejects_unmanifested_screenshot_reference(tmp_path, monke
     readme.write_text(
         readme.read_text(encoding='utf-8')
         + '\n![unverified](docs/screenshots/readme/01-import-corpus.jpg)\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(contracts, 'ROOT', root)
+
+    errors = contracts.validate_governance()
+
+    assert any('no capture manifest' in error for error in errors)
+
+
+def test_docs_contract_rejects_unmanifested_html_screenshot_reference(
+        tmp_path, monkeypatch):
+    root = _docs_fixture(tmp_path)
+    guide = root / 'docs/guide/getting-started.html'
+    guide.write_text(
+        guide.read_text(encoding='utf-8')
+        + '\n<img src="../screenshots/guide/missing.jpg" alt="missing">\n',
         encoding='utf-8',
     )
     monkeypatch.setattr(contracts, 'ROOT', root)

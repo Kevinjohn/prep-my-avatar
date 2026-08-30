@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Step 13: Generate missing views in the Prep My Avatar first-run guide.">
+  <title>Step 13: Generate missing views — Prep My Avatar</title>
+  <link rel="stylesheet" href="../first-run.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="../getting-started.html">Prep My Avatar</a>
+      <nav aria-label="Guide navigation"><a href="../getting-started.html">All steps</a><a href="../../../README.md">Project README</a></nav>
+    </div>
+  </header>
+  <main class="page">
+    <div class="prose">
+      <p class="eyebrow">First run · 13 of 21</p>
+      <h1>Step 13: Generate missing views</h1>
+      <p>Generation is optional. Use it only for real coverage gaps that you cannot fill with suitable source photos. Generated images are candidates and never enter training until you accept them.</p>
+      <p>This guided gap generator is Character-only. Concept and Style datasets do not show it; add more examples with <strong>Import</strong>, or use the Concept scraper when appropriate, then continue to curation.</p>
+    </div>
+    <figure class="step-shot">
+      <img src="../../screenshots/guide/13_generate_missing_views.jpg" alt="Generate missing views screen in Prep My Avatar" width="1440" height="900">
+    </figure>
+    <div class="prose">
+      <h2>Before you begin</h2>
+      <p>You need a tested Gemini, Replicate, or OpenAI credential, or a working local Klein setup. Before remote generation, explicitly enable remote-generation privacy in <strong>Settings → Image engines</strong>. Remote providers may charge per request and receive the prompt plus the bounded anchor pack.</p>
+      <h2>Do this</h2>
+      <ol><li>Open <strong>Generate missing views</strong> in the dataset step navigator. Its URL ends in <code>/generate</code> and it is labelled <strong>Optional</strong>.</li><li>Review the recommended shots. Remove any shot you do not actually need.</li><li>Choose the configured engine and model.</li><li>Keep the multiplier at one for the first attempt.</li><li>Read the estimated request count and cost information.</li><li>Start generation and wait for the results. Use <strong>Stop generation</strong> if early results show that the prompt or identity is wrong.</li><li>Use the edit control on an individual result to correct its prompt and regenerate that shot only.</li><li>Select <strong>Continue to Curate images</strong>, or <strong>Skip optional step</strong> when real photos already provide enough coverage.</li></ol>
+      <h2>You are finished when</h2>
+      <p>For Character, every requested generation has completed or been stopped and each result awaits review, or you deliberately skipped generation. Concept and Style navigators omit this page and go from review directly to curation.</p>
+    </div>
+    <nav class="page-nav" aria-label="Step navigation">
+      <div><a href="12_set_primary_reference.html">← Previous step</a></div>
+      <a class="index" href="../getting-started.html">All 21 steps</a>
+      <div class="next"><a href="14_curate_images.html">Next step →</a></div>
+    </nav>
+  </main>
+</body>
+</html>

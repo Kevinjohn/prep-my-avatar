@@ -1,4 +1,182 @@
 screenshots:
+  - path: guide/01_open_app.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Setup welcome
+    viewport: 1440x900
+    sha256: 5ae1ca71189fe34e2c93997229b0c57822553f94182a47be96acb5d1a87dcd28
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: &setup_sources
+      - path: frontend/src/pages/SetupPage.jsx
+        sha256: 7015574db2ead58c45815dcde9b1080815bb9fa5648a3e7e69d58bf9bda35171
+      - path: frontend/src/components/setup/SetupToolBody.jsx
+        sha256: 661abb10ebb7e38e88cccbeec88969eea60d17923050b68484fe278e0987e3b3
+  - path: guide/02_choose_image_provider.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Setup image generation
+    viewport: 1440x900
+    sha256: 696437adb732a9320c4022d4ed3ddf5459c2823b706c3c437a9b9042820e3015
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *setup_sources
+  - path: guide/03_configure_comfyui.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Setup ComfyUI
+    viewport: 1440x900
+    sha256: cecbbf50eb56dd089c0094aef487127b3d9c02ba0f0be151e83b9aaa10e303a3
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *setup_sources
+  - path: guide/04_configure_local_vision.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Setup local vision
+    viewport: 1440x900
+    sha256: a672308f051597ab87d840015ed1a8aa5b4f12a1615f2be9fccba6c9210b3a38
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *setup_sources
+  - path: guide/05_install_quality_tools.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Setup quality tools
+    viewport: 1440x900
+    sha256: 0c7fca0f10e6b126344b6d38fec1c179b69b6b1386545677e88b7a9ae0d74f9f
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *setup_sources
+  - path: guide/06_configure_training.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Setup training
+    viewport: 1440x900
+    sha256: 12e716021efdb8f1c7da5c176405794a866d60740b43730cfa1f0fabe1690a3d
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *setup_sources
+  - path: guide/07_create_dataset.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Create dataset
+    viewport: 1440x900
+    sha256: 95ddef27fcedea86869bd1e319438e60ae8ebe79515dcbbf7638c311b15747f0
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources:
+      - path: frontend/src/components/dataset/DatasetListPanel.jsx
+        sha256: e842665ac4903160309b28a7d2d1cca808196439ae47bf68376f874f7fb20ac0
+  - path: guide/08_import_photos.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset import
+    viewport: 1440x900
+    sha256: 033f7d628bb00cb0b515ebd5062ea1ed16c9990faffd723ee222684a5e2876ad
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: &workflow_sources
+      - path: frontend/src/components/dataset/DatasetWorkspace.jsx
+        sha256: 8c2b03e8190d6506d108a5ec2123fea556cda5b34dad0bd54dd01d08910bfb3c
+      - path: frontend/src/components/dataset/DatasetWorkflowNav.jsx
+        sha256: b5aff34622f683407236cca1a2ca86dba15cefd8e4a22d139d955611bf1a2dd9
+  - path: guide/09_review_corpus.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset review
+    viewport: 1440x900
+    sha256: e0acb1515d7b65658184a84cb4d08ac4757527b01c511a5d1fe7d8e22193bffa
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/10_choose_anchors.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset anchors
+    viewport: 1440x900
+    sha256: 104202892bcbbf55cf30459ad8733536c56d08c3542efb61cf1d4ce36369c5c1
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/11_review_coverage.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset coverage
+    viewport: 1440x900
+    sha256: f812758dd32d80d078db3ed1f6fa36841db58f4911b5dbda32f899b716229475
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/12_set_primary_reference.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset primary reference
+    viewport: 1440x900
+    sha256: f962a8d02f63a4bb53f996a4de4bc18f387f3b32c521d08cbe77db4012d1007e
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/13_generate_missing_views.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset generation
+    viewport: 1440x900
+    sha256: a6edbfdd6d1bd68a48121afaf2e06e97a6126fa7fd7243b0da55594cd4e7a444
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/14_curate_images.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset curation
+    viewport: 1440x900
+    sha256: 5265239676e77fe34d49303326a96ceb2aabc3700069dd46d0849acb3da96353
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/15_caption_images.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset captions
+    viewport: 1440x900
+    sha256: 62ce1a23c1c4a2d70e05bdf16a58856c4aceae9c111824b093e142ebb27508f4
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/16_score_face_similarity.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset face scoring
+    viewport: 1440x900
+    sha256: 83d48809b12602e14c3cca3f0dc50421a3b9c63964abacc0c8bb1bad6951b96b
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/17_export_dataset.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset export
+    viewport: 1440x900
+    sha256: 39bd79cddc6ffa4a018eb2fd999192d1ec88b0dc3660b3feba0aebe6f372655d
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/18_train_lora.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset training
+    viewport: 1440x900
+    sha256: 76bbf09c7421a9416c184918baf126155b77f040740c6de154d27676292ad311
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/19_review_checkpoints.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset checkpoints
+    viewport: 1440x900
+    sha256: 0ea94b775db5e0a0b29bb4f4872ed011b9ff8d0fb35ce3f51857914b5a2f1d21
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/20_test_studio.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset Studio
+    viewport: 1440x900
+    sha256: 9ebd1551c2f097eaf659376cf6f5a275151ba64dbaef75e088e86736c23168ec
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
+  - path: guide/21_back_up_dataset.jpg
+    status: current
+    capture_revision: e5489d6632571837075da6c354a0c708b3d818d1
+    page: Dataset backup
+    viewport: 1440x900
+    sha256: 74f3a25a798d64289c42cba9d5504746e0c5de9224690c33de2f02b01972ceed
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources: *workflow_sources
   - path: readme/05-training-readiness.jpg
     status: retired
     capture_revision: e77aa6c7397c682bf104f6c5712fd90b4fbe753d
