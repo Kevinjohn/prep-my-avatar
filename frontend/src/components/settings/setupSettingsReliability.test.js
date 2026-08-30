@@ -30,10 +30,12 @@ test('installer reattaches to terminal state and keeps reconnecting after poll f
   assert.doesNotMatch(source, /MAX_POLL_FAILURES/);
 });
 
-test('guide section links update the fragment, move focus, and honor reduced motion', () => {
+test('guide section links preserve their routed page, move focus, and honor reduced motion', () => {
   const source = read('../../pages/GuidePage.jsx');
-  assert.match(source, /href=\{`#\$\{item\.id\}`\}/);
-  assert.match(source, /window\.history\.pushState/);
+  assert.match(source, /href=\{`#\$\{guideHeadingRoute\(chapter\.id, item\.id\)\}`\}/);
+  assert.match(source, /navigate\(guideHeadingRoute\(chapter\.id, id\), \{ replace: true \}\)/);
+  assert.match(source, /chapterId === 'getting-help' \? '\/help'/);
+  assert.doesNotMatch(source, /window\.history\.pushState/);
   assert.match(source, /target\.focus\(\{ preventScroll: true \}\)/);
   assert.match(source, /prefers-reduced-motion: reduce/);
   assert.match(source, /behavior: reducedMotion \? 'auto' : 'smooth'/);

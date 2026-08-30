@@ -49,7 +49,7 @@ large photo corpus → analyse → plan coverage → generate missing combinatio
 
 ## Workflow at a glance
 
-If you are new to the project, open the [standalone visual getting-started guide](docs/guide/getting-started.html). It begins with the launch instructions, then explains the possible outcomes: reference images, a family-specific Character LoRA, a provider-owned avatar such as Gemini’s, or a portable training pack. It also explains what this app can create, where each result can be reused, and why every preparation step exists. The same orientation is available inside the app at **Guide → Getting started**. The Markdown file at [`docs/guide/getting-started.md`](docs/guide/getting-started.md) remains available as an operational plain-text reference.
+If you are new to the project, start with the [first-run guide index](docs/guide/getting-started.html). It links to 21 short pages in the order you will encounter them: opening the app, all five Setup screens, dataset preparation, export, optional training and testing, and backup. Each page covers one action, assumes no previous knowledge, explains optional choices, and ends with a visible completion check. The same sequence is built into the app under **Guide → Open the app**. A Markdown-only [guide index](docs/guide/using-the-app.md) is also available.
 
 ### 1. Import and review the source corpus
 
@@ -140,10 +140,11 @@ for the fork-specific architecture and data contracts.
 ## Installation and launch
 
 Use the [Open the app](#open-the-app) instructions above for Windows, macOS, or
-Linux. Docker's API-only mode and optional configuration are documented in
-[`docs/guide/getting-started.md`](docs/guide/getting-started.md#install-and-launch).
-Once the app is open, **Guide → Getting started** explains which optional tools
-and API keys unlock generation, automatic analysis, and training.
+Linux. Docker's API-only mode and optional configuration are documented in this
+README; the beginner launch procedure is also available in
+[`docs/guide/getting-started.md`](docs/guide/getting-started.md).
+Once the app is open, **Guide → Open the app** begins the complete first-run
+sequence, including all five optional Setup screens.
 
 ## Process and health model
 

@@ -1,164 +1,35 @@
-# Using the app
+# First-run guide index
 
-The workspace is a **guided flow**: each stage stays folded until the one
-before it is done, and the progress rail on the left tells you where you are
-and what's blocking the next step. You never have to guess what comes next —
-this chapter just explains what each stage does and where the useful buttons
-hide.
+The first-run guide assumes no previous knowledge and gives one action to each page. Start at Step 1 and use **Next** in the app, or open the source pages below in order.
 
----
+## Open and configure the app
 
-## The character walkthrough (real corpus → trained LoRA)
+1. [Open Prep My Avatar](getting-started.md)
+2. [Choose an image provider](steps/02-image-provider.md)
+3. [Configure ComfyUI](steps/03-comfyui.md)
+4. [Configure local vision](steps/04-local-vision.md)
+5. [Install quality tools](steps/05-quality-tools.md)
+6. [Configure training](steps/06-training-tools.md)
 
-1. **Create the dataset** — Datasets → New. Pick **Character**, name it, set a
-   **trigger word** (the token your prompts will use), and choose the **target
-   model** (Z-Image / SDXL / Krea 2 / FLUX.1 / FLUX.2 Klein — changes the caption
-   style; you can change it later).
-2. **Import the real corpus first.** Drag in as many useful photos as you have.
-   Originals are preserved byte-for-byte and normalized derivatives keep their
-   aspect ratio unless you explicitly enable head crop. Exact reimports are
-   skipped; near-duplicates stay visible for review.
-3. **Use the Corpus Workbench.** Refresh the local technical pass, then map
-   framing, angle, expression, lighting, pose, background and occlusion with
-   Ollama vision or the manual editor. Imports start at **Needs decision** and
-   do not train until you explicitly Accept them. Run **Analyze faces** after
-   setting a reference: face-region sharpness/exposure and identity are recorded
-   alongside whole-image quality. Pin several strong, accepted identity anchors, leave good
-   candidates on Automatic, and mark private/unsuitable provider references as
-   Excluded. Excluded photos may still remain in the training set.
-4. **Review the Coverage Plan.** It distinguishes covered, weak, missing and
-   unknown evidence. Only accepted images count. Unknown means “classify or
-   review this,” never “buy a generated replacement.”
-5. **Optionally set a primary reference.** API engines can use the bounded
-   corpus anchor pack directly. Local Klein still needs one primary reference;
-   its crop editor and up to three explicit extra references remain available.
-6. **Generate proven gaps only** — Nano Banana, ChatGPT or local Klein opens on
-   the catalogue shots recommended by the plan. Every candidate records its
-   engine, prompt, targeted gap and exact anchor pack.
-7. **Curate** — keep / reject / crop, guided by the live meter targeting
-   **12 face · 6 bust · 6 body · 1 back**. Watch the face-similarity badges
-   (green = strong match, orange = review) to drop off-identity shots before
-   they poison training.
-   For irreplaceable low-quality evidence, open it at full size and choose
-   **Reconstruct & compare**. This is a generative, identity-constrained repair,
-   not neutral upscaling. Curation shows source and candidate side by side with
-   measured quality/identity deltas and atomically admits one version or neither.
-8. **Caption** — one click captions the kept set (prose or booru tags,
-   matched to the target model). The **identity-leak check** flags any caption
-   that describes hair/face/skin — fix every flagged one. A find/replace +
-   tag-frequency panel sweeps the whole set at once; its **💾 Write .txt
-   files** button drops a kohya-style `<image>.txt` next to each kept image
-   in the dataset folder (same format as the export ZIP) for external tools.
-9. **Fix individual shots** — every generated tile has a ✏️ button: edit the
-   exact prompt that made it and regenerate in place, without losing the rest.
-10. **Train** — the pre-flight check runs the full checklist (count, balance,
-   captions, leaks, duplicates, pixel/identity QA, watermarks, enlarged crops,
-   reconstruction provenance, source rights and real/generated source mix). Most findings warn;
-   an impossible double-kept reconstruction pair blocks until resolved. Leaking captions and
-   near-duplicates are editable right inside the confirm, and missing captions
-   just ask you to **Start anyway** (captions stay strongly recommended). Steps
-   are computed automatically; ⚙️ Advanced options exposes every knob (each with
-   its own why/how) and a **Presets** row — apply a shipped ★ recipe (*Krea
-   character*, *Concept*, *Style*) or save/import/export your own as a JSON.
-   No GPU? **☁️ Train in cloud** rents one per run. Watch this run — and every
-   other, cloud or local — from the **🏋️ Runs** tab, where you can retry a
-   failed run (↻), continue a finished cloud run for more steps (▶), and download
-   the LoRA. At admission, the app makes an immutable training snapshot and
-   hashes its files and recipe. If the dataset changes while that snapshot is
-   being captured, launch stops cleanly instead of training a mixed revision.
-11. **Pick the best checkpoint** — open the **Test Studio** from the dataset:
-    grid-test checkpoint × strength with fixed seeds, vote, rank by face
-    similarity, and star ★ the winning settings. Results link to the exact
-    training-run record—not a filename guess—so the feedback panel can compare
-    recipes, suggest an earlier step or strength, and recommend a controlled
-    next iteration. The last checkpoint is almost never the best one.
-12. **Export** — at any point, **Export ZIP** gives you standard image/text
-    training pairs plus `_prep_my_avatar_manifest.json` with source mix,
-    coverage and provenance. Trainers ignore the manifest; other tools can use
-    it. Portable Backup additionally preserves exact originals and decisions.
+## Prepare a dataset
 
-## Privacy, recovery and operational safety
+7. [Create a dataset](steps/07-create-dataset.md)
+8. [Import your photos](steps/08-import-photos.md)
+9. [Review the corpus](steps/09-review-corpus.md)
+10. [Choose identity anchors](steps/10-choose-anchors.md)
+11. [Review coverage](steps/11-plan-coverage.md)
+12. [Set a primary reference](steps/12-primary-reference.md)
+13. [Generate missing views](steps/13-generate-gaps.md)
+14. [Curate the images](steps/14-curate-images.md)
+15. [Caption the kept images](steps/15-caption-images.md)
+16. [Score face similarity](steps/16-score-images.md)
 
-- **Remote generation is off by default.** Enable it explicitly in **Settings →
-  Image engines → Remote-generation privacy** before Nano Banana or ChatGPT can
-  receive prompts or the bounded reference pack. Local Klein stays on-device.
-  Record source rights and identifiable-person consent in the Corpus Workbench;
-  publishing to Hugging Face requires a separate confirmation.
-- **Curation is reversible.** Use the curation-history control to undo recent
-  keep/reject changes. Deleting a dataset, checkpoint, cloud staging directory,
-  or deployed LoRA moves it to **Settings → Maintenance → Trash**; restore it
-  there before choosing **Empty trash**, which is the permanent step.
-- **Portable backup is the move/copy format.** It creates a new dataset when
-  restored and carries originals, normalized files, captions, settings,
-  relationships, decisions and provenance. A training ZIP is deliberately
-  smaller and is not a complete backup.
-- **Integrity checking is read-only.** Run **Settings → Maintenance → Data
-  integrity** to inspect SQLite consistency, relationships, referenced files,
-  unsafe links and untracked files without modifying the dataset.
-- **Cloud safeguards are launch boundaries, not a provider bill.** The maximum
-  hourly price, concurrency limit and monthly budget can block a new launch;
-  runtime/stall timeouts terminate unhealthy runs. The Runs page shows measured
-  billing time and cost, but the provider console remains authoritative.
-- **Updates are transactional for clean Git checkouts.** The in-app updater
-  accepts fast-forwards only, installs pinned dependencies, verifies isolated
-  startup and the committed frontend build, then restarts. A failed or
-  interrupted update keeps a private recovery journal and restores the previous
-  revision; it refuses an automatic reset if local work appeared meanwhile.
-- **LAN access is authenticated by default.** Turning on **Available on the
-  local network** requires an access token unless you explicitly disable it.
-  The token is entered on the remote login page and never embedded in a URL or
-  QR code. Loopback access remains local-only and token-free.
+## Export, train, test, and protect the result
 
-## Concept datasets (an object or action, not a person)
+17. [Export the dataset](steps/17-export-dataset.md)
+18. [Train a LoRA](steps/18-train-lora.md)
+19. [Review checkpoints](steps/19-review-checkpoints.md)
+20. [Test in Studio](steps/20-test-studio.md)
+21. [Back up the project](steps/21-back-up.md)
 
-Pick **Concept** at creation and describe the concept in the required field —
-the captioner needs to know exactly *what to omit*. What changes vs character:
-
-- **No reference photo.** Images come from **import** or the built-in
-  **scraper** (paste a gallery URL or run a Reddit keyword search, tick the
-  frames you want, they land straight in the dataset — deduplicated and
-  quality-filtered). Already have a kohya-style dataset on disk (images +
-  same-name `.txt` captions)? **⋯ More → 📂 Import from folder…** merges it in
-  from a pasted folder path — captions attach, duplicates are skipped (a ZIP
-  works too, via **📦 Import dataset**). On gallery sites (PornPics), a category/tag/search scan
-  shows **the same previews the listing page does** — one per gallery, the shot
-  that actually matches your keyword. Tick **Scan full albums** to pull every
-  photo of each matched gallery instead, or paste a single `/galleries/…` URL
-  to get that whole album. Sex.com works the same way for keyword searches
-  (`sex.com/en/pics?search=…`) — every pin **is** a single matching image, so
-  there is no album option to worry about. Civitai searches return **SFW
-  results only** unless you add a Civitai API key in **Settings → Scraping &
-  sources**.
-
-  > **Reddit says "wait N seconds" (429)?** By default Reddit scans share a
-  > public client id (and its ~1000 requests / 10 min quota) with many other
-  > people, so it can be exhausted before your first scan. Add your own free
-  > client ID in **Settings → Scraping & sources** — a one-minute, step-by-step
-  > guide is built into that page.
-- **Captions invert**: they describe everything *except* the concept, so the
-  concept is what binds to the trigger. The leak check watches for stray
-  descriptions of it.
-- **Masked training is off** (a person mask would erase the very thing you're
-  teaching), and imports keep the full frame instead of head-cropping.
-
-## Style datasets (a global aesthetic)
-
-Pick **Style** at creation. What changes:
-
-- **No trigger word** — the style tints every image once the LoRA is loaded.
-- **Captions describe content only** (never the rendering), and they're
-  optional; caption dropout rises so the style generalizes.
-- **Step count switches to a sublinear √n scale** built for the large sets
-  (hundreds of images) style LoRAs want.
-
-## Tips that save runs
-
-- Trust the composition meter over your instinct — a set that "looks varied"
-  is usually still face-heavy.
-- Fix every leak the badge reports before training; one "a woman with long
-  blonde hair" caption quietly competes with your trigger.
-- Don't chase steps. Train the auto count, then let the Test Studio find the
-  *earliest* checkpoint that nails the identity — it keeps the most prompt
-  flexibility.
-- The next chapter — **Building a good dataset** — explains *why* behind every
-  rule above. Read it once before your first serious run.
+Optional steps say so at the start of their page and explain what remains available when you skip them. For deeper decision guidance, use [Building a good dataset](../DATASET_GUIDE.md). For a failure, use [Troubleshooting](troubleshooting.md), then [Getting help](getting-help.md) if the problem remains.

@@ -177,10 +177,11 @@ test('every guide link resolves to a chapter route or an absolute external URL',
 test('every shipped guide chapter renders semantic content without axe violations', async () => {
   const { default: Markdown } = await server.ssrLoadModule('/src/components/common/Markdown.jsx')
   const { ALL_GUIDE_CHAPTERS } = await server.ssrLoadModule('/src/pages/GuidePage.jsx')
-  assert.equal(ALL_GUIDE_CHAPTERS.length, 5)
+  assert.equal(ALL_GUIDE_CHAPTERS.length, 24)
   for (const chapter of ALL_GUIDE_CHAPTERS) {
     const mounted = render(React.createElement('main', { 'aria-label': chapter.title },
       React.createElement(Markdown, { source: chapter.source, variant: 'guide' })))
+    assert.equal(mounted.container.querySelectorAll('h1').length, 0, `${chapter.id} must leave the page H1 to GuidePage`)
     assert.ok(mounted.container.querySelectorAll('h1,h2,h3').length > 0, chapter.id)
     const ids = [...mounted.container.querySelectorAll('[id]')].map((node) => node.id)
     assert.equal(new Set(ids).size, ids.length, `duplicate heading target in ${chapter.id}`)
@@ -188,6 +189,50 @@ test('every shipped guide chapter renders semantic content without axe violation
     assert.deepEqual(result.violations.map((violation) => violation.id), [], chapter.id)
     mounted.unmount()
   }
+})
+
+test('the beginner guide exposes one ordered product step per page', async () => {
+  const { FIRST_RUN_STEPS } = await server.ssrLoadModule('/src/pages/GuidePage.jsx')
+  assert.equal(FIRST_RUN_STEPS.length, 21)
+  assert.deepEqual(
+    FIRST_RUN_STEPS.map((chapter) => chapter.num),
+    Array.from({ length: 21 }, (_, index) => String(index + 1).padStart(2, '0')),
+  )
+  for (const chapter of FIRST_RUN_STEPS) {
+    assert.equal(chapter.group, 'First run')
+    const topLevelHeadings = [...chapter.source.matchAll(/^# (.+)$/gm)]
+    assert.equal(topLevelHeadings.length, 1, `${chapter.id} must contain one page title`)
+    assert.match(topLevelHeadings[0][0], new RegExp(`^# Step ${Number(chapter.num)}:`))
+    assert.match(chapter.source, /## Do this/)
+    assert.match(chapter.source, /## You are finished when/)
+  }
+  for (const id of ['review-corpus', 'choose-anchors', 'plan-coverage', 'primary-reference', 'generate-gaps']) {
+    const source = FIRST_RUN_STEPS.find((chapter) => chapter.id === id).source
+    assert.match(source, /Concept/, `${id} must explain the Concept path`)
+    assert.match(source, /Style/, `${id} must explain the Style path`)
+  }
+  assert.match(FIRST_RUN_STEPS.find((chapter) => chapter.id === 'review-checkpoints').source, /Import →/)
+})
+
+test('guide heading routes preserve page ownership and the desktop rail follows the active item', async () => {
+  const { guideHeadingRoute, keepGuideItemVisible } = await server.ssrLoadModule('/src/pages/GuidePage.jsx')
+  assert.equal(
+    guideHeadingRoute('image-provider', 'before-you-begin'),
+    '/guide/image-provider?heading=before-you-begin',
+  )
+  assert.equal(
+    guideHeadingRoute('local-vision', 'server & model'),
+    '/guide/local-vision?heading=server%20%26%20model',
+  )
+  assert.equal(
+    guideHeadingRoute('getting-help', 'create-a-report'),
+    '/help?heading=create-a-report',
+  )
+  const nav = { scrollTop: 20, getBoundingClientRect: () => ({ top: 100, bottom: 500 }) }
+  keepGuideItemVisible(nav, { getBoundingClientRect: () => ({ top: 480, bottom: 540 }) })
+  assert.equal(nav.scrollTop, 60)
+  keepGuideItemVisible(nav, { getBoundingClientRect: () => ({ top: 70, bottom: 110 }) })
+  assert.equal(nav.scrollTop, 30)
 })
 
 test('focus trap enters, loops in both directions, and restores prior focus', async () => {

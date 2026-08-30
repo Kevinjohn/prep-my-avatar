@@ -1252,10 +1252,10 @@ Implementation is in progress. The detailed design, current state, and verificat
 ### CI-05: Validate and push the action-pin maintenance
 
 - [x] Run the focused workflow/governance checks and applicable complete local gate.
-- [ ] Commit only the reviewed action pins, migration-required input changes, and final checklist state.
-- [ ] Push `main` and watch every ordinary CI job to completion.
-- [ ] Confirm the governance actionlint step executes successfully.
-- [ ] Record the tag-only release workflow's remaining live-release verification boundary.
+- [x] Commit only the reviewed action pins, migration-required input changes, and final checklist state.
+- [x] Push `main` and watch every ordinary CI job to completion.
+- [x] Confirm the governance actionlint step executes successfully.
+- [x] Record the tag-only release workflow's remaining live-release verification boundary: its live publication path is verified only by a future release tag, not by an ordinary `main` push.
 
 **Depends on:** CI-04.
 

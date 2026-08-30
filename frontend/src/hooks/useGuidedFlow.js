@@ -51,7 +51,7 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
       subtitle: hasCoveragePlan ? `${coveragePlan.summary?.gaps || 0} framing gaps` : 'automatic' },
     { id: 'reference', label: 'Primary reference', targetId: 'gf-reference',
       done: !!(d && d.ref_filename), optional: true,
-      subtitle: d && d.ref_filename ? 'set' : 'optional fallback; Klein only' },
+      subtitle: d && d.ref_filename ? 'set' : 'optional; Klein or face scoring' },
     { id: 'generate', label: hasImportedCorpus ? 'Generate gaps' : 'Generate', targetId: 'gf-generate',
       done: generated.length > 0 || (hasImportedCorpus && recommended.length === 0),
       optional: hasImportedCorpus,

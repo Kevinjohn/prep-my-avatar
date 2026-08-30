@@ -931,7 +931,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
                 <div id="gf-reference" className="scroll-mt-20">
                   <div id="ds-add-reference" tabIndex={-1} className="scroll-mt-20 flex flex-col gap-1">
                     <span className="text-content-subtle text-[0.6875rem]">
-                      optional primary reference — required only for local Klein; API engines can use the reviewed corpus anchor set
+                      optional primary reference — used by local Klein and face scoring; API engines can use the reviewed corpus anchor set
                     </span>
                     <ReferencePanel refFilename={d.ref_filename} datasetId={d.id} onSetRef={ds.setRef}
                       onCropRef={() => setRefCrop(true)} busy={ds.busy} nonce={ds.refNonce}
