@@ -29,6 +29,12 @@ def _manifest_path(path: PurePath) -> str:
     return path.as_posix()
 
 
+def _source_digest(path: Path) -> str:
+    """Hash text source with platform line endings normalized."""
+    content = path.read_text(encoding="utf-8")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def app_version() -> str:
     match = VERSION_RE.search(_read("backend/app/version.py"))
     if not match:
@@ -260,7 +266,7 @@ def _validate_screenshot_manifest(documentation_paths: list[Path]) -> list[str]:
                         f"Screenshot relevant source is missing: {source['path']}"
                     )
                     continue
-                source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+                source_digest = _source_digest(source_path)
                 if entry["status"] == "current" and source_digest != source["sha256"]:
                     errors.append(
                         f"Current screenshot predates relevant source: {relative} "

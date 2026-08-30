@@ -29,6 +29,16 @@ def test_screenshot_manifest_paths_use_portable_separators(path):
     )
 
 
+def test_screenshot_source_digest_ignores_platform_line_endings(tmp_path):
+    source = tmp_path / "source.jsx"
+    source.write_bytes(b"first line\nsecond line\n")
+    expected = contracts._source_digest(source)
+
+    source.write_bytes(b"first line\r\nsecond line\r\n")
+
+    assert contracts._source_digest(source) == expected
+
+
 def test_current_release_contract_is_consistent():
     assert contracts.validate_release(f"v{contracts.app_version()}") == []
 
