@@ -38,6 +38,10 @@ export default function ResultLightbox({ img, datasetId, onRate, onClose, fmt })
           {img.seed != null ? ` · seed ${img.seed}` : ''}
         </div>
         <div className="flex items-center gap-2">
+          <a href={datasetImageUrl(datasetId, img)} download={img.filename}
+            className="px-3 py-1 rounded-lg text-sm border border-border bg-surface text-content no-underline">
+            Download image
+          </a>
           <button type="button" aria-pressed={img.rating === 1}
             onClick={() => onRate(img.id, img.rating === 1 ? 0 : 1)}
             className={`px-3 py-1 rounded-lg text-sm border ${img.rating === 1 ? 'border-green-400/60 bg-green-500/20 text-green-200' : 'border-border bg-surface text-content'}`}>

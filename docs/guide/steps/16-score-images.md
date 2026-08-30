@@ -17,4 +17,4 @@ This page applies only when **Face-similarity scoring** was installed during Set
 
 ## You are finished when
 
-Every kept Character image you intended to score has a result and every suspicious result has been reviewed. The optional Progress item **Score** is checked.
+Every kept Character image you intended to score has a result and every suspicious result has been reviewed. On a wide screen, the optional Progress item **Score** is also checked.

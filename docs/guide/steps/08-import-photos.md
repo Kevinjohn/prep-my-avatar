@@ -19,4 +19,4 @@ For Concept or Style datasets, import representative examples of the concept or 
 
 ## You are finished when
 
-The **Progress** checklist marks **Import corpus** complete and reports the number imported. The **Corpus Workbench** shows the new images as needing a decision.
+The **Corpus Workbench** shows the new images as needing a decision and its imported count matches the files you expected. On a wide screen with a Character dataset, the **Progress** checklist also marks **Import corpus** complete; that checklist is hidden for Concept and Style datasets and on small screens.

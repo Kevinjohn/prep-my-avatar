@@ -21,4 +21,4 @@ The reference is not automatically your entire training set. It is an identity i
 
 ## You are finished when
 
-For Character, Progress shows **Primary reference — set**, or you have deliberately skipped both features that need it. For Concept or Style, the step is finished because it does not apply.
+For Character, the primary-reference preview shows the intended image, or you have deliberately skipped both features that need it. On a wide screen, Progress also shows **Primary reference — set** when one is set. For Concept or Style, the step is finished because it does not apply.

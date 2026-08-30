@@ -1194,7 +1194,7 @@ Checkpoint ST-A is an automated merged-tree parity checkpoint only; the human re
 
 ## CI Recovery Tasks — 2026-08-29
 
-Implementation is in progress. The detailed design, current state, and verification commands are in the `CI Recovery Plan` section of `tasks/plan.md`.
+Implementation is complete. The detailed design, final state, and verification commands are in the `CI Recovery Plan` section of `tasks/plan.md`.
 
 ### CI-01: Restore the canonical guide launch reference
 

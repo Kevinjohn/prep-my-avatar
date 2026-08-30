@@ -19,4 +19,4 @@ An export ZIP is a training package, not a complete backup of the project. The f
 
 ## You are finished when
 
-A ZIP file exists in your chosen download folder and its image/text pairs match the kept set. If export is your goal, you can stop here and use the ZIP with a compatible external trainer.
+A ZIP file exists in your chosen download folder and its image/text pairs match the kept set. If export is your goal, skip the optional training, checkpoint-review, and Studio work in Steps 18–20, then continue to Step 21 to back up the dataset.

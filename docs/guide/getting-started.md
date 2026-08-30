@@ -6,6 +6,8 @@ Prep My Avatar runs on your computer and opens in a web browser. You do not need
 
 You need a Windows, macOS, or Linux computer and an internet connection for the first installation. Keep five or more clear photos ready for your first test. Use photos you own or have permission to process.
 
+On macOS or Linux, install [Python](https://www.python.org/downloads/) before continuing. Python 3.10 can run the core app. If you may install the optional machine-learning tools, use Python 3.11 or 3.12. Open Terminal and run `python3 --version`. If Terminal says the command was not found, install Python 3.11 or 3.12, close and reopen Terminal, then run the check again. If `python3` reports another version after you installed one of those, run the matching `python3.11 --version` or `python3.12 --version`, then replace `python3 -m venv .venv` below with that matching command—for example, `python3.11 -m venv .venv`.
+
 ## Do this
 
 ### Windows
@@ -35,6 +37,8 @@ The repository README has the canonical [Installation and launch](https://github
 
 ## You are finished when
 
-Your browser shows **Welcome to Prep My Avatar** or the **Setup** screen. On first launch, choose **Start setup**. All five setup steps are optional; the next five pages explain them one at a time.
+Your browser shows **Welcome to Prep My Avatar** or the **Setup** screen. On first launch, choose **Start setup** to configure tools now. The next five pages explain its five screens one at a time.
+
+Setup is optional as a whole: **Skip setup — I'll do it later** takes you directly to **Datasets**. If you start Setup, its local-vision screen must be ready before the wizard can advance; Step 4 explains that choice exactly.
 
 If the page does not open, keep the terminal visible and use the error message with the **Troubleshooting** reference in this guide.

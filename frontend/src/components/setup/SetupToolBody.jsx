@@ -135,8 +135,8 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
           {guidedField('ComfyUI API URL', 'comfyui', 'api_url', 'http://127.0.0.1:8188')}
           {guidedField('ComfyUI install directory', 'comfyui', 'base_dir', 'C:\\ComfyUI')}
           {detectedPathChip('comfyui', 'base_dir')}
-          {/* Validate the folder on Save & re-check: it must actually hold main.py +
-              models/. A portable-wrapper path is auto-corrected to the nested ComfyUI on
+          {/* Validate the folder on Save & re-check: it must hold models/ plus
+              either classic main.py or Desktop custom_nodes/. A portable-wrapper path is auto-corrected to the nested ComfyUI on
               save (so checkpoints are found); a genuinely wrong path is flagged here.
               The ✓/⚠ verdict comes from the last PROBE — while the field holds a path
               that hasn't been saved yet, showing that verdict would judge the WRONG
@@ -152,8 +152,9 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
               </p>
             ) : (
               <p className="text-xs text-amber-400">
-                ⚠ No ComfyUI install in this folder — it must contain <span className="font-mono">main.py</span> and
-                a <span className="font-mono">models/</span> folder. Check the path, then Save &amp; re-check.
+                ⚠ No ComfyUI install in this folder — it must contain <span className="font-mono">models/</span> plus
+                either <span className="font-mono">main.py</span> (classic) or <span className="font-mono">custom_nodes/</span> (Desktop).
+                Check the path, then Save &amp; re-check.
                 For the portable build, point at the inner <span className="font-mono">…\ComfyUI_windows_portable\ComfyUI</span>.
               </p>
             )

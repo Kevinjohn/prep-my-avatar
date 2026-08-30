@@ -21,4 +21,4 @@ If you use only local tools or never generate images, you may leave every accept
 
 ## You are finished when
 
-For Character, Progress shows a selected total or you have deliberately kept the automatic selection, and no private photo is eligible for API use. For Concept or Style, the step is finished because the controls do not apply.
+For Character, the workbench summary shows the expected automatic or pinned selection, and every photo you do not consent to send is set to **Exclude**. On a wide screen, Progress also shows the selected total. For Concept or Style, the step is finished because the controls do not apply.

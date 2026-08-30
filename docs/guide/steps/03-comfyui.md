@@ -11,7 +11,7 @@ Local image generation needs a compatible GPU, a separate ComfyUI installation, 
 1. On **Step 2 of 5 — Local generation — ComfyUI**, check whether the page says ComfyUI is already running.
 2. If it is not installed, follow the **ComfyUI on GitHub** link, install it, and start it. Its usual address is `http://127.0.0.1:8188`.
 3. Enter the **ComfyUI install directory** and **ComfyUI API URL** shown by your installation.
-4. Select **Save & re-check**. The directory is valid only when it contains ComfyUI's `main.py` file and `models` folder.
+4. Select **Save & re-check**. A classic ComfyUI directory contains `models` and `main.py`; ComfyUI Desktop uses the supported `models` and `custom_nodes` layout instead.
 5. If you want local Klein generation, accept the model licence, add any required Hugging Face token in Settings, and use the offered model, text-encoder, VAE, and consistency-LoRA downloads.
 6. Select **Save & continue →**.
 

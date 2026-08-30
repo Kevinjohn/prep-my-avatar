@@ -15,6 +15,13 @@ Clone or download this repository, then double-click **`start.bat`**.
 
 ### macOS or Linux
 
+Install [Python](https://www.python.org/downloads/) first, then run
+`python3 --version`. Python 3.10 can run the core app. If you want the optional
+machine-learning tools, the result must be Python 3.11 or 3.12. If `python3`
+reports another version after you installed one of those, run the matching
+`python3.11 --version` or `python3.12 --version`, then use that matching command
+for the first line below—for example, `python3.11 -m venv .venv`.
+
 Open a terminal in the repository folder and run these commands for the first
 launch:
 
@@ -36,8 +43,10 @@ python data/source-launcher.py --root . --data-dir data
 Then open **<http://127.0.0.1:5050/>**. Keep the terminal window open while you
 use the app; press `Ctrl+C` there to stop it.
 
-The first launch opens the Setup wizard. You can import and review photos
-without installing the optional generation, analysis, or training tools.
+The first launch opens the Setup wizard. You can skip Setup as a whole and
+import or review photos without the optional generation, analysis, or training
+tools. If you enter Setup, local vision must be ready before its wizard can
+advance; use **Skip setup — I'll do it later** to leave it unconfigured.
 
 The upstream application provides the guided workspace, curation, captioning,
 training, export, setup, and documentation foundation. This fork changes the
@@ -84,7 +93,7 @@ and an explicit **Start anyway** confirmation; they do not block training.
 ### 6. Export or back up
 
 Export ordinary training pairs, or create a portable backup that retains the
-full preparation history.
+current dataset state and source provenance.
 
 
 ## Fork-specific workflow
@@ -144,7 +153,7 @@ Linux. Docker's API-only mode and optional configuration are documented in this
 README; the beginner launch procedure is also available in
 [`docs/guide/getting-started.md`](docs/guide/getting-started.md).
 Once the app is open, **Guide → Open the app** begins the complete first-run
-sequence, including all five optional Setup screens.
+sequence, including all five Setup screens and the whole-wizard skip path.
 
 ## Process and health model
 

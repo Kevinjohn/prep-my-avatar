@@ -212,6 +212,44 @@ test('the beginner guide exposes one ordered product step per page', async () =>
     assert.match(source, /Style/, `${id} must explain the Style path`)
   }
   assert.match(FIRST_RUN_STEPS.find((chapter) => chapter.id === 'review-checkpoints').source, /Import →/)
+
+  const gettingStarted = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'getting-started').source
+  assert.match(gettingStarted, /python3 --version/)
+  assert.match(gettingStarted, /Python 3\.11 or 3\.12/)
+  assert.match(gettingStarted, /Skip setup — I'll do it later/)
+
+  const provider = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'image-provider').source
+  assert.match(provider, /Nano Banana provider/)
+  assert.match(provider, /select \*\*Google direct\*\*.*\*\*Replicate\*\*/)
+  assert.match(provider, /OpenAI does not use this selector/)
+  assert.match(provider, /API billing are separate from a ChatGPT subscription/)
+
+  const comfyui = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'comfyui').source
+  assert.match(comfyui, /`models` and `custom_nodes`/)
+
+  const localVision = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'local-vision').source
+  assert.match(localVision, /required to advance once you enter Setup/)
+  assert.match(localVision, /Skip setup — I'll do it later/)
+  assert.doesNotMatch(localVision, /continue without configuring/)
+
+  const curation = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'curate-images').source
+  assert.match(curation, /Find watermarks/)
+  assert.match(curation, /Review flagged \(N\)/)
+
+  const captions = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'caption-images').source
+  assert.match(captions, /Style datasets have no automatic style-term scanner/)
+
+  const exportGuide = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'export-dataset').source
+  assert.match(exportGuide, /continue to Step 21/)
+
+  const backup = FIRST_RUN_STEPS.find((chapter) => chapter.id === 'back-up').source
+  assert.match(backup, /does not include raw training-run folders/)
+  assert.match(backup, /\.safetensors/)
+  assert.match(backup, /separately copy/)
+  assert.match(backup, /Download the cloud-trained LoRA/)
+  assert.match(backup, /Download image/)
+  assert.match(backup, /5,000 image records/)
+  assert.match(backup, /Copy the entire `data` folder/)
 })
 
 test('guide heading routes preserve page ownership and the desktop rail follows the active item', async () => {
@@ -233,6 +271,43 @@ test('guide heading routes preserve page ownership and the desktop rail follows 
   assert.equal(nav.scrollTop, 60)
   keepGuideItemVisible(nav, { getBoundingClientRect: () => ({ top: 70, bottom: 110 }) })
   assert.equal(nav.scrollTop, 30)
+})
+
+test('guide heading focus uses instant scrolling when reduced motion is requested', async () => {
+  const { focusGuideHeading } = await server.ssrLoadModule('/src/pages/GuidePage.jsx')
+  const heading = document.createElement('h2')
+  heading.id = 'reduced-motion-heading'
+  let scrollOptions = null
+  heading.scrollIntoView = (options) => { scrollOptions = options }
+  document.body.appendChild(heading)
+  const originalMatchMedia = window.matchMedia
+  window.matchMedia = () => ({ matches: true })
+  try {
+    assert.equal(focusGuideHeading(heading.id), true)
+    assert.equal(document.activeElement, heading)
+    assert.deepEqual(scrollOptions, { behavior: 'auto', block: 'start' })
+  } finally {
+    window.matchMedia = originalMatchMedia
+    heading.remove()
+  }
+})
+
+test('Studio result preview offers a real image download', async () => {
+  const { default: ResultLightbox } = await server.ssrLoadModule(
+    '/src/components/dataset/studio/ResultLightbox.jsx')
+  render(React.createElement(ResultLightbox, {
+    img: {
+      id: 7, filename: 'studio result #1.png', label: 'Checkpoint 1000',
+      strength: 0.8, rating: 0, seed: 42,
+    },
+    datasetId: 12,
+    onRate() {},
+    onClose() {},
+    fmt: (value) => String(value),
+  }))
+  const download = screen.getByRole('link', { name: 'Download image' })
+  assert.equal(download.getAttribute('href'), '/api/dataset/12/img/studio%20result%20%231.png')
+  assert.equal(download.getAttribute('download'), 'studio result #1.png')
 })
 
 test('focus trap enters, loops in both directions, and restores prior focus', async () => {
@@ -524,6 +599,32 @@ test('setup image step renders independent provider credentials and changes Nano
   assert.equal(screen.getAllByText('○ Not set').length, 1)
   await user.selectOptions(screen.getByLabelText('Nano Banana provider'), 'replicate')
   assert.deepEqual(changes.at(-1), ['engines', 'nanobanana_provider', 'replicate'])
+})
+
+test('setup ComfyUI recovery names classic and Desktop directory layouts', async () => {
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  render(React.createElement(SetupToolBody, {
+    id: 'comfyui',
+    stepById: {
+      comfyui: {
+        baseDir: '/Applications/ComfyUI', dirValid: false, reachable: false,
+        hasKlein: false, apiUrl: 'http://127.0.0.1:8188',
+      },
+    },
+    config: {
+      comfyui: {
+        base_dir: '/Applications/ComfyUI', api_url: 'http://127.0.0.1:8188',
+      },
+    },
+    secretsPresence: {}, setSecretsPresence() {}, secretInputs: {}, setSecretInputs() {},
+    detected: {}, busy: false, caps: {}, refresh: async () => {},
+    toast: { success() {}, warning() {}, error() {} }, setField() {}, persist: async () => {},
+    applyDetectedPath() {},
+  }))
+  assert.ok(screen.getByText('main.py'))
+  assert.ok(screen.getByText('custom_nodes/'))
+  assert.ok(screen.getByText(/Desktop/))
 })
 
 test('assembled SettingsPage recovers an initial settings request failure', async () => {

@@ -30,6 +30,6 @@ The first-run guide assumes no previous knowledge and gives one action to each p
 18. [Train a LoRA](steps/18-train-lora.md)
 19. [Review checkpoints](steps/19-review-checkpoints.md)
 20. [Test in Studio](steps/20-test-studio.md)
-21. [Back up the project](steps/21-back-up.md)
+21. [Back up the dataset](steps/21-back-up.md)
 
-Optional steps say so at the start of their page and explain what remains available when you skip them. For deeper decision guidance, use [Building a good dataset](../DATASET_GUIDE.md). For a failure, use [Troubleshooting](troubleshooting.md), then [Getting help](getting-help.md) if the problem remains.
+Setup can be skipped as a whole. Once you enter it, local vision must be ready before the wizard can advance; its page explains how to leave Setup instead. Later optional pages say so at the start and direct you to the next page that still applies. Always finish with the dataset backup in Step 21. For deeper decision guidance, use [Building a good dataset](../DATASET_GUIDE.md). For a failure, use [Troubleshooting](troubleshooting.md), then [Getting help](getting-help.md) if the problem remains.

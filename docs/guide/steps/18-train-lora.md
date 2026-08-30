@@ -1,6 +1,6 @@
 # Step 18: Train a LoRA
 
-Training turns the kept images and captions into a `.safetensors` LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai cloud worker.
+Training turns the kept images and captions into a `.safetensors` LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai cloud worker. If you do not want to train in Prep My Avatar, skip Steps 18–20 and continue to Step 21 to back up the dataset.
 
 ## Before you begin
 
@@ -19,4 +19,4 @@ Training can take significant time, disk space, GPU memory, and—for cloud runs
 
 ## You are finished when
 
-The run reaches **Finished** and at least one checkpoint appears. If it fails, open the run log, keep the exact error, fix that cause, and use retry rather than starting several duplicate cloud jobs.
+The run reaches **Finished** and at least one checkpoint appears; continue to Step 19. If it fails, open the run log, keep the exact error, fix that cause, and use retry rather than starting several duplicate cloud jobs. If you chose not to train, continue to Step 21 instead.

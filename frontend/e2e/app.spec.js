@@ -340,3 +340,80 @@ test('primary pages fit the viewport without horizontal overflow', async ({ page
     expect(await accessibilityViolations(page)).toEqual([]);
   }
 });
+
+test('the rendered guide exposes all first-run pages in order', async ({ page }) => {
+  await page.addInitScript(() => sessionStorage.setItem('lds_setup_redirected', '1'));
+  await page.goto('/#/guide/getting-started');
+  const guidePages = [
+    ['getting-started', 'Open the app'],
+    ['image-provider', 'Choose an image provider'],
+    ['comfyui', 'Configure ComfyUI'],
+    ['local-vision', 'Configure local vision'],
+    ['quality-tools', 'Install quality tools'],
+    ['training-tools', 'Configure training'],
+    ['create-dataset', 'Create a dataset'],
+    ['import-photos', 'Import your photos'],
+    ['review-corpus', 'Review the corpus'],
+    ['choose-anchors', 'Choose identity anchors'],
+    ['plan-coverage', 'Review coverage'],
+    ['primary-reference', 'Set a primary reference'],
+    ['generate-gaps', 'Generate missing views'],
+    ['curate-images', 'Curate the images'],
+    ['caption-images', 'Caption the kept images'],
+    ['score-images', 'Score face similarity'],
+    ['export-dataset', 'Export the dataset'],
+    ['train-lora', 'Train a LoRA'],
+    ['review-checkpoints', 'Review checkpoints'],
+    ['test-studio', 'Test in Studio'],
+    ['back-up', 'Back up the dataset'],
+  ];
+
+  const pagePicker = page.getByLabel('Guide page');
+  if (await pagePicker.isVisible()) {
+    await pagePicker.selectOption('back-up');
+    await expect(page.getByRole('heading', { name: 'Back up the dataset', level: 1 })).toBeVisible();
+    await pagePicker.selectOption('getting-started');
+  }
+
+  for (const [index, [id, title]] of guidePages.entries()) {
+    await expect(page.getByRole('heading', { name: title, level: 1 })).toBeVisible();
+    await expect(page.getByText(`${index + 1} of ${guidePages.length}`, { exact: true })).toBeVisible();
+    if (await pagePicker.isVisible()) {
+      await expect(pagePicker).toHaveValue(id);
+    }
+    if (index > 0) {
+      await expect(page.getByRole('link', {
+        name: `Previous ${guidePages[index - 1][1]}`,
+      })).toBeVisible();
+    }
+    if (index < guidePages.length - 1) {
+      await page.getByRole('link', { name: `Next ${guidePages[index + 1][1]}` }).click();
+    }
+  }
+  await expect(page.getByRole('link', { name: /^Next / })).toHaveCount(0);
+
+  await page.goto('/#/guide/dataset-guide');
+  await expect(page.getByRole('heading', { name: 'Building a good dataset', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: /^Previous / })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Next Troubleshooting' })).toBeVisible();
+});
+
+test('activating the current guide heading link always restores focus and scroll', async ({ page }) => {
+  await page.addInitScript(() => sessionStorage.setItem('lds_setup_redirected', '1'));
+  await page.goto('/#/guide/getting-started');
+  const onThisPage = page.getByRole('navigation', { name: 'On this page' });
+  const doThisLink = onThisPage.getByRole('link', { name: 'Do this' });
+  const doThisSection = page.locator('#do-this');
+
+  await doThisLink.click();
+  await expect(page).toHaveURL(/heading=do-this/);
+  await expect(doThisSection).toBeFocused();
+  await page.getByRole('heading', { name: 'Open the app', level: 1 }).focus();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await doThisLink.click();
+
+  await expect(doThisSection).toBeFocused();
+  await expect.poll(() => doThisSection.evaluate((section) => (
+    section.getBoundingClientRect().top < window.innerHeight
+  ))).toBe(true);
+});

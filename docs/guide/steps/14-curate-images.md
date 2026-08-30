@@ -14,9 +14,10 @@ Open **Images** for the full grid or **Curation** for focused review tools. Judg
 4. Remove near-duplicates unless each one contributes meaningfully different evidence.
 5. Use the crop tool only when it improves framing without removing important context.
 6. Resolve every reconstruction or rescue comparison by choosing one version or neither. Never keep both sides of an exclusive pair.
-7. Watch the composition meter and add real variety where it is weak.
-8. Use curation history if you need to undo a recent keep or reject decision.
+7. Select **Find watermarks**. If anything is flagged, select **Clean (N)** to process the flagged set or **Review flagged (N)** to inspect it first. In review, check the highlighted box, then clean the watermark, dismiss a false positive with **Not a watermark**, or reject the image. Without the optional inpainting tool, the app can crop a watermark near an image edge; an off-centre mark may need the tool installed or a manual edit outside the app.
+8. Watch the composition meter and add real variety where it is weak.
+9. Use curation history if you need to undo a recent keep or reject decision.
 
 ## You are finished when
 
-No image says it is awaiting a decision, every comparison is resolved, and at least one image is kept. The Progress item **Curate** is checked.
+No image says it is awaiting a decision, every comparison is resolved, at least one image is kept, and every flagged watermark has been cleaned, dismissed, or rejected. On a wide screen with a Character dataset, the Progress item **Curate** is also checked.

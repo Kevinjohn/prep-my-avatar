@@ -899,6 +899,53 @@ def test_backup_import_rejects_duplicate_paths_and_oversized_metadata(app, monke
             svc.import_backup_zip(LOCAL_USER, oversized.getvalue())
 
 
+def test_backup_builder_enforces_every_restore_size_limit(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    with app.app_context():
+        dataset = svc.create_dataset(LOCAL_USER, 'Builder limits', 'builder-limits')
+        payload = _png((12, 34, 56))
+        filename = 'payload.webp'
+        Path(svc._dataset_dir(dataset.id), filename).write_bytes(payload)
+        image = FaceDatasetImage(
+            dataset_id=dataset.id, filename=filename, source='import',
+            status='keep', caption='short caption')
+        svc.db.session.add(image)
+        svc.db.session.commit()
+        original_max_bytes = svc._BACKUP_MAX_BYTES
+
+        monkeypatch.setattr(svc, '_BACKUP_MAX_METADATA_BYTES', 10)
+        with pytest.raises(ValueError, match='metadata is too large'):
+            svc.build_backup_zip(LOCAL_USER, dataset.id)
+
+        monkeypatch.setattr(svc, '_BACKUP_MAX_METADATA_BYTES', 64 * 1024 * 1024)
+        monkeypatch.setattr(svc, '_BACKUP_MAX_TEXT_VALUE_BYTES', 4)
+        with pytest.raises(ValueError, match='manifest field is too large'):
+            svc.build_backup_zip(LOCAL_USER, dataset.id)
+
+        monkeypatch.setattr(svc, '_BACKUP_MAX_TEXT_VALUE_BYTES', 1024 * 1024)
+        baseline = svc.build_backup_zip(LOCAL_USER, dataset.id)
+        with zipfile.ZipFile(io.BytesIO(baseline)) as archive:
+            metadata_size = sum(
+                archive.getinfo(name).file_size
+                for name in ('manifest.json', 'images.json'))
+            payload_size = archive.getinfo(f'images/{filename}').file_size
+        aggregate_cap = metadata_size + payload_size - 1
+        assert aggregate_cap > metadata_size
+        assert aggregate_cap > payload_size
+        monkeypatch.setattr(svc, '_BACKUP_MAX_BYTES', aggregate_cap)
+        with pytest.raises(ValueError, match='dataset too large to back up'):
+            svc.build_backup_zip(LOCAL_USER, dataset.id)
+
+        monkeypatch.setattr(svc, '_BACKUP_MAX_BYTES', original_max_bytes)
+        monkeypatch.setattr(svc, '_BACKUP_MAX_TEXT_VALUE_BYTES', 100)
+        image.caption = 'x' * 101
+        svc.db.session.commit()
+        with pytest.raises(ValueError, match='backup image field is too large: caption'):
+            svc.build_backup_zip(LOCAL_USER, dataset.id)
+
+
 @pytest.mark.parametrize(('field', 'value', 'message'), [
     ('version', 0, 'invalid backup version'),
     ('kind', 'not-a-kind', 'invalid backup dataset kind'),

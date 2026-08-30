@@ -20,4 +20,4 @@ Reject blurred, unusable, or incorrect-subject images. Keep useful variety even 
 
 ## You are finished when
 
-For Character, the **needs decision** and **needs coverage** counts are zero and Progress shows **Review corpus — mapped**. For Concept or Style, every imported image has an intentional **Accept** or **Reject** decision.
+For Character, the **needs decision** and **needs coverage** counts are zero. On a wide screen, Progress also shows **Review corpus — mapped**. For Concept or Style, every imported image has an intentional **Accept** or **Reject** decision; those dataset types do not show the Progress checklist.

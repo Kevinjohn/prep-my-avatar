@@ -4,7 +4,9 @@ Local vision can classify your photos, map coverage, and write first-draft capti
 
 ## Before you begin
 
-This step is optional. Each choice needs a running local server and a vision-capable, or “multimodal,” model. A text-only model cannot inspect images.
+Each choice needs a running local server and a vision-capable, or “multimodal,” model. A text-only model cannot inspect images.
+
+The local-vision capability is required to advance once you enter Setup. If you do not want to configure it now, use the wizard's global **Skip setup — I'll do it later** action. That exits Setup and opens **Datasets**; you can configure local vision later from **Setup** or **Settings**.
 
 ## Do this
 
@@ -18,8 +20,8 @@ This step is optional. Each choice needs a running local server and a vision-cap
 5. Correct the URL or loaded model if the check fails, then re-check.
 6. Select **Save & continue →**.
 
-To skip automatic analysis and captioning, continue without configuring a backend. You can classify photos and edit captions manually.
+If you want to work without automatic analysis and captioning, select **Skip setup — I'll do it later** instead of trying to continue from this screen. Manual photo classification and caption editing remain available.
 
 ## You are finished when
 
-The page says the selected backend is running and its vision model is loaded, or you have deliberately skipped local vision. The wizard then shows **Quality tools — ML extras**.
+The page says the selected backend is running and its vision model is loaded, then the wizard shows **Quality tools — ML extras**. If you used the global Setup skip, **Datasets** opens instead.

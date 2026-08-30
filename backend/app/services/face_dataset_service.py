@@ -2345,13 +2345,32 @@ def _build_backup_zip_locked(user_id, dataset_id, *, destination=None):
             # otherwise a Windows-created backup loses originals on macOS/Linux.
             values['original_filename'] = values['original_filename'].replace('\\', '/')
         images_meta.append({'backup_image_id': img.id, **values})
+    for field, value in manifest.items():
+        if (isinstance(value, str)
+                and len(value.encode('utf-8')) > _BACKUP_MAX_TEXT_VALUE_BYTES):
+            raise ValueError(f'backup manifest field is too large: {field}')
+    for meta in images_meta:
+        for field in _BACKUP_IMG_FIELDS:
+            value = meta.get(field)
+            if (isinstance(value, str)
+                    and len(value.encode('utf-8')) > _BACKUP_MAX_TEXT_VALUE_BYTES):
+                raise ValueError(f'backup image field is too large: {field}')
+    manifest_bytes = json.dumps(
+        manifest, ensure_ascii=False, indent=1).encode('utf-8')
+    images_bytes = json.dumps(
+        images_meta, ensure_ascii=False, indent=1).encode('utf-8')
+    metadata_bytes = len(manifest_bytes) + len(images_bytes)
+    if metadata_bytes > _BACKUP_MAX_METADATA_BYTES:
+        raise ValueError('backup metadata is too large')
+    if metadata_bytes > _BACKUP_MAX_BYTES:
+        raise ValueError('dataset too large to back up (max 2 GB uncompressed)')
     buf = destination if destination is not None else io.BytesIO()
     dataset_root = Path(dsdir).resolve()
     written_arcnames = set()
     written_relatives = set()
     # DBR-0019: the writer enforces the same file-count and byte ceilings its
     # importer does, so a backup can never be emitted that the reader rejects.
-    total_bytes = 0
+    total_bytes = metadata_bytes
 
     def add_file(z, relative, arcname):
         nonlocal total_bytes
@@ -2381,8 +2400,8 @@ def _build_backup_zip_locked(user_id, dataset_id, *, destination=None):
         written_relatives.add(normalized_relative)
 
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=1))
-        z.writestr('images.json', json.dumps(images_meta, ensure_ascii=False, indent=1))
+        z.writestr('manifest.json', manifest_bytes)
+        z.writestr('images.json', images_bytes)
         ref_names = [n for n in (ds.ref_filename, ds.ref_original_filename) if n]
         ref_names += extra_ref_filenames(ds)
         for n in dict.fromkeys(ref_names):

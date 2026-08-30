@@ -38,7 +38,7 @@ import gettingHelp from '../../../docs/guide/getting-help.md?raw'
 const step = (id, num, title, description, source) => ({ id, num, title, description, source, group: 'First run' })
 
 export const FIRST_RUN_STEPS = [
-  step('getting-started', '01', 'Open the app', 'Install and launch Prep My Avatar, then begin the five-page Setup wizard.', gettingStarted),
+  step('getting-started', '01', 'Open the app', 'Install and launch Prep My Avatar, then start or skip the five-page Setup wizard.', gettingStarted),
   step('image-provider', '02', 'Choose an image provider', 'Optionally connect Gemini, Replicate, or OpenAI for remote image generation.', imageProvider),
   step('comfyui', '03', 'Configure ComfyUI', 'Optionally enable local Klein generation and Test Studio.', comfyui),
   step('local-vision', '04', 'Configure local vision', 'Optionally connect Ollama, LM Studio, or llama.cpp for image analysis and captions.', localVision),
@@ -58,7 +58,7 @@ export const FIRST_RUN_STEPS = [
   step('train-lora', '18', 'Train a LoRA', 'Optionally launch a local or cloud training run.', trainLora),
   step('review-checkpoints', '19', 'Review checkpoints', 'Keep the checkpoints worth comparing and trace each to its run.', reviewCheckpoints),
   step('test-studio', '20', 'Test in Studio', 'Compare checkpoints and strengths with controlled prompts and seeds.', testStudio),
-  step('back-up', '21', 'Back up the project', 'Create and verify a portable backup of the complete dataset.', backUp),
+  step('back-up', '21', 'Back up the dataset', 'Create and verify a portable dataset backup, then copy training artefacts separately.', backUp),
 ]
 export const REFERENCE_CHAPTERS = [
   { id: 'dataset-guide', num: 'R1', title: 'Building a good dataset', description: 'Understand the reasoning behind image, caption, training, and checkpoint choices.', source: datasetGuide, group: 'Reference' },
@@ -101,6 +101,15 @@ export const resolveGuideLink = (href) => {
 export const guideHeadingRoute = (chapterId, headingId) => (
   `${chapterId === 'getting-help' ? '/help' : `/guide/${chapterId}`}?heading=${encodeURIComponent(headingId)}`
 )
+export const focusGuideHeading = (headingId) => {
+  const target = document.getElementById(headingId)
+  if (!target) return false
+  target.tabIndex = -1
+  target.focus({ preventScroll: true })
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' })
+  return true
+}
 export const keepGuideItemVisible = (nav, item) => {
   if (!nav || !item) return
   const navRect = nav.getBoundingClientRect()
@@ -121,14 +130,22 @@ export default function GuidePage({ helpOnly = false }) {
   const desktopNavRef = useRef(null)
   const activeNavItemRef = useRef(null)
   const chapter = validSection ? chapters[idx] : chapters[0]
-  const prev = idx > 0 ? chapters[idx - 1] : null
-  const next = idx < chapters.length - 1 ? chapters[idx + 1] : null
+  const groupChapters = chapters.filter((item) => item.group === chapter.group)
+  const groupIndex = groupChapters.findIndex((item) => item.id === chapter.id)
+  const prev = groupIndex > 0 ? groupChapters[groupIndex - 1] : null
+  const next = groupIndex >= 0 && groupIndex < groupChapters.length - 1
+    ? groupChapters[groupIndex + 1] : null
   const headings = markdownHeadingModel(chapter.source)
   const readingMinutes = Math.max(1, Math.ceil(chapter.source.trim().split(/\s+/).length / 210))
   const firstRunIndex = FIRST_RUN_STEPS.findIndex((item) => item.id === chapter.id)
   const jumpToHeading = (event, id) => {
     event.preventDefault()
-    navigate(guideHeadingRoute(chapter.id, id), { replace: true })
+    const route = guideHeadingRoute(chapter.id, id)
+    if (`${location.pathname}${location.search}` === route) {
+      focusGuideHeading(id)
+      return
+    }
+    navigate(route, { replace: true })
   }
 
   // A chapter switch is a new "page" — land the reader at its top, not at the
@@ -136,16 +153,10 @@ export default function GuidePage({ helpOnly = false }) {
   useEffect(() => {
     if (!validSection) return
     const headingId = new URLSearchParams(location.search).get('heading')
-    const target = headingId ? document.getElementById(headingId) : null
-    if (!target) {
+    if (!headingId || !focusGuideHeading(headingId)) {
       window.scrollTo(0, 0)
       headingRef.current?.focus()
-      return
     }
-    target.tabIndex = -1
-    target.focus({ preventScroll: true })
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' })
   }, [chapter.id, location.search, validSection])
 
   useEffect(() => {
@@ -220,7 +231,7 @@ export default function GuidePage({ helpOnly = false }) {
         {headings.length > 0 && (
           <nav aria-label="On this page" className="mb-4 rounded-xl border border-border bg-surface p-3 xl:hidden">
             <p className="m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle">On this page</p>
-            <div tabIndex={0} className="flex gap-2 overflow-x-auto pb-0.5">
+            <div className="flex gap-2 overflow-x-auto pb-0.5">
               {headings.map((item) => (
                 <a key={item.id} href={`#${guideHeadingRoute(chapter.id, item.id)}`} onClick={(event) => jumpToHeading(event, item.id)}
                   className="shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content">{item.title}</a>
