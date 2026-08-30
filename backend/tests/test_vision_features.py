@@ -143,13 +143,31 @@ def test_gpu_lease_acquisition_is_atomic_between_threads(threaded_app, monkeypat
     assert len(errors) == 1
 
 
-def test_gpu_lease_is_renewed_past_initial_ttl(app, monkeypatch):
+def test_gpu_lease_is_renewed_past_initial_ttl(threaded_app, monkeypatch):
     from app.gpu_window import GpuBusyError, gpu_exclusive_vision_window
+    from app.job_queue import queue_manager
 
+    app = threaded_app
     monkeypatch.setattr('app.utils.comfyui.free_comfyui_vram', lambda: True)
+    now = [1_000.0]
+    allow_renewal = threading.Event()
+    renewed = threading.Event()
+    original_renew = queue_manager._renew_gpu_lease
+
+    def tracked_renew(token, ttl_seconds):
+        if not allow_renewal.wait(timeout=1):
+            return False
+        result = original_renew(token, ttl_seconds)
+        renewed.set()
+        return result
+
+    monkeypatch.setattr('app.job_queue.time.time', lambda: now[0])
+    monkeypatch.setattr(queue_manager, '_renew_gpu_lease', tracked_renew)
     with app.app_context():
         with gpu_exclusive_vision_window(flag_ttl=0.15):
-            time.sleep(0.3)
+            now[0] += 0.2
+            allow_renewal.set()
+            assert renewed.wait(timeout=1), 'GPU lease heartbeat did not run'
             with pytest.raises(GpuBusyError):
                 with gpu_exclusive_vision_window(flag_ttl=0.15):
                     pass
