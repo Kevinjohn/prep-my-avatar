@@ -8,7 +8,7 @@ Training can take significant time, disk space, GPU memory, and—for cloud runs
 
 ## Do this
 
-1. Open **Training** in the dataset sidebar.
+1. Open **Train a LoRA** in the dataset step navigator. Its URL ends in `/train` and it is labelled **Optional**.
 2. Choose the LoRA family that matches the target model you intend to use.
 3. Read the readiness summary and resolve blocking findings.
 4. Keep the automatic step count and default recipe for a first run. Open **Advanced options** only when you understand the setting you need to change.
@@ -16,6 +16,7 @@ Training can take significant time, disk space, GPU memory, and—for cloud runs
 6. Read the **Before training** confirmation. Fix duplicate pairs or caption leaks shown there.
 7. Confirm the launch. For cloud training, check the quoted limits before accepting.
 8. Keep the app running for local training. Follow either type of run from **Runs**.
+9. Select **Continue to Review checkpoints**, or **Skip optional step** to move through the remaining optional training pages toward backup.
 
 ## You are finished when
 

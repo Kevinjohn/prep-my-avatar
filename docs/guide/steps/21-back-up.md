@@ -1,4 +1,4 @@
-# Step 21: Back up the dataset
+# Step 21: Back up dataset
 
 A portable backup preserves the dataset itself: originals, working images, captions, settings, relationships, decisions, provenance, and starred best settings. It is different from the smaller training export ZIP.
 
@@ -12,11 +12,11 @@ One dataset-backup ZIP supports at most 5,000 image records, 10,050 image/refere
 
 ## Do this
 
-1. Open the dataset's **Import & export** section.
-2. Select **Backup**.
+1. Open **Back up dataset** in the dataset step navigator. Its URL ends in `/backup`.
+2. Select **Download portable backup**.
 3. Save the backup ZIP outside the Prep My Avatar data directory.
-4. If you trained locally, use **Run folder** and **LoRA folder** under **Checkpoints & LoRAs** to locate and separately copy the training run and every `.safetensors` file you want to retain.
-5. If you trained in the cloud, wait for the run to finish, open **Runs**, and select **Download the LoRA**. The dataset's **Training** section also offers **Download the cloud-trained LoRA (.safetensors)** for its latest completed cloud run. Save the downloaded file outside the app's data folder.
+4. If you trained locally, return to **Review checkpoints** and use **Run folder** and **LoRA folder** to locate and separately copy the training run and every `.safetensors` file you want to retain.
+5. If you trained in the cloud, wait for the run to finish, open **Runs**, and select **Download the LoRA**. The dataset's **Train a LoRA** page also offers **Download the cloud-trained LoRA (.safetensors)** for its latest completed cloud run. Save the downloaded file outside the app's data folder.
 6. In Studio, open each result image you need and select **Download image** in its preview.
 7. Wait for the backup download to finish and confirm the file is not empty.
 8. Keep at least one second copy if losing the dataset would matter.

@@ -10,15 +10,16 @@ Skip this page only if you will use neither local Klein nor face-similarity scor
 
 ## Do this
 
-1. Open **Add images** and find **optional primary reference** below the coverage plan.
+1. Open **Set primary reference** in the dataset step navigator. Its URL ends in `/reference` and it is labelled **Optional**.
 2. Select or drop the best reference photo.
 3. Open the crop control and keep the face clear without cutting off important features.
 4. Add up to three extra references only when another angle adds useful identity evidence.
 5. Remove any weak or incorrect extra reference.
 6. Confirm the preview shows the intended person and no unrelated face dominates the frame.
+7. Select **Continue**, or select **Skip optional step** if neither local Klein nor face scoring needs a reference.
 
 The reference is not automatically your entire training set. It is an identity input for local Klein and face scoring; accepted images still determine what is available for training.
 
 ## You are finished when
 
-For Character, the primary-reference preview shows the intended image, or you have deliberately skipped both features that need it. On a wide screen, Progress also shows **Primary reference — set** when one is set. For Concept or Style, the step is finished because it does not apply.
+For Character, the preview shows the intended image and the navigator marks **Set primary reference — Complete**, or you deliberately used **Skip optional step**. Concept and Style navigators omit this page.

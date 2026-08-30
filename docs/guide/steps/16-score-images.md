@@ -8,13 +8,14 @@ This page applies only when **Face-similarity scoring** was installed during Set
 
 ## Do this
 
-1. Open **Curation**.
+1. Open **Score face similarity** in the dataset step navigator. Its URL ends in `/score` and it is labelled **Optional**.
 2. Select **Analyze faces**.
 3. Wait for every kept image to receive a result. ComfyUI may pause while this local analysis uses the GPU or CPU.
 4. Review low or orange results at full size. Check whether the face is actually wrong, obscured, too small, or simply seen from a difficult angle.
 5. Reject an off-identity image manually. Keep a useful image when your own inspection shows the score is misleading.
 6. Review sharpness and exposure warnings separately; identity and technical quality are different questions.
+7. Select **Continue to Export dataset**, or **Skip optional step** when scoring is not installed or not useful for this set.
 
 ## You are finished when
 
-Every kept Character image you intended to score has a result and every suspicious result has been reviewed. On a wide screen, the optional Progress item **Score** is also checked.
+Every kept Character image you intended to score has a result and every suspicious result has been reviewed, or you deliberately skipped scoring. Concept and Style navigators omit this page.

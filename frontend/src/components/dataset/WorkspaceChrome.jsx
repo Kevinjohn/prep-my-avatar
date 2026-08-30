@@ -1,29 +1,3 @@
-/** Shared visual primitives for the dataset workspace shell. */
-export function SectionHeading({ id, eyebrow, title, description }) {
-  return (
-    <div id={id} tabIndex={-1}>
-      <p className="m-0 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle">{eyebrow}</p>
-      <h2 className="m-0 mt-0.5 text-content text-base font-semibold">{title}</h2>
-      {description && <p className="m-0 mt-0.5 text-content-muted text-[0.75rem] leading-relaxed">{description}</p>}
-    </div>
-  );
-}
-
-export function NavBadge({ badge }) {
-  if (!badge) return null;
-  const cls = badge.tone === 'amber' ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-    : badge.tone === 'indigo' ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200'
-      : 'border-border bg-surface-raised text-content-subtle';
-  return (
-    <span
-      className={`ml-auto shrink-0 rounded-full border px-1.5 py-px text-[0.625rem] font-semibold tabular-nums ${cls} ${badge.pulse ? 'animate-pulse' : ''}`}
-    >
-      <span aria-hidden>{badge.n}</span>
-      <span className="sr-only"> — {badge.srLabel}</span>
-    </span>
-  );
-}
-
 export function GridFilterBar({
   excludes,
   includes,

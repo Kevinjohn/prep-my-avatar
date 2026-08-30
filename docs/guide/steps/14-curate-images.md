@@ -1,10 +1,10 @@
-# Step 14: Curate the images
+# Step 14: Curate images
 
 Curation creates the final kept set. Only images marked with a check are included in captions, export, and training.
 
 ## Before you begin
 
-Open **Images** for the full grid or **Curation** for focused review tools. Judge identity, sharpness, composition, duplicates, watermarks, and usefulness—not just whether an image looks attractive.
+Open **Curate images** in the dataset step navigator. Its URL ends in `/curate`. The grid, rescue comparisons, watermark tools, cleanup, and curation history are together on this page.
 
 ## Do this
 
@@ -17,7 +17,8 @@ Open **Images** for the full grid or **Curation** for focused review tools. Judg
 7. Select **Find watermarks**. If anything is flagged, select **Clean (N)** to process the flagged set or **Review flagged (N)** to inspect it first. In review, check the highlighted box, then clean the watermark, dismiss a false positive with **Not a watermark**, or reject the image. Without the optional inpainting tool, the app can crop a watermark near an image edge; an off-centre mark may need the tool installed or a manual edit outside the app.
 8. Watch the composition meter and add real variety where it is weak.
 9. Use curation history if you need to undo a recent keep or reject decision.
+10. Select **Continue to Caption images**.
 
 ## You are finished when
 
-No image says it is awaiting a decision, every comparison is resolved, at least one image is kept, and every flagged watermark has been cleaned, dismissed, or rejected. On a wide screen with a Character dataset, the Progress item **Curate** is also checked.
+No image says it is awaiting a decision, every comparison is resolved, at least one image is kept, every flagged watermark is resolved, and the navigator marks **Curate images — Complete**.

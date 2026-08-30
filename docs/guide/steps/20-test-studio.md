@@ -1,4 +1,4 @@
-# Step 20: Test the LoRA in Studio
+# Step 20: Test in Studio
 
 Studio compares checkpoints and strengths with the same prompts and seeds. This separates the effect of the LoRA from random changes between generated images. This step is optional; if you have no compatible checkpoint or do not use Studio, continue to Step 21.
 
@@ -8,7 +8,7 @@ Studio needs a working ComfyUI setup, compatible base models and nodes, and at l
 
 ## Do this
 
-1. Open **Studio** from the dataset or the top navigation.
+1. Open **Test in Studio** in the dataset step navigator. Its URL ends in `/studio` and it is labelled **Optional**.
 2. Select the correct model family.
 3. Choose one or more compatible checkpoints.
 4. Enter a plain test prompt that includes the Character or Concept trigger word when one is required.
@@ -18,7 +18,8 @@ Studio needs a working ComfyUI setup, compatible base models and nodes, and at l
 8. Vote or rate the results, then star the best settings.
 9. Repeat with a different prompt before making a final choice.
 10. Open any result image you need to keep and select **Download image** in its preview.
+11. Return to the dataset step page and select **Continue to Back up dataset**, or use **Skip optional step** when Studio is unavailable.
 
 ## You are finished when
 
-The dataset has starred **best settings** backed by more than one useful prompt. Record the winning checkpoint filename and strength. Use **Run folder** or **LoRA folder** under **Checkpoints & LoRAs** to locate and copy the checkpoint for the image-generation workflow where you will use it, then continue to Step 21.
+The dataset has starred **best settings** backed by more than one useful prompt. Record the winning checkpoint filename and strength. Return to **Review checkpoints** to use **Run folder** or **LoRA folder** when you need to locate and copy the checkpoint for another image-generation workflow, then continue to Step 21.

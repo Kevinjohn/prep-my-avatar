@@ -24,3 +24,9 @@ test('full hydration has a request lifecycle independent from routine refreshes'
     /\+\+dataRequestSequenceRef\.current/,
   );
 });
+
+test('a definitive missing dataset is exposed to canonical route handling', () => {
+  assert.match(hook, /const \[notFoundId, setNotFoundId\] = useState\(null\)/);
+  assert.match(hook, /error\?\.status === 404[\s\S]*setNotFoundId\(dsId\)/);
+  assert.match(hook, /return \{ datasets, currentId, notFoundId, data/);
+});

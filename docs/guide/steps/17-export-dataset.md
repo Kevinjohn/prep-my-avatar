@@ -1,4 +1,4 @@
-# Step 17: Export the dataset
+# Step 17: Export dataset
 
 Export creates a standard training package from the images currently marked **kept**. It does not include rejected or undecided images.
 
@@ -8,12 +8,13 @@ Finish curation and captions first. An export can be useful even if you never tr
 
 ## Do this
 
-1. Check the kept count beside **Export ZIP** at the top of the dataset.
-2. Open **Import & export** if you want to review the export options, or use the top **Export ZIP** button directly.
+1. Open **Export dataset** in the dataset step navigator. Its URL ends in `/export`.
+2. Check the kept count beside **Export ZIP**.
 3. Select **Export ZIP**.
 4. Choose a destination folder if your browser asks.
 5. Wait for the download to finish, then open the ZIP to verify it contains image files and matching `.txt` caption files.
 6. Keep `_prep_my_avatar_manifest.json`. Training tools can ignore it, but it records the source mix, coverage, and provenance.
+7. Select **Continue to Train a LoRA**.
 
 An export ZIP is a training package, not a complete backup of the project. The final guide step explains the separate **Backup** action.
 

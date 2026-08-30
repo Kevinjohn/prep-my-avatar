@@ -53,7 +53,7 @@ def _docs_fixture(tmp_path):
         'docs/specs/import-first-multi-reference-design.md',
         'docs/screenshots/manifest.yml',
         'docs/screenshots/readme/05-training-readiness.jpg',
-        'frontend/src/components/dataset/NextStepCard.jsx',
+        'frontend/src/components/dataset/DatasetWorkflowNav.jsx',
         'frontend/src/components/dataset/PreflightModal.jsx',
         'frontend/src/utils/labels.js',
     ):
@@ -180,7 +180,7 @@ def test_docs_contract_rejects_current_screenshot_after_relevant_source_changes(
         ),
         encoding='utf-8',
     )
-    source = root / 'frontend/src/components/dataset/NextStepCard.jsx'
+    source = root / 'frontend/src/components/dataset/DatasetWorkflowNav.jsx'
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text('changed after the declared screenshot capture', encoding='utf-8')
     monkeypatch.setattr(contracts, 'ROOT', root)

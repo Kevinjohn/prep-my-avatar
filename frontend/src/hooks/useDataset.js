@@ -72,6 +72,7 @@ export function useDataset() {
   const toast = useToast();
   const [datasets, setDatasets] = useState([]);
   const [currentId, setCurrentId] = useState(readDatasetCurrentId);
+  const [notFoundId, setNotFoundId] = useState(null);
   const currentIdRef = useRef(currentId);
   currentIdRef.current = currentId;
   const [data, setData] = useState(null);
@@ -132,6 +133,7 @@ export function useDataset() {
       // rapid switch (or repopulate a workspace the user already closed).
       if (currentIdRef.current !== dsId
           || dataRequestSequenceRef.current !== requestSequence) return;
+      setNotFoundId(null);
       const retainHydratedImages = hydrationWasActive
         || imageRequestSequenceRef.current !== imageSequenceAtStart;
       const retainedTarget = loadedTargetRef.current;
@@ -156,6 +158,7 @@ export function useDataset() {
       if (error?.status === 404 && currentIdRef.current === dsId
           && dataRequestSequenceRef.current === requestSequence) {
         currentIdRef.current = null;
+        setNotFoundId(dsId);
         setData(null);
         setCurrentId(null);
         // A delete in another tab should not reveal a stale tile when this
@@ -179,6 +182,7 @@ export function useDataset() {
     loadingMoreImagesRef.current = false;
     setLoadingMoreImages(false);
     setData(null);
+    setNotFoundId(null);
     setCurrentId(null);
   }, []);
 
@@ -242,6 +246,7 @@ export function useDataset() {
     setImageHydrationError(null);
     loadingMoreImagesRef.current = false;
     setLoadingMoreImages(false);
+    setNotFoundId(null);
     currentIdRef.current = id;
     setCurrentId(id);
     await refresh(id);
@@ -1059,7 +1064,7 @@ export function useDataset() {
     || actKind === 'watermark_detect' || actKind === 'watermark_clean';
   const busyLive = busy || !!activity;
 
-  return { datasets, currentId, data, busy: busyLive, captioning: captioningLive,
+  return { datasets, currentId, notFoundId, data, busy: busyLive, captioning: captioningLive,
            analyzing: analyzingLive, watermarking: watermarkingLive, activity,
            hasMoreImages: imagePage.hasMore, loadingMoreImages, imageHydrationError,
            nonces, refNonce, create, open,

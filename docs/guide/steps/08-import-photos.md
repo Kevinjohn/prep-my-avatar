@@ -1,4 +1,4 @@
-# Step 8: Import your photos
+# Step 8: Import photos
 
 Start with real source images. The app preserves each original and makes a working copy, so later crops and decisions do not overwrite your source file.
 
@@ -8,15 +8,15 @@ For a Character dataset, gather at least five clear photos you own or have permi
 
 ## Do this
 
-1. Open **Add images** in the dataset sidebar.
-2. Find the import area at the top of the page.
-3. Drag image files into it, or select the area and choose files from your computer.
-4. Leave automatic head crop off for the first import unless you specifically need face-only crops.
-5. Wait until processing finishes. Do not close the app while the busy message is visible.
-6. Check the import result. Exact duplicates are skipped; near-duplicates remain available for your review.
+1. Open **Import photos** in the dataset step navigator. Its URL ends in `/import`.
+2. Drag image files into the import area, or select it and choose files from your computer.
+3. Leave automatic head crop off for the first import unless you specifically need face-only crops.
+4. Wait until processing finishes. Do not close the app while the busy message is visible.
+5. Check the import result. Exact duplicates are skipped; near-duplicates remain available for your review.
+6. Select **Continue to Review corpus**.
 
 For Concept or Style datasets, import representative examples of the concept or style. Concept datasets can also use the scraper, but a manual import is the simplest first test.
 
 ## You are finished when
 
-The **Corpus Workbench** shows the new images as needing a decision and its imported count matches the files you expected. On a wide screen with a Character dataset, the **Progress** checklist also marks **Import corpus** complete; that checklist is hidden for Concept and Style datasets and on small screens.
+The import reports the number of files you expected, the step navigator marks **Import photos — Complete**, and **Continue** opens **Review corpus**.

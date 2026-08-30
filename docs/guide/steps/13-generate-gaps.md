@@ -10,14 +10,15 @@ You need a tested Gemini, Replicate, or OpenAI credential, or a working local Kl
 
 ## Do this
 
-1. In **Coverage plan**, select **Review gap shots**, or open the generation panel under **Add images**.
+1. Open **Generate missing views** in the dataset step navigator. Its URL ends in `/generate` and it is labelled **Optional**.
 2. Review the recommended shots. Remove any shot you do not actually need.
 3. Choose the configured engine and model.
 4. Keep the multiplier at one for the first attempt.
 5. Read the estimated request count and cost information.
 6. Start generation and wait for the results. Use **Stop generation** if early results show that the prompt or identity is wrong.
 7. Use the edit control on an individual result to correct its prompt and regenerate that shot only.
+8. Select **Continue to Curate images**, or **Skip optional step** when real photos already provide enough coverage.
 
 ## You are finished when
 
-For Character, every requested generation has completed or been stopped and each result awaits review. For Concept or Style, the step is finished after you deliberately use import or the Concept scraper instead.
+For Character, every requested generation has completed or been stopped and each result awaits review, or you deliberately skipped generation. Concept and Style navigators omit this page and go from review directly to curation.

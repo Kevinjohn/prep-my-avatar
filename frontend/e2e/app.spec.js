@@ -93,7 +93,8 @@ test('dataset flow, destructive dialog focus, and accessibility', async ({ page 
   await page.getByLabel('Character name').fill(datasetName);
   await page.getByLabel(/^Trigger word/).fill(`zchar_e2e_${suffix.toLowerCase()}_avatar`);
   await page.getByRole('button', { name: 'Create', exact: true }).click();
-  await expect(page.getByRole('heading', { name: datasetName, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Import photos', level: 1 })).toBeVisible();
+  await expect(page.getByText(datasetName, { exact: true })).toBeVisible();
   await page.getByTitle('More dataset actions — edit settings, body fidelity').click();
   const editSettings = page.getByRole('button', { name: /Edit settings/ });
   await expect(editSettings).toBeVisible();
@@ -116,7 +117,68 @@ test('dataset flow, destructive dialog focus, and accessibility', async ({ page 
   await expect(deleteButton).toBeFocused();
   await deleteButton.click();
   await page.getByRole('button', { name: 'Move to trash', exact: true }).click();
-  await expect(page.getByRole('heading', { name: datasetName, level: 1 })).toHaveCount(0);
+  await expect(page.getByText(datasetName, { exact: true })).toHaveCount(0);
+});
+
+test('dataset workflow uses one canonical page per guide step', async ({ page }, testInfo) => {
+  await openDatasets(page);
+  const { datasetId } = await seedImportedDataset(
+    page, `Step flow ${testInfo.project.name}-${testInfo.retry}`,
+  );
+
+  await page.goto(`/#/datasets/${datasetId}/review`);
+  await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/review$`));
+  await expect(page.getByRole('heading', { name: 'Review corpus', level: 1 })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/review$`));
+  await expect(page.getByRole('heading', { name: 'Review corpus', level: 1 })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Dataset steps' })).toBeVisible();
+  const desktopCurrent = page.getByRole('button', { name: /Review corpus Current/ });
+  if (await desktopCurrent.isVisible()) {
+    await expect(desktopCurrent).toHaveAttribute('aria-current', 'step');
+  } else {
+    await expect(page.getByLabel(/Step \d+ of \d+/)).toHaveValue('review');
+  }
+  await expect(page.getByText('Import an existing dataset ZIP')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Export ZIP/ })).toHaveCount(0);
+  expect(await accessibilityViolations(page)).toEqual([]);
+
+  await page.getByRole('button', { name: /Continue/ }).click();
+  await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/anchors$`));
+  await expect(page.getByRole('heading', { name: 'Choose anchors', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Choose anchors', level: 1 })).toBeFocused();
+
+  const stepPicker = page.getByLabel(/Step \d+ of \d+/);
+  if (await stepPicker.isVisible()) {
+    await stepPicker.selectOption('reference');
+  } else {
+    await page.getByRole('button', { name: /Set primary reference Optional/ }).click();
+  }
+  await expect(page.getByRole('heading', { name: 'Set primary reference', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Skip optional step' }).click();
+  await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/generate$`));
+  await expect(page.getByRole('heading', { name: 'Generate missing views', level: 1 })).toBeVisible();
+
+  await page.goto(`/#/datasets/${datasetId}/not-a-step`);
+  await expect(page.getByRole('heading', { name: 'Review coverage', level: 1 })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/coverage$`));
+
+  const concept = await postJson(page, '/api/dataset/create', {
+    name: `Concept flow ${testInfo.project.name}-${testInfo.retry}`,
+    trigger_word: `z_concept_${testInfo.project.name}_${testInfo.retry}`,
+    kind: 'concept',
+    concept_desc: 'a recurring light trail',
+  });
+  expect(concept.status).toBe(200);
+  await page.goto(`/#/datasets/${concept.body.id}/anchors`);
+  await expect(page).toHaveURL(new RegExp(`#/datasets/${concept.body.id}/import$`));
+  await expect(page.getByRole('heading', { name: 'Import photos', level: 1 })).toBeVisible();
+  await expect(page.getByText('Step 1 of 9', { exact: true }).last()).toBeVisible();
+  await expect(page.getByRole('button', { name: /Choose anchors/ })).toHaveCount(0);
+
+  await page.goto('/#/datasets/2147483647/review');
+  await expect(page).toHaveURL(/#\/datasets$/);
+  await expect(page.getByRole('heading', { name: 'Datasets', level: 1 })).toBeVisible();
 });
 
 test('re-caption protects authored captions until the explicit override', async ({ page }, testInfo) => {
@@ -238,8 +300,7 @@ test('outdated analysis refreshes explicitly and preserves review evidence', asy
   });
 
   await page.evaluate((id) => localStorage.setItem('datasetCurrentId', String(id)), datasetId);
-  await page.goto('/#/datasets?section=add');
-  await page.reload();
+  await page.goto(`/#/datasets/${datasetId}/coverage`);
   const refresh = page.getByRole('button', {
     name: '📐 Refresh local analysis (1 outdated)', exact: true,
   });
@@ -352,26 +413,26 @@ test('the rendered guide exposes all first-run pages in order', async ({ page })
     ['quality-tools', 'Install quality tools'],
     ['training-tools', 'Configure training'],
     ['create-dataset', 'Create a dataset'],
-    ['import-photos', 'Import your photos'],
-    ['review-corpus', 'Review the corpus'],
-    ['choose-anchors', 'Choose identity anchors'],
+    ['import-photos', 'Import photos'],
+    ['review-corpus', 'Review corpus'],
+    ['choose-anchors', 'Choose anchors'],
     ['plan-coverage', 'Review coverage'],
     ['primary-reference', 'Set a primary reference'],
     ['generate-gaps', 'Generate missing views'],
-    ['curate-images', 'Curate the images'],
-    ['caption-images', 'Caption the kept images'],
+    ['curate-images', 'Curate images'],
+    ['caption-images', 'Caption images'],
     ['score-images', 'Score face similarity'],
-    ['export-dataset', 'Export the dataset'],
+    ['export-dataset', 'Export dataset'],
     ['train-lora', 'Train a LoRA'],
     ['review-checkpoints', 'Review checkpoints'],
     ['test-studio', 'Test in Studio'],
-    ['back-up', 'Back up the dataset'],
+    ['back-up', 'Back up dataset'],
   ];
 
   const pagePicker = page.getByLabel('Guide page');
   if (await pagePicker.isVisible()) {
     await pagePicker.selectOption('back-up');
-    await expect(page.getByRole('heading', { name: 'Back up the dataset', level: 1 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Back up dataset', level: 1 })).toBeVisible();
     await pagePicker.selectOption('getting-started');
   }
 

@@ -1,7 +1,7 @@
-import{j as e,t as B,n as G,E,r as v,N as K,L as T}from"./index-BLN38n1-.js";import{D as M}from"./DiagnosticReport-oU0eG2AF.js";function W(n){return String(n||"").replace(/[`*_]/g,"").normalize("NFKC").toLocaleLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu,"-").replace(/^-|-$/g,"")||"section"}function U(n){const a=new Map;return n.map(r=>{const t=W(r),o=(a.get(t)||0)+1;return a.set(t,o),o===1?t:`${t}-${o}`})}function $(n){const a=[...String(n||"").matchAll(/^##\s+(.+)$/gm)].map(t=>t[1]),r=U(a);return a.map((t,o)=>({title:t.replace(/[`*_]/g,""),id:r[o]}))}function y(n,a="i",r){const t=[],o=/(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;let u=0,c,s=0;for(;(c=o.exec(n))!==null;){c.index>u&&t.push(n.slice(u,c.index));const d=c[0],m=`${a}-${s++}`;if(d.startsWith("`"))t.push(e.jsx("code",{className:"px-1 py-0.5 rounded bg-surface-raised text-indigo-200 text-[0.8125em] font-mono",children:d.slice(1,-1)},m));else if(d.startsWith("**"))t.push(e.jsx("strong",{className:"text-content font-semibold",children:d.slice(2,-2)},m));else if(d.startsWith("*"))t.push(e.jsx("em",{children:d.slice(1,-1)},m));else{const h=d.match(/^\[([^\]]+)\]\(([^)]+)\)$/),l=r==null?void 0:r(h[2]);t.push(l==null?e.jsx("a",{href:h[2],target:"_blank",rel:"noreferrer",className:"text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300",children:h[1]},m):e.jsx("a",{href:l,className:"text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300",children:h[1]},m))}u=c.index+d.length}return u<n.length&&t.push(n.slice(u)),t}function q(n){const a=n.replace(/\r\n/g,`
+import{j as e,o as B,n as G,E,r as w,N as K,L as T}from"./index-CGbUFJcc.js";import{D as M}from"./DiagnosticReport-B3OEMr_F.js";function $(n){return String(n||"").replace(/[`*_]/g,"").normalize("NFKC").toLocaleLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu,"-").replace(/^-|-$/g,"")||"section"}function P(n){const a=new Map;return n.map(r=>{const t=$(r),o=(a.get(t)||0)+1;return a.set(t,o),o===1?t:`${t}-${o}`})}function q(n){const a=[...String(n||"").matchAll(/^##\s+(.+)$/gm)].map(t=>t[1]),r=P(a);return a.map((t,o)=>({title:t.replace(/[`*_]/g,""),id:r[o]}))}function y(n,a="i",r){const t=[],o=/(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;let u=0,l,i=0;for(;(l=o.exec(n))!==null;){l.index>u&&t.push(n.slice(u,l.index));const d=l[0],m=`${a}-${i++}`;if(d.startsWith("`"))t.push(e.jsx("code",{className:"px-1 py-0.5 rounded bg-surface-raised text-indigo-200 text-[0.8125em] font-mono",children:d.slice(1,-1)},m));else if(d.startsWith("**"))t.push(e.jsx("strong",{className:"text-content font-semibold",children:d.slice(2,-2)},m));else if(d.startsWith("*"))t.push(e.jsx("em",{children:d.slice(1,-1)},m));else{const h=d.match(/^\[([^\]]+)\]\(([^)]+)\)$/),c=r==null?void 0:r(h[2]);t.push(c==null?e.jsx("a",{href:h[2],target:"_blank",rel:"noreferrer",className:"text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300",children:h[1]},m):e.jsx("a",{href:c,className:"text-indigo-300 underline decoration-indigo-400/40 hover:decoration-indigo-300",children:h[1]},m))}u=l.index+d.length}return u<n.length&&t.push(n.slice(u)),t}function W(n){const a=n.replace(/\r\n/g,`
 `).split(`
-`),r=[];let t=0;for(;t<a.length;){const o=a[t];if(!o.trim()){t++;continue}if(o.startsWith("```")){const s=[];for(t++;t<a.length&&!a[t].startsWith("```");)s.push(a[t++]);t++,r.push({t:"code",body:s.join(`
-`)});continue}const u=o.match(/^(#{1,3})\s+(.*)$/);if(u){r.push({t:`h${u[1].length}`,body:u[2]}),t++;continue}if(/^(-{3,}|\*{3,})\s*$/.test(o)){r.push({t:"hr"}),t++;continue}if(o.startsWith(">")){const s=[];for(;t<a.length&&a[t].startsWith(">");)s.push(a[t++].replace(/^>\s?/,""));r.push({t:"quote",body:s.join(" ")});continue}if(/^\|/.test(o)){const s=[];for(;t<a.length&&/^\|/.test(a[t]);)s.push(a[t++]);const d=f=>f.replace(/^\||\|$/g,"").split("|").map(b=>b.trim()),m=d(s[0]),h=s[1]?d(s[1]):[];h.length===m.length&&h.every(f=>/^:?-{3,}:?$/.test(f))?r.push({t:"table",header:m,body:s.slice(2).map(d)}):s.forEach(f=>r.push({t:"p",body:f}));continue}if(/^(\s*)([-*]|\d+\.)\s+/.test(o)){const s=[],d=/^\s*\d+\./.test(o);for(;t<a.length&&/^(\s*)([-*]|\d+\.)\s+/.test(a[t]);){let m=a[t].replace(/^(\s*)([-*]|\d+\.)\s+/,"");for(t++;t<a.length&&/^\s{2,}\S/.test(a[t])&&!/^(\s*)([-*]|\d+\.)\s+/.test(a[t]);)m+=" "+a[t++].trim();s.push(m)}r.push({t:"list",ordered:d,items:s});continue}const c=[o];for(t++;t<a.length&&a[t].trim()&&!/^(#{1,3}\s|```|\||>|(\s*)([-*]|\d+\.)\s|-{3,}\s*$)/.test(a[t]);)c.push(a[t++]);r.push({t:"p",body:c.join(" ")})}return r}function S(n,a,r=!1,t){const o=`b${a}`;switch(n.t){case"h1":return e.jsx("h1",{className:"m-0 mt-2 text-content font-bold text-2xl",children:y(n.body,o,t)},o);case"h2":return e.jsx("h2",{id:r?void 0:n.headingId,className:`${r?"text-xl":"mt-4 border-b border-border pb-1.5 text-lg"} m-0 scroll-mt-24 text-content font-bold`,children:y(n.body,o,t)},o);case"h3":return e.jsx("h3",{className:"m-0 mt-2 text-content font-semibold text-base",children:y(n.body,o,t)},o);case"hr":return e.jsx("hr",{className:"border-border my-2"},o);case"quote":return e.jsx("blockquote",{className:"m-0 rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-4 py-3 text-content text-sm leading-relaxed",children:y(n.body,o,t)},o);case"code":return e.jsx("pre",{tabIndex:0,className:"m-0 rounded-lg border border-border bg-app/60 p-3 overflow-x-auto text-[0.8125rem] text-content-muted font-mono",children:n.body},o);case"table":return e.jsx("div",{tabIndex:0,className:"overflow-x-auto rounded-lg border border-border",children:e.jsxs("table",{className:"w-full text-sm border-collapse",children:[e.jsx("thead",{children:e.jsx("tr",{className:"bg-surface-raised",children:n.header.map((u,c)=>e.jsx("th",{className:"text-left px-3 py-2 text-content font-semibold border-b border-border whitespace-nowrap",children:y(u,`${o}h${c}`,t)},c))})}),e.jsx("tbody",{children:n.body.map((u,c)=>e.jsx("tr",{className:c%2?"bg-surface":"",children:u.map((s,d)=>e.jsx("td",{className:"px-3 py-2 text-content-muted align-top border-b border-border last:border-b-0",children:y(s,`${o}r${c}c${d}`,t)},d))},c))})]})},o);case"list":{const u=n.ordered?"ol":"ul";return e.jsx(u,{className:`m-0 flex flex-col text-sm text-content-muted ${r&&n.ordered?"list-none gap-2 p-0":`gap-1.5 pl-5 ${n.ordered?"list-decimal":"list-disc"}`}`,children:n.items.map((c,s)=>{const d=c.match(/^\[([ xX])\]\s+(.*)$/);return d?e.jsxs("li",{className:"list-none -ml-5 flex items-start gap-2",children:[e.jsx("span",{"aria-hidden":!0,className:`mt-0.5 grid place-items-center w-4 h-4 shrink-0 rounded border text-[0.625rem] ${d[1]===" "?"border-border-strong text-transparent":"border-emerald-400/60 bg-emerald-500/15 text-emerald-300"}`,children:"✓"}),e.jsx("span",{children:y(d[2],`${o}i${s}`,t)})]},s):r&&n.ordered?e.jsxs("li",{className:"flex gap-3 rounded-lg border border-border bg-app px-3 py-3 leading-relaxed",children:[e.jsx("span",{"aria-hidden":!0,className:"grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-500/15 font-mono text-[0.6875rem] font-bold text-indigo-300",children:String(s+1).padStart(2,"0")}),e.jsx("span",{children:y(c,`${o}i${s}`,t)})]},s):e.jsx("li",{children:y(c,`${o}i${s}`,t)},s)})},o)}default:return e.jsx("p",{className:"m-0 text-sm text-content-muted leading-relaxed",children:y(n.body,o,t)},o)}}function z({source:n,variant:a="default",resolveLink:r}){const t=q(n||""),o=t.filter(c=>c.t==="h2"),u=U(o.map(c=>c.body));if(o.forEach((c,s)=>{c.headingId=u[s]}),a==="guide"){const c=t.filter((h,l)=>!(l===0&&h.t==="h1")),s=[],d=[];let m=null;return c.forEach((h,l)=>{h.t==="h2"?(m={heading:h,blocks:[],index:l},d.push(m)):m?m.blocks.push({block:h,index:l}):h.t!=="hr"&&s.push({block:h,index:l})}),e.jsxs("div",{className:"flex max-w-none flex-col gap-4",children:[s.length>0&&e.jsx("div",{className:"flex flex-col gap-3 rounded-xl border border-indigo-400/20 bg-gradient-to-br from-indigo-500/10 via-surface to-surface px-4 py-4 sm:px-5",children:s.map(({block:h,index:l})=>S(h,l,!0,r))}),d.map(({heading:h,blocks:l,index:f})=>e.jsxs("section",{id:h.headingId,className:"scroll-mt-24 rounded-xl border border-border bg-surface px-4 py-4 shadow-sm shadow-black/10 sm:px-5 sm:py-5",children:[e.jsxs("div",{className:"mb-4 flex items-start gap-3 border-b border-border pb-3",children:[e.jsx("span",{"aria-hidden":!0,className:"mt-1 h-5 w-1 shrink-0 rounded-full bg-gradient-primary"}),S(h,f,!0,r)]}),e.jsx("div",{className:"flex flex-col gap-3",children:l.map(({block:b,index:w})=>S(b,w,!0,r))})]},h.headingId))]})}return e.jsx("div",{className:"flex max-w-none flex-col gap-3",children:t.map((c,s)=>S(c,s,!1,r))})}const Y=`# Step 1: Open Prep My Avatar
+`),r=[];let t=0;for(;t<a.length;){const o=a[t];if(!o.trim()){t++;continue}if(o.startsWith("```")){const i=[];for(t++;t<a.length&&!a[t].startsWith("```");)i.push(a[t++]);t++,r.push({t:"code",body:i.join(`
+`)});continue}const u=o.match(/^(#{1,3})\s+(.*)$/);if(u){r.push({t:`h${u[1].length}`,body:u[2]}),t++;continue}if(/^(-{3,}|\*{3,})\s*$/.test(o)){r.push({t:"hr"}),t++;continue}if(o.startsWith(">")){const i=[];for(;t<a.length&&a[t].startsWith(">");)i.push(a[t++].replace(/^>\s?/,""));r.push({t:"quote",body:i.join(" ")});continue}if(/^\|/.test(o)){const i=[];for(;t<a.length&&/^\|/.test(a[t]);)i.push(a[t++]);const d=f=>f.replace(/^\||\|$/g,"").split("|").map(b=>b.trim()),m=d(i[0]),h=i[1]?d(i[1]):[];h.length===m.length&&h.every(f=>/^:?-{3,}:?$/.test(f))?r.push({t:"table",header:m,body:i.slice(2).map(d)}):i.forEach(f=>r.push({t:"p",body:f}));continue}if(/^(\s*)([-*]|\d+\.)\s+/.test(o)){const i=[],d=/^\s*\d+\./.test(o);for(;t<a.length&&/^(\s*)([-*]|\d+\.)\s+/.test(a[t]);){let m=a[t].replace(/^(\s*)([-*]|\d+\.)\s+/,"");for(t++;t<a.length&&/^\s{2,}\S/.test(a[t])&&!/^(\s*)([-*]|\d+\.)\s+/.test(a[t]);)m+=" "+a[t++].trim();i.push(m)}r.push({t:"list",ordered:d,items:i});continue}const l=[o];for(t++;t<a.length&&a[t].trim()&&!/^(#{1,3}\s|```|\||>|(\s*)([-*]|\d+\.)\s|-{3,}\s*$)/.test(a[t]);)l.push(a[t++]);r.push({t:"p",body:l.join(" ")})}return r}function S(n,a,r=!1,t){const o=`b${a}`;switch(n.t){case"h1":return e.jsx("h1",{className:"m-0 mt-2 text-content font-bold text-2xl",children:y(n.body,o,t)},o);case"h2":return e.jsx("h2",{id:r?void 0:n.headingId,className:`${r?"text-xl":"mt-4 border-b border-border pb-1.5 text-lg"} m-0 scroll-mt-24 text-content font-bold`,children:y(n.body,o,t)},o);case"h3":return e.jsx("h3",{className:"m-0 mt-2 text-content font-semibold text-base",children:y(n.body,o,t)},o);case"hr":return e.jsx("hr",{className:"border-border my-2"},o);case"quote":return e.jsx("blockquote",{className:"m-0 rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-4 py-3 text-content text-sm leading-relaxed",children:y(n.body,o,t)},o);case"code":return e.jsx("pre",{tabIndex:0,className:"m-0 rounded-lg border border-border bg-app/60 p-3 overflow-x-auto text-[0.8125rem] text-content-muted font-mono",children:n.body},o);case"table":return e.jsx("div",{tabIndex:0,className:"overflow-x-auto rounded-lg border border-border",children:e.jsxs("table",{className:"w-full text-sm border-collapse",children:[e.jsx("thead",{children:e.jsx("tr",{className:"bg-surface-raised",children:n.header.map((u,l)=>e.jsx("th",{className:"text-left px-3 py-2 text-content font-semibold border-b border-border whitespace-nowrap",children:y(u,`${o}h${l}`,t)},l))})}),e.jsx("tbody",{children:n.body.map((u,l)=>e.jsx("tr",{className:l%2?"bg-surface":"",children:u.map((i,d)=>e.jsx("td",{className:"px-3 py-2 text-content-muted align-top border-b border-border last:border-b-0",children:y(i,`${o}r${l}c${d}`,t)},d))},l))})]})},o);case"list":{const u=n.ordered?"ol":"ul";return e.jsx(u,{className:`m-0 flex flex-col text-sm text-content-muted ${r&&n.ordered?"list-none gap-2 p-0":`gap-1.5 pl-5 ${n.ordered?"list-decimal":"list-disc"}`}`,children:n.items.map((l,i)=>{const d=l.match(/^\[([ xX])\]\s+(.*)$/);return d?e.jsxs("li",{className:"list-none -ml-5 flex items-start gap-2",children:[e.jsx("span",{"aria-hidden":!0,className:`mt-0.5 grid place-items-center w-4 h-4 shrink-0 rounded border text-[0.625rem] ${d[1]===" "?"border-border-strong text-transparent":"border-emerald-400/60 bg-emerald-500/15 text-emerald-300"}`,children:"✓"}),e.jsx("span",{children:y(d[2],`${o}i${i}`,t)})]},i):r&&n.ordered?e.jsxs("li",{className:"flex gap-3 rounded-lg border border-border bg-app px-3 py-3 leading-relaxed",children:[e.jsx("span",{"aria-hidden":!0,className:"grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-500/15 font-mono text-[0.6875rem] font-bold text-indigo-300",children:String(i+1).padStart(2,"0")}),e.jsx("span",{children:y(l,`${o}i${i}`,t)})]},i):e.jsx("li",{children:y(l,`${o}i${i}`,t)},i)})},o)}default:return e.jsx("p",{className:"m-0 text-sm text-content-muted leading-relaxed",children:y(n.body,o,t)},o)}}function Y({source:n,variant:a="default",resolveLink:r}){const t=W(n||""),o=t.filter(l=>l.t==="h2"),u=P(o.map(l=>l.body));if(o.forEach((l,i)=>{l.headingId=u[i]}),a==="guide"){const l=t.filter((h,c)=>!(c===0&&h.t==="h1")),i=[],d=[];let m=null;return l.forEach((h,c)=>{h.t==="h2"?(m={heading:h,blocks:[],index:c},d.push(m)):m?m.blocks.push({block:h,index:c}):h.t!=="hr"&&i.push({block:h,index:c})}),e.jsxs("div",{className:"flex max-w-none flex-col gap-4",children:[i.length>0&&e.jsx("div",{className:"flex flex-col gap-3 rounded-xl border border-indigo-400/20 bg-gradient-to-br from-indigo-500/10 via-surface to-surface px-4 py-4 sm:px-5",children:i.map(({block:h,index:c})=>S(h,c,!0,r))}),d.map(({heading:h,blocks:c,index:f})=>e.jsxs("section",{id:h.headingId,className:"scroll-mt-24 rounded-xl border border-border bg-surface px-4 py-4 shadow-sm shadow-black/10 sm:px-5 sm:py-5",children:[e.jsxs("div",{className:"mb-4 flex items-start gap-3 border-b border-border pb-3",children:[e.jsx("span",{"aria-hidden":!0,className:"mt-1 h-5 w-1 shrink-0 rounded-full bg-gradient-primary"}),S(h,f,!0,r)]}),e.jsx("div",{className:"flex flex-col gap-3",children:c.map(({block:b,index:v})=>S(b,v,!0,r))})]},h.headingId))]})}return e.jsx("div",{className:"flex max-w-none flex-col gap-3",children:t.map((l,i)=>S(l,i,!1,r))})}const z=`# Step 1: Open Prep My Avatar
 
 Prep My Avatar runs on your computer and opens in a web browser. You do not need an API key, a graphics card, or any AI tools to open it and begin reviewing photos.
 
@@ -168,7 +168,7 @@ To skip training setup, leave the directory empty and finish. For cloud training
 ## You are finished when
 
 The page says ai-toolkit is set up, or you have deliberately skipped it, and the setup summary appears. Review the summary, then continue to **Datasets**.
-`,J=`# Step 7: Create a dataset
+`,Q=`# Step 7: Create a dataset
 
 A dataset is one project containing source images, decisions, captions, and training settings. For a first run with photos of yourself, create a **Character** dataset.
 
@@ -192,12 +192,12 @@ Decide what the images teach:
 8. Leave advanced fidelity choices at their defaults for a first test.
 9. Select **Create**.
 
-The remaining first-run pages use a **Character** dataset because it exposes every guided Progress step. If you chose **Concept** or **Style**, keep following the pages: each Character-only page now tells you what is hidden and what to do instead.
+The remaining first-run pages use a **Character** dataset because it exposes every dataset step. If you chose **Concept** or **Style**, the app omits Character-only pages from its step navigator; this guide still explains why those pages do not apply.
 
 ## You are finished when
 
-The new dataset workspace opens and its name appears at the top. The left side shows the dataset sections and, for a Character dataset, a **Progress** checklist beginning with **Import corpus**.
-`,Q=`# Step 8: Import your photos
+The new dataset opens on **Import photos**, shown as **Step 1 of 14** for a Character dataset. The URL ends in \`/import\`, and the step navigator lists every remaining applicable page.
+`,J=`# Step 8: Import photos
 
 Start with real source images. The app preserves each original and makes a working copy, so later crops and decisions do not overwrite your source file.
 
@@ -207,42 +207,41 @@ For a Character dataset, gather at least five clear photos you own or have permi
 
 ## Do this
 
-1. Open **Add images** in the dataset sidebar.
-2. Find the import area at the top of the page.
-3. Drag image files into it, or select the area and choose files from your computer.
-4. Leave automatic head crop off for the first import unless you specifically need face-only crops.
-5. Wait until processing finishes. Do not close the app while the busy message is visible.
-6. Check the import result. Exact duplicates are skipped; near-duplicates remain available for your review.
+1. Open **Import photos** in the dataset step navigator. Its URL ends in \`/import\`.
+2. Drag image files into the import area, or select it and choose files from your computer.
+3. Leave automatic head crop off for the first import unless you specifically need face-only crops.
+4. Wait until processing finishes. Do not close the app while the busy message is visible.
+5. Check the import result. Exact duplicates are skipped; near-duplicates remain available for your review.
+6. Select **Continue to Review corpus**.
 
 For Concept or Style datasets, import representative examples of the concept or style. Concept datasets can also use the scraper, but a manual import is the simplest first test.
 
 ## You are finished when
 
-The **Corpus Workbench** shows the new images as needing a decision and its imported count matches the files you expected. On a wide screen with a Character dataset, the **Progress** checklist also marks **Import corpus** complete; that checklist is hidden for Concept and Style datasets and on small screens.
-`,ee=`# Step 9: Review the imported corpus
+The import reports the number of files you expected, the step navigator marks **Import photos — Complete**, and **Continue** opens **Review corpus**.
+`,ee=`# Step 9: Review corpus
 
 Review decides which imported images are allowed into the training set and records what each image contributes. Imported images begin as **Needs decision** and do not train until you accept them.
 
 ## Before you begin
 
-Stay in **Add images** and find **Corpus Workbench**. If local vision is ready, it can propose classifications. Without local vision, use the manual controls.
+Open **Review corpus** in the dataset step navigator. Its URL ends in \`/review\`. This page contains admission, technical-quality, duplicate, and source-rights controls only; anchors and coverage have their own pages.
 
 ## Do this
 
 1. Select **Refresh local analysis**. This checks basic image quality and duplicates.
-2. For a Character dataset, select **Map visual coverage** when local vision is available, or open each image's manual editor. Concept and Style datasets do not show Character visual-coverage controls; review their technical analysis and training admission instead.
-3. For a Character dataset, record framing, angle, expression, lighting, pose, background, and occlusion where the app asks for them.
-4. Inspect warnings instead of accepting them blindly. A warning is evidence to review, not an automatic rejection.
-5. Select **✓ Accept** for usable images and **✕ Reject** for images that should not train.
-6. Use **Accept clean** only after checking the set it will affect.
-7. Record source rights and consent when the workbench requests them.
+2. Inspect warnings instead of accepting them blindly. A warning is evidence to review, not an automatic rejection.
+3. Select **✓ Accept** for usable images and **✕ Reject** for images that should not train.
+4. Use **Accept clean** only after checking the set it will affect.
+5. Record source rights and consent when the workbench requests them.
+6. Select **Continue**. Character datasets open **Choose anchors**; Concept and Style datasets continue directly to **Curate images**.
 
 Reject blurred, unusable, or incorrect-subject images. Keep useful variety even when a photo is not aesthetically perfect.
 
 ## You are finished when
 
-For Character, the **needs decision** and **needs coverage** counts are zero. On a wide screen, Progress also shows **Review corpus — mapped**. For Concept or Style, every imported image has an intentional **Accept** or **Reject** decision; those dataset types do not show the Progress checklist.
-`,te=`# Step 10: Choose identity anchors
+Every imported image has an intentional **Accept** or **Reject** decision, and the step navigator marks **Review corpus — Complete**. Coverage classification is completed separately on **Review coverage** for Character datasets.
+`,te=`# Step 10: Choose anchors
 
 Anchors are the small set of reviewed photos that a remote image provider may receive with a generation request. They help generated candidates keep the correct identity.
 
@@ -254,23 +253,24 @@ Use only accepted, identity-accurate Character photos. An anchor should have a c
 
 ## Do this
 
-1. In **Corpus Workbench**, filter to accepted images if necessary.
-2. Leave strong ordinary candidates on **Automatic** so the app can choose a bounded set for each request.
-3. Select **📌 Pin** for a small number of identity-critical photos that must always be considered.
-4. Select **⊘ Exclude** for any photo that must never be sent to a remote provider. Excluding it from API use does not remove it from local training.
-5. Avoid pinning several near-identical photos; varied angles provide better evidence.
-6. Check the **anchors/request** and **pinned** counts in the workbench summary.
+1. Open **Choose anchors** in the dataset step navigator. Its URL ends in \`/anchors\`.
+2. Filter to accepted images if necessary.
+3. Leave strong ordinary candidates on **Automatic** so the app can choose a bounded set for each request.
+4. Select **📌 Pin** for a small number of identity-critical photos that must always be considered.
+5. Select **⊘ Exclude** for any photo that must never be sent to a remote provider. Excluding it from API use does not remove it from local training.
+6. Avoid pinning several near-identical photos; varied angles provide better evidence.
+7. Check the **anchors/request** and **pinned** counts, then select **Continue to Review coverage**.
 
 If you use only local tools or never generate images, you may leave every accepted image on Automatic.
 
 ## You are finished when
 
-For Character, the workbench summary shows the expected automatic or pinned selection, and every photo you do not consent to send is set to **Exclude**. On a wide screen, Progress also shows the selected total. For Concept or Style, the step is finished because the controls do not apply.
-`,ne=`# Step 11: Review the coverage plan
+For Character, the summary shows the expected automatic or pinned selection, every photo you do not consent to send is **Excluded**, and the step navigator marks **Choose anchors — Complete**. Concept and Style navigators omit this page.
+`,ne=`# Step 11: Review coverage
 
 Coverage describes what evidence your accepted images provide: face, bust, body, and back views, plus useful variation in angle, expression, lighting, pose, and background.
 
-Character datasets show this detailed visual plan. Concept and Style datasets instead show **Concept coverage & admission** or **Style coverage & admission**, which checks accepted-image count and basic readiness without identity anchors or generated pose gaps.
+This is a Character-only step. Concept and Style datasets go directly from **Review corpus** to **Curate images** because they do not use identity anchors or generated pose-gap planning.
 
 ## Before you begin
 
@@ -278,18 +278,20 @@ Finish classifying and accepting the imported corpus first. An unclassified imag
 
 ## Do this
 
-1. In **Add images**, scroll to **Coverage plan**, **Concept coverage & admission**, or **Style coverage & admission**, depending on the dataset kind.
-2. For Concept or Style, read the admission cards and add or accept more varied examples where a card is weak; then continue to Step 14 because Steps 12 and 13 are Character-only.
-3. For Character, keep **Balanced** for a normal first run. **Strict** recommends fewer generated gaps; **Experimental** allows more.
-4. Read each framing card. The first number is what you have and the second is the target.
-5. Expand the other dimensions to see weak, missing, covered, and unknown evidence.
-6. Adjust a target only when your intended output genuinely needs a different balance.
-7. Select **Save targets** after changing the profile or any number.
-8. Add another real photo whenever practical. Treat generated gap shots as optional supplements, not replacements for unknown imports.
+1. Open **Review coverage** in the dataset step navigator. Its URL ends in \`/coverage\`.
+2. Use **Map visual coverage** when local vision is available, or classify each accepted photo manually on this page.
+3. Record framing, angle, expression, lighting, pose, background, and occlusion where the app asks for them.
+4. Keep **Balanced** for a normal first run. **Strict** recommends fewer generated gaps; **Experimental** allows more.
+5. Read each framing card. The first number is what you have and the second is the target.
+6. Expand the other dimensions to see weak, missing, covered, and unknown evidence.
+7. Adjust a target only when your intended output genuinely needs a different balance.
+8. Select **Save targets** after changing the profile or any number.
+9. Add another real photo whenever practical. Treat generated gap shots as optional supplements, not replacements for unknown imports.
+10. Select **Continue to Set primary reference**.
 
 ## You are finished when
 
-For Character, you understand the gaps and the selected profile is saved. For Concept or Style, you have reviewed the admission cards. If Character gaps remain and generation is configured, **Review gap shots** appears; otherwise continue to curation.
+You understand the gaps, no accepted image remains unclassified, and the selected profile is saved. The step navigator marks **Review coverage — Complete**. Concept and Style navigators omit this Character-only page.
 `,ae=`# Step 12: Set a primary reference
 
 The primary reference is used by local FLUX.2 Klein and by optional face-similarity scoring. Remote API engines can use the reviewed anchor set instead.
@@ -302,18 +304,19 @@ Skip this page only if you will use neither local Klein nor face-similarity scor
 
 ## Do this
 
-1. Open **Add images** and find **optional primary reference** below the coverage plan.
+1. Open **Set primary reference** in the dataset step navigator. Its URL ends in \`/reference\` and it is labelled **Optional**.
 2. Select or drop the best reference photo.
 3. Open the crop control and keep the face clear without cutting off important features.
 4. Add up to three extra references only when another angle adds useful identity evidence.
 5. Remove any weak or incorrect extra reference.
 6. Confirm the preview shows the intended person and no unrelated face dominates the frame.
+7. Select **Continue**, or select **Skip optional step** if neither local Klein nor face scoring needs a reference.
 
 The reference is not automatically your entire training set. It is an identity input for local Klein and face scoring; accepted images still determine what is available for training.
 
 ## You are finished when
 
-For Character, the primary-reference preview shows the intended image, or you have deliberately skipped both features that need it. On a wide screen, Progress also shows **Primary reference — set** when one is set. For Concept or Style, the step is finished because it does not apply.
+For Character, the preview shows the intended image and the navigator marks **Set primary reference — Complete**, or you deliberately used **Skip optional step**. Concept and Style navigators omit this page.
 `,oe=`# Step 13: Generate missing views
 
 Generation is optional. Use it only for real coverage gaps that you cannot fill with suitable source photos. Generated images are candidates and never enter training until you accept them.
@@ -326,24 +329,25 @@ You need a tested Gemini, Replicate, or OpenAI credential, or a working local Kl
 
 ## Do this
 
-1. In **Coverage plan**, select **Review gap shots**, or open the generation panel under **Add images**.
+1. Open **Generate missing views** in the dataset step navigator. Its URL ends in \`/generate\` and it is labelled **Optional**.
 2. Review the recommended shots. Remove any shot you do not actually need.
 3. Choose the configured engine and model.
 4. Keep the multiplier at one for the first attempt.
 5. Read the estimated request count and cost information.
 6. Start generation and wait for the results. Use **Stop generation** if early results show that the prompt or identity is wrong.
 7. Use the edit control on an individual result to correct its prompt and regenerate that shot only.
+8. Select **Continue to Curate images**, or **Skip optional step** when real photos already provide enough coverage.
 
 ## You are finished when
 
-For Character, every requested generation has completed or been stopped and each result awaits review. For Concept or Style, the step is finished after you deliberately use import or the Concept scraper instead.
-`,se=`# Step 14: Curate the images
+For Character, every requested generation has completed or been stopped and each result awaits review, or you deliberately skipped generation. Concept and Style navigators omit this page and go from review directly to curation.
+`,ie=`# Step 14: Curate images
 
 Curation creates the final kept set. Only images marked with a check are included in captions, export, and training.
 
 ## Before you begin
 
-Open **Images** for the full grid or **Curation** for focused review tools. Judge identity, sharpness, composition, duplicates, watermarks, and usefulness—not just whether an image looks attractive.
+Open **Curate images** in the dataset step navigator. Its URL ends in \`/curate\`. The grid, rescue comparisons, watermark tools, cleanup, and curation history are together on this page.
 
 ## Do this
 
@@ -356,11 +360,12 @@ Open **Images** for the full grid or **Curation** for focused review tools. Judg
 7. Select **Find watermarks**. If anything is flagged, select **Clean (N)** to process the flagged set or **Review flagged (N)** to inspect it first. In review, check the highlighted box, then clean the watermark, dismiss a false positive with **Not a watermark**, or reject the image. Without the optional inpainting tool, the app can crop a watermark near an image edge; an off-centre mark may need the tool installed or a manual edit outside the app.
 8. Watch the composition meter and add real variety where it is weak.
 9. Use curation history if you need to undo a recent keep or reject decision.
+10. Select **Continue to Caption images**.
 
 ## You are finished when
 
-No image says it is awaiting a decision, every comparison is resolved, at least one image is kept, and every flagged watermark has been cleaned, dismissed, or rejected. On a wide screen with a Character dataset, the Progress item **Curate** is also checked.
-`,ie=`# Step 15: Caption the kept images
+No image says it is awaiting a decision, every comparison is resolved, at least one image is kept, every flagged watermark is resolved, and the navigator marks **Curate images — Complete**.
+`,se=`# Step 15: Caption images
 
 A caption tells the training model what is visible in each image. The thing you are teaching must be left out: Character captions omit identity traits, Concept captions omit the concept, and Style captions describe content rather than the visual style.
 
@@ -370,17 +375,18 @@ Keep and reject images before captioning. Automatic captioning needs a ready loc
 
 ## Do this
 
-1. Open **Captions** in the dataset sidebar.
+1. Open **Caption images** in the dataset step navigator. Its URL ends in \`/captions\`.
 2. Confirm the caption style. Use prose for the prose-based model families; use booru tags for an SDXL booru workflow.
 3. Select **Caption the kept ones** and wait for the count to finish.
 4. Read every caption. Correct factual mistakes and remove descriptions of the training target.
 5. For a Character or Concept dataset, open the identity- or concept-leak badge and fix every highlighted caption. Style datasets have no automatic style-term scanner: review them manually and remove aesthetic, medium, artist, or other style names so each caption describes content only.
 6. Use **Caption tools** for a repeated find-and-replace across the set.
 7. If another trainer needs sidecar files, use **Write .txt files** after the captions are final.
+8. Select **Continue**. Character datasets open **Score face similarity**; Concept and Style datasets open **Export dataset**.
 
 ## You are finished when
 
-The kept count and captioned count match and every caption is accurate. For Character or Concept, the leak check reports no unresolved target descriptions. For Style, your manual review has removed style terms from every caption. On a wide screen with a Character dataset, the Progress item **Caption** is also checked.
+The kept and captioned counts match, every caption is accurate, target-leak review is clear where applicable, and the navigator marks **Caption images — Complete**.
 `,re=`# Step 16: Score face similarity
 
 Face scoring is an optional review aid for Character datasets. It compares each kept face with the reference and shows which images deserve closer inspection. A score is not permission to keep or delete an image automatically.
@@ -391,17 +397,18 @@ This page applies only when **Face-similarity scoring** was installed during Set
 
 ## Do this
 
-1. Open **Curation**.
+1. Open **Score face similarity** in the dataset step navigator. Its URL ends in \`/score\` and it is labelled **Optional**.
 2. Select **Analyze faces**.
 3. Wait for every kept image to receive a result. ComfyUI may pause while this local analysis uses the GPU or CPU.
 4. Review low or orange results at full size. Check whether the face is actually wrong, obscured, too small, or simply seen from a difficult angle.
 5. Reject an off-identity image manually. Keep a useful image when your own inspection shows the score is misleading.
 6. Review sharpness and exposure warnings separately; identity and technical quality are different questions.
+7. Select **Continue to Export dataset**, or **Skip optional step** when scoring is not installed or not useful for this set.
 
 ## You are finished when
 
-Every kept Character image you intended to score has a result and every suspicious result has been reviewed. On a wide screen, the optional Progress item **Score** is also checked.
-`,ce=`# Step 17: Export the dataset
+Every kept Character image you intended to score has a result and every suspicious result has been reviewed, or you deliberately skipped scoring. Concept and Style navigators omit this page.
+`,le=`# Step 17: Export dataset
 
 Export creates a standard training package from the images currently marked **kept**. It does not include rejected or undecided images.
 
@@ -411,19 +418,20 @@ Finish curation and captions first. An export can be useful even if you never tr
 
 ## Do this
 
-1. Check the kept count beside **Export ZIP** at the top of the dataset.
-2. Open **Import & export** if you want to review the export options, or use the top **Export ZIP** button directly.
+1. Open **Export dataset** in the dataset step navigator. Its URL ends in \`/export\`.
+2. Check the kept count beside **Export ZIP**.
 3. Select **Export ZIP**.
 4. Choose a destination folder if your browser asks.
 5. Wait for the download to finish, then open the ZIP to verify it contains image files and matching \`.txt\` caption files.
 6. Keep \`_prep_my_avatar_manifest.json\`. Training tools can ignore it, but it records the source mix, coverage, and provenance.
+7. Select **Continue to Train a LoRA**.
 
 An export ZIP is a training package, not a complete backup of the project. The final guide step explains the separate **Backup** action.
 
 ## You are finished when
 
 A ZIP file exists in your chosen download folder and its image/text pairs match the kept set. If export is your goal, skip the optional training, checkpoint-review, and Studio work in Steps 18–20, then continue to Step 21 to back up the dataset.
-`,le=`# Step 18: Train a LoRA
+`,ce=`# Step 18: Train a LoRA
 
 Training turns the kept images and captions into a \`.safetensors\` LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai cloud worker. If you do not want to train in Prep My Avatar, skip Steps 18–20 and continue to Step 21 to back up the dataset.
 
@@ -433,7 +441,7 @@ Training can take significant time, disk space, GPU memory, and—for cloud runs
 
 ## Do this
 
-1. Open **Training** in the dataset sidebar.
+1. Open **Train a LoRA** in the dataset step navigator. Its URL ends in \`/train\` and it is labelled **Optional**.
 2. Choose the LoRA family that matches the target model you intend to use.
 3. Read the readiness summary and resolve blocking findings.
 4. Keep the automatic step count and default recipe for a first run. Open **Advanced options** only when you understand the setting you need to change.
@@ -441,11 +449,12 @@ Training can take significant time, disk space, GPU memory, and—for cloud runs
 6. Read the **Before training** confirmation. Fix duplicate pairs or caption leaks shown there.
 7. Confirm the launch. For cloud training, check the quoted limits before accepting.
 8. Keep the app running for local training. Follow either type of run from **Runs**.
+9. Select **Continue to Review checkpoints**, or **Skip optional step** to move through the remaining optional training pages toward backup.
 
 ## You are finished when
 
 The run reaches **Finished** and at least one checkpoint appears; continue to Step 19. If it fails, open the run log, keep the exact error, fix that cause, and use retry rather than starting several duplicate cloud jobs. If you chose not to train, continue to Step 21 instead.
-`,de=`# Step 19: Review training checkpoints
+`,de=`# Step 19: Review checkpoints
 
 A checkpoint is a saved LoRA from a particular point during training. The last checkpoint is not automatically the best; an earlier one may preserve identity while responding more flexibly to prompts. This step applies only when Step 18 produced checkpoints. Otherwise, continue to Step 21.
 
@@ -455,7 +464,7 @@ Wait for training to produce checkpoints. Face scoring is helpful but optional. 
 
 ## Do this
 
-1. Open **Checkpoints & LoRAs** in the dataset sidebar.
+1. Open **Review checkpoints** in the dataset step navigator. Its URL ends in \`/checkpoints\` and it is labelled **Optional**.
 2. Choose the model family and training base used by the run.
 3. Review the visible step and dataset-version badges. Select **Run folder** to inspect that run's raw checkpoints, sample images, training log, and other files.
 4. If face scoring is available, run the checkpoint scoring action and treat its winner as a candidate—not a final decision.
@@ -464,11 +473,12 @@ Wait for training to produce checkpoints. Face scoring is helpful but optional. 
 7. Wait for the imported state to appear, then use **LoRA folder** if you want to verify the copied file.
 8. Move an unwanted checkpoint to Trash only after you are sure it is not needed.
 9. Use the cleanup action only after a best checkpoint has been established; it keeps the final and any scored winner described by the UI.
+10. Select **Continue to Test in Studio**, or **Skip optional step** when no checkpoints exist.
 
 ## You are finished when
 
 You have identified the small set worth testing, know which run produced each one, and imported at least one compatible checkpoint into ComfyUI for Studio. Continue to Step 20; if you are not using Studio, skip to Step 21.
-`,he=`# Step 20: Test the LoRA in Studio
+`,he=`# Step 20: Test in Studio
 
 Studio compares checkpoints and strengths with the same prompts and seeds. This separates the effect of the LoRA from random changes between generated images. This step is optional; if you have no compatible checkpoint or do not use Studio, continue to Step 21.
 
@@ -478,7 +488,7 @@ Studio needs a working ComfyUI setup, compatible base models and nodes, and at l
 
 ## Do this
 
-1. Open **Studio** from the dataset or the top navigation.
+1. Open **Test in Studio** in the dataset step navigator. Its URL ends in \`/studio\` and it is labelled **Optional**.
 2. Select the correct model family.
 3. Choose one or more compatible checkpoints.
 4. Enter a plain test prompt that includes the Character or Concept trigger word when one is required.
@@ -488,11 +498,12 @@ Studio needs a working ComfyUI setup, compatible base models and nodes, and at l
 8. Vote or rate the results, then star the best settings.
 9. Repeat with a different prompt before making a final choice.
 10. Open any result image you need to keep and select **Download image** in its preview.
+11. Return to the dataset step page and select **Continue to Back up dataset**, or use **Skip optional step** when Studio is unavailable.
 
 ## You are finished when
 
-The dataset has starred **best settings** backed by more than one useful prompt. Record the winning checkpoint filename and strength. Use **Run folder** or **LoRA folder** under **Checkpoints & LoRAs** to locate and copy the checkpoint for the image-generation workflow where you will use it, then continue to Step 21.
-`,pe=`# Step 21: Back up the dataset
+The dataset has starred **best settings** backed by more than one useful prompt. Record the winning checkpoint filename and strength. Return to **Review checkpoints** to use **Run folder** or **LoRA folder** when you need to locate and copy the checkpoint for another image-generation workflow, then continue to Step 21.
+`,pe=`# Step 21: Back up dataset
 
 A portable backup preserves the dataset itself: originals, working images, captions, settings, relationships, decisions, provenance, and starred best settings. It is different from the smaller training export ZIP.
 
@@ -506,11 +517,11 @@ One dataset-backup ZIP supports at most 5,000 image records, 10,050 image/refere
 
 ## Do this
 
-1. Open the dataset's **Import & export** section.
-2. Select **Backup**.
+1. Open **Back up dataset** in the dataset step navigator. Its URL ends in \`/backup\`.
+2. Select **Download portable backup**.
 3. Save the backup ZIP outside the Prep My Avatar data directory.
-4. If you trained locally, use **Run folder** and **LoRA folder** under **Checkpoints & LoRAs** to locate and separately copy the training run and every \`.safetensors\` file you want to retain.
-5. If you trained in the cloud, wait for the run to finish, open **Runs**, and select **Download the LoRA**. The dataset's **Training** section also offers **Download the cloud-trained LoRA (.safetensors)** for its latest completed cloud run. Save the downloaded file outside the app's data folder.
+4. If you trained locally, return to **Review checkpoints** and use **Run folder** and **LoRA folder** to locate and separately copy the training run and every \`.safetensors\` file you want to retain.
+5. If you trained in the cloud, wait for the run to finish, open **Runs**, and select **Download the LoRA**. The dataset's **Train a LoRA** page also offers **Download the cloud-trained LoRA (.safetensors)** for its latest completed cloud run. Save the downloaded file outside the app's data folder.
 6. In Studio, open each result image you need and select **Download image** in its preview.
 7. Wait for the backup download to finish and confirm the file is not empty.
 8. Keep at least one second copy if losing the dataset would matter.
@@ -948,4 +959,4 @@ configured). One caveat: the log tail can mention file names from your machine
 Describe the **job you were doing when you missed the feature** — the problem
 is more valuable than the proposed solution. Open a GitHub issue with the
 *Feature request* template.
-`,p=(n,a,r,t,o)=>({id:n,num:a,title:r,description:t,source:o,group:"First run"}),k=[p("getting-started","01","Open the app","Install and launch Prep My Avatar, then start or skip the five-page Setup wizard.",Y),p("image-provider","02","Choose an image provider","Optionally connect Gemini, Replicate, or OpenAI for remote image generation.",X),p("comfyui","03","Configure ComfyUI","Optionally enable local Klein generation and Test Studio.",Z),p("local-vision","04","Configure local vision","Optionally connect Ollama, LM Studio, or llama.cpp for image analysis and captions.",_),p("quality-tools","05","Install quality tools","Optionally add face scoring, person masks, and watermark repair.",H),p("training-tools","06","Configure training","Optionally connect ai-toolkit for local LoRA training.",V),p("create-dataset","07","Create a dataset","Create a Character, Concept, or Style project with the right target model.",J),p("import-photos","08","Import your photos","Add the real source images that form the authoritative corpus.",Q),p("review-corpus","09","Review the corpus","Classify, accept, or reject every imported image.",ee),p("choose-anchors","10","Choose identity anchors","Control which accepted photos may anchor generation requests.",te),p("plan-coverage","11","Review coverage","Identify useful evidence, unknown images, and genuine gaps.",ne),p("primary-reference","12","Set a primary reference","Optionally choose the identity image used by local Klein and face-similarity scoring.",ae),p("generate-gaps","13","Generate missing views","Optionally create candidates for proven coverage gaps.",oe),p("curate-images","14","Curate the images","Keep the useful images, reject the rest, and resolve every comparison.",se),p("caption-images","15","Caption the kept images","Generate or write accurate captions and remove target leaks.",ie),p("score-images","16","Score face similarity","Optionally use face scores to find Character images that need review.",re),p("export-dataset","17","Export the dataset","Download standard image and caption pairs for another trainer.",ce),p("train-lora","18","Train a LoRA","Optionally launch a local or cloud training run.",le),p("review-checkpoints","19","Review checkpoints","Keep the checkpoints worth comparing and trace each to its run.",de),p("test-studio","20","Test in Studio","Compare checkpoints and strengths with controlled prompts and seeds.",he),p("back-up","21","Back up the dataset","Create and verify a portable dataset backup, then copy training artefacts separately.",pe)],j=[{id:"dataset-guide",num:"R1",title:"Building a good dataset",description:"Understand the reasoning behind image, caption, training, and checkpoint choices.",source:ue,group:"Reference"},{id:"troubleshooting",num:"R2",title:"Troubleshooting",description:"Find a symptom, understand the cause, and apply the shortest reliable fix.",source:me,group:"Reference"}],F=[...k,...j],O={id:"getting-help",num:"R3",title:"Getting help",description:"Create a useful report and share the details needed to solve a problem.",source:ge,group:"Support",extra:"diagnostic"},ke=[...F,O],fe=Object.freeze({"getting-started.md":"/guide/getting-started","using-the-app.md":"/guide/getting-started","steps/02-image-provider.md":"/guide/image-provider","steps/03-comfyui.md":"/guide/comfyui","steps/04-local-vision.md":"/guide/local-vision","steps/05-quality-tools.md":"/guide/quality-tools","steps/06-training-tools.md":"/guide/training-tools","steps/07-create-dataset.md":"/guide/create-dataset","steps/08-import-photos.md":"/guide/import-photos","steps/09-review-corpus.md":"/guide/review-corpus","steps/10-choose-anchors.md":"/guide/choose-anchors","steps/11-plan-coverage.md":"/guide/plan-coverage","steps/12-primary-reference.md":"/guide/primary-reference","steps/13-generate-gaps.md":"/guide/generate-gaps","steps/14-curate-images.md":"/guide/curate-images","steps/15-caption-images.md":"/guide/caption-images","steps/16-score-images.md":"/guide/score-images","steps/17-export-dataset.md":"/guide/export-dataset","steps/18-train-lora.md":"/guide/train-lora","steps/19-review-checkpoints.md":"/guide/review-checkpoints","steps/20-test-studio.md":"/guide/test-studio","steps/21-back-up.md":"/guide/back-up","../DATASET_GUIDE.md":"/guide/dataset-guide","troubleshooting.md":"/guide/troubleshooting","getting-help.md":"/help"}),ye=n=>{const a=fe[n];return a?`#${a}`:null},A=(n,a)=>`${n==="getting-help"?"/help":`/guide/${n}`}?heading=${encodeURIComponent(a)}`,L=n=>{const a=document.getElementById(n);if(!a)return!1;a.tabIndex=-1,a.focus({preventScroll:!0});const r=window.matchMedia("(prefers-reduced-motion: reduce)").matches;return a.scrollIntoView({behavior:r?"auto":"smooth",block:"start"}),!0},be=(n,a)=>{if(!n||!a)return;const r=n.getBoundingClientRect(),t=a.getBoundingClientRect();t.top<r.top?n.scrollTop-=r.top-t.top:t.bottom>r.bottom&&(n.scrollTop+=t.bottom-r.bottom)};function xe({helpOnly:n=!1}){const{section:a}=B(),r=G(),t=E(),o=n?[O]:F,u=a||"getting-started",c=n?0:o.findIndex(i=>i.id===u),s=n||c>=0,d=v.useRef(null),m=v.useRef(null),h=v.useRef(null),l=s?o[c]:o[0],f=o.filter(i=>i.group===l.group),b=f.findIndex(i=>i.id===l.id),w=b>0?f[b-1]:null,I=b>=0&&b<f.length-1?f[b+1]:null,C=$(l.source),D=Math.max(1,Math.ceil(l.source.trim().split(/\s+/).length/210)),R=k.findIndex(i=>i.id===l.id),N=(i,g)=>{i.preventDefault();const x=A(l.id,g);if(`${t.pathname}${t.search}`===x){L(g);return}r(x,{replace:!0})};if(v.useEffect(()=>{var g;if(!s)return;const i=new URLSearchParams(t.search).get("heading");(!i||!L(i))&&(window.scrollTo(0,0),(g=d.current)==null||g.focus())},[l.id,t.search,s]),v.useEffect(()=>{be(m.current,h.current)},[l.id]),!s)return e.jsx(K,{to:"/guide/getting-started",replace:!0});const P=i=>{const g=i.id===l.id,x=`relative flex w-full items-baseline gap-2.5 rounded-md px-3 py-2 text-left text-sm ${g?"bg-surface-raised text-content":"text-content-muted hover:bg-surface hover:text-content"}`;return e.jsxs(T,{to:`/guide/${i.id}`,ref:g?h:void 0,"aria-current":g?"page":void 0,className:x,children:[g&&e.jsx("span",{"aria-hidden":!0,className:"absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded bg-gradient-primary"}),e.jsx("span",{className:`font-mono text-[11px] ${g?"text-content":"text-content-subtle"}`,children:i.num}),e.jsx("span",{className:"font-medium",children:i.title})]},i.id)};return e.jsxs("div",{className:n?"mx-auto max-w-5xl xl:grid xl:grid-cols-[minmax(0,1fr)_190px] xl:items-start xl:gap-7":"lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:items-start lg:gap-7 xl:grid-cols-[210px_minmax(0,1fr)_190px]",children:[!n&&e.jsxs("aside",{children:[e.jsxs("nav",{"aria-label":"Guide chapters",className:"pb-3 lg:hidden",children:[e.jsx("label",{htmlFor:"guide-page",className:"mb-1 block font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"Guide page"}),e.jsxs("select",{id:"guide-page","aria-label":"Guide page",value:l.id,onChange:i=>r(`/guide/${i.target.value}`),className:"w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-content",children:[e.jsx("optgroup",{label:"First run",children:k.map(i=>e.jsxs("option",{value:i.id,children:[i.num," — ",i.title]},i.id))}),e.jsx("optgroup",{label:"Reference",children:j.map(i=>e.jsxs("option",{value:i.id,children:[i.num," — ",i.title]},i.id))})]})]}),e.jsxs("nav",{ref:m,"aria-label":"Guide chapters",className:"hidden lg:sticky lg:top-20 lg:block lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:pr-1",children:[e.jsx("p",{className:"px-3 pb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"First run"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:k.map(P)}),e.jsx("p",{className:"mt-4 px-3 pb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"Reference"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:j.map(P)})]})]}),e.jsxs("section",{className:`min-w-0 max-w-4xl pb-10 ${n?"mx-auto":"mt-2 lg:mt-0"}`,children:[e.jsxs("header",{className:"relative mb-4 overflow-hidden rounded-2xl border border-border bg-surface px-5 py-5 sm:px-6 sm:py-6",children:[e.jsx("div",{"aria-hidden":!0,className:"absolute -right-16 -top-20 h-52 w-52 rounded-full bg-indigo-500/10 blur-3xl"}),e.jsxs("div",{className:"relative",children:[e.jsxs("div",{className:"mb-3 flex flex-wrap items-center gap-2 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-content-subtle",children:[e.jsx("span",{className:"rounded-md border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 text-indigo-300",children:n?"Support":R>=0?`Step ${l.num}`:"Reference"}),e.jsxs("span",{children:[D," min read"]}),R>=0&&e.jsxs(e.Fragment,{children:[e.jsx("span",{"aria-hidden":!0,children:"·"}),e.jsxs("span",{children:[R+1," of ",k.length]})]})]}),e.jsx("h1",{ref:d,tabIndex:-1,className:"m-0 max-w-2xl text-2xl font-bold tracking-tight text-content focus:outline-none sm:text-3xl",children:l.title}),e.jsx("p",{className:"mb-0 mt-2 max-w-2xl text-sm leading-relaxed text-content-muted sm:text-base",children:l.description})]})]}),C.length>0&&e.jsxs("nav",{"aria-label":"On this page",className:"mb-4 rounded-xl border border-border bg-surface p-3 xl:hidden",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex gap-2 overflow-x-auto pb-0.5",children:C.map(i=>e.jsx("a",{href:`#${A(l.id,i.id)}`,onClick:g=>N(g,i.id),className:"shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content",children:i.title},i.id))})]}),e.jsx(z,{source:l.source,variant:"guide",resolveLink:ye}),l.extra==="diagnostic"&&e.jsx("div",{className:"mt-6",children:e.jsx(M,{})}),!n&&e.jsxs("div",{className:"mt-6 grid grid-cols-2 gap-3 border-t border-border pt-4",children:[w?e.jsxs(T,{to:`/guide/${w.id}`,className:"group flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 no-underline hover:bg-surface-raised",children:[e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"←"}),e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Previous"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:w.title})]})]}):e.jsx("span",{}),I?e.jsxs(T,{to:`/guide/${I.id}`,className:"group flex min-w-0 items-center justify-end gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 text-right no-underline hover:bg-surface-raised",children:[e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Next"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:I.title})]}),e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"→"})]}):e.jsx("span",{})]})]}),e.jsx("aside",{className:"hidden xl:block",children:e.jsxs("nav",{"aria-label":"On this page",className:"sticky top-20 border-l border-border pl-4",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:C.map(i=>e.jsx("a",{href:`#${A(l.id,i.id)}`,onClick:g=>N(g,i.id),className:"rounded-md bg-transparent px-2 py-1.5 text-left text-xs leading-snug text-content-subtle hover:bg-surface hover:text-content",children:i.title},i.id))})]})})]})}export{ke as ALL_GUIDE_CHAPTERS,F as CHAPTERS,k as FIRST_RUN_STEPS,fe as GUIDE_DOCUMENT_ROUTES,O as HELP_CHAPTER,j as REFERENCE_CHAPTERS,xe as default,L as focusGuideHeading,A as guideHeadingRoute,be as keepGuideItemVisible,ye as resolveGuideLink};
+`,p=(n,a,r,t,o)=>({id:n,num:a,title:r,description:t,source:o,group:"First run"}),k=[p("getting-started","01","Open the app","Install and launch Prep My Avatar, then start or skip the five-page Setup wizard.",z),p("image-provider","02","Choose an image provider","Optionally connect Gemini, Replicate, or OpenAI for remote image generation.",X),p("comfyui","03","Configure ComfyUI","Optionally enable local Klein generation and Test Studio.",Z),p("local-vision","04","Configure local vision","Optionally connect Ollama, LM Studio, or llama.cpp for image analysis and captions.",_),p("quality-tools","05","Install quality tools","Optionally add face scoring, person masks, and watermark repair.",H),p("training-tools","06","Configure training","Optionally connect ai-toolkit for local LoRA training.",V),p("create-dataset","07","Create a dataset","Create a Character, Concept, or Style project with the right target model.",Q),p("import-photos","08","Import photos","Add the real source images that form the authoritative corpus.",J),p("review-corpus","09","Review corpus","Classify, accept, or reject every imported image.",ee),p("choose-anchors","10","Choose anchors","Control which accepted photos may anchor generation requests.",te),p("plan-coverage","11","Review coverage","Identify useful evidence, unknown images, and genuine gaps.",ne),p("primary-reference","12","Set a primary reference","Optionally choose the identity image used by local Klein and face-similarity scoring.",ae),p("generate-gaps","13","Generate missing views","Optionally create candidates for proven coverage gaps.",oe),p("curate-images","14","Curate images","Keep the useful images, reject the rest, and resolve every comparison.",ie),p("caption-images","15","Caption images","Generate or write accurate captions and remove target leaks.",se),p("score-images","16","Score face similarity","Optionally use face scores to find Character images that need review.",re),p("export-dataset","17","Export dataset","Download standard image and caption pairs for another trainer.",le),p("train-lora","18","Train a LoRA","Optionally launch a local or cloud training run.",ce),p("review-checkpoints","19","Review checkpoints","Keep the checkpoints worth comparing and trace each to its run.",de),p("test-studio","20","Test in Studio","Compare checkpoints and strengths with controlled prompts and seeds.",he),p("back-up","21","Back up dataset","Create and verify a portable dataset backup, then copy training artefacts separately.",pe)],j=[{id:"dataset-guide",num:"R1",title:"Building a good dataset",description:"Understand the reasoning behind image, caption, training, and checkpoint choices.",source:ue,group:"Reference"},{id:"troubleshooting",num:"R2",title:"Troubleshooting",description:"Find a symptom, understand the cause, and apply the shortest reliable fix.",source:me,group:"Reference"}],O=[...k,...j],F={id:"getting-help",num:"R3",title:"Getting help",description:"Create a useful report and share the details needed to solve a problem.",source:ge,group:"Support",extra:"diagnostic"},ke=[...O,F],fe=Object.freeze({"getting-started.md":"/guide/getting-started","using-the-app.md":"/guide/getting-started","steps/02-image-provider.md":"/guide/image-provider","steps/03-comfyui.md":"/guide/comfyui","steps/04-local-vision.md":"/guide/local-vision","steps/05-quality-tools.md":"/guide/quality-tools","steps/06-training-tools.md":"/guide/training-tools","steps/07-create-dataset.md":"/guide/create-dataset","steps/08-import-photos.md":"/guide/import-photos","steps/09-review-corpus.md":"/guide/review-corpus","steps/10-choose-anchors.md":"/guide/choose-anchors","steps/11-plan-coverage.md":"/guide/plan-coverage","steps/12-primary-reference.md":"/guide/primary-reference","steps/13-generate-gaps.md":"/guide/generate-gaps","steps/14-curate-images.md":"/guide/curate-images","steps/15-caption-images.md":"/guide/caption-images","steps/16-score-images.md":"/guide/score-images","steps/17-export-dataset.md":"/guide/export-dataset","steps/18-train-lora.md":"/guide/train-lora","steps/19-review-checkpoints.md":"/guide/review-checkpoints","steps/20-test-studio.md":"/guide/test-studio","steps/21-back-up.md":"/guide/back-up","../DATASET_GUIDE.md":"/guide/dataset-guide","troubleshooting.md":"/guide/troubleshooting","getting-help.md":"/help"}),ye=n=>{const a=fe[n];return a?`#${a}`:null},A=(n,a)=>`${n==="getting-help"?"/help":`/guide/${n}`}?heading=${encodeURIComponent(a)}`,N=n=>{const a=document.getElementById(n);if(!a)return!1;a.tabIndex=-1,a.focus({preventScroll:!0});const r=window.matchMedia("(prefers-reduced-motion: reduce)").matches;return a.scrollIntoView({behavior:r?"auto":"smooth",block:"start"}),!0},be=(n,a)=>{if(!n||!a)return;const r=n.getBoundingClientRect(),t=a.getBoundingClientRect();t.top<r.top?n.scrollTop-=r.top-t.top:t.bottom>r.bottom&&(n.scrollTop+=t.bottom-r.bottom)};function xe({helpOnly:n=!1}){const{section:a}=B(),r=G(),t=E(),o=n?[F]:O,u=a||"getting-started",l=n?0:o.findIndex(s=>s.id===u),i=n||l>=0,d=w.useRef(null),m=w.useRef(null),h=w.useRef(null),c=i?o[l]:o[0],f=o.filter(s=>s.group===c.group),b=f.findIndex(s=>s.id===c.id),v=b>0?f[b-1]:null,C=b>=0&&b<f.length-1?f[b+1]:null,I=q(c.source),D=Math.max(1,Math.ceil(c.source.trim().split(/\s+/).length/210)),R=k.findIndex(s=>s.id===c.id),L=(s,g)=>{s.preventDefault();const x=A(c.id,g);if(`${t.pathname}${t.search}`===x){N(g);return}r(x,{replace:!0})};if(w.useEffect(()=>{var g;if(!i)return;const s=new URLSearchParams(t.search).get("heading");(!s||!N(s))&&(window.scrollTo(0,0),(g=d.current)==null||g.focus())},[c.id,t.search,i]),w.useEffect(()=>{be(m.current,h.current)},[c.id]),!i)return e.jsx(K,{to:"/guide/getting-started",replace:!0});const U=s=>{const g=s.id===c.id,x=`relative flex w-full items-baseline gap-2.5 rounded-md px-3 py-2 text-left text-sm ${g?"bg-surface-raised text-content":"text-content-muted hover:bg-surface hover:text-content"}`;return e.jsxs(T,{to:`/guide/${s.id}`,ref:g?h:void 0,"aria-current":g?"page":void 0,className:x,children:[g&&e.jsx("span",{"aria-hidden":!0,className:"absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded bg-gradient-primary"}),e.jsx("span",{className:`font-mono text-[11px] ${g?"text-content":"text-content-subtle"}`,children:s.num}),e.jsx("span",{className:"font-medium",children:s.title})]},s.id)};return e.jsxs("div",{className:n?"mx-auto max-w-5xl xl:grid xl:grid-cols-[minmax(0,1fr)_190px] xl:items-start xl:gap-7":"lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:items-start lg:gap-7 xl:grid-cols-[210px_minmax(0,1fr)_190px]",children:[!n&&e.jsxs("aside",{children:[e.jsxs("nav",{"aria-label":"Guide chapters",className:"pb-3 lg:hidden",children:[e.jsx("label",{htmlFor:"guide-page",className:"mb-1 block font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"Guide page"}),e.jsxs("select",{id:"guide-page","aria-label":"Guide page",value:c.id,onChange:s=>r(`/guide/${s.target.value}`),className:"w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-content",children:[e.jsx("optgroup",{label:"First run",children:k.map(s=>e.jsxs("option",{value:s.id,children:[s.num," — ",s.title]},s.id))}),e.jsx("optgroup",{label:"Reference",children:j.map(s=>e.jsxs("option",{value:s.id,children:[s.num," — ",s.title]},s.id))})]})]}),e.jsxs("nav",{ref:m,"aria-label":"Guide chapters",className:"hidden lg:sticky lg:top-20 lg:block lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:pr-1",children:[e.jsx("p",{className:"px-3 pb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"First run"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:k.map(U)}),e.jsx("p",{className:"mt-4 px-3 pb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle",children:"Reference"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:j.map(U)})]})]}),e.jsxs("section",{className:`min-w-0 max-w-4xl pb-10 ${n?"mx-auto":"mt-2 lg:mt-0"}`,children:[e.jsxs("header",{className:"relative mb-4 overflow-hidden rounded-2xl border border-border bg-surface px-5 py-5 sm:px-6 sm:py-6",children:[e.jsx("div",{"aria-hidden":!0,className:"absolute -right-16 -top-20 h-52 w-52 rounded-full bg-indigo-500/10 blur-3xl"}),e.jsxs("div",{className:"relative",children:[e.jsxs("div",{className:"mb-3 flex flex-wrap items-center gap-2 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-content-subtle",children:[e.jsx("span",{className:"rounded-md border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 text-indigo-300",children:n?"Support":R>=0?`Step ${c.num}`:"Reference"}),e.jsxs("span",{children:[D," min read"]}),R>=0&&e.jsxs(e.Fragment,{children:[e.jsx("span",{"aria-hidden":!0,children:"·"}),e.jsxs("span",{children:[R+1," of ",k.length]})]})]}),e.jsx("h1",{ref:d,tabIndex:-1,className:"m-0 max-w-2xl text-2xl font-bold tracking-tight text-content focus:outline-none sm:text-3xl",children:c.title}),e.jsx("p",{className:"mb-0 mt-2 max-w-2xl text-sm leading-relaxed text-content-muted sm:text-base",children:c.description})]})]}),I.length>0&&e.jsxs("nav",{"aria-label":"On this page",className:"mb-4 rounded-xl border border-border bg-surface p-3 xl:hidden",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex gap-2 overflow-x-auto pb-0.5",children:I.map(s=>e.jsx("a",{href:`#${A(c.id,s.id)}`,onClick:g=>L(g,s.id),className:"shrink-0 rounded-full border border-border bg-transparent px-2.5 py-1 text-xs text-content-muted hover:border-border-strong hover:text-content",children:s.title},s.id))})]}),e.jsx(Y,{source:c.source,variant:"guide",resolveLink:ye}),c.extra==="diagnostic"&&e.jsx("div",{className:"mt-6",children:e.jsx(M,{})}),!n&&e.jsxs("div",{className:"mt-6 grid grid-cols-2 gap-3 border-t border-border pt-4",children:[v?e.jsxs(T,{to:`/guide/${v.id}`,className:"group flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 no-underline hover:bg-surface-raised",children:[e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"←"}),e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Previous"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:v.title})]})]}):e.jsx("span",{}),C?e.jsxs(T,{to:`/guide/${C.id}`,className:"group flex min-w-0 items-center justify-end gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 text-right no-underline hover:bg-surface-raised",children:[e.jsxs("span",{className:"min-w-0",children:[e.jsx("span",{className:"block font-mono text-[0.625rem] uppercase tracking-wider text-content-subtle",children:"Next"}),e.jsx("span",{className:"block truncate text-sm font-medium text-content-muted group-hover:text-content",children:C.title})]}),e.jsx("span",{"aria-hidden":!0,className:"text-content-subtle",children:"→"})]}):e.jsx("span",{})]})]}),e.jsx("aside",{className:"hidden xl:block",children:e.jsxs("nav",{"aria-label":"On this page",className:"sticky top-20 border-l border-border pl-4",children:[e.jsx("p",{className:"m-0 mb-2 font-mono text-[0.625rem] uppercase tracking-[0.16em] text-content-subtle",children:"On this page"}),e.jsx("div",{className:"flex flex-col gap-0.5",children:I.map(s=>e.jsx("a",{href:`#${A(c.id,s.id)}`,onClick:g=>L(g,s.id),className:"rounded-md bg-transparent px-2 py-1.5 text-left text-xs leading-snug text-content-subtle hover:bg-surface hover:text-content",children:s.title},s.id))})]})})]})}export{ke as ALL_GUIDE_CHAPTERS,O as CHAPTERS,k as FIRST_RUN_STEPS,fe as GUIDE_DOCUMENT_ROUTES,F as HELP_CHAPTER,j as REFERENCE_CHAPTERS,xe as default,N as focusGuideHeading,A as guideHeadingRoute,be as keepGuideItemVisible,ye as resolveGuideLink};

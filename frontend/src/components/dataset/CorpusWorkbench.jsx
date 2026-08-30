@@ -43,10 +43,20 @@ function Stat({ label, value, tone = '' }) {
 
 export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = null, coveragePlan,
   onAnalyze, onClassify = null, onAnchorDecision = null, onCoverage = null,
-  onSourceRights, onStatus, onBatch,
+  onSourceRights, onStatus, onBatch = null,
   busy = false, visionAvailable = false, reviewPairIds = EMPTY_IDS,
   faceThresholds = { green: 0.50 },
-  showAnchors = true, showCoverage = true }) {
+  showAnchors = true, showCoverage = true, mode = 'all' }) {
+  const reviewVisible = mode === 'all' || mode === 'review';
+  const anchorsVisible = mode === 'anchors' || (mode === 'all' && showAnchors);
+  const coverageVisible = mode === 'coverage' || (mode === 'all' && showCoverage);
+  const filters = mode === 'anchors'
+    ? FILTERS.filter(([id]) => ['all', 'anchors', 'duplicates'].includes(id))
+    : mode === 'coverage'
+      ? FILTERS.filter(([id]) => ['all', 'unclassified'].includes(id))
+      : mode === 'review'
+        ? FILTERS.filter(([id]) => ['all', 'pending', 'quality', 'duplicates'].includes(id))
+        : FILTERS;
   const imported = useMemo(() => images.filter((image) => image.source === 'import'
     && image.filename && !reviewPairIds.has(image.id)), [images, reviewPairIds]);
   const analysisCounts = useMemo(() => technicalAnalysisCounts(imported), [imported]);
@@ -127,7 +137,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
             📐 Refresh local analysis{analysisCounts.outdated
               ? ` (${analysisCounts.outdated} outdated)` : ''}
           </button>
-          {showCoverage && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
+          {coverageVisible && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
             title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up local vision, or classify images manually below'}
             className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
             👁 Map visual coverage
@@ -139,16 +149,16 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
         <Stat label="real photos" value={imported.length} tone="good" />
         <Stat label="accepted for training" value={accepted.length} tone={accepted.length ? 'good' : 'warn'} />
         <Stat label="needs decision" value={pending.length} tone={pending.length ? 'warn' : 'good'} />
-        {showAnchors && <Stat label="anchors/request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />}
-        {showAnchors && <Stat label="pinned" value={anchorPlan?.pinned || 0} />}
-        {showAnchors && <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />}
+        {anchorsVisible && <Stat label="anchors/request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />}
+        {anchorsVisible && <Stat label="pinned" value={anchorPlan?.pinned || 0} />}
+        {anchorsVisible && <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />}
         <Stat label="near-duplicates" value={summary.near_duplicates || 0} tone={summary.near_duplicates ? 'warn' : ''} />
         <Stat label="needs coverage" value={summary.unclassified || 0} tone={summary.unclassified ? 'warn' : 'good'} />
         {!!analysisCounts.outdated && <Stat label="outdated analysis" value={analysisCounts.outdated} tone="warn" />}
         {!!analysisCounts.missing && <Stat label="not analyzed" value={analysisCounts.missing} tone="warn" />}
       </div>
 
-      {!!pending.length && onBatch && (
+      {reviewVisible && !!pending.length && onBatch && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-500/5 px-2.5 py-2">
           <span className="text-[0.6875rem] text-amber-100">Admission shortcuts only act on undecided photos with completed QA.</span>
           <button type="button" disabled={busy || !cleanPending.length}
@@ -164,8 +174,8 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1" role="tablist" aria-label="Corpus filters">
-        {FILTERS.map(([id, label]) => (
+      <div className="flex flex-wrap gap-1" role="group" aria-label="Corpus filters">
+        {filters.map(([id, label]) => (
           <button key={id} type="button" onClick={() => setFilter(id)} aria-pressed={filter === id}
             className={`rounded-md border px-2 py-1 text-[0.625rem] ${filter === id
               ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200'
@@ -189,10 +199,12 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                   : 'border-border hover:border-content-subtle'}`}>
                 <img loading="lazy" decoding="async" alt="" src={datasetImageUrl(datasetId, image)}
                   className="h-full w-full object-cover" />
-                <span className={`absolute left-1 top-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] ${decision === 'pinned'
-                  ? 'text-emerald-300' : decision === 'excluded' ? 'text-rose-300' : 'text-white/80'}`}>
-                  {decision === 'pinned' ? '📌 pinned' : decision === 'excluded' ? '⊘ API' : selectedIds.has(image.id) ? '◆ anchor' : 'auto'}
-                </span>
+                {anchorsVisible && (
+                  <span className={`absolute left-1 top-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] ${decision === 'pinned'
+                    ? 'text-emerald-300' : decision === 'excluded' ? 'text-rose-300' : 'text-white/80'}`}>
+                    {decision === 'pinned' ? '📌 pinned' : decision === 'excluded' ? '⊘ API' : selectedIds.has(image.id) ? '◆ anchor' : 'auto'}
+                  </span>
+                )}
                 {(image.duplicate_of_id || duplicateRoots.has(image.id)) && (
                   <span className="absolute right-1 top-1 rounded bg-amber-950/90 px-1 py-px text-[0.5625rem] text-amber-200">≈ duplicate</span>
                 )}
@@ -222,7 +234,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               </p>
             </div>
 
-            <div>
+            {reviewVisible && <div>
               <p className="m-0 mb-1 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Training admission</p>
               <div className="grid grid-cols-3 gap-1">
                 {[['keep', '✓ Accept'], ['pending', '… Review'], ['reject', '✕ Reject']].map(([value, label]) => (
@@ -235,9 +247,9 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                   </button>
                 ))}
               </div>
-            </div>
+            </div>}
 
-            {showAnchors && <div>
+            {anchorsVisible && <div>
               <p className="m-0 mb-1 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Generation anchor</p>
               <div className="grid grid-cols-3 gap-1">
                 {[['auto', 'Automatic'], ['pinned', '📌 Pin'], ['excluded', '⊘ Exclude']].map(([value, label]) => (
@@ -256,7 +268,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               </p>
             </div>}
 
-            <form className="flex flex-col gap-1.5 rounded-md border border-border p-2"
+            {reviewVisible && <form className="flex flex-col gap-1.5 rounded-md border border-border p-2"
               onSubmit={async (event) => {
                 event.preventDefault();
                 const saved = await onSourceRights?.(selected.id, rightsDraft);
@@ -293,9 +305,9 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                 className="rounded-md border border-indigo-400/40 bg-indigo-500/10 px-2 py-1 text-[0.625rem] font-semibold text-indigo-200 disabled:opacity-40">
                 Save rights record
               </button>
-            </form>
+            </form>}
 
-            {showCoverage && <form className="grid grid-cols-2 gap-1.5" onSubmit={async (event) => {
+            {coverageVisible && <form className="grid grid-cols-2 gap-1.5" onSubmit={async (event) => {
               event.preventDefault();
               const saved = await onCoverage(selected.id, draft);
               if (saved !== false) setDraftDirty(false);

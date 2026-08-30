@@ -1,8 +1,8 @@
-# Step 11: Review the coverage plan
+# Step 11: Review coverage
 
 Coverage describes what evidence your accepted images provide: face, bust, body, and back views, plus useful variation in angle, expression, lighting, pose, and background.
 
-Character datasets show this detailed visual plan. Concept and Style datasets instead show **Concept coverage & admission** or **Style coverage & admission**, which checks accepted-image count and basic readiness without identity anchors or generated pose gaps.
+This is a Character-only step. Concept and Style datasets go directly from **Review corpus** to **Curate images** because they do not use identity anchors or generated pose-gap planning.
 
 ## Before you begin
 
@@ -10,15 +10,17 @@ Finish classifying and accepting the imported corpus first. An unclassified imag
 
 ## Do this
 
-1. In **Add images**, scroll to **Coverage plan**, **Concept coverage & admission**, or **Style coverage & admission**, depending on the dataset kind.
-2. For Concept or Style, read the admission cards and add or accept more varied examples where a card is weak; then continue to Step 14 because Steps 12 and 13 are Character-only.
-3. For Character, keep **Balanced** for a normal first run. **Strict** recommends fewer generated gaps; **Experimental** allows more.
-4. Read each framing card. The first number is what you have and the second is the target.
-5. Expand the other dimensions to see weak, missing, covered, and unknown evidence.
-6. Adjust a target only when your intended output genuinely needs a different balance.
-7. Select **Save targets** after changing the profile or any number.
-8. Add another real photo whenever practical. Treat generated gap shots as optional supplements, not replacements for unknown imports.
+1. Open **Review coverage** in the dataset step navigator. Its URL ends in `/coverage`.
+2. Use **Map visual coverage** when local vision is available, or classify each accepted photo manually on this page.
+3. Record framing, angle, expression, lighting, pose, background, and occlusion where the app asks for them.
+4. Keep **Balanced** for a normal first run. **Strict** recommends fewer generated gaps; **Experimental** allows more.
+5. Read each framing card. The first number is what you have and the second is the target.
+6. Expand the other dimensions to see weak, missing, covered, and unknown evidence.
+7. Adjust a target only when your intended output genuinely needs a different balance.
+8. Select **Save targets** after changing the profile or any number.
+9. Add another real photo whenever practical. Treat generated gap shots as optional supplements, not replacements for unknown imports.
+10. Select **Continue to Set primary reference**.
 
 ## You are finished when
 
-For Character, you understand the gaps and the selected profile is saved. For Concept or Style, you have reviewed the admission cards. If Character gaps remain and generation is configured, **Review gap shots** appears; otherwise continue to curation.
+You understand the gaps, no accepted image remains unclassified, and the selected profile is saved. The step navigator marks **Review coverage — Complete**. Concept and Style navigators omit this Character-only page.

@@ -344,6 +344,8 @@ function AppInner() {
           <Route element={<Shell />}>
             <Route path="/" element={<Navigate to="/datasets" replace />} />
             <Route path="/datasets" element={<DatasetPage />} />
+            <Route path="/datasets/:datasetId" element={<DatasetPage />} />
+            <Route path="/datasets/:datasetId/:step" element={<DatasetPage />} />
             <Route path="/guide" element={<GuidePage />} />
             <Route path="/guide/getting-help" element={<Navigate to="/help" replace />} />
             <Route path="/guide/:section" element={<GuidePage />} />

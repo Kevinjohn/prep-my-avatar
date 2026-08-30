@@ -14,22 +14,22 @@ The first-run guide assumes no previous knowledge and gives one action to each p
 ## Prepare a dataset
 
 7. [Create a dataset](steps/07-create-dataset.md)
-8. [Import your photos](steps/08-import-photos.md)
-9. [Review the corpus](steps/09-review-corpus.md)
-10. [Choose identity anchors](steps/10-choose-anchors.md)
+8. [Import photos](steps/08-import-photos.md)
+9. [Review corpus](steps/09-review-corpus.md)
+10. [Choose anchors](steps/10-choose-anchors.md)
 11. [Review coverage](steps/11-plan-coverage.md)
 12. [Set a primary reference](steps/12-primary-reference.md)
 13. [Generate missing views](steps/13-generate-gaps.md)
-14. [Curate the images](steps/14-curate-images.md)
-15. [Caption the kept images](steps/15-caption-images.md)
+14. [Curate images](steps/14-curate-images.md)
+15. [Caption images](steps/15-caption-images.md)
 16. [Score face similarity](steps/16-score-images.md)
 
 ## Export, train, test, and protect the result
 
-17. [Export the dataset](steps/17-export-dataset.md)
+17. [Export dataset](steps/17-export-dataset.md)
 18. [Train a LoRA](steps/18-train-lora.md)
 19. [Review checkpoints](steps/19-review-checkpoints.md)
 20. [Test in Studio](steps/20-test-studio.md)
-21. [Back up the dataset](steps/21-back-up.md)
+21. [Back up dataset](steps/21-back-up.md)
 
 Setup can be skipped as a whole. Once you enter it, local vision must be ready before the wizard can advance; its page explains how to leave Setup instead. Later optional pages say so at the start and direct you to the next page that still applies. Always finish with the dataset backup in Step 21. For deeper decision guidance, use [Building a good dataset](../DATASET_GUIDE.md). For a failure, use [Troubleshooting](troubleshooting.md), then [Getting help](getting-help.md) if the problem remains.

@@ -22,8 +22,8 @@ Decide what the images teach:
 8. Leave advanced fidelity choices at their defaults for a first test.
 9. Select **Create**.
 
-The remaining first-run pages use a **Character** dataset because it exposes every guided Progress step. If you chose **Concept** or **Style**, keep following the pages: each Character-only page now tells you what is hidden and what to do instead.
+The remaining first-run pages use a **Character** dataset because it exposes every dataset step. If you chose **Concept** or **Style**, the app omits Character-only pages from its step navigator; this guide still explains why those pages do not apply.
 
 ## You are finished when
 
-The new dataset workspace opens and its name appears at the top. The left side shows the dataset sections and, for a Character dataset, a **Progress** checklist beginning with **Import corpus**.
+The new dataset opens on **Import photos**, shown as **Step 1 of 14** for a Character dataset. The URL ends in `/import`, and the step navigator lists every remaining applicable page.

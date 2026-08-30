@@ -7,8 +7,8 @@ screenshots:
     sha256: 36774e9fe0836885903551629fc04438a9ed4bbe43a96595ce8f21cbdfe8cf76
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources:
-      - path: frontend/src/components/dataset/NextStepCard.jsx
-        sha256: 73acb38a5533ecbd90fe1a69d516f891b8be3877a8d9efd557509894342b395d
+      - path: frontend/src/components/dataset/DatasetWorkflowNav.jsx
+        sha256: b5aff34622f683407236cca1a2ca86dba15cefd8e4a22d139d955611bf1a2dd9
       - path: frontend/src/components/dataset/PreflightModal.jsx
         sha256: 06ec617666b0e188998b343f069177d79e4c9e16ed6486da0c022bffa0ff16c9
     reason: Captured copy says captions are required, but launch permits Start anyway.
