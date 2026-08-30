@@ -1214,7 +1214,7 @@ Implementation is in progress. The detailed design, current state, and verificat
 - [x] Replace fixed sleeps with an instrumented `_probe_lock` entry barrier that proves all callers captured the same cache generation before refresh begins.
 - [x] Isolate the thread harness in a spawned process, capture worker exceptions, and terminate the child safely if the five-second parent deadline expires.
 - [x] Assert an exact cache-generation delta so three callers provably share one refresh.
-- [ ] Pass the Windows Python 3.10 CI job, then rerun that successful job twice through `gh`.
+- [x] Pass the Windows Python 3.10 CI job, then rerun that successful job twice through `gh`.
 
 **Files:** `backend/tests/test_capabilities.py` initially; `backend/app/capabilities.py` only after a deterministic production-bug reproduction.
 
@@ -1226,10 +1226,10 @@ Implementation is in progress. The detailed design, current state, and verificat
 
 - [x] Run the complete supported backend and frontend validation suites for the atomic recovery change.
 - [x] Use the exact repository-native commands listed in Phase 3 of `tasks/plan.md`.
-- [ ] Confirm generated output is current and the worktree is clean after commits.
-- [ ] Inspect outgoing commit metadata for neutral, task-focused wording.
-- [ ] Push `main` and watch every GitHub Actions job to completion.
-- [ ] Record any remaining non-blocking warning with its upstream constraint.
+- [x] Confirm generated output is current and the worktree is clean after commits.
+- [x] Inspect outgoing commit metadata for neutral, task-focused wording.
+- [x] Push `main` and watch every GitHub Actions job to completion.
+- [x] Record any remaining non-blocking warning with its upstream constraint.
 
 **Depends on:** CI-01 and CI-02.
 
@@ -1237,11 +1237,11 @@ Implementation is in progress. The detailed design, current state, and verificat
 
 ### CI-04: Refresh GitHub Actions runtime pins
 
-- [ ] Verify the smallest maintained Node 24-compatible releases and immutable SHAs from official action sources.
-- [ ] Read intervening release notes and migration guidance for every upgraded action.
-- [ ] Update matching pins and version comments in CI and release workflows.
-- [ ] Preserve action inputs and document any warning that has no released compatible upgrade.
-- [ ] Run workflow syntax and repository-governance validation.
+- [x] Verify the smallest maintained Node 24-compatible releases and immutable SHAs from official action sources.
+- [x] Read intervening release notes and migration guidance for every upgraded action.
+- [x] Update matching pins and version comments in CI and release workflows.
+- [x] Preserve action inputs; all referenced actions have a maintained Node 24-compatible release.
+- [x] Run repository-governance validation locally; workflow syntax is delegated to the pinned GitHub `actionlint` job because no local binary is installed.
 
 **Files:** `.github/workflows/ci.yml`, `.github/workflows/release.yml`.
 
@@ -1251,7 +1251,7 @@ Implementation is in progress. The detailed design, current state, and verificat
 
 ### CI-05: Validate and push the action-pin maintenance
 
-- [ ] Run the focused workflow/governance checks and applicable complete local gate.
+- [x] Run the focused workflow/governance checks and applicable complete local gate.
 - [ ] Commit only the reviewed action pins, migration-required input changes, and final checklist state.
 - [ ] Push `main` and watch every ordinary CI job to completion.
 - [ ] Confirm the governance actionlint step executes successfully.

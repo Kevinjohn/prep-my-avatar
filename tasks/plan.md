@@ -574,6 +574,8 @@ Use official GitHub/action-maintainer release pages to identify the smallest mai
 
 If an action has no released Node 24-compatible version, retain its current immutable pin and document the remaining warning instead of inventing a version. Preserve all action inputs and workflow behavior unless the reviewed official migration guidance requires a change. Because `release.yml` runs only for version tags, validate its syntax and action metadata locally and inspect the official migration contract; an ordinary `main` CI run cannot prove the release job end to end.
 
+Official release metadata and intervening release notes were reviewed on 2026-08-30. The smallest release lines with current Node 24 maintenance evidence are `actions/checkout@v5.1.0`, `actions/setup-python@v6.3.0`, `actions/setup-node@v6.5.0`, and `pnpm/action-setup@v4.4.0`. Their published `action.yml` files use Node 24, their existing inputs remain supported, and the workflow references the release commits directly rather than mutable tags.
+
 **Acceptance criteria**
 
 - Every upgraded action remains pinned to a full immutable commit SHA.
