@@ -1,6 +1,8 @@
 import importlib.util
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "validate_repository_contracts.py"
@@ -12,6 +14,19 @@ SPEC.loader.exec_module(contracts)
 
 def test_current_repository_governance_contracts():
     assert contracts.validate_governance() == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        PurePosixPath("docs/screenshots/guide/01_open_app.jpg"),
+        PureWindowsPath(r"docs\screenshots\guide\01_open_app.jpg"),
+    ],
+)
+def test_screenshot_manifest_paths_use_portable_separators(path):
+    assert contracts._manifest_path(path) == (
+        "docs/screenshots/guide/01_open_app.jpg"
+    )
 
 
 def test_current_release_contract_is_consistent():

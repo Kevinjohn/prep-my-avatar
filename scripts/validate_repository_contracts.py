@@ -5,7 +5,7 @@ import argparse
 import ast
 import hashlib
 import re
-from pathlib import Path
+from pathlib import Path, PurePath
 
 import yaml
 
@@ -22,6 +22,11 @@ ISSUE_CONTACT_ABOUT = (
 
 def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def _manifest_path(path: PurePath) -> str:
+    """Return a repository path in the manifest's platform-neutral format."""
+    return path.as_posix()
 
 
 def app_version() -> str:
@@ -214,7 +219,7 @@ def _validate_screenshot_manifest(documentation_paths: list[Path]) -> list[str]:
                 documentation_path.read_text(encoding='utf-8')):
             target_path = target.split('#', 1)[0]
             try:
-                normalized = str(
+                normalized = _manifest_path(
                     (documentation_path.parent / target_path).resolve().relative_to(ROOT)
                 )
             except ValueError:
