@@ -593,7 +593,7 @@ export function useDataset() {
 
   const setCoveragePolicy = useCallback(async (profile, targets) => {
     const d = await postJson(`/api/dataset/${currentId}/coverage-policy`, { profile, targets });
-    if (!d.ok) { toast.error(d.error || 'Could not save coverage policy'); return false; }
+    if (!d.ok) { toast.error(d.error || 'Could not save photo-variety settings'); return false; }
     await refresh();
     return true;
   }, [currentId, refresh, toast]);

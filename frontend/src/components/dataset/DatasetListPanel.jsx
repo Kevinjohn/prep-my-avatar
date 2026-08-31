@@ -26,7 +26,7 @@ function gradientFor(name = '') {
 function PipelineSteps() {
   const steps = [
     { n: 1, icon: '📸', title: 'Import your corpus', text: 'Bring every useful real photo you already have.' },
-    { n: 2, icon: '🧭', title: 'Review & fill gaps', text: 'Map coverage, choose anchors, generate only what is missing.' },
+    { n: 2, icon: '🧭', title: 'Review & fill gaps', text: 'Check photo variety, choose photos for generation, and create only what is missing.' },
     { n: 3, icon: '🧬', title: 'Train the LoRA', text: 'Export or train — reuse the character anywhere.' },
   ];
   return (

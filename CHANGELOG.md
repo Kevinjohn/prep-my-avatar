@@ -277,7 +277,7 @@ under **Unreleased** until a release is tagged.
   cache-busting rule once: a nonce only where an edit rewrites the file in place
   under the same name, so every other surface gets a cacheable URL.
 - The framing vocabulary — face, bust, body, back — had five copies across the
-  composition bar, the coverage plan, the catalog and the corpus workbench, each
+  composition bar, the photo variety plan, the catalog and photo review, each
   with its own order, labels and colours that happened to agree. It is now one
   definition, so adding a fifth framing is one edit rather than a hunt. The
   body-fidelity training target stays where it is, because only one surface

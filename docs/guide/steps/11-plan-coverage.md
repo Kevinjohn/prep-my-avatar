@@ -1,17 +1,17 @@
-# Step 11: Review coverage
+# Step 11: Check photo variety
 
-Coverage describes what evidence your accepted images provide: face, bust, body, and back views, plus useful variation in angle, expression, lighting, pose, and background.
+Photo variety means the different views and conditions in your accepted images: face, bust, body, and back views, plus differences in angle, expression, lighting, pose, and background.
 
-This is a Character-only step. Concept and Style datasets go directly from **Review corpus** to **Curate images** because they do not use identity anchors or generated pose-gap planning.
+This is a Character-only step. Concept and Style datasets go directly from **Review photos** to **Curate images** because they do not need this view-by-view check.
 
 ## Before you begin
 
-Finish classifying and accepting the imported corpus first. An unclassified image is shown as **unknown**; unknown does not mean the view is missing.
+Finish describing and accepting the imported photos first. A photo without these details is shown as **unknown**; unknown does not mean the view is missing.
 
 ## Do this
 
-1. Open **Review coverage** in the dataset step navigator. Its URL ends in `/coverage`.
-2. Use **Map visual coverage** when local vision is available, or classify each accepted photo manually on this page.
+1. Open **Check photo variety** in the dataset step navigator. Its URL ends in `/coverage`.
+2. Use **Analyse photo variety** when local vision is available, or describe each accepted photo manually on this page.
 3. Record framing, angle, expression, lighting, pose, background, and occlusion where the app asks for them.
 4. Keep **Balanced** for a normal first run. **Strict** recommends fewer generated gaps; **Experimental** allows more.
 5. Read each framing card. The first number is what you have and the second is the target.
@@ -23,4 +23,4 @@ Finish classifying and accepting the imported corpus first. An unclassified imag
 
 ## You are finished when
 
-You understand the gaps, no accepted image remains unclassified, and the selected profile is saved. The step navigator marks **Review coverage — Complete**. Concept and Style navigators omit this Character-only page.
+You understand which kinds of photos are missing, every accepted image has its details recorded, and the selected profile is saved. The step navigator marks **Check photo variety — Complete**. Concept and Style navigators omit this Character-only page.

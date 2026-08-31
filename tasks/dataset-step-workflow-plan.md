@@ -9,7 +9,7 @@
 3. Add the shared step navigator and page actions with responsive and accessible
    states.
 4. Convert the workspace from section visibility to step visibility. Give the
-   corpus workbench review, anchors, and coverage modes; separate export from
+   photo review, anchors, and coverage modes; separate export from
    backup and curation from face scoring.
 5. Add unit, component, and Playwright coverage for all routes and dataset kinds.
 6. Update every affected first-run page and regenerate tracked frontend output.

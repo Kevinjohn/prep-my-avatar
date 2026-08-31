@@ -17,9 +17,9 @@ artifacts remain compatible.
 The canonical character-dataset sequence is:
 
 1. Import photos
-2. Review corpus
-3. Choose anchors
-4. Review coverage
+2. Review photos
+3. Choose photos for generation
+4. Check photo variety
 5. Set primary reference (optional)
 6. Generate missing views (optional)
 7. Curate images

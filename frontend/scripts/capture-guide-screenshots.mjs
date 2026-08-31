@@ -25,9 +25,9 @@ const screenshots = [
 ];
 
 const workflow = [
-  ['09_review_corpus', 'review', 'Review corpus'],
-  ['10_choose_anchors', 'anchors', 'Choose anchors'],
-  ['11_review_coverage', 'coverage', 'Review coverage'],
+  ['09_review_corpus', 'review', 'Review photos'],
+  ['10_choose_anchors', 'anchors', 'Choose photos for generation'],
+  ['11_review_coverage', 'coverage', 'Check photo variety'],
   ['12_set_primary_reference', 'reference', 'Set primary reference'],
   ['13_generate_missing_views', 'generate', 'Generate missing views'],
   ['14_curate_images', 'curate', 'Curate images'],

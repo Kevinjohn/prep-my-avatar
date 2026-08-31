@@ -62,7 +62,7 @@ If you are new to the project, start with the [first-run guide index](docs/guide
 
 ### 1. Import and review the source corpus
 
-Import preserves every original while the Corpus Workbench surfaces technical
+Import preserves every original while Photo review surfaces technical
 quality, duplicates, training admission, anchor choices, rights, and coverage.
 
 
@@ -106,7 +106,7 @@ current dataset state and source provenance.
   admission decision; face-aware QA measures the subject crop, multiple faces and
   identity against a reviewed multi-reference centroid.
 - Map framing, angle, expression, lighting, pose, background, and occlusion with
-  the optional local vision model or the manual Corpus Workbench editor.
+  the optional local vision model or the manual Photo review editor.
 - Separate the complete private reference pool from a bounded API anchor pack.
   Pin identity-critical images, leave selection automatic, or exclude an image
   from providers without removing it from training.
@@ -200,7 +200,7 @@ not designed as a public multi-user service.
 ## Legal and responsible use
 
 Use images you own, license, or have permission to process. Record the source
-basis and identifiable-person consent in the Corpus Workbench before training;
+basis and identifiable-person consent in Photo review before training;
 the preflight reports missing rights metadata. Publishing additionally requires
 an explicit confirmation that you have the right and consent to share the
 selected material.

@@ -84,13 +84,13 @@ ComfyUI.
 ### Preserve first, admit second
 
 For character datasets, an import now enters the **master corpus** as *Needs
-decision*. It is preserved, analysed and available for coverage review, but it
+decision*. It is preserved, analysed and available for the photo-variety check, but it
 does not train until you explicitly **Accept** it. Run both local technical
 analysis and face analysis first. The latter measures the detected face crop —
 sharpness, exposure, detection confidence, size, pose, face count and identity
 similarity — rather than letting a crisp background disguise a soft face.
 
-The Corpus workbench labels local technical analysis as **not analyzed** when no
+Photo review labels local technical analysis as **not analyzed** when no
 technical pass exists, **outdated** for the older whole-frame scoring, and
 **current** for version 2 or newer. Version 2 measures sharpness region by region,
 so a focused subject against a deliberately blurred background is not penalized

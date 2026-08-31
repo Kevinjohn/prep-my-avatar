@@ -128,12 +128,12 @@ test('dataset workflow uses one canonical page per guide step', async ({ page },
 
   await page.goto(`/#/datasets/${datasetId}/review`);
   await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/review$`));
-  await expect(page.getByRole('heading', { name: 'Review corpus', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Review photos', level: 1 })).toBeVisible();
   await page.reload();
   await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/review$`));
-  await expect(page.getByRole('heading', { name: 'Review corpus', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Review photos', level: 1 })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Dataset steps' })).toBeVisible();
-  const desktopCurrent = page.getByRole('button', { name: /Review corpus Current/ });
+  const desktopCurrent = page.getByRole('button', { name: /Review photos Current/ });
   if (await desktopCurrent.isVisible()) {
     await expect(desktopCurrent).toHaveAttribute('aria-current', 'step');
   } else {
@@ -145,8 +145,8 @@ test('dataset workflow uses one canonical page per guide step', async ({ page },
 
   await page.getByRole('button', { name: /Continue/ }).click();
   await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/anchors$`));
-  await expect(page.getByRole('heading', { name: 'Choose anchors', level: 1 })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Choose anchors', level: 1 })).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Choose photos for generation', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Choose photos for generation', level: 1 })).toBeFocused();
 
   const stepPicker = page.getByLabel(/Step \d+ of \d+/);
   if (await stepPicker.isVisible()) {
@@ -160,7 +160,7 @@ test('dataset workflow uses one canonical page per guide step', async ({ page },
   await expect(page.getByRole('heading', { name: 'Generate missing views', level: 1 })).toBeVisible();
 
   await page.goto(`/#/datasets/${datasetId}/not-a-step`);
-  await expect(page.getByRole('heading', { name: 'Review coverage', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Check photo variety', level: 1 })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`#/datasets/${datasetId}/coverage$`));
 
   const concept = await postJson(page, '/api/dataset/create', {
@@ -174,7 +174,7 @@ test('dataset workflow uses one canonical page per guide step', async ({ page },
   await expect(page).toHaveURL(new RegExp(`#/datasets/${concept.body.id}/import$`));
   await expect(page.getByRole('heading', { name: 'Import photos', level: 1 })).toBeVisible();
   await expect(page.getByText('Step 1 of 9', { exact: true }).last()).toBeVisible();
-  await expect(page.getByRole('button', { name: /Choose anchors/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Choose photos for generation/ })).toHaveCount(0);
 
   await page.goto('/#/datasets/2147483647/review');
   await expect(page).toHaveURL(/#\/datasets$/);
@@ -414,9 +414,9 @@ test('the rendered guide exposes all first-run pages in order', async ({ page })
     ['training-tools', 'Configure training'],
     ['create-dataset', 'Create a dataset'],
     ['import-photos', 'Import photos'],
-    ['review-corpus', 'Review corpus'],
-    ['choose-anchors', 'Choose anchors'],
-    ['plan-coverage', 'Review coverage'],
+    ['review-corpus', 'Review photos'],
+    ['choose-anchors', 'Choose photos for generation'],
+    ['plan-coverage', 'Check photo variety'],
     ['primary-reference', 'Set a primary reference'],
     ['generate-gaps', 'Generate missing views'],
     ['curate-images', 'Curate images'],

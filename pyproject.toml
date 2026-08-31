@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "avatar-prep"
 dynamic = ["version"]
-description = "Local-first photo triage, crop, caption and coverage planning for reusable avatar model training"
+description = "Local-first photo review, cropping, captions, and variety checks for reusable avatar model training"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["Pillow==12.3.0"]

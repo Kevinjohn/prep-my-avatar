@@ -273,7 +273,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
         <span className="text-content-muted text-[0.6875rem] uppercase">Shots</span>
         <span className="text-content-subtle text-[0.625rem]">
           {(recommendedIds?.length || 0) > 0
-            ? 'the coverage plan pre-selected missing combinations — click any card to add or remove it'
+            ? 'the photo variety plan pre-selected missing combinations — click any card to add or remove it'
             : 'a preset pre-selects a balanced mix — click any card to add or remove it'}
         </span>
       </div>

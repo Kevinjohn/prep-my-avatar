@@ -70,7 +70,7 @@ Offline copies: every cited commit is extracted as a readable patch in `tasks/up
 
 ### Adopt after the core release
 
-- Corpus Workbench search, deterministic sorting, honest empty states, and per-dataset resume state.
+- Photo review search, deterministic sorting, honest empty states, and per-dataset resume state.
 
 ### Optional, separately approved epics
 

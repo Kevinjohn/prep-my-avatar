@@ -602,7 +602,7 @@ Checkpoint ST-A is an automated merged-tree parity checkpoint only; the human re
 
 ### QS-04: Surface stale technical analysis and explicit refresh semantics
 
-**Description:** Distinguish missing, v1/outdated, and v2/current analysis in the Corpus Workbench and explain the existing refresh action.
+**Description:** Distinguish missing, v1/outdated, and v2/current analysis in Photo review and explain the existing refresh action.
 
 **Acceptance criteria:**
 
@@ -704,7 +704,7 @@ Checkpoint ST-A is an automated merged-tree parity checkpoint only; the human re
 
 ---
 
-## Phase 2 — Corpus Workbench UX
+## Phase 2 — Photo review UX
 
 ### CW-01: Extract the corpus query-state model
 

@@ -15,9 +15,9 @@ The first-run guide assumes no previous knowledge and gives one action to each p
 
 7. [Create a dataset](steps/07-create-dataset.md)
 8. [Import photos](steps/08-import-photos.md)
-9. [Review corpus](steps/09-review-corpus.md)
-10. [Choose anchors](steps/10-choose-anchors.md)
-11. [Review coverage](steps/11-plan-coverage.md)
+9. [Review photos](steps/09-review-corpus.md)
+10. [Choose photos for generation](steps/10-choose-anchors.md)
+11. [Check photo variety](steps/11-plan-coverage.md)
 12. [Set a primary reference](steps/12-primary-reference.md)
 13. [Generate missing views](steps/13-generate-gaps.md)
 14. [Curate images](steps/14-curate-images.md)

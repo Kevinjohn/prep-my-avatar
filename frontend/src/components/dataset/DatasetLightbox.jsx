@@ -97,7 +97,7 @@ export default function DatasetLightbox({
         {!!img.generation_anchor_metadata?.length && (
           <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-100"
             title={img.generation_anchor_metadata.map((anchor) => `${anchor.source_name || anchor.filename}: ${anchor.selection_reason}`).join('\n')}>
-            ◆ {img.generation_anchor_metadata.length} generation anchor(s)
+            ◆ {img.generation_anchor_metadata.length} generation reference(s)
           </span>
         )}
         <button type="button" onClick={() => setFull((value) => !value)} aria-pressed={full}

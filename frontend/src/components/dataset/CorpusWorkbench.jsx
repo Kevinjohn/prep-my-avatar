@@ -20,7 +20,7 @@ const COVERAGE_OPTIONS = {
 
 const FILTERS = [
   ['all', 'All'], ['pending', 'Needs decision'], ['quality', 'Quality review'],
-  ['anchors', 'Anchor set'], ['duplicates', 'Duplicates'], ['unclassified', 'Needs coverage'],
+  ['anchors', 'Generation photos'], ['duplicates', 'Duplicates'], ['unclassified', 'Needs details'],
 ];
 const EMPTY_IDS = new Set();
 
@@ -90,8 +90,8 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
     return (
       <section id="ds-corpus-review" tabIndex={-1}
         className="scroll-mt-20 rounded-lg border border-dashed border-border bg-surface px-3 py-4 text-center">
-        <h3 className="m-0 text-sm font-semibold text-content">Corpus workbench</h3>
-        <p className="m-0 mt-1 text-xs text-content-subtle">Import your real photos first; they will appear here for coverage and anchor review.</p>
+        <h3 className="m-0 text-sm font-semibold text-content">Photo review</h3>
+        <p className="m-0 mt-1 text-xs text-content-subtle">Import your real photos first; they will appear here for review, generation-photo selection, and photo-variety checks.</p>
       </section>
     );
   }
@@ -116,7 +116,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
   const selectedAnalysis = technicalAnalysisState(selected?.analysis);
   const refreshTitle = `Re-runs CPU-local technical analysis with bokeh-aware sharpness scoring. ${
     analysisCounts.outdated} outdated and ${analysisCounts.missing} not analyzed. `
-    + 'Face analysis, coverage, rights, and review decisions are preserved.';
+    + 'Face analysis, photo details, rights, and review decisions are preserved.';
 
   return (
     <section id="ds-corpus-review" tabIndex={-1}
@@ -125,7 +125,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
         <div>
           <div className="flex items-center gap-2">
             <span aria-hidden>🗂️</span>
-            <h3 className="m-0 text-sm font-semibold text-content">Corpus workbench</h3>
+            <h3 className="m-0 text-sm font-semibold text-content">Photo review</h3>
           </div>
           <p className="m-0 mt-0.5 max-w-3xl text-[0.6875rem] leading-relaxed text-content-muted">
             Import preserves the master photo pool. Only images you accept here enter training; rejected and undecided originals remain available for review.
@@ -140,7 +140,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
           {coverageVisible && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
             title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up local vision, or classify images manually below'}
             className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
-            👁 Map visual coverage
+            👁 Analyse photo variety
           </button>}
         </div>
       </div>
@@ -149,11 +149,11 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
         <Stat label="real photos" value={imported.length} tone="good" />
         <Stat label="accepted for training" value={accepted.length} tone={accepted.length ? 'good' : 'warn'} />
         <Stat label="needs decision" value={pending.length} tone={pending.length ? 'warn' : 'good'} />
-        {anchorsVisible && <Stat label="anchors/request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />}
-        {anchorsVisible && <Stat label="pinned" value={anchorPlan?.pinned || 0} />}
-        {anchorsVisible && <Stat label="excluded from API" value={anchorPlan?.excluded || 0} />}
+        {anchorsVisible && <Stat label="photos per request" value={`${anchorPlan?.selected_total || 0}/${anchorPlan?.limit || 0}`} />}
+        {anchorsVisible && <Stat label="always included" value={anchorPlan?.pinned || 0} />}
+        {anchorsVisible && <Stat label="never sent" value={anchorPlan?.excluded || 0} />}
         <Stat label="near-duplicates" value={summary.near_duplicates || 0} tone={summary.near_duplicates ? 'warn' : ''} />
-        <Stat label="needs coverage" value={summary.unclassified || 0} tone={summary.unclassified ? 'warn' : 'good'} />
+        <Stat label="needs photo details" value={summary.unclassified || 0} tone={summary.unclassified ? 'warn' : 'good'} />
         {!!analysisCounts.outdated && <Stat label="outdated analysis" value={analysisCounts.outdated} tone="warn" />}
         {!!analysisCounts.missing && <Stat label="not analyzed" value={analysisCounts.missing} tone="warn" />}
       </div>
@@ -174,7 +174,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1" role="group" aria-label="Corpus filters">
+      <div className="flex flex-wrap gap-1" role="group" aria-label="Photo filters">
         {filters.map(([id, label]) => (
           <button key={id} type="button" onClick={() => setFilter(id)} aria-pressed={filter === id}
             className={`rounded-md border px-2 py-1 text-[0.625rem] ${filter === id
@@ -202,7 +202,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                 {anchorsVisible && (
                   <span className={`absolute left-1 top-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] ${decision === 'pinned'
                     ? 'text-emerald-300' : decision === 'excluded' ? 'text-rose-300' : 'text-white/80'}`}>
-                    {decision === 'pinned' ? '📌 pinned' : decision === 'excluded' ? '⊘ API' : selectedIds.has(image.id) ? '◆ anchor' : 'auto'}
+                    {decision === 'pinned' ? '📌 always use' : decision === 'excluded' ? '⊘ never send' : selectedIds.has(image.id) ? '◆ selected' : 'auto'}
                   </span>
                 )}
                 {(image.duplicate_of_id || duplicateRoots.has(image.id)) && (
@@ -250,9 +250,9 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
             </div>}
 
             {anchorsVisible && <div>
-              <p className="m-0 mb-1 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Generation anchor</p>
+              <p className="m-0 mb-1 text-[0.625rem] font-semibold uppercase tracking-wide text-content-muted">Use for generation</p>
               <div className="grid grid-cols-3 gap-1">
-                {[['auto', 'Automatic'], ['pinned', '📌 Pin'], ['excluded', '⊘ Exclude']].map(([value, label]) => (
+                {[['auto', 'Automatic'], ['pinned', '📌 Always use'], ['excluded', '⊘ Never send']].map(([value, label]) => (
                   <button key={value} type="button" disabled={busy}
                     onClick={() => onAnchorDecision(selected.id, value)}
                     aria-pressed={(selected.anchor_decision || 'auto') === value}
@@ -325,7 +325,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               ))}
               <button type="submit" disabled={busy}
                 className="col-span-2 mt-1 rounded-lg bg-gradient-primary px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40">
-                Save coverage
+                Save photo details
               </button>
               {selected.coverage_provenance && (
                 <p className="col-span-2 m-0 text-[0.5625rem] text-content-subtle">

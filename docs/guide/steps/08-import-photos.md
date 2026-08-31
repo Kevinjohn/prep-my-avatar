@@ -13,10 +13,10 @@ For a Character dataset, gather at least five clear photos you own or have permi
 3. Leave automatic head crop off for the first import unless you specifically need face-only crops.
 4. Wait until processing finishes. Do not close the app while the busy message is visible.
 5. Check the import result. Exact duplicates are skipped; near-duplicates remain available for your review.
-6. Select **Continue to Review corpus**.
+6. Select **Continue to Review photos**.
 
 For Concept or Style datasets, import representative examples of the concept or style. Concept datasets can also use the scraper, but a manual import is the simplest first test.
 
 ## You are finished when
 
-The import reports the number of files you expected, the step navigator marks **Import photos — Complete**, and **Continue** opens **Review corpus**.
+The import reports the number of files you expected, the step navigator marks **Import photos — Complete**, and **Continue** opens **Review photos**.

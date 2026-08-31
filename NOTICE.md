@@ -8,6 +8,6 @@ The upstream source is distributed under the PolyForm Noncommercial License
 remain applicable to upstream-derived code and other derivative work.
 
 This fork adds an import-first workflow for large photo corpora, with richer
-technical analysis, duplicate detection, coverage planning, and a bounded
+technical analysis, duplicate detection, photo-variety checks, and a limited
 many-reference generation path. Existing upstream notices and attributions
 are retained.

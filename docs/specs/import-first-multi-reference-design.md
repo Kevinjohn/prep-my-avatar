@@ -26,7 +26,7 @@ and selection reason must be stored with the generated candidate. The current
 API default selects up to 14 anchors; the pool itself is not capped by that
 request limit.
 
-### Coverage plan
+### Photo variety plan
 
 The current corpus analysed by view, framing, expression, lighting, and other
 available annotations. Each dimension distinguishes `covered`, `weak`,
@@ -49,7 +49,7 @@ to report the mix.
 1. Import a folder or add individual photographs.
 2. Preserve originals and analyse technical quality, duplicates, and coverage.
 3. Review the corpus and select identity anchors.
-4. Show a live coverage plan with actionable deficits.
+4. Show a live photo variety plan with actionable gaps.
 5. Offer generation presets that target missing combinations only.
 6. Generate candidates using a bounded, diverse anchor set.
 7. Review imported and generated images in one curation surface.
@@ -76,7 +76,7 @@ explicit references first, followed by reviewed imported photos ranked by
 technical usefulness and spread across available framings. The generated row
 stores both imported anchor ids and displayable anchor metadata.
 
-The Corpus Workbench retains near-duplicates as reviewable groups, refreshes
+Photo review retains near-duplicates as reviewable groups, refreshes
 technical analysis locally, and provides durable automatic, pinned, and
 excluded anchor decisions. Exclusion is a provider-privacy decision, not a
 training-set rejection.

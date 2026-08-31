@@ -51,9 +51,9 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
       <section id="ds-coverage-plan" tabIndex={-1}
         className="flex flex-col gap-2 rounded-lg border border-indigo-400/40 bg-indigo-500/[0.06] px-3 py-2 scroll-mt-20">
         <div className="flex flex-wrap items-center gap-2">
-          <h3 className="m-0 text-sm font-semibold text-content">🧭 {plan.mode === 'style' ? 'Style' : 'Concept'} coverage & admission</h3>
+          <h3 className="m-0 text-sm font-semibold text-content">🧭 {plan.mode === 'style' ? 'Style' : 'Concept'} photo checks</h3>
           <select value={profile} onChange={(event) => setProfile(event.target.value)}
-            aria-label="Coverage profile"
+            aria-label="Photo-check profile"
             className="ml-auto rounded border border-border bg-surface px-2 py-1 text-xs text-content">
             <option value="strict">Strict</option><option value="balanced">Balanced</option><option value="experimental">Experimental</option>
           </select>
@@ -89,18 +89,18 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span aria-hidden="true">🧭</span>
-            <h3 className="m-0 text-sm font-semibold text-content">Coverage plan</h3>
+            <h3 className="m-0 text-sm font-semibold text-content">Photo variety plan</h3>
             <span className="rounded-full border border-indigo-400/40 bg-indigo-500/10 px-1.5 py-px text-[0.625rem] text-indigo-200">
               {summary.gaps || 0} framing gaps
             </span>
           </div>
           <p className="m-0 mt-0.5 text-[0.6875rem] leading-relaxed text-content-muted">
-            The corpus stays authoritative. Generation is suggested only for empty framing buckets;
+            Your imported photos remain the source of truth. Generation is suggested only for missing framings;
             imported photos without classification remain <em>unknown</em>, not falsely missing.
           </p>
         </div>
         <select value={profile} onChange={(event) => { setProfile(event.target.value); setTargetDraft({}); targetsDirtyRef.current = true; }}
-          aria-label="Coverage profile"
+          aria-label="Photo variety profile"
           className="ml-auto rounded border border-border bg-surface px-2 py-1 text-xs text-content">
           <option value="strict">Strict</option><option value="balanced">Balanced</option><option value="experimental">Experimental</option>
         </select>
@@ -120,7 +120,7 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
         <CountChip label="generated" value={summary.generated || 0} />
         <CountChip label="pending candidates" value={summary.pending_candidates || 0} />
         <CountChip label="originals preserved" value={summary.originals_preserved || 0} />
-        <CountChip label="API anchors/request" value={plan.anchor_limit || 0} tone="amber" />
+        <CountChip label="photos per request" value={plan.anchor_limit || 0} tone="amber" />
       </div>
 
       {framing.length > 0 ? (
@@ -200,7 +200,7 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
       {(plan.joint_coverage || []).length > 0 && (
         <details className="rounded-md border border-border bg-app/30 px-2 py-1.5">
           <summary className="cursor-pointer text-[0.6875rem] font-semibold text-content-muted">
-            Joint coverage · {(plan.joint_coverage || []).filter((item) => item.state === 'missing').length} missing combinations
+            Combined photo variety · {(plan.joint_coverage || []).filter((item) => item.state === 'missing').length} missing combinations
           </summary>
           <div className="mt-1.5 flex flex-wrap gap-1">
             {(plan.joint_coverage || []).map((item) => (

@@ -717,7 +717,7 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
               <div id="gf-reference" className="scroll-mt-20 flex flex-col gap-2">
                 <p className="m-0 text-sm text-content-muted">
                   Local Klein generation and face scoring use this image. Remote image providers can
-                  use the reviewed anchor set instead, so you may skip this page.
+                  use the reviewed generation photos instead, so you may skip this page.
                 </p>
                 <div id="ds-add-reference" tabIndex={-1}>
                   <ReferencePanel refFilename={d.ref_filename} datasetId={d.id} onSetRef={ds.setRef}
@@ -1157,7 +1157,7 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
               </button>
               <p className="m-0 text-sm text-content-muted">
                 Store this ZIP somewhere separate from the app. It preserves images, decisions,
-                captions, scores, coverage, and dataset settings for restoration on another machine.
+                captions, scores, photo details, and dataset settings for restoration on another machine.
               </p>
             </div>
           </div>
