@@ -7,6 +7,7 @@ every reachability probe goes through it so tests can patch one symbol.
 """
 import copy
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -533,8 +534,90 @@ def resolve_comfyui_base(path: str) -> dict:
     return {'valid': False, 'resolved': str(p), 'nested': False}
 
 
+def _detect_macos_comfy_app(roots=None) -> dict:
+    """Return the real installed Comfy desktop bundle and a dependable launcher.
+
+    The current official app is named ``Comfy Desktop.app`` rather than
+    ``ComfyUI.app``. Reading Info.plist avoids guessing either the display name or
+    the bundle id, and ``open -b`` keeps working if the app moves between the
+    system and per-user Applications folders.
+    """
+    if roots is None:
+        if sys.platform != 'darwin':
+            return {}
+        roots = (Path('/Applications'), Path.home() / 'Applications')
+    for root in roots:
+        try:
+            apps = sorted(path for path in Path(root).glob('*.app')
+                          if 'comfy' in path.name.lower())
+        except OSError:
+            continue
+        for app in apps:
+            try:
+                with (app / 'Contents' / 'Info.plist').open('rb') as handle:
+                    info = plistlib.load(handle)
+            except (OSError, plistlib.InvalidFileException):
+                continue
+            bundle_id = str(info.get('CFBundleIdentifier') or '').strip()
+            if not re.fullmatch(r'[A-Za-z0-9.-]+', bundle_id):
+                continue
+            name = str(info.get('CFBundleDisplayName')
+                       or info.get('CFBundleName') or app.stem).strip()
+            return {
+                'name': name,
+                'bundle_id': bundle_id,
+                'path': str(app),
+                'launch_command': f'open -b {bundle_id}',
+            }
+    return {}
+
+
+def _comfyui_install_type(path: str) -> str:
+    """Classify a configured folder without requiring a runnable venv."""
+    if not path:
+        return ''
+    install = Path(path)
+    try:
+        if (install / '.comfy_environment').is_file():
+            return 'desktop'
+        if (install / 'main.py').is_file():
+            return 'git'
+    except OSError:
+        pass
+    return ''
+
+
+def _comfyui_folder_launcher(path: str) -> dict:
+    """Build a launch instruction only from files verified inside ``path``."""
+    if not path:
+        return {}
+    install = Path(path)
+    try:
+        if not (install / 'main.py').is_file():
+            return {}
+        if (install / '.venv' / 'bin' / 'python').is_file():
+            command = './.venv/bin/python main.py --listen 127.0.0.1 --port 8188'
+        elif (install / '.venv' / 'Scripts' / 'python.exe').is_file():
+            command = r'.\.venv\Scripts\python.exe main.py --listen 127.0.0.1 --port 8188'
+        else:
+            return {}
+    except OSError:
+        return {}
+    return {
+        'cwd': str(install),
+        'command': command,
+        # Desktop owns GPU/environment startup for these installs. Calling
+        # main.py directly bypasses that orchestration and is not the normal
+        # launch path even though its private interpreter exists on disk.
+        'managed_by_desktop': (install / '.comfy_environment').is_file(),
+    }
+
+
 def _detect_comfyui() -> dict:
     out = {}
+    app = _detect_macos_comfy_app()
+    if app:
+        out['app'] = app
     if _http_ok(f'{_COMFYUI_DEFAULT_URL}/history'):
         out['api_url'] = _COMFYUI_DEFAULT_URL
     base = _find_install_dir(('ComfyUI', 'comfyui'), _is_comfyui_dir)
@@ -546,6 +629,9 @@ def _detect_comfyui() -> dict:
             base = str(Path(portable) / 'ComfyUI')
     if base:
         out['base_dir'] = base
+        install_type = _comfyui_install_type(base)
+        if install_type:
+            out['install_type'] = install_type
     return out
 
 
@@ -560,6 +646,7 @@ def autodetect() -> dict:
     a reachable default port (url/api_url) is safe to auto-apply; a disk-scanned
     path (base_dir/dir) is a suggestion the UI should confirm. Never raises."""
     return {
+        'host': {'platform': sys.platform},
         'ollama': _detect_ollama(),
         'comfyui': _detect_comfyui(),
         'aitoolkit': _detect_aitoolkit(),
@@ -602,6 +689,9 @@ def _probe_locked(force=False, request_generation=0) -> dict:
     models = _scan_models()
     base_dir = cfg.get('comfyui.base_dir') or ''
     comfy_dir = resolve_comfyui_base(base_dir)
+    comfy_app = _detect_macos_comfy_app()
+    comfy_install_type = _comfyui_install_type(comfy_dir['resolved'])
+    comfy_folder_launcher = _comfyui_folder_launcher(comfy_dir['resolved'])
 
     caps = {
         'configured': cfg.is_configured(),
@@ -623,6 +713,9 @@ def _probe_locked(force=False, request_generation=0) -> dict:
             'dir_configured': bool(base_dir),
             'dir_valid': comfy_dir['valid'],       # base_dir really is a ComfyUI install
             'resolved_dir': comfy_dir['resolved'],
+            'install_type': comfy_install_type,
+            'app': comfy_app,
+            'folder_launcher': comfy_folder_launcher,
             'models': models,
         },
         'ollama': {

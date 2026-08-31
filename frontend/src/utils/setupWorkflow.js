@@ -22,12 +22,17 @@ export function localVisionGateReason(step) {
 // Backward-compatible export for older tests/imports.
 export const ollamaGateReason = localVisionGateReason
 
+/** Return destination for a tool detail opened from either checklist. */
+export function detailBackScreen(origin, sessionScreen) {
+  return origin === 'session' ? sessionScreen : 0
+}
+
 /** Pure wizard navigation model; rendering and persistence stay outside it. */
 export function setupNavigation(stepIds, stepById, screen) {
   const screens = ['welcome', ...stepIds, 'done']
   const kind = screens[screen]
   const done = screens.length - 1
-  const isReady = (id) => stepById[id]?.status === 'ready'
+  const isReady = (id) => stepById[id]?.setupComplete ?? stepById[id]?.status === 'ready'
   const toolIndex = (id) => stepIds.indexOf(id)
   const screenOf = (id) => stepIds.indexOf(id) + 1
   const find = (start, direction) => {

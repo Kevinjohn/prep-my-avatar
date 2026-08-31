@@ -3,11 +3,18 @@
 A reachable default port (url/api_url) is a hard signal (auto-apply); a folder
 found on disk (base_dir/dir) is a suggestion. Network + filesystem are stubbed.
 """
+import plistlib
+
 from app import capabilities as cap
 from app.routes import setup as setup_routes  # noqa: F401 - ensures blueprint import
 
 
+def _without_host_comfy_app(monkeypatch):
+    monkeypatch.setattr(cap, '_detect_macos_comfy_app', lambda roots=None: {})
+
+
 def test_autodetect_ollama_reachable_picks_vl_model(monkeypatch):
+    _without_host_comfy_app(monkeypatch)
     monkeypatch.setattr(cap, '_http_ok', lambda url, timeout=3: '11434' in url)  # ollama up, comfy down
     monkeypatch.setattr(cap, '_ollama_tags', lambda url, timeout=3: ['llama3:8b', 'qwen3-vl:8b'])
     monkeypatch.setattr(cap, '_find_install_dir', lambda names, marker: '')
@@ -17,6 +24,7 @@ def test_autodetect_ollama_reachable_picks_vl_model(monkeypatch):
 
 
 def test_autodetect_ollama_up_but_no_vl_model(monkeypatch):
+    _without_host_comfy_app(monkeypatch)
     monkeypatch.setattr(cap, '_http_ok', lambda url, timeout=3: '11434' in url)
     monkeypatch.setattr(cap, '_ollama_tags', lambda url, timeout=3: ['llama3:8b'])  # no vision model
     monkeypatch.setattr(cap, '_find_install_dir', lambda names, marker: '')
@@ -24,6 +32,7 @@ def test_autodetect_ollama_up_but_no_vl_model(monkeypatch):
 
 
 def test_autodetect_comfyui_port_and_disk_paths(monkeypatch):
+    _without_host_comfy_app(monkeypatch)
     monkeypatch.setattr(cap, '_http_ok', lambda url, timeout=3: '8188' in url)  # comfy up, ollama down
     def fake_find(names, marker):
         if 'ComfyUI' in names:
@@ -39,9 +48,13 @@ def test_autodetect_comfyui_port_and_disk_paths(monkeypatch):
 
 
 def test_autodetect_nothing_found(monkeypatch):
+    _without_host_comfy_app(monkeypatch)
     monkeypatch.setattr(cap, '_http_ok', lambda url, timeout=3: False)
     monkeypatch.setattr(cap, '_find_install_dir', lambda names, marker: '')
-    assert cap.autodetect() == {'ollama': {}, 'comfyui': {}, 'aitoolkit': {}}
+    assert cap.autodetect() == {
+        'host': {'platform': cap.sys.platform},
+        'ollama': {}, 'comfyui': {}, 'aitoolkit': {},
+    }
 
 
 def test_autodetect_route(client, monkeypatch):
@@ -51,3 +64,21 @@ def test_autodetect_route(client, monkeypatch):
     r = client.get('/api/setup/autodetect')
     assert r.status_code == 200
     assert r.get_json()['ollama']['url'].endswith('11434')
+
+
+def test_detect_macos_comfy_app_uses_real_bundle_identity(tmp_path):
+    app = tmp_path / 'Comfy Desktop.app'
+    contents = app / 'Contents'
+    contents.mkdir(parents=True)
+    with (contents / 'Info.plist').open('wb') as handle:
+        plistlib.dump({
+            'CFBundleDisplayName': 'Comfy Desktop',
+            'CFBundleIdentifier': 'com.todesktop.241012ess7yxs0e',
+        }, handle)
+
+    assert cap._detect_macos_comfy_app([tmp_path]) == {
+        'name': 'Comfy Desktop',
+        'bundle_id': 'com.todesktop.241012ess7yxs0e',
+        'path': str(app),
+        'launch_command': 'open -b com.todesktop.241012ess7yxs0e',
+    }

@@ -1,6 +1,6 @@
 import CopyCommand from './CopyCommand'
 
-export default function GuidedSteps({ intro, steps = [], link, children }) {
+export default function GuidedSteps({ intro, steps = [], link = null, children }) {
   return (
     <div className="space-y-3 text-sm text-content-muted">
       {intro && <p>{intro}</p>}

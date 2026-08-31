@@ -3,6 +3,8 @@ import { putJson, postJson } from '../../api/fetchClient'
 import GuidedSteps from './GuidedSteps'
 import InstallRunner from './InstallRunner'
 import LabeledConfigField from './LabeledConfigField'
+import CopyCommand from './CopyCommand'
+import ComfyInstallGuide from './ComfyInstallGuide'
 
 const INPUT_CLASS =
   'mt-1 w-full rounded-md border border-border-strong bg-surface-raised px-3 py-2 text-sm text-content ' +
@@ -24,8 +26,10 @@ const KLEIN_MODEL_VRAM = '≈ 16 GB VRAM (fp8; ~29 GB at bf16)'
 /** Configuration and installation content for one setup tool. */
 export default function SetupToolBody({ id, stepById, config, secretsPresence,
   setSecretsPresence, secretInputs, setSecretInputs, detected, busy, caps, refresh,
-  toast, setField, persist, applyDetectedPath }) {
+  toast, setField, persist, applyDetectedPath, mode = 'setup' }) {
   const [startingOllama, setStartingOllama] = useState(false)
+  const [choosingDirectory, setChoosingDirectory] = useState(false)
+  const isMacHost = detected?.host?.platform === 'darwin'
   // Test the key the user JUST typed. The probe reads the SAVED secret, so save
   // that one key first (no need to fill anything else), then test + re-probe so
   // the step flips to Ready. With no typed value, test whatever is already saved.
@@ -61,6 +65,19 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
     finally { setStartingOllama(false) }
   }
 
+  const chooseAitoolkitDirectory = async () => {
+    setChoosingDirectory(true)
+    try {
+      const result = await postJson('/api/setup/pick-directory/aitoolkit', {})
+      if (!result.cancelled && result.path) {
+        setField('aitoolkit', 'dir', result.path)
+        toast.success('Folder selected. Save and re-check to validate it.')
+      }
+    } catch (error) {
+      toast.error(error.message || 'The folder chooser could not be opened.')
+    } finally { setChoosingDirectory(false) }
+  }
+
   const guidedField = (label, section, key, placeholder) => (
     <LabeledConfigField label={label} value={config[section][key]} placeholder={placeholder}
       className={INPUT_CLASS} onChange={(value) => setField(section, key, value)} />
@@ -80,6 +97,186 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
         className="mt-1 block text-left text-xs text-primary underline">
         Found on disk: <span className="font-mono">{val}</span> — Use
       </button>
+    )
+  }
+
+  const SessionStartGuide = () => {
+    const step = stepById[id]
+    const panelClass = 'rounded-md border border-primary/30 bg-primary/10 p-3'
+    if (id === 'image') {
+      return (
+        <section className={panelClass} aria-labelledby="session-start-image">
+          <h2 id="session-start-image" className="text-sm font-semibold text-content">Use image generation now</h2>
+          <p className="mt-1 text-xs text-content-muted">
+            Cloud/API image providers do not need a local app or server. If a provider is marked ready, there is
+            nothing to start. For local Klein generation, start ComfyUI from its separate session row.
+          </p>
+        </section>
+      )
+    }
+    if (id === 'comfyui') {
+      const installLabel = step.installLabel || 'ComfyUI'
+      if (step.reachable) {
+        return (
+          <section className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3"
+            aria-labelledby="session-running-comfyui">
+            <h2 id="session-running-comfyui" className="text-sm font-semibold text-content">
+              {installLabel} is running
+            </h2>
+            <p className="mt-1 text-xs text-content-muted">
+              Nothing needs to be started. Its server is responding at{' '}
+              <span className="font-mono text-content">{step.apiUrl || 'http://127.0.0.1:8188'}</span>.
+            </p>
+            {!step.hasKlein && (
+              <p className="mt-2 text-xs text-content-muted">
+                The server is running, but local Klein generation still needs its model files. Return to Setup to install them.
+              </p>
+            )}
+          </section>
+        )
+      }
+      const folder = step.resolvedDir || config.comfyui?.base_dir || 'Your configured ComfyUI folder'
+      const folderParts = folder.split(/[\\/]/).filter(Boolean)
+      const instanceName = folderParts.at(-1)?.toLowerCase() === 'comfyui' ? folderParts.at(-2) : ''
+      const detectedApp = detected?.comfyui?.app || {}
+      const app = step.app?.launchCommand ? step.app : {
+        name: detectedApp.name || '', path: detectedApp.path || '',
+        launchCommand: detectedApp.launch_command || '',
+      }
+      const folderCommand = step.folderLauncher?.command || ''
+      const managedByDesktop = step.installType === 'desktop' || !!step.folderLauncher?.managedByDesktop
+      const fullFolderCommand = folderCommand && step.folderLauncher.cwd
+        ? `cd "${step.folderLauncher.cwd}" && ${folderCommand}` : ''
+      const appCommand = isMacHost ? app.launchCommand : ''
+      return (
+        <section className={panelClass} aria-labelledby="session-start-comfyui">
+          <h2 id="session-start-comfyui" className="text-sm font-semibold text-content">Start ComfyUI now</h2>
+          <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs text-content-muted">
+            {managedByDesktop && appCommand ? (
+              <>
+                <li>
+                  This is a Comfy Desktop-managed installation. Open its dashboard:
+                  <CopyCommand command={appCommand} />
+                  {app.path && <div className="mt-1">Application path:<CopyCommand command={app.path} /></div>}
+                </li>
+                <li>
+                  In the dashboard, select your existing instance
+                  {instanceName ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.
+                  Comfy Desktop will start its Python environment, GPU support, and server for you.
+                </li>
+              </>
+            ) : managedByDesktop ? (
+              <>
+                <li>Open <strong className="text-content">Comfy Desktop</strong> from Applications.</li>
+                <li>Select your configured instance{instanceName
+                  ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.</li>
+              </>
+            ) : folderCommand ? (
+              <>
+                <li>If Terminal is somewhere else, use the complete command:<CopyCommand command={fullFolderCommand} /></li>
+                <li>If Terminal is already in this exact ComfyUI folder, run:<CopyCommand command={folderCommand} /></li>
+              </>
+            ) : step.installType === 'git' ? (
+              <>
+                <li>A Git/code installation was detected, but its Python environment was not. Enter the clone:
+                  <CopyCommand command={`cd "${folder}"`} />
+                </li>
+                <li>Create and activate its environment:
+                  <CopyCommand command="python3 -m venv .venv && source .venv/bin/activate" />
+                </li>
+                <li>Install dependencies, then start it:
+                  <CopyCommand command="python -m pip install -r requirements.txt && python main.py --listen 127.0.0.1 --port 8188" />
+                </li>
+              </>
+            ) : (
+              <li>
+                The configured folder could not be identified as ComfyUI Desktop or ComfyUI from Git/code.
+                Return to Setup, choose the matching installation method, and correct the folder path.
+              </li>
+            )}
+            {appCommand && !managedByDesktop && (
+              <li>
+                Or open the detected desktop application:<CopyCommand command={appCommand} />
+                {app.path && <div className="mt-1">Application path:<CopyCommand command={app.path} /></div>}
+                When {app.name || 'it'} opens its dashboard, select your existing instance
+                {instanceName ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.
+              </li>
+            )}
+            <li>Your configured ComfyUI folder is:<CopyCommand command={folder} /></li>
+            <li>Wait until ComfyUI opens and its interface loads at <span className="font-mono text-content">http://127.0.0.1:8188</span>.</li>
+            <li>Then come back here and select <strong className="text-content">Re-check now</strong>.</li>
+          </ol>
+          {app.name && (
+            <p className="mt-2 text-xs text-content-subtle">
+              The installed application is named <strong className="text-content">{app.name}</strong>. Its display name
+              may differ from “ComfyUI,” which is why the command uses the detected bundle identifier.
+            </p>
+          )}
+        </section>
+      )
+    }
+    if (id === 'ollama') {
+      const provider = step.provider || config.local_vision?.backend || 'ollama'
+      if (provider === 'lmstudio') {
+        return (
+          <section className={panelClass} aria-labelledby="session-start-lmstudio">
+            <h2 id="session-start-lmstudio" className="text-sm font-semibold text-content">Start LM Studio now</h2>
+            <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs text-content-muted">
+              <li>Open LM Studio:<CopyCommand command={'open -a "LM Studio"'} /></li>
+              <li>In LM Studio, open the <strong className="text-content">Developer</strong> tab.</li>
+              <li>Choose and load this vision model. It must support images, not text only:
+                <CopyCommand command={step.visionModel || config.lmstudio?.vision_model || 'Choose a vision-capable model'} />
+              </li>
+              <li>Turn on <strong className="text-content">Start server</strong> and set the port to <span className="font-mono text-content">1234</span>.</li>
+              <li>Terminal alternative, after the model is available:<CopyCommand command="lms server start --port 1234" /></li>
+              <li>Then come back here and select <strong className="text-content">Re-check now</strong>.</li>
+            </ol>
+          </section>
+        )
+      }
+      if (provider === 'llamacpp') {
+        return (
+          <section className={panelClass} aria-labelledby="session-start-llamacpp">
+            <h2 id="session-start-llamacpp" className="text-sm font-semibold text-content">Start llama.cpp now</h2>
+            <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs text-content-muted">
+              <li>Replace both example paths with the vision GGUF and its matching projector file:</li>
+              <li><CopyCommand command={'llama-server -m "/path/to/vision-model.gguf" --mmproj "/path/to/mmproj.gguf" --host 127.0.0.1 --port 8080'} /></li>
+              <li>Leave that Terminal window open, then select <strong className="text-content">Re-check now</strong>.</li>
+            </ol>
+          </section>
+        )
+      }
+      return (
+        <section className={panelClass} aria-labelledby="session-start-ollama">
+          <h2 id="session-start-ollama" className="text-sm font-semibold text-content">Start Ollama now</h2>
+          <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs text-content-muted">
+            <li>Start its local server:<CopyCommand command="ollama serve" /></li>
+            <li>If the vision model below is missing, pull it:<CopyCommand command={`ollama pull ${step.visionModel || DEFAULT_VISION_MODEL}`} /></li>
+            <li>Leave that Terminal window open, then select <strong className="text-content">Re-check now</strong>.</li>
+          </ol>
+        </section>
+      )
+    }
+    if (id === 'quality') {
+      return (
+        <section className={panelClass} aria-labelledby="session-start-quality">
+          <h2 id="session-start-quality" className="text-sm font-semibold text-content">Nothing to start</h2>
+          <p className="mt-1 text-xs text-content-muted">
+            Quality tools are Python libraries used automatically inside this app. “Ready” means they are installed;
+            there is no separate app, folder, port, or server to open.
+          </p>
+        </section>
+      )
+    }
+    return (
+      <section className={panelClass} aria-labelledby="session-start-training">
+        <h2 id="session-start-training" className="text-sm font-semibold text-content">Nothing to start manually</h2>
+        <p className="mt-1 text-xs text-content-muted">
+          When you launch training, this app starts ai-toolkit from the configured folder itself. Keep the folder and
+          Python environment shown below in place; you do not need to run a separate server.
+        </p>
+        {(config.aitoolkit?.dir) && <div className="mt-2"><CopyCommand command={config.aitoolkit.dir} /></div>}
+      </section>
     )
   }
 
@@ -130,8 +327,23 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
       )
     }
     if (id === 'comfyui') {
+      const detectedApp = detected?.comfyui?.app || {}
+      const installGuideApp = step.app?.launchCommand ? step.app : {
+        name: detectedApp.name || '', path: detectedApp.path || '',
+        launchCommand: detectedApp.launch_command || '',
+      }
       const fields = (
         <>
+          <ComfyInstallGuide platform={detected?.host?.platform || ''}
+            app={installGuideApp} expanded={!step.reachable} />
+          {step.dirValid && (
+            <p className="rounded-md border border-border bg-surface-raised px-3 py-2 text-xs text-content-muted">
+              Detected installation type:{' '}
+              <strong className="text-content">
+                {step.folderLauncher?.managedByDesktop ? 'Comfy Desktop-managed' : 'Git / manual'}
+              </strong>
+            </p>
+          )}
           {guidedField('ComfyUI API URL', 'comfyui', 'api_url', 'http://127.0.0.1:8188')}
           {guidedField('ComfyUI install directory', 'comfyui', 'base_dir', 'C:\\ComfyUI')}
           {detectedPathChip('comfyui', 'base_dir')}
@@ -245,13 +457,7 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
         )
       }
       return (
-        <GuidedSteps
-          intro="ComfyUI is a local image generator. Install it once, then point the app at it."
-          steps={[
-            { text: 'Clone ComfyUI and follow its README to install it.', command: 'git clone https://github.com/comfyanonymous/ComfyUI' },
-            { text: 'Start it (defaults to port 8188).' },
-          ]}
-          link={{ href: 'https://github.com/comfyanonymous/ComfyUI', label: 'ComfyUI on GitHub →' }}>
+        <GuidedSteps intro="ComfyUI is a local image generator. Install it once using either method below, then point the app at that installation.">
           {fields}
         </GuidedSteps>
       )
@@ -466,9 +672,29 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
     // training (ai-toolkit)
     const dir = (config.aitoolkit && config.aitoolkit.dir) || ''
     const detectedDir = detected && detected.aitoolkit && detected.aitoolkit.dir
+    const setupCommand = dir
+      ? `cd "${dir}" && ./run_mac.zsh`
+      : 'cd /path/to/ai-toolkit && ./run_mac.zsh'
     const fields = (
       <>
-        {guidedField('ai-toolkit directory', 'aitoolkit', 'dir', 'C:\\ai-toolkit')}
+        <div>
+          <div className="items-end gap-2 sm:flex">
+            <div className="min-w-0 flex-1">
+              {guidedField('ai-toolkit directory', 'aitoolkit', 'dir',
+                isMacHost ? '/Users/you/path/to/ai-toolkit' : 'C:\\ai-toolkit')}
+            </div>
+            {isMacHost && (
+              <button type="button" onClick={chooseAitoolkitDirectory}
+                disabled={choosingDirectory}
+                className="mt-2 shrink-0 rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-content hover:bg-surface-raised disabled:opacity-50 sm:mt-0">
+                {choosingDirectory ? 'Choosing…' : 'Choose folder…'}
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-content-subtle">
+            Choose the folder that contains <span className="font-mono">run.py</span>. You can also paste its full path.
+          </p>
+        </div>
         {saveRecheckBtn}
         <p className="mt-2 text-content-muted text-xs">
           No GPU? You can skip this step: add a <strong>vast.ai API key</strong> in
@@ -507,7 +733,15 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
       return (
         <div className="space-y-4">
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-content">
-            Pointed at <span className="font-mono">{dir}</span>, but it isn't usable yet — set up its Python venv per the README.
+            <p>
+              Pointed at <span className="font-mono">{dir}</span>, but it isn't usable yet because its Python environment is missing.
+            </p>
+            {isMacHost && (
+              <p className="mt-2 text-content-muted">
+                On macOS, open Terminal and run <span className="font-mono text-content">{setupCommand}</span>,
+                wait for installation to finish, then select <strong>Save &amp; re-check</strong>.
+              </p>
+            )}
           </div>
           {fields}
         </div>
@@ -518,6 +752,10 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
         intro="ai-toolkit trains the LoRA. Install it once, then point the app at its folder."
         steps={[
           { text: 'Clone ai-toolkit and set up its venv per its README.', command: 'git clone https://github.com/ostris/ai-toolkit' },
+          ...(isMacHost ? [{
+            text: 'On macOS, open Terminal in the cloned folder and run its Apple Silicon setup.',
+            command: './run_mac.zsh',
+          }] : []),
         ]}
         link={{ href: 'https://github.com/ostris/ai-toolkit', label: 'ai-toolkit on GitHub →' }}>
         {fields}
@@ -525,5 +763,6 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
     )
   }
 
+  if (mode === 'session') return <SessionStartGuide />
   return toolBody(id)
 }

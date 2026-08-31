@@ -18,7 +18,7 @@
     <div class="prose">
       <p class="eyebrow">First run · 3 of 21</p>
       <h1>Step 3: Configure ComfyUI</h1>
-      <p>ComfyUI is optional. It enables local FLUX.2 Klein image generation and the Test Studio. Skip it if you only want to import photos, use a remote image provider, or export data for another tool.</p>
+      <p>ComfyUI is the local alternative to the API/cloud providers on the previous page. Generating missing images requires at least one of those choices. ComfyUI also enables the Test Studio; skip it if you chose a remote provider or only want to import and export photos.</p>
     </div>
     <figure class="step-shot">
       <img src="../../screenshots/guide/03_configure_comfyui.jpg" alt="Configure ComfyUI screen in Prep My Avatar" width="1440" height="900">
@@ -26,11 +26,82 @@
     <div class="prose">
       <h2>Before you begin</h2>
       <p>Local image generation needs a compatible GPU, a separate ComfyUI installation, and large model downloads. Installing Prep My Avatar does not install ComfyUI automatically.</p>
+      <h2>Choose one installation method</h2>
+      <h3>Option A — Comfy Desktop (recommended on macOS and Windows)</h3>
+      <ol>
+        <li><a href="https://www.comfy.org/download">Download Comfy Desktop</a>, install it, and open it.</li>
+        <li>Create or select an instance. Comfy Desktop owns that instance’s Python environment, GPU setup, and server process.</li>
+        <li>In the instance menu, open <strong>Storage</strong>. Copy its <strong>application directory</strong> into Prep My Avatar’s <strong>ComfyUI install directory</strong> field. Do not enter <code>/Applications/Comfy Desktop.app</code> or the shared-model directory.</li>
+        <li>Start the instance. On the verified Mac, <code>open -b com.todesktop.241012ess7yxs0e</code> opens the dashboard and the instance is named <strong>ComfyUI-desktop</strong>.</li>
+        <li>Wait for <code>http://127.0.0.1:8188</code>, then select <strong>Save &amp; re-check</strong>.</li>
+      </ol>
+      <p>If the selected folder contains <code>.comfy_environment</code>, it is Desktop-managed. Always start it through Comfy Desktop rather than invoking its private <code>main.py</code>.</p>
+      <h3>Option B — Git/manual installation</h3>
+      <p>Use this route only if you want to maintain the clone and Python environment yourself:</p>
+      <pre><code>git clone https://github.com/comfyanonymous/ComfyUI
+cd ComfyUI
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python main.py --listen 127.0.0.1 --port 8188</code></pre>
+      <p>Leave Terminal open while using ComfyUI. On Apple Silicon, the official ComfyUI instructions currently require an MPS-capable PyTorch build and recommend the latest PyTorch nightly; follow the <a href="https://github.com/comfyanonymous/ComfyUI#apple-mac-silicon">official Apple Silicon note</a> before installing the remaining requirements. Enter the clone’s full path in <strong>ComfyUI install directory</strong>, then select <strong>Save &amp; re-check</strong>.</p>
+      <h2>How Prep My Avatar identifies the installation type</h2>
+      <p>Prep My Avatar does not decide from the folder name. After you save the ComfyUI directory, it resolves that directory (including a nested <code>ComfyUI</code> child in portable layouts) and checks the files inside it:</p>
+      <ol>
+        <li>A <code>.comfy_environment</code> file identifies an instance managed by <strong>ComfyUI Desktop</strong>.</li>
+        <li>Otherwise, a <code>main.py</code> file identifies <strong>ComfyUI from Git / code</strong>.</li>
+        <li>If neither marker is present, the installation type is unknown and the page asks you to correct the configured directory instead of inventing a startup command.</li>
+      </ol>
+      <p>On macOS, Prep My Avatar also looks for a Comfy application in <code>/Applications</code> and <code>~/Applications</code>. It reads the application’s <code>Info.plist</code> to obtain its real name, bundle identifier, and launch command. This application scan helps Prep My Avatar open Comfy Desktop, but it does <strong>not</strong> classify the configured folder: a user can have Comfy Desktop and a separate Git clone installed at the same time. The <code>.comfy_environment</code> marker is what connects a particular folder to Desktop management.</p>
+      <p>This is a filesystem heuristic, not a permanent guarantee from ComfyUI. If a future ComfyUI Desktop release stops creating <code>.comfy_environment</code>, a Desktop instance that still contains <code>main.py</code> may be labelled as Git/code until Prep My Avatar’s detection is updated. The configured path and detected type contain no username-specific or machine-specific hardcoding; every installation is checked locally in the same way.</p>
+      <h2>Verified ComfyUI Desktop setup</h2>
+      <p>This working setup was verified on 31 August 2026. Prep My Avatar uses the FLUX.2 Klein <strong>9B fp8</strong> workflow. The 4B files shown in some ComfyUI tutorials are not substitutes for its 9B diffusion model and matching 8B text encoder.</p>
+      <ul>
+        <li>Desktop instance: <code>ComfyUI-desktop</code></li>
+        <li>API URL: <code>http://127.0.0.1:8188</code></li>
+        <li>ComfyUI application directory: <code>/Users/kevinjohngallagher/ComfyUI-Installs/ComfyUI-desktop/ComfyUI</code></li>
+        <li>Shared model directory visible to the instance: <code>/Users/kevinjohngallagher/ComfyUI-Shared/models</code></li>
+        <li>Model download root: <code>/Users/kevinjohngallagher/ComfyUI-Installs/ComfyUI-desktop/ComfyUI/models</code></li>
+      </ul>
+      <p>Enter the <strong>application directory</strong> in Prep My Avatar, not the shared-model directory. The installer derives the correct model subdirectories from it.</p>
+      <h2>Klein files and destinations</h2>
+      <ul>
+        <li><code>flux-2-klein-9b-fp8.safetensors</code> from <code>black-forest-labs/FLUX.2-klein-9b-fp8</code> → <code>models/unet/klein/</code></li>
+        <li><code>qwen_3_8b_fp8mixed.safetensors</code> from <code>Comfy-Org/vae-text-encorder-for-flux-klein-9b</code> → <code>models/text_encoders/</code></li>
+        <li><code>flux2-vae.safetensors</code> from <code>Comfy-Org/vae-text-encorder-for-flux-klein-9b</code> → <code>models/vae/</code></li>
+        <li><code>Flux2-Klein-9B-consistency-V2.safetensors</code> from <code>dx8152/Flux2-Klein-9B-Consistency</code> → <code>models/loras/klein/</code></li>
+      </ul>
+      <p>The diffusion model, text encoder, and VAE are required. The consistency LoRA is optional but recommended because it helps preserve composition between edits. Allow roughly 19 GB for all four files.</p>
+      <h2>What worked on ComfyUI Desktop</h2>
+      <ol>
+        <li>Open the instance menu and select <strong>Storage</strong> to confirm the instance's application and model directories.</li>
+        <li>Enter the ComfyUI application directory in Prep My Avatar and select <strong>Save &amp; re-check</strong>.</li>
+        <li>Use Prep My Avatar's one-click installers for the public text encoder, VAE, and consistency LoRA.</li>
+        <li>For the gated 9B model, accept the Hugging Face licence. This installation downloaded it through the existing authenticated browser session and moved it from Downloads to <code>models/unet/klein/</code>; no Hugging Face token was created or copied into Prep My Avatar.</li>
+        <li>Open ComfyUI's <strong>Models</strong> panel and select <strong>Load All Folders</strong>. This rescans the model paths without discarding an unsaved workflow.</li>
+        <li>Select <strong>Save &amp; re-check</strong> again in Prep My Avatar.</li>
+      </ol>
+      <p>For a future unattended reinstall, create a read-only Hugging Face token only after accepting the model licence, then save it under <strong>Settings → Local tools → Hugging Face token</strong>. The one-click gated-model installer can then use it.</p>
+      <h2>Verified file hashes</h2>
+      <p>These SHA-256 hashes confirm the files installed during this setup:</p>
+      <pre><code>865ba09f5b4c3cbd3468a4bd3acb9fcb2f8740c54317482f0bcd4ed1d3655cee  flux-2-klein-9b-fp8.safetensors
+abad16806e0cbabc54e0325d6565847443fe396d5f0be38bb3cd3fe75a1201d6  qwen_3_8b_fp8mixed.safetensors
+868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3  flux2-vae.safetensors
+61db2017ce420b97bd5ef11984e5a894c90003a6bbf0dc9473f8d7b9ebb3ff93  Flux2-Klein-9B-consistency-V2.safetensors</code></pre>
+      <p>A tiny HTML or text file with a model filename means an authenticated download failed. Do not rename it or substitute a generic Qwen encoder: incompatible encoders can load but later fail with matrix-shape errors.</p>
       <h2>Do this</h2>
-      <ol><li>On <strong>Step 2 of 5 — Local generation — ComfyUI</strong>, check whether the page says ComfyUI is already running.</li><li>If it is not installed, follow the <strong>ComfyUI on GitHub</strong> link, install it, and start it. Its usual address is <code>http://127.0.0.1:8188</code>.</li><li>Enter the <strong>ComfyUI install directory</strong> and <strong>ComfyUI API URL</strong> shown by your installation.</li><li>Select <strong>Save &amp; re-check</strong>. A classic ComfyUI directory contains <code>models</code> and <code>main.py</code>; ComfyUI Desktop uses the supported <code>models</code> and <code>custom_nodes</code> layout instead.</li><li>If you want local Klein generation, accept the model licence, add any required Hugging Face token in Settings, and use the offered model, text-encoder, VAE, and consistency-LoRA downloads.</li><li>Select <strong>Save &amp; continue →</strong>.</li></ol>
+      <ol>
+        <li>On <strong>Step 2 of 5 — Local generation — ComfyUI</strong>, check whether the page says ComfyUI is already running.</li>
+        <li>Start it using the matching method above: select the instance in Comfy Desktop, or run <code>python main.py --listen 127.0.0.1 --port 8188</code> from an activated manual-install environment.</li>
+        <li>Enter the <strong>ComfyUI install directory</strong> and <strong>ComfyUI API URL</strong> shown by your installation.</li>
+        <li>Select <strong>Save &amp; re-check</strong>. A classic ComfyUI directory contains <code>models</code> and <code>main.py</code>; ComfyUI Desktop uses the supported <code>models</code> and <code>custom_nodes</code> layout instead.</li>
+        <li>If you want local Klein generation, accept the model licence, add any required Hugging Face token in Settings, and use the offered model, text-encoder, VAE, and consistency-LoRA downloads.</li>
+        <li>Select <strong>Save &amp; continue →</strong>.</li>
+      </ol>
+      <p>The <strong>Start this session</strong> detail checks for <code>.comfy_environment</code>. For a Desktop-managed installation, it gives the detected Desktop application command and names the instance to select; it does not pretend the folder is a standalone clone. For an ordinary clone, it displays the verified folder command with Copy buttons. If neither launch route can be verified, the page says so instead of inventing a command. Returning from that detail takes you back to <strong>Start this session</strong>, not to Setup.</p>
       <p>To skip this step, leave the fields unchanged and continue. You can return through <strong>Setup</strong> or <strong>Settings → Local tools</strong>.</p>
       <h2>You are finished when</h2>
-      <p>The page reports that ComfyUI is running at the configured URL, or you have deliberately skipped local generation. The wizard then shows the local-vision step.</p>
+      <p>The page reports <strong>Klein engine · Test Studio — Ready</strong> and <strong>Nothing to do here</strong>, or you have deliberately skipped local generation. For the verified clean installation, ComfyUI's Model Library shows one entry in each of <code>diffusion_models</code>, <code>loras</code>, <code>vae</code>, and <code>text_encoders</code>. The wizard then shows the local-vision step.</p>
     </div>
     <nav class="page-nav" aria-label="Step navigation">
       <div><a href="02_choose_image_provider.html">← Previous step</a></div>

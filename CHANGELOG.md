@@ -7,7 +7,50 @@ under **Unreleased** until a release is tagged.
 
 ## Unreleased
 
+### Added
+
+- Setup now leads into a separate **Start this session** check. Setup records
+  whether each tool is configured; the session check reports whether local
+  services are running now and links each stopped tool to exact startup steps.
+- The ComfyUI setup page now presents two explicit installation routes:
+  **Comfy Desktop** for an app-managed instance and **Git / code** for a
+  user-managed clone and Python environment. Both routes include copyable,
+  platform-appropriate setup and launch commands.
+- Prep My Avatar now distinguishes a Comfy Desktop-managed folder from a
+  Git/code installation. A configured folder containing
+  `.comfy_environment` is treated as Desktop-managed; otherwise `main.py`
+  identifies a Git/code clone. On macOS, the app also reads the installed
+  Comfy application's `Info.plist` so it can use the real display name, bundle
+  identifier and launch command instead of guessing an application name.
+- ai-toolkit setup on macOS now offers a native Finder folder picker. The
+  picker is restricted to local requests and the single supported ai-toolkit
+  purpose; users on other platforms retain the text field.
+- The first-run Markdown and HTML guides now include complete startup
+  instructions for ComfyUI, LM Studio, Ollama, llama.cpp, quality helpers and
+  ai-toolkit. The ComfyUI documentation records the Desktop-detection
+  heuristic, why an installed Desktop app alone cannot identify a particular
+  instance folder, and the limitation if a future Desktop release removes its
+  marker file.
+
 ### Changed
+
+- The setup checklist now groups the five visible tools by what the workflow
+  actually requires: at least one image-generation provider, local vision for
+  automatic captioning and framing, and two genuinely optional enhancements.
+  It no longer labels every setup step optional.
+- Setup completion is independent of runtime state. A configured local tool
+  remains **set up** while stopped; **running**, **ready**, and **not running**
+  are reserved for the session check.
+- Setup and session summaries now count the same five visible tool groups.
+  Removed the unexplained ten-capability total, and replaced it with named
+  requirement groups plus a five-tool session total.
+- Session detail pages now preserve their origin when navigating back. Opening
+  a tool from **Start this session** returns there instead of unexpectedly
+  returning to the setup checklist.
+- ComfyUI labels identify **ComfyUI Desktop** or **ComfyUI from Git / code**
+  when the configured folder provides enough evidence. Desktop-managed
+  instances are started through the Desktop dashboard; Git/code installs use
+  their own verified virtual environment and `main.py` command.
 
 - The four features that run a heavy ML model in its own interpreter — face
   similarity scoring, person masks, watermark inpainting and JoyCaption
@@ -121,6 +164,19 @@ under **Unreleased** until a release is tagged.
   ever set and that could not have been widened without returning wrong answers.
 
 ### Fixed
+
+- A reachable ComfyUI server no longer displays contradictory instructions to
+  start ComfyUI. Its detail page now states that nothing needs to be started
+  and shows the responding API URL; startup instructions appear only while the
+  service is stopped.
+- ComfyUI startup guidance no longer assumes that every installation has a
+  repository-level `.venv`. Desktop-managed folders are directed to Comfy
+  Desktop, Git/code folders without an environment receive the commands to
+  create one, and unrecognised folders prompt the user to correct the path
+  instead of showing a guessed command.
+- The setup checklist no longer treats a correctly configured but currently
+  stopped ComfyUI, LM Studio, or ai-toolkit installation as though setup had
+  never been completed.
 
 - The queue and the launcher now apply one shared rule for SDXL-only VAE /
   text-encoder overrides, instead of two hand-synchronised copies, so the queue

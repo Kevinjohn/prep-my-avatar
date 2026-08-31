@@ -1,6 +1,6 @@
 # Step 2: Choose an image provider
 
-This optional setup page enables the app to create new images for missing poses or framings. You can use imported photos and export a dataset without configuring any provider.
+This is one of the two image-generation choices in Setup. Configure an API/cloud provider here or configure local ComfyUI on the next page. You can use imported photos and export a dataset without either choice, but generating missing poses or framings requires at least one.
 
 ## Before you begin
 

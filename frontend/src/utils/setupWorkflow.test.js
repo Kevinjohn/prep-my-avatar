@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { localVisionGateReason, ollamaGateReason, setupNavigation } from './setupWorkflow.js'
+import {
+  detailBackScreen, localVisionGateReason, ollamaGateReason, setupNavigation,
+} from './setupWorkflow.js'
+
+test('tool details return to the checklist that opened them', () => {
+  assert.equal(detailBackScreen('session', 6), 6)
+  assert.equal(detailBackScreen('setup', 6), 0)
+  assert.equal(detailBackScreen(null, 6), 0)
+})
 
 test('setup navigation skips ready steps in both directions', () => {
   const model = setupNavigation(['a', 'b', 'c'], {
@@ -11,6 +19,17 @@ test('setup navigation skips ready steps in both directions', () => {
   assert.equal(model.nextUnfinished(0), 'b')
   assert.equal(model.previousUnfinished(2), 'b')
   assert.equal(model.allReady, false)
+})
+
+test('setup navigation treats completed configuration as finished even when runtime is stopped', () => {
+  const model = setupNavigation(['comfyui', 'vision', 'training'], {
+    comfyui: { status: 'available', setupComplete: true },
+    vision: { status: 'available', setupComplete: true },
+    training: { status: 'available', setupComplete: true },
+  }, 0)
+
+  assert.equal(model.firstUnfinished, null)
+  assert.equal(model.allReady, true)
 })
 
 test('local vision gate names the selected OpenAI-compatible server', () => {

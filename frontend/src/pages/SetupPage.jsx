@@ -4,10 +4,12 @@ import { SETUP_REDIRECT_SESSION_KEY, writeSession } from '../utils/sessionStorag
 import { useToast } from '../components/common/Toast'
 import { useConfirmDialog } from '../components/common/ConfirmDialog'
 import { useCapabilities } from '../context/CapabilitiesContext'
-import { deriveSetupSteps, deriveCapabilitySummary, SETUP_STEP_IDS } from '../hooks/useSetupSteps'
+import {
+  deriveSessionStatus, deriveSetupGroups, deriveSetupSteps, SETUP_STEP_IDS,
+} from '../hooks/useSetupSteps'
 import { useSetupSettings } from '../hooks/useSetupSettings'
 import SetupToolBody from '../components/setup/SetupToolBody'
-import { localVisionGateReason, setupNavigation } from '../utils/setupWorkflow'
+import { detailBackScreen, localVisionGateReason, setupNavigation } from '../utils/setupWorkflow'
 
 // A wizard "screen" is the welcome/scan, one per setup tool, then done.
 const TOTAL_TOOLS = SETUP_STEP_IDS.length
@@ -18,42 +20,25 @@ const STATUS_META = {
   available: { glyph: '○', label: 'Not set up', cls: 'text-content-subtle' },
 }
 
-// Map each capability in the "What's unlocked" review list (deriveCapabilitySummary,
-// useSetupSteps.js) back to the wizard step that installs/configures it, so clicking a
-// row jumps straight to that step. Most entries match a step's own `unlocks` wording
-// 1:1 (Captioning, Face-similarity scoring, Person masks, LoRA training, Test Studio).
-// Two don't, and are set by where the control actually lives: "Klein (local)" is
-// downloaded from the comfyui step's body (toolBody('comfyui') has the one-click
-// installers), not the image step — the image step only has the API-key fields and a
-// note pointing at ComfyUI. "Auto-framing & head-crop" is the ollama step's other two
-// unlocks (Auto-classify framing / Auto head-crop), just phrased differently here.
-const CAPABILITY_STEP_ID = {
-  'Nano Banana (Google or Replicate)': 'image',
-  'ChatGPT (gpt-image-2)': 'image',
-  'Klein (local)': 'comfyui',
-  'Captioning': 'ollama',
-  'Auto-framing & head-crop': 'ollama',
-  'Face-similarity scoring': 'quality',
-  'Person masks': 'quality',
-  'Watermark inpainting': 'quality',
-  'LoRA training': 'training',
-  'Test Studio': 'comfyui',
-}
-
 export default function SetupPage() {
   const toast = useToast()
   const confirm = useConfirmDialog()
-  const { caps, refresh } = useCapabilities()
+  const { caps, loading: capabilitiesLoading, error: capabilitiesError, refresh } = useCapabilities()
   const {
     config, secretsPresence, setSecretsPresence, secretInputs, setSecretInputs,
     busy, loadError, detected, detecting, scanned, scanError, dirty, load, runAutodetect,
     setField, persist, applyDetectedPath,
   } = useSetupSettings({ refresh, toast })
   const [screen, setScreen] = useState(0)           // index into SCREENS
+  const [detailOrigin, setDetailOrigin] = useState(null)
   const [advancing, setAdvancing] = useState(false) // Next is mid save-&-recheck
   const steps = useMemo(() => deriveSetupSteps(caps), [caps])
-  const summary = useMemo(() => deriveCapabilitySummary(caps), [caps])
-  const readyCount = summary.filter((s) => s.ok).length
+  const setupGroups = useMemo(() => deriveSetupGroups(steps), [steps])
+  const sessionRows = useMemo(() => deriveSessionStatus(steps), [steps])
+  const sessionReadyCount = sessionRows.filter((row) => row.ready).length
+  const coreSetupComplete = setupGroups.filter((group) => group.required).every((group) => group.complete)
+  const optionalConfiguredCount = steps.filter((step) =>
+    ['quality', 'training'].includes(step.id) && step.setupComplete).length
   const stepById = useMemo(() => Object.fromEntries(steps.map((s) => [s.id, s])), [steps])
 
   if (!config) {
@@ -71,8 +56,8 @@ export default function SetupPage() {
   }
 
   const {
-    kind, done: DONE, isReady, toolIndex: toolIdx, screenOf, allReady,
-    firstUnfinished, nextUnfinished, previousUnfinished: prevUnfinished,
+    kind, done: DONE, isReady, toolIndex: toolIdx, screenOf,
+    nextUnfinished, previousUnfinished: prevUnfinished,
   } = setupNavigation(SETUP_STEP_IDS, stepById, screen)
   // Captioning is the ONE capability the wizard insists on. Z-Image (the default
   // training type) needs Ollama's vision model for prose captions — JoyCaption only
@@ -82,13 +67,20 @@ export default function SetupPage() {
   // The global "Skip setup" link is still the deliberate bail-out.
   // Pure gate check on a derived step object, so it can be re-evaluated against FRESH
   // capabilities after a save (not just the render-time snapshot).
-  const blockReason = (id) => (id === 'ollama' ? localVisionGateReason(stepById.ollama) : null)
+  const blockReason = (id) => (id === 'ollama' && !stepById.ollama.setupComplete
+    ? localVisionGateReason(stepById.ollama) : null)
   // The scan already knows what's installed — so "Start setup" / Next land on the
   // first tool that still needs attention and skip the ones already ready. No
   // re-walking ComfyUI/Ollama when they were just detected as running.
   const startSetup = () => {
-    const first = firstUnfinished
-    setScreen(first ? screenOf(first) : DONE)
+    if (coreSetupComplete) return setScreen(DONE)
+    const generation = setupGroups.find((group) => group.id === 'generation')
+    if (!generation.complete) return setScreen(screenOf('image'))
+    setScreen(screenOf('ollama'))
+  }
+  const openToolDetail = (id, origin) => {
+    setDetailOrigin(origin)
+    setScreen(screenOf(id))
   }
   const goNext = () => {
     if (kind === 'welcome') return startSetup()
@@ -110,6 +102,11 @@ export default function SetupPage() {
       const last = [...SETUP_STEP_IDS].reverse().find((id) => !isReady(id))
       return setScreen(last ? screenOf(last) : 0)
     }
+    if (detailOrigin) {
+      const destination = detailBackScreen(detailOrigin, DONE)
+      setDetailOrigin(null)
+      return setScreen(destination)
+    }
     const prv = prevUnfinished(toolIdx(kind))
     setScreen(prv ? screenOf(prv) : 0)
   }
@@ -126,7 +123,8 @@ export default function SetupPage() {
         return
       }
       if (kind === 'ollama') {
-        const reason = localVisionGateReason(deriveSetupSteps(fresh).find((x) => x.id === 'ollama'))
+        const freshStep = deriveSetupSteps(fresh).find((x) => x.id === 'ollama')
+        const reason = freshStep.setupComplete ? null : localVisionGateReason(freshStep)
         if (reason) { toast.warning(reason); return }
       }
       goNext()
@@ -138,7 +136,7 @@ export default function SetupPage() {
     <div className="flex items-center gap-1.5" aria-hidden="true">
       {SETUP_STEP_IDS.map((id) => {
         const active = kind === id
-        const ready = stepById[id].status === 'ready'
+        const ready = stepById[id].setupComplete
         return (
           <span key={id}
             className={`h-2 rounded-full transition-all ${active ? 'w-6 bg-primary'
@@ -162,65 +160,99 @@ export default function SetupPage() {
 
   // --- Welcome + live machine scan --------------------------------------------
   if (kind === 'welcome') {
-    // Three states per tool: ready (✓ green), partial (⚠ amber — detected but a
-    // key piece is missing), missing (✗). Ollama keys on the MODEL, not just being
-    // reachable — a running Ollama with no vision model is only "partial".
-    // `optional: true` rows (local generation) never look like a problem when not
-    // ready — you can build a dataset from your own photos + API engines and export
-    // to train elsewhere. They render neutral (grey ○ + "optional"), not amber/✗.
+    // This page answers only whether setup has been completed. Runtime health lives
+    // on the separate session-start page so stopping an app cannot undo setup.
+    // Requirements apply to groups rather than every individual row: image providers
+    // are alternatives, local vision powers automation, and the final two are extras.
     const triState = (reachable, complete) => reachable ? (complete ? 'ready' : 'partial') : 'missing'
     // The welcome page mirrors the actual wizard: one named row per step, in the
     // same order. This keeps the pre-flight promise in sync as steps are added.
     const scanRows = steps.map((step, index) => {
       if (step.id === 'image') {
-        return { index, label: 'Image generation — API keys & provider', optional: true,
-          stepId: step.id, state: step.status === 'ready' ? 'ready' : 'missing', partial: '' }
+        return { index, label: 'Cloud/API image provider', soft: true,
+          stepId: step.id, state: step.providerConfigured ? 'ready' : 'missing', partial: '',
+          readyText: 'set up' }
       }
       if (step.id === 'comfyui') {
-        return { index, label: 'Local generation — ComfyUI', optional: true, stepId: step.id,
-          state: triState(step.reachable, step.hasKlein), partial: 'running — Klein model optional' }
+        return { index, label: `Local image provider — ${step.installLabel}`, soft: true, stepId: step.id,
+          state: step.setupComplete ? 'ready' : triState(step.dirValid, step.hasKlein),
+          partial: 'found — finish the Klein model setup',
+          readyText: 'set up' }
       }
       if (step.id === 'ollama') {
         const partial = step.reachable
           ? `running — load ${step.visionModel || 'a vision model'}`
           : step.provider === 'ollama' && step.installed ? 'installed — not running' : ''
-        return { index, label: `Local vision — ${step.providerLabel}`, optional: true,
-          stepId: step.id, state: step.reachable
+        return { index, label: `Local vision — ${step.providerLabel}`, soft: false,
+          stepId: step.id, state: step.setupComplete ? 'ready' : step.reachable
             ? (step.visionModelReady ? 'ready' : 'partial')
-            : (step.installed ? 'partial' : 'missing'), partial }
+            : (step.installed ? 'partial' : 'missing'), partial,
+          readyText: 'set up' }
       }
       if (step.id === 'quality') {
-        return { index, label: 'Quality tools — ML extras', optional: true, stepId: step.id,
-          state: step.status === 'ready' ? 'ready' : step.status === 'partial' ? 'partial' : 'missing',
-          partial: 'some helpers installed' }
+        return { index, label: 'Quality tools — ML extras', soft: true, stepId: step.id,
+          state: step.setupComplete ? 'ready' : step.status === 'partial' ? 'partial' : 'missing',
+          partial: 'some helpers installed', readyText: 'set up' }
       }
-      return { index, label: 'LoRA training — ai-toolkit', optional: true, stepId: step.id,
-        state: step.valid ? 'ready'
+      return { index, label: 'LoRA training — ai-toolkit', soft: true, stepId: step.id,
+        state: step.setupComplete ? 'ready'
           : (detected?.aitoolkit?.dir ? 'partial' : 'missing'),
-        partial: 'found on disk — one click to use' }
+        partial: 'found on disk — one click to use',
+        readyText: 'set up' }
     })
     const SCAN_META = {
       ready: { glyph: '✓', cls: 'text-emerald-400', word: 'ready' },
       partial: { glyph: '⚠', cls: 'text-amber-400', word: '' },
       missing: { glyph: '✗', cls: 'text-content-subtle', word: 'not found' },
     }
-    // Optional + not-ready → don't alarm: neutral glyph/color and an "optional" tone.
+    const scanRowsById = Object.fromEntries(scanRows.map((row) => [row.stepId, row]))
     const NEUTRAL = { glyph: '○', cls: 'text-content-subtle' }
+    const ScanRow = ({ row: r }) => {
+      const soft = r.soft && r.state !== 'ready'
+      const m = soft ? { ...SCAN_META[r.state], ...NEUTRAL } : SCAN_META[r.state]
+      const word = r.state === 'ready' ? (r.readyText || 'set up')
+        : r.state === 'partial' ? r.partial
+        : r.state === 'missing' ? 'not configured'
+        : m.word
+      return (
+        <li>
+          <button type="button" disabled={detecting} onClick={() => openToolDetail(r.stepId, 'setup')}
+            className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-sm
+              transition-colors hover:bg-surface-raised focus:outline-none focus-visible:ring-2 focus-visible:ring-primary
+              disabled:cursor-default disabled:hover:bg-transparent">
+            <span className="flex items-center gap-2">
+              <span aria-hidden="true" className={detecting ? 'text-content-subtle' : m.cls}>
+                {detecting ? '…' : m.glyph}
+              </span>
+              <span className="w-16 shrink-0 text-[10px] font-medium uppercase tracking-wide text-content-subtle">
+                Step {r.index + 1} of {TOTAL_TOOLS}
+              </span>
+              <span className={r.state === 'ready' ? 'text-content' : 'text-content-muted'}>{r.label}</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className={`truncate text-right font-mono text-xs ${detecting ? 'text-content-subtle' : m.cls}`}>
+                {detecting ? '' : word}
+              </span>
+              {!detecting && <span aria-hidden="true" className="text-xs text-content-subtle">›</span>}
+            </span>
+          </button>
+        </li>
+      )
+    }
     return (
       <div className="mx-auto max-w-2xl space-y-6">
         <div className="text-center">
           <div className="text-3xl" aria-hidden="true">🧬</div>
-          <h1 className="mt-2 text-2xl font-bold text-content">Welcome to Prep My Avatar</h1>
+          <h1 className="mt-2 text-2xl font-bold text-content">Setup</h1>
           <p className="mt-2 text-sm text-content-muted">
-            Let's set up your machine. I'll scan what's already installed and help you install the rest —
-            you can also start building a dataset from your own photos right now, no setup required.
+            Configure each tool once. Whether local apps are running today is checked separately on the next page.
           </p>
         </div>
 
         <section className="rounded-xl border border-border bg-surface p-5">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-content">
-              {detecting ? 'Scanning your machine…' : 'Machine scan'}
+              {detecting ? 'Checking setup…' : 'Setup checklist'}
             </h2>
             {detecting
               ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-border-strong border-t-primary" aria-hidden="true" />
@@ -229,51 +261,23 @@ export default function SetupPage() {
                   className="text-xs text-primary underline">Re-scan</button>
               )}
           </div>
-          <ul className="mt-4 space-y-1">
-            {scanRows.map((r) => {
-              const soft = r.optional && r.state !== 'ready'   // optional + not ready → neutral, not a warning
-              const m = soft ? { ...SCAN_META[r.state], ...NEUTRAL } : SCAN_META[r.state]
-              const word = r.state === 'partial' ? r.partial
-                : r.state === 'missing' ? (r.optional ? 'optional' : m.word)
-                : m.word
-              return (
-                <li key={r.label}>
-                  {/* Whole row navigates to the wizard step that installs this capability —
-                      ready ones stay clickable too (revisit/change it), the chevron just
-                      stays subtle for those. Disabled mid-scan: the state is still shifting. */}
-                  <button type="button" disabled={detecting}
-                    onClick={() => setScreen(screenOf(r.stepId))}
-                    className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 -mx-2 text-left text-sm
-                      cursor-pointer transition-colors hover:bg-surface-raised focus:outline-none focus-visible:ring-2
-                      focus-visible:ring-primary disabled:cursor-default disabled:hover:bg-transparent">
-                    <span className="flex items-center gap-2">
-                      <span aria-hidden="true" className={detecting ? 'text-content-subtle' : m.cls}>
-                        {detecting ? '…' : m.glyph}
-                      </span>
-                      <span className="w-16 shrink-0 text-[10px] font-medium uppercase tracking-wide text-content-subtle">
-                        Step {r.index + 1} of {TOTAL_TOOLS}
-                      </span>
-                      <span className={r.state === 'ready' ? 'text-content' : 'text-content-muted'}>{r.label}</span>
-                      {r.optional && (
-                        <span className="rounded bg-surface-raised px-1.5 py-px text-[10px] font-medium text-content-subtle">optional</span>
-                      )}
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <span className={`truncate text-right font-mono text-xs ${detecting ? 'text-content-subtle' : m.cls}`}>
-                        {detecting ? '' : word}
-                      </span>
-                      {!detecting && (
-                        <span aria-hidden="true"
-                          className={`text-xs ${r.state === 'ready' ? 'text-content-subtle/60' : 'text-content-subtle'}`}>
-                          ›
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
+          <div className="mt-4 space-y-5">
+            {setupGroups.map((group) => (
+              <section key={group.id} aria-labelledby={`setup-group-${group.id}`}>
+                <div className="flex items-baseline justify-between gap-3 border-b border-border pb-1.5">
+                  <h3 id={`setup-group-${group.id}`} className="text-sm font-semibold text-content">{group.title}</h3>
+                  <span className={`text-[10px] font-medium uppercase tracking-wide ${group.required
+                    ? 'text-primary' : 'text-content-subtle'}`}>
+                    {group.id === 'generation' ? 'At least one required' : group.required ? 'Required for automation' : 'Optional'}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-content-subtle">{group.requirement}</p>
+                <ul className="mt-1 space-y-1">
+                  {group.stepIds.map((stepId) => <ScanRow key={stepId} row={scanRowsById[stepId]} />)}
+                </ul>
+              </section>
+            ))}
+          </div>
           {scanError && !detecting && (
             <div role="alert" className="mt-3 flex items-center justify-between gap-3 text-xs text-rose-400">
               <span>Machine scan failed: {scanError}</span>
@@ -282,7 +286,8 @@ export default function SetupPage() {
           )}
           {scanned && !detecting && !scanError && (
             <p className="mt-3 text-xs text-content-subtle">
-              {readyCount} of {summary.length} capabilities ready. Reachable services were filled in automatically.
+              {coreSetupComplete ? 'Main workflow setup is complete.' : 'Main workflow setup needs attention.'}{' '}
+              {optionalConfiguredCount} of 2 optional enhancements configured.
             </p>
           )}
         </section>
@@ -291,60 +296,67 @@ export default function SetupPage() {
           {skipLink}
           <button type="button" onClick={goNext}
             className="rounded-lg bg-gradient-primary px-5 py-2 text-sm font-semibold text-white">
-            {allReady ? "Everything's ready — review →" : 'Start setup →'}
+            {coreSetupComplete ? 'Start this session →' : 'Start setup →'}
           </button>
         </div>
       </div>
     )
   }
 
-  // --- Done / summary ----------------------------------------------------------
+  // --- Session readiness -------------------------------------------------------
   if (kind === 'done') {
     return (
       <div className="mx-auto max-w-2xl space-y-6">
         <div className="text-center">
-          <div className="text-3xl" aria-hidden="true">🎉</div>
-          <h1 className="mt-2 text-2xl font-bold text-content">You're all set</h1>
-          <p className="mt-1 text-sm text-content-muted">{readyCount} of {summary.length} capabilities ready.</p>
+          <div className="text-3xl" aria-hidden="true">▶</div>
+          <h1 className="mt-2 text-2xl font-bold text-content">Start this session</h1>
+          <p className="mt-1 text-sm text-content-muted">
+            Setup is complete. Start only the local tools you plan to use today.
+          </p>
         </div>
         <section className="rounded-xl border border-border bg-surface p-5">
-          <h2 className="text-base font-semibold text-content">What's unlocked</h2>
-          <ul className="mt-3 grid gap-1 sm:grid-cols-2">
-            {summary.map((s) => {
-              const targetStep = CAPABILITY_STEP_ID[s.label]
-              // Every current capability maps to a wizard step (see CAPABILITY_STEP_ID above);
-              // this guard is defensive only — an unmapped label just renders inert, as before.
-              if (!targetStep) {
-                return (
-                  <li key={s.label} className={`flex items-center gap-2 px-2 py-1 text-sm ${s.ok ? 'text-content' : 'text-content-subtle'}`}>
-                    <span aria-hidden="true" className={s.ok ? 'text-emerald-400' : 'text-content-subtle'}>{s.ok ? '✓' : '✗'}</span>
-                    {s.label}
-                  </li>
-                )
-              }
-              return (
-                <li key={s.label}>
-                  <button type="button" onClick={() => setScreen(screenOf(targetStep))}
-                    className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-sm
-                      cursor-pointer transition-colors hover:bg-surface-raised focus:outline-none focus-visible:ring-2
-                      focus-visible:ring-primary ${s.ok ? 'text-content' : 'text-content-subtle'}`}>
-                    <span className="flex items-center gap-2">
-                      <span aria-hidden="true" className={s.ok ? 'text-emerald-400' : 'text-content-subtle'}>{s.ok ? '✓' : '✗'}</span>
-                      {s.label}
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-base font-semibold text-content">Is everything running?</h2>
+            <button type="button" onClick={() => refresh(true)} disabled={capabilitiesLoading}
+              className="text-xs text-primary underline disabled:cursor-wait disabled:text-content-subtle">
+              {capabilitiesLoading ? 'Checking…' : 'Re-check'}
+            </button>
+          </div>
+          <ul className="mt-3 space-y-1">
+            {sessionRows.map((row) => (
+              <li key={row.id}>
+                <button type="button" onClick={() => {
+                  setDetailOrigin('session')
+                  setScreen(screenOf(row.id))
+                }}
+                  className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-sm
+                    transition-colors hover:bg-surface-raised focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+                  <span className="flex items-center gap-2 text-content">
+                    <span aria-hidden="true" className={row.ready ? 'text-emerald-400' : 'text-content-subtle'}>
+                      {row.ready ? '✓' : '○'}
                     </span>
-                    <span aria-hidden="true" className={`text-xs ${s.ok ? 'text-content-subtle/60' : 'text-content-subtle'}`}>›</span>
-                  </button>
-                </li>
-              )
-            })}
+                    {row.label}
+                  </span>
+                  <span className={`flex items-center gap-1.5 font-mono text-xs ${row.ready ? 'text-emerald-400' : 'text-content-muted'}`}>
+                    {row.status}<span aria-hidden="true" className="text-content-subtle">›</span>
+                  </span>
+                </button>
+              </li>
+            ))}
           </ul>
+          <p className="mt-3 text-xs text-content-subtle">
+            {sessionReadyCount} of {sessionRows.length} tools are usable now.
+          </p>
+          {capabilitiesError && (
+            <p role="alert" className="mt-2 text-xs text-rose-400">Could not refresh runtime status.</p>
+          )}
         </section>
         <div className="flex items-center justify-between">
-          <button type="button" onClick={goBack} className="text-xs text-content-subtle underline hover:text-content">
-            ← Back
+          <button type="button" onClick={() => setScreen(0)} className="text-xs text-content-subtle underline hover:text-content">
+            ← Back to setup
           </button>
           <Link to="/datasets" className="rounded-lg bg-gradient-primary px-5 py-2 text-sm font-semibold text-white">
-            Build your first dataset →
+            Open datasets →
           </Link>
         </div>
       </div>
@@ -363,8 +375,12 @@ export default function SetupPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <div className="flex items-center justify-between">
-        <ProgressDots />
-        <span className="text-xs text-content-subtle">Step {stepNo} of {TOTAL_TOOLS}</span>
+        {detailOrigin === 'session' ? (
+          <span className="text-xs font-medium uppercase tracking-wide text-primary">Session check</span>
+        ) : <ProgressDots />}
+        <span className="text-xs text-content-subtle">
+          {detailOrigin === 'session' ? 'How to make this tool ready now' : `Step ${stepNo} of ${TOTAL_TOOLS}`}
+        </span>
       </div>
 
       <section className="rounded-xl border border-border bg-surface p-5">
@@ -389,7 +405,8 @@ export default function SetupPage() {
             secretsPresence={secretsPresence} setSecretsPresence={setSecretsPresence}
             secretInputs={secretInputs} setSecretInputs={setSecretInputs}
             detected={detected} busy={busy} caps={caps} refresh={refresh} toast={toast}
-            setField={setField} persist={persist} applyDetectedPath={applyDetectedPath} />
+            setField={setField} persist={persist} applyDetectedPath={applyDetectedPath}
+            mode={detailOrigin === 'session' ? 'session' : 'setup'} />
         </div>
       </section>
 
@@ -400,16 +417,23 @@ export default function SetupPage() {
       )}
       <div className="flex items-center justify-between">
         <button type="button" onClick={goBack} className="text-xs text-content-subtle underline hover:text-content">
-          ← Back
+          {detailOrigin === 'session' ? '← Back to session status' : '← Back'}
         </button>
-        <div className="flex items-center gap-4">
-          {skipLink}
-          <button type="button" onClick={nextWithSave} disabled={advancing}
-            title={reason || ''}
-            className="rounded-lg bg-gradient-primary px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">
-            {nextLabel}
+        {detailOrigin === 'session' ? (
+          <button type="button" onClick={() => refresh(true)} disabled={capabilitiesLoading}
+            className="rounded-lg bg-gradient-primary px-5 py-2 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-40">
+            {capabilitiesLoading ? 'Checking…' : 'Re-check now'}
           </button>
-        </div>
+        ) : (
+          <div className="flex items-center gap-4">
+            {skipLink}
+            <button type="button" onClick={nextWithSave} disabled={advancing}
+              title={reason || ''}
+              className="rounded-lg bg-gradient-primary px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">
+              {nextLabel}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

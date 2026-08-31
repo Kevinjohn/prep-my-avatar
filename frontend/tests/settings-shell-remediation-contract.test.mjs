@@ -78,6 +78,23 @@ test('setup names all five steps and exposes every requested provider choice', (
   assert.match(engines, /nanobanana_provider/)
 })
 
+test('setup and session readiness are separate five-row screens', () => {
+  const setup = read('pages/SetupPage.jsx')
+  assert.match(setup, /'Setup checklist'/)
+  assert.match(setup, /deriveSetupGroups/)
+  assert.match(setup, /'At least one required'/)
+  assert.match(setup, /'Required for automation'/)
+  assert.match(setup, /Start this session/)
+  assert.match(setup, /Is everything running\?/)
+  assert.match(setup, /sessionRows\.map/)
+  assert.match(setup, /sessionRows\.length/)
+  assert.doesNotMatch(setup, /capabilities are usable right now/)
+  assert.doesNotMatch(setup, /What's unlocked/)
+  assert.doesNotMatch(setup, /r\.optional/)
+  assert.match(setup, /setDetailOrigin\('session'\)/)
+  assert.match(setup, /mode=\{detailOrigin === 'session' \? 'session' : 'setup'\}/)
+})
+
 test('queued confirmations insert an activation boundary', () => {
   const dialog = read('components/common/ConfirmDialog.jsx')
   assert.match(dialog, /activationPendingRef\.current = true/)

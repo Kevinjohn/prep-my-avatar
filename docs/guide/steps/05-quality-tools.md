@@ -22,3 +22,5 @@ If an installation fails, copy the visible error before leaving the page. You ca
 ## You are finished when
 
 Every tool you chose says **Installed**, or you have deliberately skipped all three. The wizard then shows **LoRA training — ai-toolkit**.
+
+Quality tools do not have a separate app or server. On **Start this session**, “Ready” means the Python libraries are installed and Prep My Avatar will use them automatically; there is nothing else to launch.

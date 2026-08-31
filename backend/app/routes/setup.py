@@ -1,8 +1,11 @@
 """Setup API: auto-detect installed tools + run the whitelisted one-click installs."""
-from flask import Blueprint, jsonify
+import ipaddress
+
+from flask import Blueprint, jsonify, request
 
 from .. import capabilities
 from .. import setup_installer
+from ..directory_picker import DirectoryPickerUnavailable, pick_directory
 
 bp = Blueprint('setup', __name__, url_prefix='/api/setup')
 
@@ -13,6 +16,24 @@ def setup_autodetect():
     can fill config itself. Reachable-port hits are safe to apply; disk paths are
     suggestions the UI confirms."""
     return jsonify(capabilities.autodetect())
+
+
+@bp.post('/pick-directory/<purpose>')
+def setup_pick_directory(purpose):
+    """Open a native picker on the same Mac that runs this local server."""
+    if purpose != 'aitoolkit':
+        return jsonify({'error': f'unknown directory purpose: {purpose}'}), 404
+    try:
+        is_loopback = ipaddress.ip_address(request.remote_addr or '').is_loopback
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        return jsonify({'error': 'The folder chooser is available locally only.'}), 403
+    try:
+        path = pick_directory(purpose)
+    except DirectoryPickerUnavailable as exc:
+        return jsonify({'error': str(exc)}), 503
+    return jsonify({'path': path or '', 'cancelled': path is None})
 
 
 @bp.post('/install/<action>')

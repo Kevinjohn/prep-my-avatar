@@ -307,18 +307,63 @@ def test_resolve_comfyui_base_empty():
     from app.capabilities import resolve_comfyui_base
     assert resolve_comfyui_base('') == {'valid': False, 'resolved': '', 'nested': False}
 
+def test_comfyui_folder_launcher_uses_its_own_mac_venv(tmp_path):
+    from app.capabilities import _comfyui_folder_launcher
+    install = tmp_path / 'ComfyUI'
+    (install / '.venv' / 'bin').mkdir(parents=True)
+    (install / '.venv' / 'bin' / 'python').touch()
+    (install / 'main.py').touch()
+
+    assert _comfyui_folder_launcher(str(install)) == {
+        'cwd': str(install),
+        'command': './.venv/bin/python main.py --listen 127.0.0.1 --port 8188',
+        'managed_by_desktop': False,
+    }
+
+
+def test_comfyui_folder_launcher_identifies_desktop_managed_install(tmp_path):
+    from app.capabilities import _comfyui_folder_launcher
+    install = tmp_path / 'ComfyUI'
+    (install / '.venv' / 'bin').mkdir(parents=True)
+    (install / '.venv' / 'bin' / 'python').touch()
+    (install / 'main.py').touch()
+    (install / '.comfy_environment').write_text('local-desktop2-standalone')
+
+    launcher = _comfyui_folder_launcher(str(install))
+
+    assert launcher['managed_by_desktop'] is True
+
+
+def test_comfyui_install_type_does_not_depend_on_a_terminal_launcher(tmp_path):
+    from app.capabilities import _comfyui_install_type
+    desktop = tmp_path / 'desktop' / 'ComfyUI'
+    desktop.mkdir(parents=True)
+    (desktop / '.comfy_environment').write_text('local-desktop2-standalone')
+    git_clone = tmp_path / 'git' / 'ComfyUI'
+    git_clone.mkdir(parents=True)
+    (git_clone / 'main.py').touch()
+
+    assert _comfyui_install_type(str(desktop)) == 'desktop'
+    assert _comfyui_install_type(str(git_clone)) == 'git'
+    assert _comfyui_install_type(str(tmp_path / 'missing')) == ''
+
 def test_probe_exposes_dir_valid(app, tmp_path):
     """probe() surfaces dir_configured/dir_valid/resolved_dir so the wizard can
     tell a wrong path from a right one without a second round-trip."""
     with app.app_context():
         from app import capabilities, config
         _make_comfyui(tmp_path / 'ComfyUI')
+        python = tmp_path / 'ComfyUI' / '.venv' / 'bin' / 'python'
+        python.parent.mkdir(parents=True)
+        python.touch()
         config.save_config({'comfyui': {'base_dir': str(tmp_path)}})   # wrapper, nested install
         with patch('app.capabilities._http_ok', return_value=False):
             caps = capabilities.probe(force=True)
     c = caps['comfyui']
     assert c['dir_configured'] is True and c['dir_valid'] is True
     assert pathlib.Path(c['resolved_dir']) == tmp_path / 'ComfyUI'
+    assert c['install_type'] == 'git'
+    assert c['folder_launcher']['cwd'] == str(tmp_path / 'ComfyUI')
 
 
 # --- probe() caching ------------------------------------------------------

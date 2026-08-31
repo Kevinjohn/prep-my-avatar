@@ -1,5 +1,7 @@
 import pytest
 
+from app.routes import setup as setup_routes
+
 
 @pytest.fixture(autouse=True)
 def _reset_runs():
@@ -52,3 +54,32 @@ def test_cancel_install_calls_owner(client, monkeypatch):
     response = client.post('/api/setup/install/ml_extras/cancel')
     assert response.status_code == 200
     assert response.get_json()['action'] == 'ml_extras'
+
+
+def test_pick_aitoolkit_directory_returns_native_selection(client, monkeypatch):
+    monkeypatch.setattr(
+        setup_routes, 'pick_directory',
+        lambda purpose: '/Users/tester/Documents/GitHub/ai-toolkit')
+
+    response = client.post('/api/setup/pick-directory/aitoolkit')
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        'path': '/Users/tester/Documents/GitHub/ai-toolkit',
+        'cancelled': False,
+    }
+
+
+def test_pick_aitoolkit_directory_reports_cancel_without_changing_path(client, monkeypatch):
+    monkeypatch.setattr(setup_routes, 'pick_directory', lambda purpose: None)
+
+    response = client.post('/api/setup/pick-directory/aitoolkit')
+
+    assert response.status_code == 200
+    assert response.get_json() == {'path': '', 'cancelled': True}
+
+
+def test_pick_directory_rejects_unknown_purpose(client):
+    response = client.post('/api/setup/pick-directory/arbitrary')
+
+    assert response.status_code == 404

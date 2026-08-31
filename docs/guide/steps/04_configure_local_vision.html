@@ -30,6 +30,19 @@
       <h2>Do this</h2>
       <ol><li>On <strong>Step 3 of 5 — Local vision</strong>, open <strong>Local vision backend</strong>.</li><li>Choose one backend:<ul><li><strong>Ollama:</strong> install and start Ollama, keep the default URL unless you changed it, then pull the model offered by the wizard.</li><li><strong>LM Studio:</strong> start its local server, load a vision model, and use its OpenAI-compatible URL, normally <code>http://127.0.0.1:1234/v1</code>.</li><li><strong>llama.cpp:</strong> start <code>llama-server</code> with a vision model and projector, then use its OpenAI-compatible URL, normally <code>http://127.0.0.1:8080/v1</code>.</li></ul></li><li>Enter the exact loaded model identifier in the <strong>vision model</strong> field.</li><li>Select <strong>Save &amp; re-check</strong>.</li><li>Correct the URL or loaded model if the check fails, then re-check.</li><li>Select <strong>Save &amp; continue →</strong>.</li></ol>
       <p>If you want to work without automatic analysis and captioning, select <strong>Skip setup — I'll do it later</strong> instead of trying to continue from this screen. Manual photo classification and caption editing remain available.</p>
+      <h2>LM Studio: exact setup</h2>
+      <p>LM Studio includes a llama.cpp-based inference engine, but Prep My Avatar connects to LM Studio's local OpenAI-compatible HTTP server rather than to the chat UI itself.</p>
+      <ol>
+        <li>In LM Studio, open <strong>My Models</strong> and select an installed model whose <strong>Capabilities</strong> include <strong>Vision</strong>. If necessary, use <strong>Model Search</strong> to download one first.</li>
+        <li>Select <strong>Load Model</strong>, keep or set an <strong>API Identifier</strong>, and wait until the model shows <strong>READY</strong>. The identifier used on this Mac was <code>google/gemma-4-12b-qat</code>.</li>
+        <li>Open <strong>Developer → Local Server</strong> and turn the server switch on. Keep it local unless another device must connect; the normal status is <strong>Reachable at: <code>http://127.0.0.1:1234</code></strong>.</li>
+        <li>In Prep My Avatar, choose <strong>LM Studio</strong> and enter:<ul><li><strong>OpenAI-compatible URL:</strong> <code>http://127.0.0.1:1234/v1</code></li><li><strong>Vision model:</strong> the exact API identifier shown beside the loaded model, for example <code>google/gemma-4-12b-qat</code></li></ul></li>
+        <li>Select <strong>Save &amp; re-check</strong>. A successful check says LM Studio is running and the configured vision model is loaded.</li>
+      </ol>
+      <p>On a Mac, <code>open -a "LM Studio"</code> opens the app. After loading the vision model, start port 1234 from <strong>Developer → Local Server</strong>, or run <code>lms server start --port 1234</code> in Terminal. The session detail shows both commands and the exact configured model identifier.</p>
+      <p>For the other backends, the session detail shows <code>ollama serve</code> plus the exact <code>ollama pull …</code> command, or a complete <code>llama-server</code> command template with the model, projector, host, and port arguments.</p>
+      <p>Keep LM Studio open, the model loaded, and the <strong>Local Server</strong> switch on while Prep My Avatar is using local vision. You do not need to start a separate <code>llama-server</code> process when using LM Studio.</p>
+      <p>If the page says LM Studio is not reachable, check the server switch and port first. If it is reachable but the model check fails, copy the model's API identifier from LM Studio and make sure the selected model is marked <strong>Vision</strong>.</p>
       <h2>You are finished when</h2>
       <p>The page says the selected backend is running and its vision model is loaded, then the wizard shows <strong>Quality tools — ML extras</strong>. If you used the global Setup skip, <strong>Datasets</strong> opens instead.</p>
     </div>

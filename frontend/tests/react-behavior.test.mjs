@@ -167,6 +167,53 @@ test('Setup autodetect persists only detected fields and preserves an intervenin
   renderer.unmount()
 })
 
+test('ai-toolkit setup offers a native folder chooser and applies its selected path', async () => {
+  globalThis.window = globalThis.window || {}
+  globalThis.document = globalThis.document || { cookie: '', querySelector: () => null }
+  globalThis.HTMLMetaElement = globalThis.HTMLMetaElement || class HTMLMetaElement {}
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  let chosenField = null
+  globalThis.fetch = async (url, options = {}) => {
+    assert.equal(String(url), '/api/setup/pick-directory/aitoolkit')
+    assert.equal(options.method, 'POST')
+    return new Response(JSON.stringify({
+      path: '/Users/tester/Documents/GitHub/ai-toolkit', cancelled: false,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  let renderer
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(SetupToolBody, {
+      id: 'training',
+      stepById: { training: { valid: false } },
+      config: { aitoolkit: { dir: '' } },
+      secretsPresence: {},
+      setSecretsPresence() {},
+      secretInputs: {},
+      setSecretInputs() {},
+      detected: { host: { platform: 'darwin' } },
+      busy: false,
+      caps: {},
+      refresh: async () => ({}),
+      toast: { error() {}, success() {} },
+      setField(section, key, value) { chosenField = { section, key, value } },
+      persist: async () => ({}),
+      applyDetectedPath: async () => {},
+    }))
+  })
+  const choose = renderer.root.findAllByType('button')
+    .find((button) => textOf(button).includes('Choose folder'))
+  assert.ok(choose, 'the directory field should have a native chooser button')
+  await act(async () => { await choose.props.onClick() })
+  assert.deepEqual(chosenField, {
+    section: 'aitoolkit', key: 'dir',
+    value: '/Users/tester/Documents/GitHub/ai-toolkit',
+  })
+  assert.match(textOf(renderer.toJSON()), /On macOS.*run_mac\.zsh/s)
+  renderer.unmount()
+})
+
 test('Studio hook retries initial failure, rejects stale refresh, and recovers after resume', async () => {
   globalThis.window = globalThis.window || {}
   globalThis.document = globalThis.document || {

@@ -502,12 +502,12 @@ test('assembled SetupPage recovers its initial request and reports autodetection
         React.createElement(CapabilitiesProvider, null, React.createElement(SetupPage))))))
   await waitFor(() => assert.ok(screen.getByText("Couldn't load setup.")))
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-  await waitFor(() => assert.ok(screen.getByRole('heading', { name: 'Welcome to Prep My Avatar' })))
+  await waitFor(() => assert.ok(screen.getByRole('heading', { name: 'Setup', level: 1 })))
   await waitFor(() => assert.ok(screen.getByText(/Machine scan failed:/)))
   assert.equal(screen.getAllByText(/Step \d of 5/).length, 5)
   for (const label of [
-    /Image generation — API keys & provider/,
-    /Local generation — ComfyUI/,
+    /Cloud\/API image provider/,
+    /Local image provider — ComfyUI/,
     /Local vision — Ollama/,
     /Quality tools — ML extras/,
     /LoRA training — ai-toolkit/,
@@ -561,6 +561,82 @@ test('setup local vision selector exposes provider-specific fields without stale
   await user.click(screen.getByRole('button', { name: 'Save & re-check' }))
   assert.equal(saves, 1)
   assert.equal(screen.queryByText(/Ollama is running at/), null)
+})
+
+test('session tool details give exact local launch instructions', async () => {
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  const common = {
+    secretsPresence: {}, setSecretsPresence() {}, secretInputs: {}, setSecretInputs() {},
+    detected: { host: { platform: 'darwin' } }, busy: false, caps: {}, refresh: async () => {},
+    toast: { success() {}, warning() {}, error() {} }, setField() {}, persist: async () => {},
+    applyDetectedPath() {}, mode: 'session',
+  }
+  const config = {
+    comfyui: { api_url: 'http://127.0.0.1:8188',
+      base_dir: '/Users/test/ComfyUI-Installs/ComfyUI-desktop/ComfyUI' },
+    local_vision: { backend: 'lmstudio' },
+    lmstudio: { url: 'http://127.0.0.1:1234/v1', vision_model: 'qwen-vl' },
+  }
+  const stepById = {
+    comfyui: { reachable: false, hasKlein: true, dirValid: true,
+      resolvedDir: '/Users/test/ComfyUI-Installs/ComfyUI-desktop/ComfyUI',
+      baseDir: '/Users/test/ComfyUI-Installs/ComfyUI-desktop/ComfyUI',
+      folderLauncher: { cwd: '/Users/test/ComfyUI-Installs/ComfyUI-desktop/ComfyUI',
+        command: './.venv/bin/python main.py --listen 127.0.0.1 --port 8188',
+        managedByDesktop: true },
+      app: { name: 'Comfy Desktop', path: '/Applications/Comfy Desktop.app',
+        launchCommand: 'open -b com.todesktop.241012ess7yxs0e' } },
+    ollama: { provider: 'lmstudio', providerLabel: 'LM Studio', reachable: false,
+      visionModelReady: false, url: config.lmstudio.url, visionModel: 'qwen-vl' },
+  }
+
+  const comfy = render(React.createElement(SetupToolBody, {
+    ...common, id: 'comfyui', config, stepById,
+  }))
+  assert.ok(screen.getByRole('heading', { name: 'Start ComfyUI now' }))
+  assert.equal(screen.queryByText('./.venv/bin/python main.py --listen 127.0.0.1 --port 8188'), null)
+  assert.ok(screen.getByText('open -b com.todesktop.241012ess7yxs0e'))
+  assert.ok(screen.getByText(/This is a Comfy Desktop-managed installation/))
+  assert.ok(screen.getByText('/Applications/Comfy Desktop.app'))
+  assert.ok(screen.getByText((_, node) => node?.tagName === 'LI'
+    && /select your existing instance\s+named\s+ComfyUI/.test(node.textContent)))
+  assert.ok(screen.getAllByText('/Users/test/ComfyUI-Installs/ComfyUI-desktop/ComfyUI').length >= 1)
+  assert.ok(screen.getByText((_, node) => node?.tagName === 'LI'
+    && /Then come back here and select\s+Re-check now/.test(node.textContent)))
+  comfy.unmount()
+
+  render(React.createElement(SetupToolBody, {
+    ...common, id: 'ollama', config, stepById,
+  }))
+  assert.ok(screen.getByRole('heading', { name: 'Start LM Studio now' }))
+  assert.ok(screen.getByText('open -a "LM Studio"'))
+  assert.ok(screen.getByText('lms server start --port 1234'))
+  assert.ok(screen.getByText((_, node) => node?.tagName === 'LI'
+    && /open the\s+Developer\s+tab/.test(node.textContent)))
+  assert.ok(screen.getByText(/Choose and load this vision model/))
+})
+
+test('a running ComfyUI session does not ask the user to start it', async () => {
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  render(React.createElement(SetupToolBody, {
+    id: 'comfyui', mode: 'session',
+    stepById: { comfyui: {
+      reachable: true, runtimeReady: true, installLabel: 'ComfyUI Desktop',
+      apiUrl: 'http://127.0.0.1:8188', resolvedDir: '/Users/test/ComfyUI',
+    } },
+    config: { comfyui: { base_dir: '/Users/test/ComfyUI', api_url: 'http://127.0.0.1:8188' } },
+    secretsPresence: {}, setSecretsPresence() {}, secretInputs: {}, setSecretInputs() {},
+    detected: { host: { platform: 'darwin' } }, busy: false, caps: {}, refresh: async () => {},
+    toast: { success() {}, warning() {}, error() {} }, setField() {}, persist: async () => {},
+    applyDetectedPath() {},
+  }))
+
+  assert.ok(screen.getByRole('heading', { name: 'ComfyUI Desktop is running' }))
+  assert.ok(screen.getByText(/Nothing needs to be started/))
+  assert.equal(screen.queryByRole('heading', { name: 'Start ComfyUI now' }), null)
+  assert.equal(screen.queryByText(/does not contain a detected Python environment/), null)
 })
 
 test('setup image step renders independent provider credentials and changes Nano Banana provider', async () => {
@@ -618,13 +694,50 @@ test('setup ComfyUI recovery names classic and Desktop directory layouts', async
       },
     },
     secretsPresence: {}, setSecretsPresence() {}, secretInputs: {}, setSecretInputs() {},
-    detected: {}, busy: false, caps: {}, refresh: async () => {},
+    detected: {
+      host: { platform: 'darwin' },
+      comfyui: { app: { name: 'Comfy Desktop', path: '/Applications/Comfy Desktop.app',
+        launch_command: 'open -b com.todesktop.241012ess7yxs0e' } },
+    }, busy: false, caps: {}, refresh: async () => {},
     toast: { success() {}, warning() {}, error() {} }, setField() {}, persist: async () => {},
     applyDetectedPath() {},
   }))
   assert.ok(screen.getByText('main.py'))
   assert.ok(screen.getByText('custom_nodes/'))
-  assert.ok(screen.getByText(/Desktop/))
+  assert.ok(screen.getAllByText(/Desktop/).length >= 1)
+  assert.ok(screen.getByText('Choose one installation method'))
+  assert.ok(screen.getByRole('heading', { name: 'Comfy Desktop' }))
+  assert.ok(screen.getByRole('heading', { name: 'Git / manual installation' }))
+  assert.equal(screen.getByRole('link', { name: 'Download Comfy Desktop →' })
+    .getAttribute('href'), 'https://www.comfy.org/download')
+  assert.ok(screen.getByText('open -b com.todesktop.241012ess7yxs0e'))
+  assert.ok(screen.getByText('git clone https://github.com/comfyanonymous/ComfyUI'))
+  assert.ok(screen.getByText('python3 -m venv .venv'))
+  assert.ok(screen.getByText('python -m pip install -r requirements.txt'))
+  assert.ok(screen.getByText('python main.py --listen 127.0.0.1 --port 8188'))
+})
+
+test('setup ComfyUI identifies which installation method owns the configured folder', async () => {
+  const { default: SetupToolBody } = await server.ssrLoadModule(
+    '/src/components/setup/SetupToolBody.jsx')
+  render(React.createElement(SetupToolBody, {
+    id: 'comfyui',
+    stepById: {
+      comfyui: {
+        baseDir: '/Users/test/ComfyUI', resolvedDir: '/Users/test/ComfyUI',
+        dirValid: true, reachable: true, hasKlein: true,
+        folderLauncher: { managedByDesktop: true },
+      },
+    },
+    config: { comfyui: { base_dir: '/Users/test/ComfyUI', api_url: 'http://127.0.0.1:8188' } },
+    secretsPresence: {}, setSecretsPresence() {}, secretInputs: {}, setSecretInputs() {},
+    detected: { host: { platform: 'darwin' } }, busy: false, caps: {}, refresh: async () => {},
+    toast: { success() {}, warning() {}, error() {} }, setField() {}, persist: async () => {},
+    applyDetectedPath() {},
+  }))
+
+  assert.ok(screen.getByText((_, node) => node?.tagName === 'P'
+    && /Detected installation type:\s*Comfy Desktop-managed/.test(node.textContent)))
 })
 
 test('assembled SettingsPage recovers an initial settings request failure', async () => {
