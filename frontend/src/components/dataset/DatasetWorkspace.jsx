@@ -30,6 +30,8 @@ import InstallRunner from '../setup/InstallRunner';
 import DatasetWorkflowNav, { DatasetStepActions } from './DatasetWorkflowNav';
 import TrainingReadiness from './TrainingReadiness';
 import useGuidedFlow from '../../hooks/useGuidedFlow';
+import { deriveSetupSteps } from '../../hooks/useSetupSteps';
+import { localVisionGateReason } from '../../utils/setupWorkflow';
 import { filterImages, normalizeTag } from '../../utils/tagFilter';
 import {
   buildSmallImageRescuePairs,
@@ -123,6 +125,7 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
     kind: d?.kind || 'character',
     completed: completedSteps,
   });
+  const localVisionStep = deriveSetupSteps(caps).find((step) => step.id === 'ollama');
   const workflowSteps = applicableDatasetSteps({ kind: d?.kind || 'character' }).map((step) => {
     const unavailableReason = step.slug === 'score' && !caps.face_scoring
       ? 'Configure face scoring in Setup'
@@ -494,7 +497,7 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
         </aside>
 
         <div className="flex flex-col gap-3 min-w-0 mt-1 lg:mt-0">
-          <header className="rounded-xl border border-border bg-surface px-4 py-3">
+          <header className="border-b border-border pb-3">
             <div className="flex flex-wrap items-center gap-2">
               <p className="m-0 font-mono text-[11px] uppercase tracking-[0.18em] text-content-subtle">
                 Step {workflowSteps.findIndex((step) => step.slug === activeStep.slug) + 1} of {workflowSteps.length}
@@ -705,9 +708,8 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                   onStatus={ds.setStatus} onBatch={ds.batchImages}
                   reviewPairIds={unresolvedExclusiveIds} faceThresholds={d.face_thresholds}
                   busy={ds.busy}
-                  visionAvailable={!!((caps.local_vision || caps.ollama)?.reachable
-                    && ((caps.local_vision || caps.ollama)?.model_ready
-                      ?? (caps.local_vision || caps.ollama)?.vision_model_ready))} />
+                  visionAvailable={Boolean(localVisionStep?.runtimeReady)}
+                  visionUnavailableReason={localVisionGateReason(localVisionStep)} />
                 <CoveragePlan plan={d.coverage_plan} onPolicyChange={ds.setCoveragePolicy}
                   onGoToGenerate={() => jumpTo({ targetId: 'ds-add-generate' })} />
               </>

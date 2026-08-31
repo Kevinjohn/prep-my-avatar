@@ -38,6 +38,87 @@ const axe = (await import('axe-core')).default
 const { render, screen, cleanup, fireEvent, waitFor } = testing
 test.afterEach(() => { cleanup(); localStorage.clear() })
 
+test('photo review presents larger uncropped previews with status in dedicated columns', async () => {
+  const { default: CorpusWorkbench } = await server.ssrLoadModule(
+    '/src/components/dataset/CorpusWorkbench.jsx')
+  const mounted = render(React.createElement(CorpusWorkbench, {
+    datasetId: 2,
+    mode: 'review',
+    images: [
+      {
+        id: 11,
+        source: 'import',
+        filename: 'portrait.png',
+        source_name: 'Portrait.png',
+        status: 'keep',
+        framing: 'headshot',
+        training_usefulness: 'green',
+        analysis: { analysis_version: 2 },
+      },
+    ],
+    onStatus() {},
+  }))
+
+  const table = screen.getByRole('table', { name: 'Photos for review' })
+  for (const heading of ['Photo', 'Training', 'Framing', 'Technical quality']) {
+    assert.ok(screen.getByRole('columnheader', { name: heading }))
+  }
+  const selector = screen.getByRole('button', { name: /Select Portrait\.png/ })
+  assert.equal(selector.querySelector('img').classList.contains('object-contain'), true)
+  assert.match(table.textContent, /Accepted/)
+  assert.match(table.textContent, /headshot/)
+  assert.match(table.textContent, /green/)
+  assert.doesNotMatch(selector.textContent, /Accepted|headshot|green/,
+    'status text should live in table cells instead of covering the image')
+  const accessibility = await axe.run(mounted.container, {
+    rules: { 'color-contrast': { enabled: false } },
+  })
+  assert.deepEqual(accessibility.violations.map((violation) => violation.id), [])
+
+  const workbench = mounted.container.querySelector('#ds-corpus-review')
+  const editor = mounted.container.querySelector('[data-photo-editor]')
+  const rightsForm = screen.getByRole('form', { name: 'Source rights and consent' })
+  assert.doesNotMatch(table.parentElement.className, /max-h|overflow/,
+    'the photo list should use document scrolling instead of an internal scroll frame')
+  assert.doesNotMatch(table.className, /min-w-\[/,
+    'the photo table should fit its available width instead of forcing horizontal scrolling')
+  for (const surface of [workbench, table.parentElement, editor, rightsForm]) {
+    assert.ok(surface)
+    assert.doesNotMatch(surface.className, /rounded|bg-surface|bg-app|(?:^|\s)border(?:\s|$)/,
+      'review structure should use spacing and dividers instead of nested cards')
+  }
+})
+
+test('unavailable photo-variety analysis is itself a link to setup and explains why', async () => {
+  const { default: CorpusWorkbench } = await server.ssrLoadModule(
+    '/src/components/dataset/CorpusWorkbench.jsx')
+  render(React.createElement(CorpusWorkbench, {
+    datasetId: 2,
+    mode: 'coverage',
+    images: [{
+      id: 11,
+      source: 'import',
+      filename: 'portrait.png',
+      source_name: 'Portrait.png',
+      status: 'keep',
+    }],
+    onStatus() {},
+    onClassify() {},
+    visionAvailable: false,
+    visionUnavailableReason: 'LM Studio is unreachable',
+  }))
+
+  const reason = screen.getByText('LM Studio is unreachable')
+  assert.equal(screen.queryByRole('button', { name: /Analyse photo variety/ }), null)
+  const analysisLink = screen.getByRole('link', { name: /Analyse photo variety/ })
+  const refreshButton = screen.getByRole('button', { name: /Refresh local analysis/ })
+  assert.equal(analysisLink.getAttribute('href'), '#/setup')
+  assert.equal(analysisLink.parentElement, refreshButton.parentElement,
+    'primary actions should share one compact toolbar row')
+  assert.equal(reason.parentElement, refreshButton.parentElement.parentElement,
+    'the availability reason should sit below the toolbar instead of stretching its controls')
+})
+
 test('ConfirmDialog resolves FIFO requests with an activation boundary and Escape cancellation', async () => {
   const {
     ConfirmDialogProvider, useConfirmDialog,

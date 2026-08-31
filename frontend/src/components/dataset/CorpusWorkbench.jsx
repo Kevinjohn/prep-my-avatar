@@ -4,8 +4,8 @@ import {
   technicalAnalysisCounts,
   technicalAnalysisState,
 } from '../../utils/technicalAnalysis.js';
+import CorpusPhotoTable from './CorpusPhotoTable';
 import { FRAMING_ORDER } from './variationCatalogModel';
-import { datasetImageUrl } from './datasetImageUrl';
 
 const COVERAGE_OPTIONS = {
   // 'unknown' is a corpus-only bucket: an imported photo nobody has classified yet.
@@ -28,23 +28,17 @@ function countClassified(image) {
   return Object.keys(image?.coverage || {}).length;
 }
 
-function decisionLabel(image, selectedIds) {
-  if (image.anchor_decision === 'pinned') return 'pinned';
-  if (image.anchor_decision === 'excluded') return 'excluded';
-  return selectedIds.has(image.id) ? 'auto-selected' : 'automatic';
-}
-
 function Stat({ label, value, tone = '' }) {
-  const cls = tone === 'good' ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200'
-    : tone === 'warn' ? 'border-amber-400/40 bg-amber-500/10 text-amber-200'
-      : 'border-border bg-app/50 text-content-muted';
-  return <span className={`rounded-full border px-2 py-0.5 text-[0.625rem] ${cls}`}>{label} <b>{value}</b></span>;
+  const cls = tone === 'good' ? 'text-emerald-200'
+    : tone === 'warn' ? 'text-amber-200' : 'text-content-muted';
+  return <span className={`text-[0.625rem] ${cls}`}>{label} <b>{value}</b></span>;
 }
 
 export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = null, coveragePlan,
   onAnalyze, onClassify = null, onAnchorDecision = null, onCoverage = null,
   onSourceRights, onStatus, onBatch = null,
-  busy = false, visionAvailable = false, reviewPairIds = EMPTY_IDS,
+  busy = false, visionAvailable = false, visionUnavailableReason = 'Local vision is not ready',
+  reviewPairIds = EMPTY_IDS,
   faceThresholds = { green: 0.50 },
   showAnchors = true, showCoverage = true, mode = 'all' }) {
   const reviewVisible = mode === 'all' || mode === 'review';
@@ -120,32 +114,41 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
 
   return (
     <section id="ds-corpus-review" tabIndex={-1}
-      className="scroll-mt-20 flex flex-col gap-3 rounded-xl border border-border bg-surface p-3">
+      className="scroll-mt-20 flex flex-col gap-3">
       <div className="flex flex-wrap items-start gap-2">
-        <div>
-          <div className="flex items-center gap-2">
-            <span aria-hidden>🗂️</span>
-            <h3 className="m-0 text-sm font-semibold text-content">Photo review</h3>
+        <p className="m-0 max-w-2xl text-[0.6875rem] leading-relaxed text-content-muted">
+          Import preserves the master photo pool. Only images you accept here enter training; rejected and undecided originals remain available for review.
+        </p>
+        <div data-corpus-actions className="ml-auto flex max-w-xl flex-col items-start gap-1 sm:items-end">
+          <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+            <button type="button" onClick={onAnalyze} disabled={busy} title={refreshTitle}
+              className="rounded-lg border border-border bg-surface-raised px-2.5 py-1.5 text-xs font-semibold text-content disabled:opacity-40">
+              📐 Refresh local analysis{analysisCounts.outdated
+                ? ` (${analysisCounts.outdated} outdated)` : ''}
+            </button>
+            {coverageVisible && (visionAvailable ? (
+                <button type="button" onClick={onClassify} disabled={busy}
+                  title="Classify framing, angle, expression, lighting, pose and background"
+                  className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
+                  👁 Analyse photo variety
+                </button>
+              ) : (
+                <a href="#/setup" aria-describedby={`photo-variety-unavailable-${datasetId}`}
+                  className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/20">
+                  👁 Analyse photo variety
+                </a>
+              ))}
           </div>
-          <p className="m-0 mt-0.5 max-w-3xl text-[0.6875rem] leading-relaxed text-content-muted">
-            Import preserves the master photo pool. Only images you accept here enter training; rejected and undecided originals remain available for review.
-          </p>
-        </div>
-        <div className="ml-auto flex flex-wrap gap-1.5">
-          <button type="button" onClick={onAnalyze} disabled={busy} title={refreshTitle}
-            className="rounded-lg border border-border bg-surface-raised px-2.5 py-1.5 text-xs font-semibold text-content disabled:opacity-40">
-            📐 Refresh local analysis{analysisCounts.outdated
-              ? ` (${analysisCounts.outdated} outdated)` : ''}
-          </button>
-          {coverageVisible && <button type="button" onClick={onClassify} disabled={busy || !visionAvailable}
-            title={visionAvailable ? 'Classify framing, angle, expression, lighting, pose and background' : 'Set up local vision, or classify images manually below'}
-            className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
-            👁 Analyse photo variety
-          </button>}
+          {coverageVisible && !visionAvailable && (
+            <p id={`photo-variety-unavailable-${datasetId}`}
+              className="m-0 text-[0.625rem] leading-relaxed text-amber-200 sm:text-right">
+              {visionUnavailableReason}
+            </p>
+          )}
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 border-y border-border py-2">
         <Stat label="real photos" value={imported.length} tone="good" />
         <Stat label="accepted for training" value={accepted.length} tone={accepted.length ? 'good' : 'warn'} />
         <Stat label="needs decision" value={pending.length} tone={pending.length ? 'warn' : 'good'} />
@@ -159,7 +162,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
       </div>
 
       {reviewVisible && !!pending.length && onBatch && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-500/5 px-2.5 py-2">
+        <div className="flex flex-wrap items-center gap-2 border-y border-amber-400/30 py-2">
           <span className="text-[0.6875rem] text-amber-100">Admission shortcuts only act on undecided photos with completed QA.</span>
           <button type="button" disabled={busy || !cleanPending.length}
             onClick={() => onBatch(cleanPending.map((image) => image.id), 'keep')}
@@ -177,48 +180,23 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
       <div className="flex flex-wrap gap-1" role="group" aria-label="Photo filters">
         {filters.map(([id, label]) => (
           <button key={id} type="button" onClick={() => setFilter(id)} aria-pressed={filter === id}
-            className={`rounded-md border px-2 py-1 text-[0.625rem] ${filter === id
-              ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200'
-              : 'border-border bg-app/40 text-content-muted'}`}>
+            className={`border-b-2 px-1 py-1 text-[0.625rem] ${filter === id
+              ? 'border-indigo-400 text-indigo-200'
+              : 'border-transparent text-content-muted hover:text-content'}`}>
             {label}
           </button>
         ))}
         <span className="ml-auto self-center text-[0.625rem] text-content-subtle">showing {visible.length}/{imported.length}</span>
       </div>
 
-      <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.65fr)]">
-        <div className="grid max-h-[30rem] grid-cols-3 gap-1.5 overflow-auto pr-1 sm:grid-cols-5 xl:grid-cols-6">
-          {visible.map((image) => {
-            const active = selected?.id === image.id;
-            const decision = decisionLabel(image, selectedIds);
-            return (
-              <button key={image.id} type="button" onClick={() => setSelectedId(image.id)}
-                aria-pressed={active} title={image.source_name || `Imported image ${image.id}`}
-                className={`relative aspect-square overflow-hidden rounded-lg border text-left ${active
-                  ? 'border-indigo-300 ring-2 ring-indigo-400/40'
-                  : 'border-border hover:border-content-subtle'}`}>
-                <img loading="lazy" decoding="async" alt="" src={datasetImageUrl(datasetId, image)}
-                  className="h-full w-full object-cover" />
-                {anchorsVisible && (
-                  <span className={`absolute left-1 top-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] ${decision === 'pinned'
-                    ? 'text-emerald-300' : decision === 'excluded' ? 'text-rose-300' : 'text-white/80'}`}>
-                    {decision === 'pinned' ? '📌 always use' : decision === 'excluded' ? '⊘ never send' : selectedIds.has(image.id) ? '◆ selected' : 'auto'}
-                  </span>
-                )}
-                {(image.duplicate_of_id || duplicateRoots.has(image.id)) && (
-                  <span className="absolute right-1 top-1 rounded bg-amber-950/90 px-1 py-px text-[0.5625rem] text-amber-200">≈ duplicate</span>
-                )}
-                <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1 py-px text-[0.5625rem] text-white/75">
-                  {image.status === 'keep' ? '✓ training' : image.status === 'reject' ? '✕ rejected' : '… review'}
-                  {' · '}{image.framing || '?'} · {image.training_usefulness || 'unknown'}
-                </span>
-              </button>
-            );
-          })}
-        </div>
+      <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.65fr)] lg:gap-0">
+        <CorpusPhotoTable datasetId={datasetId} images={visible}
+          selectedId={selected?.id} selectedIds={selectedIds} duplicateRoots={duplicateRoots}
+          anchorsVisible={anchorsVisible} onSelect={setSelectedId} />
 
         {selected && (
-          <div className="flex flex-col gap-2 rounded-lg border border-border bg-app/40 p-2.5">
+          <aside data-photo-editor aria-label="Selected photo details"
+            className="flex flex-col gap-3 border-t border-border pt-3 lg:border-l lg:border-t-0 lg:pl-3 lg:pt-0">
             <div className="min-w-0">
               <p className="m-0 truncate text-xs font-semibold text-content" title={selected.source_name || ''}>
                 {selected.source_name || `Imported image ${selected.id}`}
@@ -268,7 +246,8 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               </p>
             </div>}
 
-            {reviewVisible && <form className="flex flex-col gap-1.5 rounded-md border border-border p-2"
+            {reviewVisible && <form aria-label="Source rights and consent"
+              className="flex flex-col gap-1.5 border-t border-border pt-3"
               onSubmit={async (event) => {
                 event.preventDefault();
                 const saved = await onSourceRights?.(selected.id, rightsDraft);
@@ -334,7 +313,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                 </p>
               )}
             </form>}
-          </div>
+          </aside>
         )}
       </div>
     </section>

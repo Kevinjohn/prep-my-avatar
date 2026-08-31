@@ -27,7 +27,7 @@ export default function DatasetWorkflowNav({ steps, currentSlug, onNavigate }) {
         </label>
       </div>
 
-      <div className="hidden rounded-lg border border-border bg-surface p-2 lg:block">
+      <div className="hidden border-r border-border pr-3 lg:block">
         <p className="m-0 px-1.5 pb-1.5 text-[0.6875rem] font-semibold uppercase tracking-wide text-content-subtle">
           Dataset steps
         </p>
@@ -35,15 +35,15 @@ export default function DatasetWorkflowNav({ steps, currentSlug, onNavigate }) {
           {steps.map((step, index) => {
             const current = step.slug === currentSlug;
             const state = stepState(step, currentSlug);
-            const tone = current ? 'bg-surface-raised text-content font-semibold'
+            const tone = current ? 'border-indigo-400 text-content font-semibold'
               : step.done ? 'text-emerald-300'
                 : step.unavailable ? 'text-content-subtle'
-                  : 'text-content-muted hover:bg-surface-raised hover:text-content';
+                  : 'text-content-muted hover:text-content';
             return (
               <li key={step.slug}>
                 <button type="button" onClick={() => onNavigate(step.slug)}
                   aria-current={current ? 'step' : undefined}
-                  className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs ${tone}`}>
+                  className={`flex w-full items-start gap-2 border-l-2 px-2 py-1.5 text-left text-xs ${current ? tone : `border-transparent ${tone}`}`}>
                   <span aria-hidden className="w-4 shrink-0 text-center">{state.glyph}</span>
                   <span className="min-w-0 flex-1">
                     <span className="block text-[0.8125rem]">
