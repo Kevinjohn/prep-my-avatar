@@ -160,16 +160,18 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
                   {app.path && <div className="mt-1">Application path:<CopyCommand command={app.path} /></div>}
                 </li>
                 <li>
-                  In the dashboard, select your existing instance
+                  In the dashboard, click the card for your existing instance
                   {instanceName ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.
-                  Comfy Desktop will start its Python environment, GPU support, and server for you.
+                  Opening Comfy Desktop alone does not start the server. Clicking the instance card starts its
+                  Python environment, GPU support, and server.
                 </li>
               </>
             ) : managedByDesktop ? (
               <>
                 <li>Open <strong className="text-content">Comfy Desktop</strong> from Applications.</li>
-                <li>Select your configured instance{instanceName
-                  ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.</li>
+                <li>On its dashboard, click the card for your configured instance{instanceName
+                  ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.
+                  Opening Comfy Desktop alone does not start the server.</li>
               </>
             ) : folderCommand ? (
               <>
@@ -198,7 +200,7 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
               <li>
                 Or open the detected desktop application:<CopyCommand command={appCommand} />
                 {app.path && <div className="mt-1">Application path:<CopyCommand command={app.path} /></div>}
-                When {app.name || 'it'} opens its dashboard, select your existing instance
+                When {app.name || 'it'} opens its dashboard, click the card for your existing instance
                 {instanceName ? <> named <strong className="text-content">{instanceName}</strong></> : ''}.
               </li>
             )}

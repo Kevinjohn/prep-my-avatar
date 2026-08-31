@@ -16,7 +16,7 @@ filenames, and verification steps used on a working installation.
 1. [Download Comfy Desktop](https://www.comfy.org/download), install it, and open it.
 2. Create or select an instance. Comfy Desktop owns that instance’s Python environment, GPU setup, and server process.
 3. In the instance menu, open **Storage**. Copy its **application directory** into Prep My Avatar’s **ComfyUI install directory** field. Do not enter `/Applications/Comfy Desktop.app` or the shared-model directory.
-4. Start the instance. On the verified Mac, `open -b com.todesktop.241012ess7yxs0e` opens the dashboard and the instance is named **ComfyUI-desktop**.
+4. On the dashboard, click the card for the instance you want to run. Opening Comfy Desktop alone does not start its server. On the verified Mac, `open -b com.todesktop.241012ess7yxs0e` opens the dashboard and the instance card is named **ComfyUI-desktop**.
 5. Wait for `http://127.0.0.1:8188`, then select **Save & re-check**.
 
 If the selected folder contains `.comfy_environment`, it is Desktop-managed. Always start it through Comfy Desktop rather than invoking its private `main.py`.
@@ -51,7 +51,7 @@ This is a filesystem heuristic, not a permanent guarantee from ComfyUI. If a fut
 ## Do this
 
 1. On **Step 2 of 5 — Local generation — ComfyUI**, check whether the page says ComfyUI is already running.
-2. Start it using the matching method above: select the instance in Comfy Desktop, or run `python main.py --listen 127.0.0.1 --port 8188` from an activated manual-install environment.
+2. Start it using the matching method above: click the instance card on the Comfy Desktop dashboard, or run `python main.py --listen 127.0.0.1 --port 8188` from an activated manual-install environment.
 3. Enter the **ComfyUI install directory** and **ComfyUI API URL** shown by your installation.
 4. Select **Save & re-check**. A classic ComfyUI directory contains `models` and `main.py`; ComfyUI Desktop uses the supported `models` and `custom_nodes` layout instead.
 5. If you want local Klein generation, accept the model licence, add any required Hugging Face token in Settings, and use the offered model, text-encoder, VAE, and consistency-LoRA downloads.

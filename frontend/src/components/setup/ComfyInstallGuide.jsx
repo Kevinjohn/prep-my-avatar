@@ -32,13 +32,19 @@ export default function ComfyInstallGuide({ platform = '', app = { launchCommand
                 Install and open it.{app.launchCommand && <><span> On this Mac:</span>
                   <CopyCommand command={app.launchCommand} /></>}
               </li>
-              <li>Create or select an instance. The Desktop app starts and stops its server for you.</li>
+              <li>
+                Create or select an instance. Opening Comfy Desktop alone does not start its server: on the
+                dashboard, click the instance card to start it.
+              </li>
               <li>
                 In the instance menu, open <strong className="text-content">Storage</strong>. Copy the
                 instance’s <strong className="text-content">application directory</strong> into the
                 ComfyUI install directory field below. Do not use the path to the Desktop app itself.
               </li>
-              <li>Start the instance, then select <strong className="text-content">Save &amp; re-check</strong>.</li>
+              <li>
+                Wait for the instance interface to load, then select
+                {' '}<strong className="text-content">Save &amp; re-check</strong>.
+              </li>
             </ol>
           </section>
 

@@ -681,7 +681,8 @@ test('session tool details give exact local launch instructions', async () => {
   assert.ok(screen.getByText(/This is a Comfy Desktop-managed installation/))
   assert.ok(screen.getByText('/Applications/Comfy Desktop.app'))
   assert.ok(screen.getByText((_, node) => node?.tagName === 'LI'
-    && /select your existing instance\s+named\s+ComfyUI/.test(node.textContent)))
+    && /click the card for your existing instance\s+named\s+ComfyUI/.test(node.textContent)
+    && /Opening Comfy Desktop alone does not start the server/.test(node.textContent)))
   assert.ok(screen.getAllByText('/Users/test/ComfyUI-Installs/ComfyUI-desktop/ComfyUI').length >= 1)
   assert.ok(screen.getByText((_, node) => node?.tagName === 'LI'
     && /Then come back here and select\s+Re-check now/.test(node.textContent)))
