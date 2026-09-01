@@ -128,6 +128,9 @@ def _generate_replicate(refs: list[bytes], prompt: str, model: str | None,
                 'prompt': prompt, 'image_input': image_input,
                 'aspect_ratio': aspect_ratio, 'resolution': '2K',
                 'output_format': 'jpg',
+                # Identity work must fail visibly if the requested model is at
+                # capacity; a silent provider/model substitution is unacceptable.
+                'allow_fallback_model': False,
             }},
             timeout=(10, 70),
         )

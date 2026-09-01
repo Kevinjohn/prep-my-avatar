@@ -143,10 +143,13 @@ def test_api_fanout_creates_pending_rows(app, monkeypatch):
         os.makedirs(svc._dataset_dir(ds.id), exist_ok=True)
         Path(svc._dataset_dir(ds.id), 'ref.webp').write_bytes(_png())
         ds.ref_filename = 'ref.webp'
+        svc.db.session.add(FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='keep',
+            filename='approved-canary.webp', generation_engine='chatgpt'))
         svc.db.session.commit()
         svc.generate_variations_nanobanana(app, LOCAL_USER, ds.id,
                                            select_preset('zimage_12')[:2], 1, engine='chatgpt')
-        rows = FaceDatasetImage.query.filter_by(dataset_id=ds.id).all()
+        rows = FaceDatasetImage.query.filter_by(dataset_id=ds.id, status='pending').all()
         assert len(rows) == 2 and all(r.status == 'pending' and r.klein_model == 'chatgpt' for r in rows)
         assert calls  # background batch was dispatched
 
@@ -491,9 +494,77 @@ def test_generation_anchor_pack_uses_imported_corpus_and_records_ids(app, monkey
         assert provenance['model'] == 'snapshot-image-model'
         assert provenance['quality'] == 'medium'
         assert provenance['auth_lane'] == 'api'
-        assert provenance['reference_limit'] == 16
+        assert provenance['reference_limit'] == 5
         assert provenance['reference_count'] == 3
         assert dispatched[0][-1]['model'] == 'snapshot-image-model'
+
+
+def test_generation_anchor_pack_prioritizes_identity_over_framing_diversity(app):
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Identity anchors', 'identityanchors')
+        rows = []
+        for name, framing, score in (
+                ('weak-face.png', 'face', 0.31),
+                ('strong-bust.png', 'bust', 0.91),
+                ('strong-face.png', 'face', 0.94)):
+            ids, failed = svc.import_images(
+                LOCAL_USER, ds.id, [(name, _png())], crop=False, dedupe=False)
+            assert failed == 0
+            row = svc.db.session.get(FaceDatasetImage, ids[0])
+            row.status = 'keep'
+            row.framing = framing
+            row.training_usefulness = 'green'
+            row.face_score = score
+            rows.append(row)
+        svc.db.session.commit()
+
+        anchors = svc.select_generation_references(ds, max_images=2)
+
+        assert [anchor['image_id'] for anchor in anchors] == [rows[2].id, rows[1].id]
+
+
+def test_remote_batch_requires_one_kept_identity_canary(app, monkeypatch):
+    import pytest
+    from app import config as cfg
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+    with app.app_context():
+        cfg.save_config({'privacy': {'allow_remote_generation': True}})
+        ds = svc.create_dataset(LOCAL_USER, 'Canary', 'canary')
+        ids, failed = svc.import_images(
+            LOCAL_USER, ds.id, [('identity.png', _png())], crop=False, dedupe=False)
+        assert failed == 0
+        source = svc.db.session.get(FaceDatasetImage, ids[0])
+        source.status = 'keep'
+        source.training_usefulness = 'green'
+        source.framing = 'face'
+        svc.db.session.commit()
+
+        variations = [
+            {'id': 'one', 'label': 'one', 'prompt': 'portrait one', 'framing': 'face'},
+            {'id': 'two', 'label': 'two', 'prompt': 'portrait two', 'framing': 'face'},
+        ]
+        with pytest.raises(ValueError, match='identity canary'):
+            svc._generate_variations_nanobanana_locked(
+                app, LOCAL_USER, ds.id, variations, 1, engine='nanobanana')
+
+        canary = FaceDatasetImage(
+            dataset_id=ds.id, source='generated', status='keep', filename='canary.webp',
+            generation_engine='nanobanana')
+        svc.db.session.add(canary)
+        svc.db.session.commit()
+        monkeypatch.setattr(
+            svc.threading, 'Thread',
+            lambda target, args=(), daemon=True: type('T', (), {'start': lambda self: None})())
+
+        generated = svc._generate_variations_nanobanana_locked(
+            app, LOCAL_USER, ds.id, variations, 1, engine='nanobanana')
+
+        assert len(generated) == 2
 
 
 def test_corpus_workbench_metadata_anchor_decisions_and_coverage(app):

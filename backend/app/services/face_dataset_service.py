@@ -201,6 +201,11 @@ try:
 except (TypeError, ValueError):
     MAX_GENERATION_REFERENCES = 14
 
+# Provider maxima are payload limits, not identity-quality targets. A compact
+# pack led by one authoritative portrait gives editing models a coherent person
+# to preserve instead of asking them to average a large, time-varying corpus.
+REMOTE_IDENTITY_REFERENCE_LIMIT = 5
+
 
 def extra_ref_filenames(ds) -> list:
     """Références additionnelles du dataset (JSON en base, parse tolérant)."""
@@ -360,7 +365,11 @@ def _anchor_quality_score(img) -> float:
             numeric.append(0.0)
     framing_bonus = {'face': 4.0, 'bust': 3.0, 'body': 2.0, 'back': 1.0}.get(
         (img.framing or '').lower(), 0.0)
-    return usefulness + sum(numeric) / len(numeric) + framing_bonus
+    try:
+        identity_bonus = max(0.0, min(1.0, float(img.face_score))) * 200.0
+    except (TypeError, ValueError):
+        identity_bonus = 0.0
+    return usefulness + identity_bonus + sum(numeric) / len(numeric) + framing_bonus
 
 
 def _coerce_image_ids(value) -> list[int]:
@@ -381,7 +390,7 @@ def _planned_anchor_rows(rows, *, preferred_ids=None, limit=MAX_GENERATION_REFER
     """Return ``[(row, reason)]`` for the imported part of an anchor pack.
 
     Explicitly preferred rows (regeneration) lead, then user-pinned rows, then a
-    quality-ranked framing round-robin. Auto selection avoids near-duplicate
+    identity-ranked reviewed photos. Auto selection avoids near-duplicate
     siblings and technical red flags when cleaner alternatives exist. A user's
     pin is authoritative and may intentionally override both safeguards.
     """
@@ -409,30 +418,15 @@ def _planned_anchor_rows(rows, *, preferred_ids=None, limit=MAX_GENERATION_REFER
     remaining = [row for row in eligible if row.id not in used_ids]
     if any(row.training_usefulness != 'red' for row in remaining):
         remaining = [row for row in remaining if row.training_usefulness != 'red']
-    ranked = sorted(remaining, key=lambda row: (-_anchor_quality_score(row), row.id))
-    groups = {}
-    group_order = ('face', 'bust', 'body', 'back', 'unknown')
-    for row in ranked:
-        groups.setdefault((row.framing or 'unknown').lower(), []).append(row)
-
     duplicate_roots = {row.duplicate_of_id or row.id for row, _reason in planned}
-    while any(groups.values()) and len(planned) < limit:
-        progressed = False
-        for key in (*group_order, *sorted(set(groups) - set(group_order))):
-            bucket = groups.get(key) or []
-            while bucket:
-                row = bucket.pop(0)
-                root = row.duplicate_of_id or row.id
-                if root in duplicate_roots:
-                    continue
-                planned.append((row, 'technical quality + framing diversity'))
-                used_ids.add(row.id)
-                duplicate_roots.add(root)
-                progressed = True
-                break
-            if len(planned) >= limit:
-                break
-        if not progressed:
+    for row in sorted(remaining, key=lambda item: (-_anchor_quality_score(item), item.id)):
+        root = row.duplicate_of_id or row.id
+        if root in duplicate_roots:
+            continue
+        planned.append((row, 'identity similarity + face visibility + technical quality'))
+        used_ids.add(row.id)
+        duplicate_roots.add(root)
+        if len(planned) >= limit:
             break
     return planned[:limit]
 
@@ -3295,7 +3289,9 @@ def _compute_dataset_aggregates(ds, imgs):
         'composition': comp,
         'composition_upscaled': comp_upscaled,
         'coverage_plan': build_coverage_plan(ds, imgs),
-        'anchor_plan': build_anchor_plan(ds, imgs),
+        'anchor_plan': build_anchor_plan(
+            ds, imgs,
+            max_images=min(MAX_GENERATION_REFERENCES, REMOTE_IDENTITY_REFERENCE_LIMIT)),
         'image_summary': image_summary,
         'caption_leak': {
             'leaking': sum(1 for i in imgs if _img_leaks(i)),
@@ -6359,7 +6355,7 @@ def _remote_generation_profile(engine) -> dict:
             'auth_lane': lane,
             'routing_model': (cfg.get('engines.chatgpt_subscription_model')
                               if lane == 'subscription' else None),
-            'reference_limit': 5 if lane == 'subscription' else 16,
+            'reference_limit': REMOTE_IDENTITY_REFERENCE_LIMIT,
         }
     provider = cfg.get('engines.nanobanana_provider') or 'google'
     if provider == 'replicate':
@@ -6372,7 +6368,7 @@ def _remote_generation_profile(engine) -> dict:
         'quality': None,
         'auth_lane': 'api',
         'routing_model': None,
-        'reference_limit': 14,
+        'reference_limit': REMOTE_IDENTITY_REFERENCE_LIMIT,
     }
 
 
@@ -6583,9 +6579,18 @@ def _generate_variations_nanobanana_locked(app, user_id, dataset_id, variations,
     if total > MAX_FANOUT:
         raise ValueError(f'fan-out too large ({total} > {MAX_FANOUT})')
     _check_fanout_capacity(dataset_id, total)
+    if total > 1:
+        approved_canary = (FaceDatasetImage.query
+                           .filter_by(dataset_id=dataset_id, source='generated',
+                                      status='keep', generation_engine=engine)
+                           .filter(FaceDatasetImage.filename.isnot(None)).first())
+        if approved_canary is None:
+            raise ValueError(
+                'identity canary required: generate and keep one image with this '
+                'provider before launching a multi-image batch')
     profile = _remote_generation_profile(engine)
-    # The full imported corpus stays on the dataset; only a bounded, diverse
-    # anchor set is sent to the provider for this request.
+    # The full imported corpus stays on the dataset; only a compact,
+    # identity-ranked anchor set is sent to the provider for this request.
     anchors = select_generation_references(
         ds, max_images=min(MAX_GENERATION_REFERENCES, profile['reference_limit']))
     ref_bytes = [anchor['bytes'] for anchor in anchors]

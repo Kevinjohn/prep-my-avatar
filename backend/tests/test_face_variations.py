@@ -120,5 +120,7 @@ def test_wrappers_scope_reference_to_face_identity():
     assert 'do NOT copy the outfit' in api and 'facial expression' in api
     api_multi = wrap_variation('upper body portrait', ref_count=3)
     assert 'do NOT copy the outfit' in api_multi
+    assert 'FIRST reference image is authoritative' in api_multi
+    assert 'supporting evidence' in api_multi
     kl = wrap_variation_klein('upper body portrait', framing='bust')
     assert 'do not copy' in kl and 'outfit' in kl and 'facial expression' in kl

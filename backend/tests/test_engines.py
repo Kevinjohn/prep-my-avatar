@@ -137,6 +137,7 @@ def test_nanobanana_routes_through_replicate_when_selected(app, monkeypatch):
     assert post.call_args.kwargs['headers']['Authorization'] == 'Bearer r8-x'
     sent = post.call_args.kwargs['json']['input']
     assert sent['aspect_ratio'] == '3:4'
+    assert sent['allow_fallback_model'] is False
     assert len(sent['image_input']) == 2
     assert sent['image_input'][0].startswith('data:image/webp;base64,')
     assert get.call_args.args[0] == 'https://replicate.delivery/output.webp'
@@ -154,7 +155,7 @@ def test_nanobanana_dataset_profile_uses_selected_replicate_model(app):
 
     assert profile['provider'] == 'replicate'
     assert profile['model'] == 'google/nano-banana-pro'
-    assert profile['reference_limit'] == 14
+    assert profile['reference_limit'] == 5
 
 
 def test_nanobanana_rejects_untrusted_replicate_output_url(app, monkeypatch):

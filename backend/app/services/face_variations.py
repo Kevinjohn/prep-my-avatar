@@ -32,8 +32,10 @@ IDENTITY_GUARD = (
 # peut s'ancrer sur une seule image ; on lui dit EXPLICITEMENT que toutes les refs
 # montrent la même personne et qu'il doit s'appuyer sur chacune d'elles.
 IDENTITY_GUARD_MULTI = (
-    "ALL the reference images show the SAME person (different angles, expressions or "
-    "framings). Use EVERY reference image together to lock the identity. Preserve their "
+    "ALL the reference images show the SAME person. The FIRST reference image is authoritative "
+    "for the person's current facial identity. Treat the remaining images only as supporting "
+    "evidence for stable facial traits across different angles, expressions, or framings; do "
+    "not average their age, hairstyle, facial hair, accessories, or body shape. Preserve their "
     f"facial identity EXACTLY: {_IDENTITY_TRAITS}. Do NOT beautify, slim, age, or alter the face. "
     "Use the reference images ONLY to lock the facial identity: take the clothing/outfit "
     "and the facial expression from the description below, and do NOT copy the outfit or "
