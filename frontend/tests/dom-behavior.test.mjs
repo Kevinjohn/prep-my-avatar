@@ -89,6 +89,57 @@ test('photo review presents larger uncropped previews with status in dedicated c
   }
 })
 
+test('reference editor explains and previews the exact provider identity pack', async () => {
+  const { default: ReferencePanel } = await server.ssrLoadModule(
+    '/src/components/dataset/ReferencePanel.jsx')
+  const decisions = []
+  const mounted = render(React.createElement(ReferencePanel, {
+    refFilename: 'primary.webp',
+    datasetId: 2,
+    onSetRef() {},
+    onCropRef() {},
+    busy: false,
+    extraRefs: ['sunglasses.webp'],
+    onAddExtraRef() {},
+    onRemoveExtraRef() {},
+    onAnchorDecision: async (...args) => { decisions.push(args); return true },
+    anchorPlan: {
+      selected_total: 2,
+      limit: 5,
+      duplicates_removed: 1,
+      items: [
+        { role: 'primary_reference', filename: 'primary.webp', warnings: [] },
+        {
+          role: 'import', image_id: 14, filename: 'sunglasses.webp',
+          warnings: ['Eyes or face may be obscured'],
+        },
+      ],
+    },
+  }))
+
+  assert.ok(screen.getByRole('heading', { name: 'Identity reference pack' }))
+  assert.match(mounted.container.textContent, /Remote generation providers receive these unique photos in this order/i)
+  assert.match(mounted.container.textContent, /Local Klein uses the primary plus hand-picked supporting photos/i)
+  assert.match(mounted.container.textContent, /Remote generation only · automatically selected/i)
+  assert.match(mounted.container.textContent, /More references are not automatically better/i)
+  assert.match(mounted.container.textContent, /1 exact duplicate omitted/i)
+  assert.ok(screen.getByText('Primary — authoritative identity'))
+  assert.ok(screen.getByText('Supporting reference 1'))
+  assert.ok(screen.getByText(/Eyes or face may be obscured/))
+  assert.equal(screen.getByRole('link', { name: 'Change automatic choices in Step 3' })
+    .getAttribute('href'), '#/datasets/2/anchors')
+  await userEvent.setup({ document }).click(screen.getByRole('button', {
+    name: 'Exclude Supporting reference 1 from generation references',
+  }))
+  assert.deepEqual(decisions, [[14, 'excluded']])
+  assert.equal(screen.getAllByRole('img').length, 2)
+
+  const accessibility = await axe.run(mounted.container, {
+    rules: { 'color-contrast': { enabled: false } },
+  })
+  assert.deepEqual(accessibility.violations.map((violation) => violation.id), [])
+})
+
 test('unavailable photo-variety analysis is itself a link to setup and explains why', async () => {
   const { default: CorpusWorkbench } = await server.ssrLoadModule(
     '/src/components/dataset/CorpusWorkbench.jsx')

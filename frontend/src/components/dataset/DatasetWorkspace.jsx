@@ -788,15 +788,12 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
 
             {activeStep.slug === 'reference' && (
               <div id="gf-reference" className="scroll-mt-20 flex flex-col gap-2">
-                <p className="m-0 text-sm text-content-muted">
-                  Local Klein generation and face scoring use this image. Remote image providers can
-                  use the reviewed generation photos instead, so you may skip this page.
-                </p>
                 <div id="ds-add-reference" tabIndex={-1}>
                   <ReferencePanel refFilename={d.ref_filename} datasetId={d.id} onSetRef={ds.setRef}
                     onCropRef={() => setRefCrop(true)} busy={ds.busy} nonce={ds.refNonce}
                     extraRefs={d.ref_extra_filenames || []}
-                    onAddExtraRef={ds.addExtraRef} onRemoveExtraRef={ds.removeExtraRef} />
+                    onAddExtraRef={ds.addExtraRef} onRemoveExtraRef={ds.removeExtraRef}
+                    onAnchorDecision={ds.setAnchorDecision} anchorPlan={d.anchor_plan} />
                 </div>
               </div>
             )}

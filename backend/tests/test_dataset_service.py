@@ -506,12 +506,12 @@ def test_generation_anchor_pack_prioritizes_identity_over_framing_diversity(app)
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'Identity anchors', 'identityanchors')
         rows = []
-        for name, framing, score in (
-                ('weak-face.png', 'face', 0.31),
-                ('strong-bust.png', 'bust', 0.91),
-                ('strong-face.png', 'face', 0.94)):
+        for name, framing, score, color in (
+                ('weak-face.png', 'face', 0.31, (220, 80, 80)),
+                ('strong-bust.png', 'bust', 0.91, (80, 220, 80)),
+                ('strong-face.png', 'face', 0.94, (80, 80, 220))):
             ids, failed = svc.import_images(
-                LOCAL_USER, ds.id, [(name, _png())], crop=False, dedupe=False)
+                LOCAL_USER, ds.id, [(name, _png(color))], crop=False, dedupe=False)
             assert failed == 0
             row = svc.db.session.get(FaceDatasetImage, ids[0])
             row.status = 'keep'
@@ -524,6 +524,49 @@ def test_generation_anchor_pack_prioritizes_identity_over_framing_diversity(app)
         anchors = svc.select_generation_references(ds, max_images=2)
 
         assert [anchor['image_id'] for anchor in anchors] == [rows[2].id, rows[1].id]
+
+
+def test_generation_anchor_pack_deduplicates_identical_files_and_backfills(app):
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Unique anchors', 'uniqueanchors')
+        duplicate_bytes = _png((220, 80, 80))
+        unique_bytes = _png((80, 220, 80))
+        ids = []
+        for name, raw in (
+                ('duplicate.png', duplicate_bytes),
+                ('unique.png', unique_bytes)):
+            imported, failed = svc.import_images(
+                LOCAL_USER, ds.id, [(name, raw)], crop=False, dedupe=False)
+            assert failed == 0
+            row = svc.db.session.get(FaceDatasetImage, imported[0])
+            row.status = 'keep'
+            row.training_usefulness = 'green'
+            row.anchor_decision = 'pinned'
+            if name == 'unique.png':
+                row.coverage_json = json.dumps({'occlusion': 'minor'})
+            ids.append(row.id)
+
+        duplicate_row = svc.db.session.get(FaceDatasetImage, ids[0])
+        stored_duplicate = Path(svc._dataset_dir(ds.id), duplicate_row.filename).read_bytes()
+        ds.ref_filename = 'primary.webp'
+        Path(svc._dataset_dir(ds.id), ds.ref_filename).write_bytes(stored_duplicate)
+        svc.db.session.commit()
+
+        anchors = svc.select_generation_references(ds, max_images=2)
+        plan = svc.build_anchor_plan(ds, FaceDatasetImage.query.filter_by(dataset_id=ds.id).all(),
+                                     max_images=2)
+
+        assert len(anchors) == 2
+        assert [anchor['role'] for anchor in anchors] == ['primary_reference', 'import']
+        assert [anchor['image_id'] for anchor in anchors] == [None, ids[1]]
+        assert len({anchor['sha256'] for anchor in anchors}) == 2
+        assert plan['selected_total'] == 2
+        assert plan['selected_import_ids'] == [ids[1]]
+        assert plan['duplicates_removed'] == 1
+        assert plan['items'][1]['warnings'] == ['Eyes or face may be obscured']
 
 
 def test_remote_batch_requires_one_kept_identity_canary(app, monkeypatch):

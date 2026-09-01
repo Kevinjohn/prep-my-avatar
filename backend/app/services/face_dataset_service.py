@@ -432,28 +432,49 @@ def _planned_anchor_rows(rows, *, preferred_ids=None, limit=MAX_GENERATION_REFER
 
 
 def build_anchor_plan(ds, images, *, max_images=MAX_GENERATION_REFERENCES) -> dict:
-    """Payload-safe preview of the exact imported anchors a new API request uses."""
-    explicit_names = [ds.ref_filename, *extra_ref_filenames(ds)]
-    explicit = sum(1 for name in explicit_names if _reference_file_readable(ds.id, name))
-    remaining = max(0, int(max_images) - explicit)
+    """Payload-safe preview of the exact ordered anchors a new request uses."""
     imported = [row for row in images if row.source == 'import']
-    planned = _planned_anchor_rows(imported, limit=remaining)
-    selected_ids = [row.id for row, _reason in planned]
+    rows_by_id = {row.id: row for row in imported}
+    rows_by_sha = {row.source_sha256: row for row in imported if row.source_sha256}
+    diagnostics = {}
+    anchors = select_generation_references(
+        ds, max_images=max_images, diagnostics=diagnostics)
+    selected_ids = [anchor['image_id'] for anchor in anchors
+                    if anchor.get('image_id') is not None]
+
+    def item_payload(anchor):
+        row = rows_by_id.get(anchor.get('image_id')) or rows_by_sha.get(anchor.get('sha256'))
+        coverage = parse_coverage(row.coverage_json) if row is not None else {}
+        warnings = []
+        if coverage.get('occlusion') in {'minor', 'major'}:
+            warnings.append('Eyes or face may be obscured')
+        if row is not None and row.training_usefulness in {'amber', 'red'}:
+            warnings.append('Technical quality needs review')
+        return {
+            'image_id': anchor.get('image_id'),
+            'filename': anchor.get('filename'),
+            'role': anchor.get('role'),
+            'source_name': anchor.get('source_name') or (row.source_name if row else '') or '',
+            'framing': (row.framing if row else None) or 'unknown',
+            'technical': (row.training_usefulness if row else None) or 'unknown',
+            'coverage': coverage,
+            'reason': anchor.get('selection_reason') or '',
+            'warnings': warnings,
+        }
+
+    items = [item_payload(anchor) for anchor in anchors]
     return {
         'limit': int(max_images),
-        'explicit_references': explicit,
+        'explicit_references': sum(
+            1 for anchor in anchors if anchor['role'] != 'import'),
         'selected_import_ids': selected_ids,
-        'selected_total': min(int(max_images), explicit + len(selected_ids)),
+        'selected_total': len(anchors),
+        'duplicates_removed': diagnostics.get('duplicates_removed', 0),
         'pinned': sum(1 for row in imported if row.anchor_decision == 'pinned'),
         'excluded': sum(1 for row in imported if row.anchor_decision == 'excluded'),
         'eligible': sum(1 for row in imported if row.filename and row.status == 'keep'
                         and (row.anchor_decision or 'auto') != 'excluded'),
-        'items': [
-            {'image_id': row.id, 'source_name': row.source_name or '',
-             'framing': row.framing or 'unknown',
-             'technical': row.training_usefulness or 'unknown', 'reason': reason}
-            for row, reason in planned
-        ],
+        'items': items,
     }
 
 
@@ -469,7 +490,8 @@ def _reference_file_readable(dataset_id, filename) -> bool:
 
 
 def select_generation_references(ds, *, preferred_ids=None,
-                                 max_images=MAX_GENERATION_REFERENCES) -> list[dict]:
+                                 max_images=MAX_GENERATION_REFERENCES,
+                                 diagnostics=None) -> list[dict]:
     """Build a bounded, diverse reference pack for an API generation request.
 
     The dataset remains the complete reference pool. This function only chooses
@@ -484,9 +506,16 @@ def select_generation_references(ds, *, preferred_ids=None,
         limit = MAX_GENERATION_REFERENCES
     anchors = []
     seen_files = set()
+    seen_hashes = set()
+    if diagnostics is not None:
+        diagnostics['duplicates_removed'] = 0
 
     def add_file(filename, role, image_id=None, source_name=None, selection_reason=''):
-        if not isinstance(filename, str) or not filename or filename in seen_files:
+        if not isinstance(filename, str) or not filename:
+            return False
+        if filename in seen_files:
+            if diagnostics is not None:
+                diagnostics['duplicates_removed'] += 1
             return False
         path = os.path.join(_dataset_dir(ds.id), filename)
         try:
@@ -497,11 +526,18 @@ def select_generation_references(ds, *, preferred_ids=None,
             return False
         if not raw:
             return False
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest in seen_hashes:
+            if diagnostics is not None:
+                diagnostics['duplicates_removed'] += 1
+            seen_files.add(filename)
+            return False
         seen_files.add(filename)
+        seen_hashes.add(digest)
         anchors.append({'bytes': raw, 'filename': filename, 'image_id': image_id,
                         'role': role, 'source_name': source_name,
                         'selection_reason': selection_reason,
-                        'sha256': hashlib.sha256(raw).hexdigest(),
+                        'sha256': digest,
                         'byte_size': len(raw)})
         return True
 
@@ -522,9 +558,8 @@ def select_generation_references(ds, *, preferred_ids=None,
     rows = (FaceDatasetImage.query
             .filter_by(dataset_id=ds.id, source='import')
             .filter(FaceDatasetImage.filename.isnot(None)).all())
-    remaining = max(0, limit - len(anchors))
     for row, reason in _planned_anchor_rows(
-            rows, preferred_ids=preferred_ids, limit=remaining):
+            rows, preferred_ids=preferred_ids, limit=len(rows)):
         if len(anchors) >= limit:
             break
         add_file(row.filename, 'import', image_id=row.id, source_name=row.source_name,

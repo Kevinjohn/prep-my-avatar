@@ -10,7 +10,7 @@ export const DATASET_WORKFLOW_STEPS = Object.freeze([
   { slug: 'coverage', label: 'Check photo variety',
     description: 'Check the mix of framings, angles, expressions, lighting, poses, and backgrounds.' },
   { slug: 'reference', label: 'Set primary reference', optional: true,
-    description: 'Optionally choose the main identity reference used by local tools.' },
+    description: 'Review the ordered identity pack used by local and remote generation providers.' },
   { slug: 'generate', label: 'Generate missing views', optional: true,
     description: 'Optionally generate only the views that the real-photo corpus lacks.' },
   { slug: 'curate', label: 'Curate images',

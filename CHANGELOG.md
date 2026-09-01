@@ -52,6 +52,14 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- **Set primary reference** now shows the exact ordered remote identity pack,
+  labels the authoritative and supporting roles, states which references local
+  Klein and face scoring actually use, provides direct replacement controls,
+  warns that extra or obstructed references can reduce likeness, lets an
+  automatic reference be excluded without removing it from training, and links
+  broader automatic choices back to Step 3. Remote provider requests remove exact
+  duplicate image content and backfill the freed place with the next eligible
+  reviewed photo.
 - Remote identity generation now uses a compact five-image pack led by the
   primary portrait. Automatically selected references are ranked by measured
   face similarity and technical quality rather than framing diversity, and the
