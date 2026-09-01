@@ -594,8 +594,8 @@ test('remote generation stays selectable and requires exact batch approval befor
 
   const nanoBanana = await screen.findByRole('button', { name: /Nano Banana Pro · Replicate API/ })
   assert.equal(nanoBanana.disabled, false, 'a configured provider must remain selectable before privacy approval')
-  await waitFor(() => assert.ok(screen.getByRole('button', { name: /Generate \(1\)/ })))
-  fireEvent.click(screen.getByRole('button', { name: /Generate \(1\)/ }))
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /Generate 1 identity canary/ })))
+  fireEvent.click(screen.getByRole('button', { name: /Generate 1 identity canary/ }))
 
   const firstDialog = await screen.findByRole('alertdialog')
   assert.match(firstDialog.textContent, /Verify identity with Nano Banana Pro via Replicate\?/)
@@ -609,7 +609,7 @@ test('remote generation stays selectable and requires exact batch approval befor
   assert.equal(settingsUpdates, 0)
   assert.equal(launches.length, 0, 'cancelling consent must leave remote generation untouched')
 
-  fireEvent.click(screen.getByRole('button', { name: /Generate \(1\)/ }))
+  fireEvent.click(screen.getByRole('button', { name: /Generate 1 identity canary/ }))
   await screen.findByRole('alertdialog')
   fireEvent.click(screen.getByRole('button', { name: 'Generate 1 identity canary' }))
   await waitFor(() => assert.equal(settingsUpdates, 1))

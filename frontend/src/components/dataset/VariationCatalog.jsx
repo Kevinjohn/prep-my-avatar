@@ -180,7 +180,9 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
             </span>
             {nbAvailable ? (
               <span className={`text-[0.625rem] ${isNB ? 'text-amber-300' : 'text-content-subtle'}`}>
-                Best face fidelity · estimated cost ≈ ${(selected.size * multiplier * nanoBananaRate).toFixed(2)}
+                5-reference identity pack · estimated cost ≈ ${(identityVerified
+                  ? selected.size * multiplier * nanoBananaRate
+                  : nanoBananaRate).toFixed(2)}
               </span>
             ) : nbProviderReady && !remoteAllowed ? (
               <span className="text-amber-300 text-[0.625rem]">
@@ -617,7 +619,9 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
             ? (generating
                 ? `Generating…${generating.total ? ` ${generating.done}/${generating.total}` : ''}`
                 : '…')
-            : `⚡ Generate (${selected.size * multiplier})`}
+            : (!isKlein && !identityVerified
+                ? '⚡ Generate 1 identity canary'
+                : `⚡ Generate (${selected.size * multiplier})`)}
         </button>
       </div>
     </div>

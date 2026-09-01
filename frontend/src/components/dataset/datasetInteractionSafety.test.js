@@ -46,6 +46,8 @@ test('remote engine cards distinguish provider readiness from privacy approval',
   assert.match(controller, /applyRemoteIdentityCanary/);
   assert.match(controller, /Generate 1 identity canary/);
   assert.match(catalog, /Keep it in Curation to unlock batch generation/);
+  assert.match(catalog, /Generate 1 identity canary/);
+  assert.match(catalog, /5-reference identity pack/);
   assert.match(catalog, /disabled=\{!nbProviderReady/);
   assert.match(catalog, /disabled=\{!gptProviderReady/);
 });
