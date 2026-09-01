@@ -546,6 +546,77 @@ test('assembled VariationCatalog retries, persists custom shots, reconciles dupl
   assert.deepEqual(launches[0][0].map((shot) => shot.id), ['portrait', launches[0][0][1].id])
 })
 
+test('remote generation stays selectable and requires exact batch approval before launch', async () => {
+  const { CapabilitiesProvider } = await server.ssrLoadModule('/src/context/CapabilitiesContext.jsx')
+  const { ToastProvider } = await server.ssrLoadModule('/src/components/common/Toast.jsx')
+  const { ConfirmDialogProvider } = await server.ssrLoadModule('/src/components/common/ConfirmDialog.jsx')
+  const { default: VariationCatalog } = await server.ssrLoadModule(
+    '/src/components/dataset/VariationCatalog.jsx')
+  let settingsUpdates = 0
+  globalThis.fetch = async (url, options = {}) => {
+    const target = String(url)
+    if (target.endsWith('/api/capabilities')) return new Response(JSON.stringify({
+      configured: true,
+      engines: { klein: true, nanobanana: true, chatgpt: true },
+      comfyui: { reachable: true, models: { klein: ['base.safetensors'] } },
+      chatgpt_subscription: { connected: true, plan: 'pro' },
+      generation_pricing: { per_image: { nanobanana: 0.15, chatgpt_api: 0.20 } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    if (target.endsWith('/api/settings')) {
+      if (options.method === 'PUT') settingsUpdates += 1
+      return new Response(JSON.stringify({
+        config: {
+          engines: {
+            enabled: ['klein', 'nanobanana', 'chatgpt'], default: 'klein',
+            nanobanana_provider: 'replicate', chatgpt_auth: 'subscription',
+          },
+          privacy: { allow_remote_generation: options.method === 'PUT' },
+        },
+        secrets: {},
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    if (target.endsWith('/api/dataset/variations')) return new Response(JSON.stringify({
+      catalog: [{ id: 'portrait', label: 'Portrait', prompt: 'portrait prompt', framing: 'face' }],
+      nsfw_catalog: [], presets: { balanced: ['portrait'] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    throw new Error(`Unexpected request ${target}`)
+  }
+  localStorage.setItem('datasetGenerator', 'nanobanana')
+  const launches = []
+  render(React.createElement(ToastProvider, null,
+    React.createElement(ConfirmDialogProvider, null,
+      React.createElement(CapabilitiesProvider, null,
+        React.createElement(VariationCatalog, {
+          hasRef: true, hasPrimaryRef: true, busy: false,
+          onGenerate: (...args) => launches.push(args), images: [],
+          recommendedIds: ['portrait'], anchorPlan: { selected_total: 14, limit: 14 },
+        })))))
+
+  const nanoBanana = await screen.findByRole('button', { name: /Nano Banana Pro · Replicate API/ })
+  assert.equal(nanoBanana.disabled, false, 'a configured provider must remain selectable before privacy approval')
+  await waitFor(() => assert.ok(screen.getByRole('button', { name: /Generate \(1\)/ })))
+  fireEvent.click(screen.getByRole('button', { name: /Generate \(1\)/ }))
+
+  const firstDialog = await screen.findByRole('alertdialog')
+  assert.match(firstDialog.textContent, /Generate 1 shot with Nano Banana Pro via Replicate\?/)
+  assert.match(firstDialog.textContent, /14 selected reference images and 1 prompt to Replicate\./)
+  assert.match(firstDialog.textContent, /Estimated provider cost: about \$0\.15\./)
+  assert.match(firstDialog.textContent, /Accepting also enables third-party image generation in Settings\./)
+  assert.equal(settingsUpdates, 0)
+  assert.equal(launches.length, 0, 'opening the consent dialog must not transmit or launch anything')
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  await waitFor(() => assert.equal(screen.queryByRole('alertdialog'), null))
+  assert.equal(settingsUpdates, 0)
+  assert.equal(launches.length, 0, 'cancelling consent must leave remote generation untouched')
+
+  fireEvent.click(screen.getByRole('button', { name: /Generate \(1\)/ }))
+  await screen.findByRole('alertdialog')
+  fireEvent.click(screen.getByRole('button', { name: 'Allow this 1-shot batch' }))
+  await waitFor(() => assert.equal(settingsUpdates, 1))
+  await waitFor(() => assert.equal(launches.length, 1))
+  assert.equal(launches[0][4], 'nanobanana')
+})
+
 test('assembled SetupPage recovers its initial request and reports autodetection failure', async () => {
   const { MemoryRouter } = await server.ssrLoadModule('react-router-dom')
   const { CapabilitiesProvider } = await server.ssrLoadModule('/src/context/CapabilitiesContext.jsx')
