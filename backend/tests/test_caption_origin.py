@@ -51,6 +51,9 @@ def test_human_caption_is_asserted_and_clears_machine_provenance():
         ("joycaption", "joycaption"),
         (" JOYCAPTION ", "joycaption"),
         ("ollama", "ollama"),
+        ("openai", "openai"),
+        ("gemini", "gemini"),
+        ("chatgpt", "chatgpt"),
         ("auto", None),
         ("future-engine", None),
         (None, None),
@@ -106,6 +109,18 @@ def test_explicit_model_provenance_is_written_atomically():
         "joycaption",
         provenance,
     )
+
+
+@pytest.mark.parametrize("engine", ["openai", "gemini", "chatgpt"])
+def test_external_model_provenance_is_written_atomically(engine):
+    from app.services.caption_origin import set_model_caption
+
+    row = SimpleNamespace(caption=None, caption_origin=None, caption_provenance=None)
+    provenance = f'{{"provider":"{engine}","model":"vision-model"}}'
+
+    set_model_caption(row, "Generated words", engine=engine, provenance=provenance)
+
+    assert (row.caption_origin, row.caption_provenance) == (engine, provenance)
 
 
 def test_unknown_engine_cannot_retain_provenance():

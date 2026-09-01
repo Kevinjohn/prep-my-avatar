@@ -8,8 +8,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getJson, safePostJson as postJson, putJson } from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
 import { serializeWatermarkRegions } from '../utils/watermarkRegions';
+import { watermarkScanNotice } from '../utils/watermarkScanNotice';
 import { summarizeScrapeImport } from '../utils/smallImageRescue';
 import { reuseUnchangedItems } from '../utils/reuseUnchangedItems';
+import { coverageClassificationNotice } from '../utils/coverageClassification';
+import { externalVisionPayload } from '../utils/externalVision';
 import {
   clearDatasetCurrentId, readDatasetCurrentId, writeDatasetCurrentId,
 } from '../utils/datasetCurrentId';
@@ -556,10 +559,12 @@ export function useDataset() {
     return d;
   }, [currentId, refresh, toast]);
 
-  const classify = useCallback(() => wrap(async () => {
-    const d = await postJson(`/api/dataset/${currentId}/classify`);
+  const classify = useCallback((provider = 'configured') => wrap(async () => {
+    const d = await postJson(`/api/dataset/${currentId}/classify`,
+      externalVisionPayload(provider));
     if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
-    toast.success(`${d.classified} image(s) mapped for coverage`);
+    const notice = coverageClassificationNotice(d.classified);
+    toast[notice.severity](notice.message);
     await refresh();
   }), [wrap, currentId, refresh, toast]);
 
@@ -598,10 +603,12 @@ export function useDataset() {
     return true;
   }, [currentId, refresh, toast]);
 
-  const caption = useCallback((mode) => wrap(async () => {
+  const caption = useCallback((mode, provider = 'configured') => wrap(async () => {
     setCaptioning(true);
     try {
-      const d = await postJson(`/api/dataset/${currentId}/caption`, mode ? { mode } : {});
+      const d = await postJson(`/api/dataset/${currentId}/caption`, {
+        ...(mode ? { mode } : {}), ...externalVisionPayload(provider),
+      });
       if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
       toast.success(`${d.captioned} captioned`);
       await refresh();
@@ -612,13 +619,15 @@ export function useDataset() {
 
   // A forced batch normally spares asserted captions. The second argument is set
   // only after the workspace's separate destructive override confirmation.
-  const recaption = useCallback((mode, includeAsserted = false) => wrap(async () => {
+  const recaption = useCallback((mode, includeAsserted = false,
+    provider = 'configured') => wrap(async () => {
     setCaptioning(true);
     try {
       const d = await postJson(`/api/dataset/${currentId}/caption`, {
         force: true,
         ...(mode ? { mode } : {}),
         ...(includeAsserted ? { include_asserted: true } : {}),
+        ...externalVisionPayload(provider),
       });
       if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
       toast.success(`${d.captioned} re-captioned`);
@@ -663,7 +672,8 @@ export function useDataset() {
     try {
       const d = await postJson(`/api/dataset/${currentId}/watermarks/detect`);
       if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
-      toast.success(`${d.detected || 0} watermark(s) found · ${d.none || 0} clean (of ${d.checked || 0})`);
+      const notice = watermarkScanNotice(d);
+      toast[notice.severity](notice.message);
       await refresh();
     } finally {
       setWatermarking(false);

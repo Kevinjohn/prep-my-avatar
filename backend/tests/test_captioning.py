@@ -197,6 +197,26 @@ def test_caption_images_backend_ollama_writes_and_truncates(app, monkeypatch):
         assert refreshed.caption_origin == 'ollama'
 
 
+def test_caption_images_can_use_external_provider(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+
+    monkeypatch.setattr(
+        svc, '_external_describer',
+        lambda provider: (lambda *args, **kwargs: 'a person standing outdoors',
+                          '{"provider":"openai","model":"test"}'),
+    )
+    with app.app_context():
+        ds, image = _dataset_with_kept_image(svc, LOCAL_USER)
+
+        assert svc.caption_images(LOCAL_USER, ds.id, provider='openai') == 1
+
+        refreshed = svc.db.session.get(FaceDatasetImage, image.id)
+        assert refreshed.caption_origin == 'openai'
+        assert '"provider":"openai"' in refreshed.caption_provenance
+
+
 def test_caption_images_allows_slow_local_inference(app, monkeypatch):
     from app.services import face_dataset_service as svc
     from app.services import vision_ollama

@@ -92,7 +92,7 @@ def _validate_config_values(partial: dict, defaults: dict, prefix: str = '') -> 
 _TEST_TARGETS = {
     'gemini': capabilities.probe_gemini,
     'replicate': capabilities.probe_replicate,
-    'openai': capabilities.probe_openai,
+    'openai': capabilities.probe_openai_api,
     'comfyui': capabilities.probe_comfyui,
     'ollama': capabilities.probe_ollama,
     'local_vision': capabilities.probe_local_vision,

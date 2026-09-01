@@ -1532,6 +1532,32 @@ def training_preflight(user_id, dataset_id, train_type=None) -> dict:
     else:
         _check('images', 'Enough images', 'ok', f'{n} kept ({reco}+ recommended)')
 
+    # Official Krea 2, FLUX.1-dev and FLUX.2 Klein bases are license-gated.
+    # Without a configured token, huggingface_hub either returns 401 or older
+    # ai-toolkit environments construct the opaque empty ``Bearer `` header.
+    # Refuse before export/spawn and name the EXACT repository whose access the
+    # user must accept. Accepting the ComfyUI 9B-fp8 repository, for example,
+    # does not prove access to the 4B training-base repository.
+    gated_repo = None
+    if ttype == 'krea':
+        gated_repo = 'krea/Krea-2-Raw' if _krea_is_raw(ds) else 'krea/Krea-2-Turbo'
+    elif ttype == 'flux':
+        gated_repo = 'black-forest-labs/FLUX.1-dev'
+    elif ttype == 'flux2klein':
+        gated_repo = ('black-forest-labs/FLUX.2-klein-base-9B'
+                      if _flux2klein_is_9b(ds)
+                      else 'black-forest-labs/FLUX.2-klein-base-4B')
+    if gated_repo and not cfg.secret('HF_TOKEN'):
+        blockers.append(
+            f'{label} uses the gated Hugging Face repository {gated_repo}. '
+            'Accept access for that exact repository, then add any Hugging Face '
+            'token value with read access in Settings › Local tools. The token display name '
+            'does not need to match the model or dataset.')
+        _check(
+            'hugging_face_access', 'Hugging Face access', 'fail',
+            f'{label}: token not set — accept {gated_repo}, then add any read '
+            'token value in Settings › Local tools; its display name is irrelevant.')
+
     # 2) équilibre de composition — heuristique PERSONNAGE (viser un mix face/bust/body/
     # back pour rendre un visage à toutes les distances). Sans objet pour un CONCEPT (il
     # s'apprend sur les cadrages tels quels), et un dataset non classé (framing=None) y
@@ -2028,6 +2054,19 @@ def training_status(user_id=None) -> dict:
     in_progress = bool(queue_manager._get_system_state('training_in_progress', False))
     training_error = queue_manager._get_system_state('training_error', None)
     queue_error = queue_manager._get_system_state('training_queue_error', None)
+    if training_error and training_error.get('dataset_id') is not None and user_id is not None:
+        # Older watcher payloads were hard-truncated to 1,500 characters, often
+        # cutting off the exception itself. Re-read the failed run's bounded log
+        # tail so the webpage remains the complete source of truth for recovery.
+        try:
+            failed_ds = fds.get_dataset(user_id, training_error['dataset_id'])
+            if failed_ds is not None:
+                failed_log = _output_dir() / _run_name(failed_ds) / 'training.log'
+                full_tail = _log_tail(str(failed_log))
+                if full_tail and full_tail != '(log illisible)':
+                    training_error = {**training_error, 'log_tail': full_tail}
+        except (OSError, RuntimeError, ValueError):
+            pass
     return {'in_progress': in_progress,
             'installed': is_installed(),
             'pid': queue_manager._get_system_state('training_pid', None),
@@ -2063,10 +2102,10 @@ def _parse_training_log(text: str) -> dict:
     curve = []
     for seg in re.split(r'[\r\n]+', text):
         lm = _PROG_LOSS_RE.search(seg)
-        # Only trust real tqdm segments ('%|' bar or a loss postfix) — the log also
-        # contains incidental 'X/Y' text (dataset counts, resolutions) that must not
-        # be read as progress.
-        if '%|' not in seg and not lm:
+        # ai-toolkit uses tqdm for model downloads, cache preparation and sample
+        # generation too. Only optimizer updates carry the loss postfix, so using
+        # any generic '%|' bar makes setup phases look like real training steps.
+        if not lm:
             continue
         sm = None
         for sm in _PROG_STEP_RE.finditer(seg):

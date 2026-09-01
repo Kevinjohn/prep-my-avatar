@@ -54,6 +54,22 @@ design.
 folder for new files if you want proof of life. The cloud runs page has a
 stall watchdog that kills genuinely stuck runs.
 
+## OpenAI captioning reports a rate limit or API quota
+
+**Why:** OpenAI returned HTTP 429 before it produced a caption. This can mean a
+short-term request limit, exhausted project quota, or billing that is not active
+for the API key's project. A ChatGPT subscription does not itself provide API
+quota.
+
+**Fix:** if you intend to use API billing, wait and retry once, then check the
+OpenAI project limits and billing for the API key saved under **Settings → Image
+engines → Secrets**. Do not keep retrying a 429 batch. If you intend to use your
+ChatGPT plan instead, select **ChatGPT subscription** on the Caption images page;
+that distinct option uses the ChatGPT account connected in Settings and does not
+use API credits. The app will ask again before sending photos through that
+different service. **Google Gemini API** is also available when its API key is
+configured.
+
 ## ai-toolkit isn't detected (conda / uv / no venv)
 
 **Why:** the app auto-detects ai-toolkit's Python from a `venv/` or `.venv/`
@@ -94,6 +110,41 @@ firewall or a different bind interface isn't blocking the connection. The
 Klein needs a reachable ComfyUI **and** the Klein model files (~16 GB VRAM
 class). **Setup → ComfyUI** offers the download; the license-gated fp8 model
 needs a Hugging Face token (Settings → Local tools).
+
+## Gated training fails with `Bearer `, HTTP 401, or exits immediately
+
+Official Krea 2, FLUX.1-dev, and FLUX.2 Klein training bases are gated on
+Hugging Face. Accept access to the **exact repository used by the selected
+training family and variant**, create any read token, and add its value under
+**Settings → Local tools → Hugging Face token**. The token's display name does
+not need to match the model, dataset, or trigger word.
+
+The FLUX.2 Klein model downloaded for ComfyUI is not necessarily the training
+base: local generation commonly uses the separate 9B fp8 repository, while the
+default local trainer uses `black-forest-labs/FLUX.2-klein-base-4B`. Accepting
+one repository does not prove that the other is available to the account. Setup
+Step 5 links every gated training repository explicitly.
+
+Training preflight blocks these families before ai-toolkit starts when no token
+is configured, instead of allowing an empty authorization header or late 401.
+
+## Complete LoRA training prerequisites
+
+**Setup/model prerequisites:** a valid ai-toolkit directory and Python
+environment; any Hugging Face token/licence required by the selected official
+base; an SDXL checkpoint for SDXL; current ai-toolkit extension support for Krea
+2 and FLUX.2 Klein; and either a suitable local accelerator or a configured,
+funded vast.ai account for cloud training. Masked training additionally needs
+the mask/ML extras; unmasked training remains available without them.
+
+**Checked for every launch:** at least 10 GB free on the training-output and
+immutable-dataset target drives; no active local training process/GPU lease; the
+family-specific image minimum; required concept description; resolved
+reconstruction choices; source rights for strict admission; compatible caption
+style (or explicit override); existing/readable custom weights and required
+Z-Image conversion; and no trigger/base collision with another dataset's run
+folder. Step 11 shows the dataset-specific result because those checks cannot be
+decided during global Setup.
 
 ## Port 5000 conflict on macOS
 

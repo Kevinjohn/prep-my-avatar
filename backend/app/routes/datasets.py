@@ -637,9 +637,21 @@ def dataset_small_image_rescue_resolve(dataset_id, candidate_id):
 def dataset_classify(dataset_id):
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
+    data = request.get_json(silent=True) or {}
+    provider = str(data.get('provider') or 'configured').strip().lower()
+    if provider not in ('configured', 'openai', 'chatgpt', 'gemini'):
+        return jsonify({'error': 'invalid vision provider', 'code': 'validation_error'}), 400
+    if provider != 'configured' and data.get('allow_external_images') is not True:
+        return jsonify({
+            'error': 'Confirm that dataset images may be sent to the selected provider',
+            'code': 'external_image_consent_required',
+        }), 400
     try:
-        with gpu_exclusive_vision_window(flag_ttl=1800):
-            n = svc.classify_images(LOCAL_USER, dataset_id)
+        if provider == 'configured':
+            with gpu_exclusive_vision_window(flag_ttl=1800):
+                n = svc.classify_images(LOCAL_USER, dataset_id)
+        else:
+            n = svc.classify_images(LOCAL_USER, dataset_id, provider=provider)
     except Exception as e:
         return _map_error(e)
     return jsonify({'ok': True, 'classified': n})
@@ -656,14 +668,32 @@ def dataset_caption(dataset_id):
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     mode = data.get('mode')  # 'prose' | 'booru' | None (None → auto selon train_type)
+    provider = str(data.get('provider') or 'configured').strip().lower()
+    if provider not in ('configured', 'openai', 'chatgpt', 'gemini'):
+        return jsonify({'error': 'invalid vision provider', 'code': 'validation_error'}), 400
+    if provider != 'configured' and data.get('allow_external_images') is not True:
+        return jsonify({
+            'error': 'Confirm that dataset images may be sent to the selected provider',
+            'code': 'external_image_consent_required',
+        }), 400
     try:
-        with gpu_exclusive_vision_window(flag_ttl=1800):
+        if provider == 'configured':
+            with gpu_exclusive_vision_window(flag_ttl=1800):
+                n = svc.caption_images(
+                    LOCAL_USER,
+                    dataset_id,
+                    force=force,
+                    mode=mode,
+                    include_asserted=include_asserted,
+                )
+        else:
             n = svc.caption_images(
                 LOCAL_USER,
                 dataset_id,
                 force=force,
                 mode=mode,
                 include_asserted=include_asserted,
+                provider=provider,
             )
     except Exception as e:
         return _map_error(e)

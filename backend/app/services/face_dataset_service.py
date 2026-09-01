@@ -4170,12 +4170,59 @@ def _parse_classify(raw):
     return fr, (label or None), coverage, confidence
 
 
-def classify_images(user_id, dataset_id):
-    """Classify imported corpus coverage via Qwen3-VL. Returns count."""
+def _image_mime_type(image_bytes):
     try:
-        from .vision_ollama import describe_image_ollama, unload_vision_model
-    except ImportError:
-        raise RuntimeError('local vision service not configured/available yet')
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            return Image.MIME.get(image.format, '')
+    except (OSError, ValueError):
+        return ''
+
+
+def _external_describer(provider):
+    from .external_vision import describe_image_external
+
+    model = (cfg.get('engines.chatgpt_subscription_model')
+             if provider == 'chatgpt'
+             else cfg.get(f'external_vision.{provider}_model'))
+
+    def describe(image_bytes, prompt, **_kwargs):
+        return describe_image_external(
+            image_bytes,
+            prompt,
+            provider=provider,
+            model=model,
+            mime_type=_image_mime_type(image_bytes),
+        )
+
+    provenance = json.dumps({'provider': provider, 'model': model}, sort_keys=True)
+    return describe, provenance
+
+
+def _external_provider_label(provider):
+    return {
+        'openai': 'OpenAI',
+        'chatgpt': 'ChatGPT subscription',
+        'gemini': 'Google Gemini',
+    }.get(provider, provider)
+
+
+def classify_images(user_id, dataset_id, provider='configured'):
+    """Classify imported corpus coverage via Qwen3-VL. Returns count."""
+    external = provider in ('openai', 'chatgpt', 'gemini')
+    if external:
+        describe, _ = _external_describer(provider)
+        unload_vision_model = lambda: None
+        vision_provider = provider
+        vision_model = (cfg.get('engines.chatgpt_subscription_model')
+                        if provider == 'chatgpt'
+                        else cfg.get(f'external_vision.{provider}_model'))
+    else:
+        try:
+            from .vision_ollama import describe_image_ollama as describe, unload_vision_model
+        except ImportError:
+            raise RuntimeError('local vision service not configured/available yet')
+        vision_provider = cfg.get('local_vision.backend') or 'ollama'
+        vision_model = cfg.get(f'{vision_provider}.vision_model')
     ds = get_dataset(user_id, dataset_id)
     if not ds:
         return 0
@@ -4183,12 +4230,14 @@ def classify_images(user_id, dataset_id):
         dataset_id=dataset_id, source='import').all()
     rows = [row for row in candidates
             if row.filename and (not row.framing or len(parse_coverage(row.coverage_json)) < 6)]
-    vision_provider = cfg.get('local_vision.backend') or 'ollama'
-    vision_model = cfg.get(f'{vision_provider}.vision_model')
     n = 0
     # Persistent progress indicator (survives a page reload): try/finally guarantees
     # end() runs even if the batch raises → no phantom "Classifying…" spinner.
-    token = dataset_activity.begin(dataset_id, 'classify', total=len(rows))
+    provider_label = _external_provider_label(provider)
+    detail = (f'Analysing photo variety with {provider_label}…'
+              if external else 'Analysing photo variety with local vision…')
+    token = dataset_activity.begin(
+        dataset_id, 'classify', total=len(rows), detail=detail)
     try:
         for i, img in enumerate(rows):
             dataset_activity.progress(token, done=i + 1)
@@ -4196,8 +4245,8 @@ def classify_images(user_id, dataset_id):
             if not os.path.exists(path):
                 continue
             with open(path, 'rb') as fh:
-                raw = describe_image_ollama(fh.read(), CLASSIFY_PROMPT, num_predict=1200,
-                                            prefer_json=True, keep_alive=_VISION_BATCH_KEEPALIVE)
+                raw = describe(fh.read(), CLASSIFY_PROMPT, num_predict=1200,
+                               prefer_json=True, keep_alive=_VISION_BATCH_KEEPALIVE)
             if not (raw or '').strip():
                 # Échec vision (Ollama indisponible) ≠ « framing indéterminé » :
                 # on laisse framing=None (retry possible) au lieu d'écrire 'unknown'
@@ -4222,7 +4271,7 @@ def classify_images(user_id, dataset_id):
             db.session.commit()
             n += 1
     finally:
-        unload_vision_model()  # libère la VRAM pour ComfyUI en fin de batch
+        unload_vision_model()  # no-op for external providers
         dataset_activity.end(token)
     return n
 
@@ -4538,6 +4587,29 @@ def _caption_concept(ds, force, backend, token=None, include_asserted=False):
     dataset_activity.progress(token, total=len(todo),
                               detail=f'Preparing {len(todo)} concept caption(s)…')
     n = 0
+    if backend in ('openai', 'chatgpt', 'gemini'):
+        describe, provenance = _external_describer(backend)
+        sample = todo[0][1]
+        leak_re = _concept_terms_re(_get_concept_terms(
+            ds, image_path=sample, describe=describe))
+        for index, (image_id, path, planned) in enumerate(todo, 1):
+            dataset_activity.progress(
+                token, detail=f'Captioning with {_external_provider_label(backend)} — image {index}/{len(todo)}…')
+            data = _read_caption_input(image_id, planned, path)
+            if data is None:
+                dataset_activity.bump(token)
+                continue
+            caption = _clean_model_text(describe(data, cap_prompt))
+            caption = _enforce_concept_omission(
+                caption, leak_re, data, concept_desc, describe=describe)
+            if _usable_caption(caption) and _persist_inference_caption(
+                    image_id, planned, caption[:CAPTION_MAX_CHARS],
+                    engine=backend, provenance=provenance):
+                n += 1
+            elif force:
+                _persist_inference_caption(image_id, planned, None, engine=backend)
+            dataset_activity.bump(token)
+        return n
     remaining = list(todo)
     refine_targets = []  # (img, p, joycap) -> Joy draft refined by Qwen
     # 1) JoyCaption batch (draft) when the backend allows it.
@@ -4686,7 +4758,8 @@ def _caption_concept(ds, force, backend, token=None, include_asserted=False):
     return n
 
 
-def caption_images(user_id, dataset_id, force=False, mode=None, include_asserted=False):
+def caption_images(user_id, dataset_id, force=False, mode=None, include_asserted=False,
+                   provider=None):
     """Caption kept images. By default only blanks are processed. ``force=True``
     also refreshes machine and legacy-unknown captions while sparing non-empty
     asserted text; ``include_asserted=True`` is the explicit overwrite opt-out.
@@ -4699,7 +4772,7 @@ def caption_images(user_id, dataset_id, force=False, mode=None, include_asserted
       - 'ollama'     -> Ollama (Qwen3-VL) seul, JoyCaption jamais tenté.
       - 'auto'       -> comportement historique : JoyCaption en priorité,
                         fallback Ollama pour les images qu'il n'a pas captées."""
-    backend = (cfg.get('captioning.backend') or 'auto').lower()
+    backend = (provider or cfg.get('captioning.backend') or 'auto').lower()
     if backend == 'none':
         raise RuntimeError('No captioning backend configured')
     ds = get_dataset(user_id, dataset_id)
@@ -4771,6 +4844,27 @@ def caption_images(user_id, dataset_id, force=False, mode=None, include_asserted
     try:
         n = 0
         remaining = todo
+        if backend in ('openai', 'chatgpt', 'gemini'):
+            describe, provenance = _external_describer(backend)
+            for index, (image_id, path, planned) in enumerate(remaining, 1):
+                dataset_activity.progress(
+                    token,
+                    detail=f'Captioning with {_external_provider_label(backend)} — image {index}/{len(remaining)}…')
+                data = _read_caption_input(image_id, planned, path)
+                if data is None:
+                    dataset_activity.bump(token)
+                    continue
+                caption = _clean_model_text(describe(data, cap_prompt))
+                cleaned = cleaner(caption) if caption else ''
+                if _usable_caption(cleaned):
+                    if _persist_inference_caption(
+                            image_id, planned, cleaned[:CAPTION_MAX_CHARS],
+                            engine=backend, provenance=provenance):
+                        n += 1
+                elif force:
+                    _persist_inference_caption(image_id, planned, None, engine=backend)
+                dataset_activity.bump(token)
+            return n
         # 1) JoyCaption en BATCH (un seul chargement du 8B NF4, via le venv ai-toolkit) -
         # sauté entièrement quand le backend force 'ollama'.
         if backend in ('auto', 'joycaption'):

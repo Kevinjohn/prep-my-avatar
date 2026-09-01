@@ -9,6 +9,24 @@ under **Unreleased** until a release is tagged.
 
 ### Added
 
+- Photo-variety analysis and captioning can now run through the configured
+  local model, a connected ChatGPT subscription, the OpenAI API, or the Google
+  Gemini API. Remote choices require an explicit per-action confirmation before
+  dataset images leave the machine, preserve provider/model provenance, and do
+  not pause ComfyUI while the remote provider works.
+- Caption review now shows every kept photo beside its editable caption, and the
+  face-similarity step shows the kept-photo grid with scored, non-scorable, and
+  not-yet-analysed counts. Training preflight also identifies the exact photos
+  with red or incomplete pixel QA, with full-size inspection and one-click
+  rejection from the training set.
+- Setup now includes a complete LoRA dependency map for Z-Image, SDXL, Krea 2,
+  FLUX.1-dev, and FLUX.2 Klein, plus the hard gates checked for every launch.
+  It links the exact gated Hugging Face repositories and provides a dedicated
+  read-token field under the ai-toolkit setup step.
+- Troubleshooting now records two dependencies exposed by the end-to-end run:
+  a ChatGPT subscription does not fund OpenAI API usage, and access to a
+  ComfyUI FLUX.2 Klein fp8 repository does not establish access to the separate
+  4B or 9B training-base repository.
 - Setup now leads into a separate **Start this session** check. Setup records
   whether each tool is configured; the session check reports whether local
   services are running now and links each stopped tool to exact startup steps.
@@ -34,6 +52,26 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- The ai-toolkit setup step is now shown as partially ready when the core
+  environment works but gated-model access is missing. It explains that any
+  Hugging Face read token is valid—the token display name does not need to
+  match the model, dataset, or trigger—and that repository access is verified
+  separately when the model downloads.
+- Training progress now advances only from optimizer updates that include a
+  loss value. Model downloads, latent caching, and step-zero sample generation
+  no longer masquerade as training steps; failed runs expose a substantially
+  longer log tail so the webpage retains the actionable exception.
+- OpenAI's explicit **Test** action now makes a small Responses API request and
+  distinguishes missing API billing or quota from ChatGPT subscription access.
+  External vision failures report credential, model-access, quota, rate-limit,
+  provider, and malformed-response problems without logging keys or images.
+- A zero-result photo-variety analysis or watermark scan is now reported as an
+  incomplete check instead of a successful empty result. Training launch also
+  retries transient checkpoint-list reads before deciding whether to resume or
+  start over.
+- Setup-owned Python and pip subprocesses no longer inherit interactive stdin,
+  preventing a background install or environment check from waiting on an
+  invisible prompt.
 - The setup checklist now groups the five visible tools by what the workflow
   actually requires: at least one image-generation provider, local vision for
   automatic captioning and framing, and two genuinely optional enhancements.
@@ -165,6 +203,14 @@ under **Unreleased** until a release is tagged.
 
 ### Fixed
 
+- Official Krea 2, FLUX.1-dev, and FLUX.2 Klein launches are blocked before
+  export or process creation when no Hugging Face token is configured. The
+  blocker names the exact selected repository, including the distinct Klein 4B
+  and 9B training bases, rather than failing later with an empty `Bearer`
+  header or an opaque HTTP 401.
+- Training controls no longer become launchable while a collapsed preflight
+  still contains a hard blocker; the first blocker remains visible without
+  expanding the readiness panel.
 - A reachable ComfyUI server no longer displays contradictory instructions to
   start ComfyUI. Its detail page now states that nothing needs to be started
   and shows the responding API URL; startup instructions appear only while the

@@ -184,7 +184,8 @@ function AutoTriageBar({ images, datasetId, faceThresholds, onBatch, busy }) {
 export default function DatasetGrid({ images, datasetId, onStatus, onCaption, onCrop, onDelete,
                                       onRegenerate, onView, onBatch, busy, nonces, faceThresholds,
                                       exclusiveImageIds, hasMore = false, onLoadMore,
-                                      loadingMore = false, totalImages = null }) {
+                                      loadingMore = false, totalImages = null,
+                                      reviewOnly = false, showCaptions = true }) {
   const confirm = useConfirmDialog();
   const isExclusive = useCallback(
     (image) => exclusiveImageIds?.has?.(image.id) || false,
@@ -273,7 +274,7 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
   return (
     <div id="ds-images-review" tabIndex={-1} data-workspace-focus
       className="flex flex-col gap-2 scroll-mt-20">
-      {onBatch && (
+      {onBatch && !reviewOnly && (
         <AutoTriageBar images={images.filter((image) => !isSmallImageRescueRow(image) && !isExclusive(image))}
           datasetId={datasetId} faceThresholds={faceThresholds} onBatch={onBatch} busy={busy} />
       )}
@@ -319,10 +320,12 @@ export default function DatasetGrid({ images, datasetId, onStatus, onCaption, on
           <DatasetGridItem key={img.id} img={img} datasetId={datasetId} onStatus={onStatus} onCaption={onCaption}
             onCrop={onCrop} onDelete={onDelete} onRegenerate={onRegenerate} onView={onView}
             selected={selected.has(img.id)}
-            onToggleSelect={onBatch && !isSmallImageRescueRow(img) && !isExclusive(img) ? toggle : undefined}
+            onToggleSelect={onBatch && !reviewOnly
+              && !isSmallImageRescueRow(img) && !isExclusive(img) ? toggle : undefined}
             exclusiveLocked={isExclusive(img)}
             busy={busy}
-            nonce={(nonces && nonces[img.id]) || 0} faceThresholds={faceThresholds} tileSize={tileSize} />
+            nonce={(nonces && nonces[img.id]) || 0} faceThresholds={faceThresholds} tileSize={tileSize}
+            reviewOnly={reviewOnly} showCaptions={showCaptions} />
         ))}
       </div>
       {(visibleCount < images.length || hasMore) && (

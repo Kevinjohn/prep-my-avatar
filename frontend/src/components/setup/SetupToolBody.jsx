@@ -5,6 +5,7 @@ import InstallRunner from './InstallRunner'
 import LabeledConfigField from './LabeledConfigField'
 import CopyCommand from './CopyCommand'
 import ComfyInstallGuide from './ComfyInstallGuide'
+import TrainingRequirementsPanel from './TrainingRequirementsPanel'
 
 const INPUT_CLASS =
   'mt-1 w-full rounded-md border border-border-strong bg-surface-raised px-3 py-2 text-sm text-content ' +
@@ -42,6 +43,15 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
         setSecretInputs((current) => (
           (current[key] || '').trim() === typed ? { ...current, [key]: '' } : current
         ))
+      }
+      if (!target) {
+        if (!typed && !secretsPresence[key]) {
+          toast.warning('Paste a Hugging Face token first.')
+          return
+        }
+        toast.success(typed ? 'Hugging Face token saved.' : 'Hugging Face token is already saved.')
+        await refresh(true)
+        return
       }
       const r = await postJson(`/api/settings/test/${target}`, {})
       r.ok ? toast.success(r.detail) : toast.warning(r.detail)
@@ -697,6 +707,31 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
             Choose the folder that contains <span className="font-mono">run.py</span>. You can also paste its full path.
           </p>
         </div>
+        <div className="rounded-md border border-border bg-white/5 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-content">Hugging Face access for gated training families</span>
+            <span className={`shrink-0 text-xs ${secretsPresence.HF_TOKEN ? 'text-emerald-400' : 'text-amber-300'}`}>
+              {secretsPresence.HF_TOKEN ? '✓ Access token saved' : '○ Access token required'}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-content-muted">
+            Official Krea 2, FLUX.1-dev, and FLUX.2 Klein weights are licence-gated. Accept access to the exact
+            repository selected for training, then add any read token. The token authorizes downloads; it does not
+            pay for training, and its display name does not need to match the model, token, or dataset.
+          </p>
+          <input type="password" autoComplete="off" className={INPUT_CLASS}
+            aria-label="Hugging Face token"
+            value={secretInputs.HF_TOKEN ?? ''}
+            placeholder={secretsPresence.HF_TOKEN ? 'Already set — enter a new value to replace it' : 'Paste your read token'}
+            onChange={(event) => setSecretInputs((current) => ({ ...current, HF_TOKEN: event.target.value }))} />
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+            <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer"
+              className="text-primary underline">Create any read token →</a>
+            <button type="button" onClick={() => saveSecretThenTest('HF_TOKEN', null)}
+              className="text-content-muted underline">Save token</button>
+          </div>
+        </div>
+        <TrainingRequirementsPanel caps={caps} hasHfToken={!!secretsPresence.HF_TOKEN} />
         {saveRecheckBtn}
         <p className="mt-2 text-content-muted text-xs">
           No GPU? You can skip this step: add a <strong>vast.ai API key</strong> in
@@ -709,7 +744,7 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
       return (
         <div className="space-y-4">
           <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-content">
-            ✓ ai-toolkit is set up at <span className="font-mono">{dir}</span>. Nothing to do here.
+            ✓ ai-toolkit is set up at <span className="font-mono">{dir}</span>. The training engine is ready.
           </div>
           {fields}
         </div>

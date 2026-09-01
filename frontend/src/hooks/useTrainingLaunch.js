@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { getJson } from '../api/fetchClient'
 import { confirmableTrainingRefusal, parseTrainingSteps, trainingLaunchBody } from '../components/dataset/trainingLaunchPolicy'
+import { loadLaunchCheckpoints } from '../components/dataset/trainingLaunchRetry'
 
 /** Owns local, queued, scheduled, and cloud launch decisions and dialogs. */
 export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePath,
@@ -78,7 +79,7 @@ export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePat
     // volontairement pointer vers une autre famille/base. Le backend fait foi
     // pour la configuration d'entraînement actuellement sélectionnée.
     try {
-      const data = await ds.listCheckpoints(base, trainType);
+      const data = await loadLaunchCheckpoints(ds.listCheckpoints, base, trainType);
       const existing = Array.isArray(data?.checkpoints) ? data.checkpoints : [];
       if (!existing.length) return 'resume';
       const latest = Math.max(...existing.map((c) => c.step));

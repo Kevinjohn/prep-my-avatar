@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { confirmableTrainingRefusal, parseTrainingSteps, trainingLaunchBody } from './trainingLaunchPolicy.js'
+import { loadLaunchCheckpoints } from './trainingLaunchRetry.js'
 
 test('training step policy distinguishes adaptive, malformed, floor, and exact values', () => {
   assert.deepEqual(parseTrainingSteps(''), { valid: true, invalidFormat: false, steps: null })
@@ -17,4 +18,15 @@ test('launch body snapshots fresh mode and family-only overrides', () => {
   assert.deepEqual(confirmableTrainingRefusal('UNCAPTIONED: 2 rows'), {
     message: '2 rows', flag: 'allow_uncaptioned',
   })
+})
+
+test('launch checkpoint safety check retries transient local-server failures', async () => {
+  let calls = 0
+  const result = await loadLaunchCheckpoints(async () => {
+    calls += 1
+    if (calls < 3) throw new TypeError('Failed to fetch')
+    return { checkpoints: [] }
+  }, '', 'zimage')
+  assert.equal(calls, 3)
+  assert.deepEqual(result, { checkpoints: [] })
 })

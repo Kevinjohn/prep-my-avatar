@@ -216,6 +216,31 @@ def test_classify_images_sets_framing_from_vision(app, monkeypatch):
         assert all(r.variation_label == '3/4, smile' for r in rows)
 
 
+def test_classify_images_can_use_external_provider(app, monkeypatch):
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+
+    monkeypatch.setattr(
+        svc, '_external_describer',
+        lambda provider: (
+            lambda *args, **kwargs: '{"framing":"face","angle":"front","expression":"neutral","lighting":"indoor","pose":"headshot","background":"plain","occlusion":"none"}',
+            '{"provider":"openai","model":"test"}',
+        ),
+    )
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'External variety', 'external')
+        ids, failed = svc.import_images(LOCAL_USER, ds.id, [_png()], crop=False)
+        assert failed == 0
+
+        assert svc.classify_images(LOCAL_USER, ds.id, provider='openai') == 1
+
+        row = svc.db.session.get(FaceDatasetImage, ids[0])
+        provenance = __import__('json').loads(row.coverage_provenance)
+        assert row.framing == 'face'
+        assert provenance['provider'] == 'openai'
+
+
 # --- route-level: 503 while the vision window is held ----------------------
 def test_classify_route_returns_503_while_vision_flag_set(client, app):
     from app.job_queue import queue_manager

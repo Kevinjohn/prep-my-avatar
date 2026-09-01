@@ -43,6 +43,45 @@ def test_manual_command_ollama_model(app):
         assert setup_installer.manual_command('ollama_model') == 'ollama pull qwen3-vl:8b'
 
 
+def test_environment_snapshot_does_not_inherit_app_stdin(monkeypatch):
+    """GUI launches may leave fd 0 unusable; child Python must get a safe stdin."""
+    import subprocess
+    from app import setup_installer
+
+    def run(_command, **kwargs):
+        if kwargs.get('stdin') != subprocess.DEVNULL:
+            return subprocess.CompletedProcess(
+                [], 1, stdout='', stderr="Fatal Python error: init_sys_streams")
+        return subprocess.CompletedProcess([], 0, stdout='[]', stderr='')
+
+    monkeypatch.setattr(setup_installer.subprocess, 'run', run)
+
+    assert setup_installer._environment_snapshot('/venv/python')['packages'] == []
+
+
+def test_installer_child_does_not_inherit_app_stdin(monkeypatch):
+    """The pip worker needs the same safe stdin as the pre-install snapshot."""
+    import subprocess
+    from app import setup_installer
+
+    received = {}
+
+    class Child:
+        pid = 123
+
+    def popen(_command, **kwargs):
+        received.update(kwargs)
+        return Child()
+
+    setup_installer._runs['ml_extras'] = setup_installer._new_run()
+    monkeypatch.setattr(setup_installer.subprocess, 'Popen', popen)
+    monkeypatch.setattr(setup_installer, '_persist', lambda *_args, **_kwargs: None)
+
+    setup_installer._spawn_owned('ml_extras', ['/venv/python', '-m', 'pip'])
+
+    assert received['stdin'] == subprocess.DEVNULL
+
+
 def test_ollama_install_uses_connect_and_read_deadlines(app, monkeypatch):
     from app import setup_installer, config
     captured = {}

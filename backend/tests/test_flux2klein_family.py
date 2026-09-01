@@ -77,6 +77,7 @@ def test_launch_refuses_flux2klein_when_arch_missing(app, tmp_path, monkeypatch)
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
     _configure_aitoolkit(tmp_path, app, supports_klein=False)
+    monkeypatch.setenv('HF_TOKEN', 'hf_test_token')
     monkeypatch.setattr(lt.shutil, 'disk_usage',
                         lambda p: type('u', (), {'free': 500e9})())
     with app.app_context():
@@ -91,6 +92,40 @@ def test_launch_refuses_flux2klein_when_arch_missing(app, tmp_path, monkeypatch)
         # Same guard on the queue path — no deferred job doomed to the fallback.
         with pytest.raises(ValueError, match=r'update it \(git pull\)'):
             lt.enqueue_training(LOCAL_USER, ds.id, extra_steps=100)
+
+
+def test_preflight_blocks_official_flux2klein_without_hugging_face_token(
+        app, tmp_path, monkeypatch):
+    """The gated official base must fail before ai-toolkit constructs an empty
+    ``Authorization: Bearer `` header and exits with an opaque protocol error."""
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.models import FaceDatasetImage
+    from app.config import LOCAL_USER
+
+    _configure_aitoolkit(tmp_path, app, supports_klein=True)
+    monkeypatch.delenv('HF_TOKEN', raising=False)
+    with app.app_context():
+        ds = svc.create_dataset(
+            LOCAL_USER, 'Klein gated', 'zchar_klein_gated',
+            train_type='flux2klein')
+        svc.db.session.add_all([
+            FaceDatasetImage(
+                dataset_id=ds.id, status='keep', filename=f'{index}.webp',
+                caption='a detailed portrait photograph with natural light')
+            for index in range(20)
+        ])
+        svc.db.session.commit()
+
+        report = lt.training_preflight(
+            LOCAL_USER, ds.id, train_type='flux2klein')
+
+        assert report['verdict'] == 'blocked'
+        assert any('Hugging Face token' in item for item in report['blockers'])
+        access = next(check for check in report['checks']
+                      if check['id'] == 'hugging_face_access')
+        assert access['status'] == 'fail'
+        assert 'Settings' in access['detail']
 
 
 # --- 3) job config: 4B default / 9B opt-in + the family's divergences ----------
@@ -135,13 +170,14 @@ def test_build_job_config_flux2klein_4b_default_and_9b_optin(app, tmp_path):
         assert p9['model']['model_kwargs'] == {'match_target_res': False}
 
 
-def test_flux2klein_expects_prose_captions(app):
+def test_flux2klein_expects_prose_captions(app, monkeypatch):
     """Everything != sdxl expects prose: booru-tag captions on a flux2klein
     dataset trip the MISMATCH_CAPTION guard (forceable, like the others)."""
     from app.services import lora_training as lt
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage
     from app.config import LOCAL_USER
+    monkeypatch.setenv('HF_TOKEN', 'hf_test_token')
     with app.app_context():
         ds = svc.create_dataset(LOCAL_USER, 'FB', 'zchar_fb', train_type='flux2klein')
         booru = '1girl, solo, cafe, sitting, window, jeans, smile, looking_at_viewer'

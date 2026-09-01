@@ -195,10 +195,13 @@ export default function SetupPage() {
           partial: 'some helpers installed', readyText: 'set up' }
       }
       return { index, label: 'LoRA training — ai-toolkit', soft: true, stepId: step.id,
-        state: step.setupComplete ? 'ready'
+        state: step.valid && !step.hfAccessConfigured ? 'partial'
+          : step.setupComplete ? 'ready'
           : (detected?.aitoolkit?.dir ? 'partial' : 'missing'),
-        partial: 'found on disk — one click to use',
-        readyText: 'set up' }
+        partial: step.valid && !step.hfAccessConfigured
+          ? 'core ready — gated model access missing'
+          : 'found on disk — one click to use',
+        readyText: 'core + gated access set up' }
     })
     const SCAN_META = {
       ready: { glyph: '✓', cls: 'text-emerald-400', word: 'ready' },

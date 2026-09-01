@@ -46,6 +46,7 @@ export default function TrainingReadiness({ datasetId, trainType, refreshKey, on
   const v = VERDICT[data.verdict] || VERDICT.warnings;
   const warns = data.checks.filter((c) => c.status === 'warn').length;
   const fails = data.checks.filter((c) => c.status === 'fail').length;
+  const firstBlocker = data.checks.find((c) => c.status === 'fail');
   const subtitle = data.verdict === 'ready'
     ? `${data.checks.length} checks passed`
     : [fails && `${fails} blocker(s)`, warns && `${warns} warning(s)`].filter(Boolean).join(' · ');
@@ -64,6 +65,12 @@ export default function TrainingReadiness({ datasetId, trainType, refreshKey, on
         <span className="text-content-subtle text-[0.6875rem]">{subtitle}</span>
         <span aria-hidden className="ml-auto text-content-subtle text-xs">{open ? '▾' : '▸'}</span>
       </button>
+      {!open && firstBlocker && (
+        <p role="alert" className="m-0 px-3 pb-2.5 text-xs text-red-200">
+          <span className="font-semibold">{firstBlocker.label}</span>
+          <span className="text-red-200/80"> — {firstBlocker.detail}</span>
+        </p>
+      )}
       {open && (
         <ul className="m-0 px-3 pb-2.5 flex flex-col gap-1 list-none">
           {data.checks.map((c) => (

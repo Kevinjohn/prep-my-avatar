@@ -19,11 +19,11 @@ test('asserted override is relevant-only, unchecked, reset, and doubly confirmed
   assert.match(workspace, /checked=\{replaceAsserted\}/);
   assert.match(workspace, /setReplaceAsserted\(false\)/);
   assert.match(workspace, /Replace your captions too\?/);
-  assert.match(workspace, /includeAsserted\) await ds\.recaption\(effCaptionMode, true\)/);
+  assert.match(workspace, /includeAsserted\) await ds\.recaption\(effCaptionMode, true, captionProvider\)/);
 });
 
 test('hook sends the asserted flag only for the confirmed override', () => {
-  assert.match(hook, /const recaption = useCallback\(\(mode, includeAsserted = false\)/);
+  assert.match(hook, /const recaption = useCallback\(\(mode, includeAsserted = false,\s*provider = 'configured'\)/);
   assert.match(hook, /\.\.\.\(includeAsserted \? \{ include_asserted: true \} : \{\}\)/);
   assert.doesNotMatch(hook, /include_asserted:\s*includeAsserted/);
 });

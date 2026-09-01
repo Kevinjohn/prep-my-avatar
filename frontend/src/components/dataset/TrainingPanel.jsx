@@ -387,7 +387,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const preflightFloor = Number.isFinite(preflightSummary?.floor) ? preflightSummary.floor : Infinity;
   const preflightRecommended = Number.isFinite(preflightSummary?.recommended)
     ? preflightSummary.recommended : null;
-  const launchConfigReady = statusLoaded && baseInfoState === 'ready' && preflightState === 'ready';
+  const preflightBlocker = preflightSummary?.blockers?.[0] || null;
+  const launchConfigReady = statusLoaded && baseInfoState === 'ready'
+    && preflightState === 'ready' && !preflightBlocker;
   const checkpointBasesRaw = baseInfo?.bases_by_type?.[checkpointTrainType] || baseInfo?.bases || [];
   const checkpointBaseOptions = checkpointBase && !checkpointBasesRaw.some((item) => item.value === checkpointBase)
     ? [{ value: checkpointBase, label: `custom: ${baseName(checkpointBase)}` }, ...checkpointBasesRaw]
@@ -583,6 +585,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
           title={baseBlocksTrain ? 'Convert the custom base first'
             : customWeightsEmpty ? 'Enter the path to your custom weights .safetensors'
             : sdxlNeedsBase ? 'Choose a base SDXL checkpoint'
+            : preflightBlocker ? preflightBlocker
             : !launchConfigReady ? 'Training configuration and readiness must load successfully before launch'
             : keptCount < preflightFloor
               ? `${keptCount} kept image(s) — the minimum for ${typeLabel} is ${preflightFloor}`

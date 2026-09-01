@@ -6,6 +6,7 @@ import {
 } from '../../utils/technicalAnalysis.js';
 import CorpusPhotoTable from './CorpusPhotoTable';
 import { FRAMING_ORDER } from './variationCatalogModel';
+import { EXTERNAL_VISION_PROVIDERS } from '../../utils/externalVision';
 
 const COVERAGE_OPTIONS = {
   // 'unknown' is a corpus-only bucket: an imported photo nobody has classified yet.
@@ -38,6 +39,7 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
   onAnalyze, onClassify = null, onAnchorDecision = null, onCoverage = null,
   onSourceRights, onStatus, onBatch = null,
   busy = false, visionAvailable = false, visionUnavailableReason = 'Local vision is not ready',
+  classificationProvider = 'configured', onClassificationProviderChange = null,
   reviewPairIds = EMPTY_IDS,
   faceThresholds = { green: 0.50 },
   showAnchors = true, showCoverage = true, mode = 'all' }) {
@@ -126,8 +128,18 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
               📐 Refresh local analysis{analysisCounts.outdated
                 ? ` (${analysisCounts.outdated} outdated)` : ''}
             </button>
-            {coverageVisible && (visionAvailable ? (
-                <button type="button" onClick={onClassify} disabled={busy}
+            {coverageVisible && (
+              <select value={classificationProvider}
+                onChange={(event) => onClassificationProviderChange?.(event.target.value)}
+                disabled={busy} aria-label="Photo variety analysis provider"
+                className="rounded-lg border border-border bg-surface-raised px-2 py-1.5 text-xs text-content disabled:opacity-40">
+                {EXTERNAL_VISION_PROVIDERS.map((provider) => (
+                  <option key={provider.id} value={provider.id}>{provider.label}</option>
+                ))}
+              </select>
+            )}
+            {coverageVisible && (classificationProvider !== 'configured' || visionAvailable ? (
+                <button type="button" onClick={() => onClassify?.(classificationProvider)} disabled={busy}
                   title="Classify framing, angle, expression, lighting, pose and background"
                   className="rounded-lg border border-indigo-400/40 bg-indigo-500/10 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 disabled:opacity-40">
                   👁 Analyse photo variety
@@ -139,10 +151,15 @@ export default function CorpusWorkbench({ datasetId, images = [], anchorPlan = n
                 </a>
               ))}
           </div>
-          {coverageVisible && !visionAvailable && (
+          {coverageVisible && classificationProvider === 'configured' && !visionAvailable && (
             <p id={`photo-variety-unavailable-${datasetId}`}
               className="m-0 text-[0.625rem] leading-relaxed text-amber-200 sm:text-right">
               {visionUnavailableReason}
+            </p>
+          )}
+          {coverageVisible && classificationProvider !== 'configured' && (
+            <p className="m-0 text-[0.625rem] leading-relaxed text-amber-200 sm:text-right">
+              Each photo will be sent to the selected provider after a confirmation.
             </p>
           )}
         </div>

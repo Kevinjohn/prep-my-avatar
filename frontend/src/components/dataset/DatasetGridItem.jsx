@@ -67,7 +67,8 @@ const WATERMARK_BADGE = {
 function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete,
                            onRegenerate, onView, nonce = 0, faceThresholds,
                            selected = false, onToggleSelect, tileSize = 'M',
-                           exclusiveLocked = false, busy = false }) {
+                           exclusiveLocked = false, busy = false,
+                           reviewOnly = false, showCaptions = true }) {
   const confirm = useConfirmDialog();
   const [cap, setCap] = useState(img.caption || '');
   const [captionEditorOpen, setCaptionEditorOpen] = useState(false);
@@ -98,7 +99,7 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
   // that source and silently make an unrelated variation instead.
   const isImageImproveCandidate = img.derivation_kind === 'klein_image_improve';
   const canRegenerate = !isRescueDerived && !isImageImproveCandidate && img.source === 'generated'
-    && !busy && !(img.status === 'pending' && !img.filename);
+    && !reviewOnly && !busy && !(img.status === 'pending' && !img.filename);
 
   const fb = faceBadge(img, faceThresholds);
   const wb = WATERMARK_BADGE[img.watermark_state];
@@ -205,12 +206,12 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
               aria-label="Edit the prompt, then regenerate this variation"
               className="px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px]">✏️</button>
           )}
-          {url && (
+          {!reviewOnly && url && (
             <button type="button" onClick={(e) => { e.stopPropagation(); onCrop(img); }}
               title="Crop" aria-label="Crop"
               className="px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px]">✂</button>
           )}
-          {!isRescueDerived && !exclusiveLocked && (
+          {!reviewOnly && !isRescueDerived && !exclusiveLocked && (
             <button type="button"
               onClick={async (e) => {
                 e.stopPropagation();
@@ -232,7 +233,7 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
             onClose={() => setEditingPrompt(false)} />
         )}
       </div>
-      {isRescueDerived || exclusiveLocked ? (
+      {reviewOnly ? null : isRescueDerived || exclusiveLocked ? (
         <p className="m-1.5 rounded border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 text-center text-[0.625rem] text-indigo-200"
           title="This winner was chosen atomically with its provenance pair. Caption and crop remain available.">
           ✓ Chosen in {isRescueDerived ? 'Klein rescue' : 'reconstruction'} review
@@ -264,7 +265,7 @@ function DatasetGridItem({ img, datasetId, onStatus, onCaption, onCrop, onDelete
             className={`flex-1 py-1 rounded text-[11px] ${img.status === 'reject' ? 'bg-red-600 text-white' : 'bg-surface text-content-muted'}`}>✕</button>
         </div>
       )}
-      {img.status === 'keep' && (
+      {showCaptions && img.status === 'keep' && (
         <div className="m-1.5 mt-0 flex flex-col gap-1">
           <div className="flex items-center justify-between gap-1">
             {attribution && (attribution.kind === 'draft' || attribution.known) ? (

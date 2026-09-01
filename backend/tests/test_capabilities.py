@@ -123,6 +123,28 @@ def test_probe_openai_missing_key(app, monkeypatch):
         result = capabilities.probe_openai()
     assert result == {'ok': False, 'detail': 'key missing'}
 
+
+def test_probe_openai_api_reports_exhausted_credits(app, monkeypatch):
+    from app import capabilities
+
+    class Response:
+        status_code = 429
+
+        def json(self):
+            return {'error': {'code': 'credit_balance_exhausted'}}
+
+    monkeypatch.setattr(capabilities.cfg, 'secret', lambda name: 'secret')
+    monkeypatch.setattr(capabilities.requests, 'post', lambda *args, **kwargs: Response())
+
+    with app.app_context():
+        result = capabilities.probe_openai_api()
+
+    assert result == {
+        'ok': False,
+        'detail': 'API credit balance exhausted — add credits in OpenAI billing',
+        'code': 'credit_balance_exhausted',
+    }
+
 def test_probe_aitoolkit_invalid_when_unconfigured(app):
     with app.app_context():
         from app import capabilities

@@ -17,6 +17,18 @@ export const CAPTION_ORIGINS = [
     short: 'Written by the local vision model',
     title: 'Written by the configured local vision model.',
   },
+  {
+    key: 'openai', chip: 'OpenAI', short: 'Written by OpenAI',
+    title: 'Written by the configured OpenAI API model.',
+  },
+  {
+    key: 'gemini', chip: 'Gemini', short: 'Written by Google Gemini',
+    title: 'Written by the configured Google Gemini API model.',
+  },
+  {
+    key: 'chatgpt', chip: 'ChatGPT', short: 'Written by ChatGPT',
+    title: 'Written through the connected ChatGPT subscription.',
+  },
 ];
 
 export const CAPTION_ORIGIN_UNRECORDED = {
@@ -83,7 +95,7 @@ export function captionRewriteCounts(images) {
     }
     const origin = captionOriginInfo(image.caption_origin);
     if (origin.key === 'asserted') counts.asserted += 1;
-    else if (origin.key === 'joycaption' || origin.key === 'ollama') counts.machine += 1;
+    else if (['joycaption', 'ollama', 'openai', 'gemini', 'chatgpt'].includes(origin.key)) counts.machine += 1;
     else if (!origin.key) counts.unrecorded += 1;
     else counts.unknown += 1;
   }

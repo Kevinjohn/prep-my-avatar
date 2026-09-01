@@ -69,6 +69,22 @@ test('setup completion is independent from whether local services are currently 
   assert.equal(steps.find((step) => step.id === 'training').runtimeReady, false)
 })
 
+test('training core readiness stays distinct from gated-family access', () => {
+  const withoutAccess = deriveSetupSteps({
+    aitoolkit: { configured: true, valid: true },
+    hf_publish: false,
+  }).find((step) => step.id === 'training')
+  const withAccess = deriveSetupSteps({
+    aitoolkit: { configured: true, valid: true },
+    hf_publish: true,
+  }).find((step) => step.id === 'training')
+
+  assert.equal(withoutAccess.setupComplete, true)
+  assert.equal(withoutAccess.status, 'partial')
+  assert.equal(withoutAccess.hfAccessConfigured, false)
+  assert.equal(withAccess.status, 'ready')
+})
+
 test('ComfyUI session instructions retain the detected macOS application launcher', () => {
   const step = deriveSetupSteps({
     comfyui: {

@@ -33,6 +33,7 @@ import useGuidedFlow from '../../hooks/useGuidedFlow';
 import { deriveSetupSteps } from '../../hooks/useSetupSteps';
 import { localVisionGateReason } from '../../utils/setupWorkflow';
 import { filterImages, normalizeTag } from '../../utils/tagFilter';
+import { EXTERNAL_VISION_PROVIDERS, externalVisionWarning } from '../../utils/externalVision';
 import {
   buildSmallImageRescuePairs,
   filterSmallImageRescueGrid,
@@ -79,6 +80,8 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
   const [refCrop, setRefCrop] = useState(false);
   const [viewImg, setViewImg] = useState(null);
   const [captionMode, setCaptionMode] = useState(null);   // null → défaut auto selon train_type
+  const [captionProvider, setCaptionProvider] = useState('configured');
+  const [classificationProvider, setClassificationProvider] = useState('configured');
   const [replaceAsserted, setReplaceAsserted] = useState(false);
   const [showLeaks, setShowLeaks] = useState(false);       // liste dépliée des captions qui fuient
   const [scraperOpen, setScraperOpen] = useState(false);
@@ -260,9 +263,33 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
   const keptCaptioned = summary.kept_captioned
     ?? images.filter((i) => i.status === 'keep' && Boolean((i.caption || '').trim())).length;
   const keptUncaptioned = kept - keptCaptioned;
+  const faceReviewImages = images.filter(
+    (image) => image.status === 'keep' && image.filename,
+  );
+  const faceScored = faceReviewImages.filter(
+    (image) => image.face_state === 'scorable' && Number.isFinite(image.face_score),
+  ).length;
+  const faceNotScorable = faceReviewImages.filter(
+    (image) => image.face_state && image.face_state !== 'scorable',
+  ).length;
+  const faceUnscored = Math.max(0, faceReviewImages.length - faceScored - faceNotScorable);
   // Style de caption : défaut AUTO (SDXL booru-native → booru tags ; sinon prose), surchargé par le sélecteur.
   const effCaptionMode = captionMode || (d.train_type === 'sdxl' ? 'booru' : 'prose');
   const recaptionableExisting = recaptionCounts.rewrite - recaptionCounts.blank;
+  const confirmExternalVision = async (provider, count) => {
+    if (provider === 'configured') return true;
+    const warning = externalVisionWarning(provider, count);
+    return confirm({ ...warning, tone: 'warning' });
+  };
+  const startClassification = async (provider) => {
+    const needsDetails = Number(d?.coverage_plan?.summary?.unclassified || 0);
+    if (await confirmExternalVision(provider, needsDetails)) ds.classify(provider);
+  };
+  const startCaptioning = async () => {
+    if (await confirmExternalVision(captionProvider, keptUncaptioned)) {
+      ds.caption(effCaptionMode, captionProvider);
+    }
+  };
   const startRecaption = async () => {
     const includeAsserted = replaceAsserted;
     try {
@@ -282,8 +309,11 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
         confirmLabel: 'Replace my captions',
         tone: 'danger',
       }))) return;
-      if (includeAsserted) await ds.recaption(effCaptionMode, true);
-      else await ds.recaption(effCaptionMode);
+      const remoteCount = includeAsserted
+        ? recaptionCounts.rewriteWithAsserted : recaptionCounts.rewrite;
+      if (!(await confirmExternalVision(captionProvider, remoteCount))) return;
+      if (includeAsserted) await ds.recaption(effCaptionMode, true, captionProvider);
+      else await ds.recaption(effCaptionMode, false, captionProvider);
     } finally {
       setReplaceAsserted(false);
     }
@@ -391,8 +421,10 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
   // clean) don't pause ComfyUI, so their note omits that claim.
   const act = ds.activity;
   const scraperBusy = isScraperImportBlocked({ busy: ds.busy, activity: act });
+  const remoteCaptioning = captionProvider !== 'configured'
+    || /OpenAI|Gemini|ChatGPT/.test(String(act?.detail || ''));
   const activityBanner = ds.captioning
-    ? `${act?.detail || `Captioning in progress — ${keptCaptioned}/${kept} captioned…`} ComfyUI is paused.`
+    ? `${act?.detail || `Captioning in progress — ${keptCaptioned}/${kept} captioned…`}${remoteCaptioning ? ' Images are being processed by the selected API.' : ' ComfyUI is paused.'}`
     : (() => {
         if (act) {
           const prog = activityProgress(act);
@@ -401,7 +433,8 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
           // ComfyUI, and the Klein case is obvious from the tiles appearing).
           const cpu = act.kind === 'analyze_faces'
             || (act.kind === 'watermark_clean' && !String(act.detail || '').includes('GPU'))
-            || act.kind === 'generate';
+            || act.kind === 'generate'
+            || /OpenAI|Gemini|ChatGPT/.test(String(act.detail || ''));
           const label = {
             watermark_detect: `Scanning for watermarks…${prog}`,
             watermark_clean: `Cleaning watermarks…${prog}`,
@@ -580,12 +613,27 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                   Set a primary reference before scoring, or skip this optional step.
                 </p>
               )}
+              {d.ref_filename && (
+                <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-content-muted">
+                  <span><strong className="text-content">{faceScored}</strong> scored</span>
+                  <span><strong className="text-content">{faceNotScorable}</strong> not scorable</span>
+                  <span className={faceUnscored ? 'text-amber-200' : ''}>
+                    <strong>{faceUnscored}</strong> not analyzed
+                  </span>
+                  {faceUnscored > 0 && !ds.analyzing && (
+                    <span className="basis-full text-amber-200">
+                      No stored result exists for these photos. Run Analyze faces; if it finishes without scores,
+                      use Setup → Quality tools to check the scorer.
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
           {/* The curation grid is also useful evidence on the optional scoring
               page, but no unrelated setup or export controls are shown there. */}
-          <div className={stepCls('curate')}>
+          <div className={stepCls('curate', 'score')}>
             <p className="m-0 text-content-subtle text-[0.75rem] tabular-nums">
               {totalImages} image(s) · {kept} kept
               {images.length < totalImages ? ` · ${images.length} loaded` : ''}
@@ -615,14 +663,20 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                   to see all {images.length} again.
                 </p>
               ) : (
-                <DatasetGrid images={gridImages} datasetId={d.id} onStatus={ds.setStatus} onCaption={ds.setCaption}
+                <DatasetGrid
+                  images={activeStep.slug === 'score'
+                    ? images.filter((image) => image.status === 'keep' && image.filename)
+                    : gridImages}
+                  datasetId={d.id} onStatus={ds.setStatus} onCaption={ds.setCaption}
                   onCrop={setCropImg} onDelete={ds.deleteImage}
                   onRegenerate={ds.regenerate} onView={setViewImg}
                   onBatch={ds.batchImages} busy={ds.busy}
                   nonces={ds.nonces} faceThresholds={d.face_thresholds}
                   exclusiveImageIds={unresolvedExclusiveIds}
                   hasMore={ds.hasMoreImages} onLoadMore={ds.loadMoreImages}
-                  loadingMore={ds.loadingMoreImages} totalImages={totalImages} />
+                  loadingMore={ds.loadingMoreImages} totalImages={totalImages}
+                  reviewOnly={activeStep.slug === 'score'}
+                  showCaptions={activeStep.slug !== 'score'} />
               )}
             </div>
           </div>
@@ -702,13 +756,15 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
               <>
                 <CorpusWorkbench mode="coverage" datasetId={d.id} images={images}
                   anchorPlan={d.anchor_plan} coveragePlan={d.coverage_plan}
-                  onAnalyze={ds.analyzeCorpus} onClassify={ds.classify}
+                  onAnalyze={ds.analyzeCorpus} onClassify={startClassification}
                   onAnchorDecision={ds.setAnchorDecision} onCoverage={ds.setCoverage}
                   onSourceRights={ds.setSourceRights}
                   onStatus={ds.setStatus} onBatch={ds.batchImages}
                   reviewPairIds={unresolvedExclusiveIds} faceThresholds={d.face_thresholds}
                   busy={ds.busy}
                   visionAvailable={Boolean(localVisionStep?.runtimeReady)}
+                  classificationProvider={classificationProvider}
+                  onClassificationProviderChange={setClassificationProvider}
                   visionUnavailableReason={localVisionGateReason(localVisionStep)} />
                 <CoveragePlan plan={d.coverage_plan} onPolicyChange={ds.setCoveragePolicy}
                   onGoToGenerate={() => jumpTo({ targetId: 'ds-add-generate' })} />
@@ -908,8 +964,15 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                     <option value="booru">🏷️ Booru tags</option>
                   </select>
                 )}
+                <select value={captionProvider} onChange={(event) => setCaptionProvider(event.target.value)}
+                  disabled={ds.busy} aria-label="Captioning provider"
+                  className="px-2 py-1.5 rounded-lg bg-surface border border-border text-content text-[0.8125rem] disabled:opacity-40">
+                  {EXTERNAL_VISION_PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.label}</option>
+                  ))}
+                </select>
                 <button type="button" data-workspace-focus
-                  onClick={() => ds.caption(effCaptionMode)} disabled={ds.busy}
+                  onClick={startCaptioning} disabled={ds.busy}
                   className="px-3 py-1.5 rounded-lg bg-gradient-primary text-white text-sm font-semibold disabled:opacity-40">
                   {ds.captioning ? `✨ ${keptCaptioned}/${kept} captioned…` : '✨ Caption the kept ones'}
                 </button>
@@ -934,6 +997,11 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                       className="h-3.5 w-3.5 accent-indigo-500" />
                     Also replace captions I wrote ({recaptionCounts.asserted})
                   </label>
+                )}
+                {captionProvider !== 'configured' && (
+                  <p className="basis-full m-0 text-[0.6875rem] text-amber-200">
+                    Each captioned photo will leave this machine and be sent to the selected provider after confirmation.
+                  </p>
                 )}
                 {/* Caption-leak badge — KIND-aware. character: identity words
                     (hair/face/skin); concept: the caption NAMING the concept (must bind to
@@ -1102,6 +1170,34 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                   open={captionToolsOpen}
                   onOpenChange={(open) => onRevealOpenChange('tools', open, setCaptionToolsOpen)} />
               </div>
+              <section aria-labelledby="caption-review-heading" className="flex flex-col gap-2 pt-1">
+                <div>
+                  <h3 id="caption-review-heading" className="m-0 text-sm font-semibold text-content">
+                    Review every kept image and caption
+                  </h3>
+                  <p className="m-0 mt-1 text-xs text-content-muted">
+                    Compare each caption with its photo. Correct factual mistakes and remove identity details;
+                    edits save when you leave the field.
+                  </p>
+                </div>
+                <DatasetGrid
+                  images={images.filter((image) => image.status === 'keep' && image.filename)}
+                  datasetId={d.id}
+                  onStatus={ds.setStatus}
+                  onCaption={ds.setCaption}
+                  onCrop={setCropImg}
+                  onDelete={ds.deleteImage}
+                  onRegenerate={ds.regenerate}
+                  onView={setViewImg}
+                  onBatch={ds.batchImages}
+                  busy={ds.busy}
+                  nonces={ds.nonces}
+                  faceThresholds={d.face_thresholds}
+                  exclusiveImageIds={unresolvedExclusiveIds}
+                  onLoadMore={ds.loadMoreImages}
+                  reviewOnly
+                />
+              </section>
               {filtersActive && (
                 <p className="m-0 text-content-subtle text-[0.6875rem]">
                   🔎 A tag filter is active — the filtered grid lives in{' '}

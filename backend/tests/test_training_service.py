@@ -47,10 +47,13 @@ def test_parse_training_log_extracts_progress():
 
 
 def test_parse_training_log_ignores_incidental_ratios():
-    """Non-tqdm 'X/Y' text (dataset counts, resolutions) must not be read as
-    progress — only segments with a '%|' bar or a loss postfix count."""
+    """Setup counters must not be presented as optimizer training steps."""
     from app.services.lora_training import _parse_training_log
-    p = _parse_training_log('Loading dataset: 25/25 images\nresolution 1024/1024\n')
+    p = _parse_training_log(
+        'Loading dataset: 25/25 images\n'
+        'Caching latents: 100%|████| 30/30 [00:17<00:00, 1.75it/s]\n'
+        'Generating Samples: 75%|███| 3/4 [02:03<00:40, 40.62s/it]\n'
+        'resolution 1024/1024\n')
     assert p['step'] is None and p['loss_curve'] == []
 
 
@@ -498,6 +501,34 @@ def test_failed_queued_launch_remains_visible_and_status_reports_error(
         status = lt.training_status(LOCAL_USER)
         assert status['error']['error'] == 'launch broke'
         assert status['queue'][0]['status'] == 'failed'
+
+
+def test_training_status_restores_full_log_tail_for_failed_run(
+        app, tmp_path, monkeypatch):
+    from app.services import lora_training as lt
+    from app.services import face_dataset_service as svc
+    from app.job_queue import queue_manager
+    from app.config import LOCAL_USER
+
+    _configure_aitoolkit(tmp_path, monkeypatch, app)
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Failed local', 'failedlocal')
+        log_path = lt._output_dir() / lt._run_name(ds) / 'training.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ['root cause: optimizer is unsupported on this device']
+        lines.extend(f'context line {index}' for index in range(80))
+        log_path.write_text('\n'.join(lines), encoding='utf-8')
+        queue_manager._set_system_state(
+            'training_error',
+            {'dataset_id': ds.id, 'rc': 1, 'log_tail': 'truncated'},
+            ttl_seconds=3600,
+        )
+
+        status = lt.training_status(LOCAL_USER)
+
+        assert status['error']['log_tail'].startswith(
+            'root cause: optimizer is unsupported on this device')
+        assert status['error']['log_tail'].endswith('context line 79')
 
 
 def test_atomic_checkpoint_copy_preserves_existing_destination_on_failure(

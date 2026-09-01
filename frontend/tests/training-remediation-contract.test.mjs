@@ -7,7 +7,7 @@ const read = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), 
 test('training launch is gated by persisted config and authoritative preflight', () => {
   const source = read('components/dataset/TrainingPanel.jsx')
   const launch = read('hooks/useTrainingLaunch.js')
-  assert.match(source, /baseInfoState === 'ready' && preflightState === 'ready'/)
+  assert.match(source, /baseInfoState === 'ready'[\s\S]*?preflightState === 'ready'[\s\S]*?!preflightBlocker/)
   assert.match(source, /preflightSummary\.floor/)
   assert.doesNotMatch(source, /const TRAIN_MIN/)
   assert.match(launch, /Training readiness could not be checked/)

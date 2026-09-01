@@ -96,12 +96,16 @@ function qualityStep(caps) {
 
 function trainingStep(caps) {
   const a = caps.aitoolkit || {}
+  const hfAccessConfigured = !!caps.hf_publish
   return {
     id: 'training', title: 'LoRA training — ai-toolkit', recommended: false,
     unlocks: ['LoRA training', 'JoyCaption captioning (bonus)'],
-    status: a.valid ? 'ready' : 'available',
+    // A valid environment means the core engine is usable, not that every
+    // family is launchable. Keep gated-family access visibly incomplete until
+    // a token is saved; public/local families remain documented in the detail.
+    status: a.valid ? (hfAccessConfigured ? 'ready' : 'partial') : 'available',
     setupComplete: !!a.configured, runtimeReady: !!a.valid,
-    valid: !!a.valid,
+    valid: !!a.valid, hfAccessConfigured,
   }
 }
 

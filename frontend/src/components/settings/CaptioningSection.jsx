@@ -28,6 +28,23 @@ export default function CaptioningSection({ config, setField }) {
             {CAPTIONING_OPTIONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
           </select>
         </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label htmlFor="openai-vision-model" className="block text-sm font-medium text-content">OpenAI vision model</label>
+            <input id="openai-vision-model" value={config.external_vision?.openai_model || ''}
+              onChange={(e) => setField('external_vision', 'openai_model', e.target.value)}
+              className={INPUT_CLASS} />
+          </div>
+          <div>
+            <label htmlFor="gemini-vision-model" className="block text-sm font-medium text-content">Gemini vision model</label>
+            <input id="gemini-vision-model" value={config.external_vision?.gemini_model || ''}
+              onChange={(e) => setField('external_vision', 'gemini_model', e.target.value)}
+              className={INPUT_CLASS} />
+          </div>
+        </div>
+        <p className="text-xs text-content-muted">
+          Remote providers are selected per action in Photo variety or Captions. ChatGPT subscription uses the connected ChatGPT account; OpenAI API and Gemini use API keys from Secrets. The app asks before sending dataset images.
+        </p>
       </Card>
 
       <Card

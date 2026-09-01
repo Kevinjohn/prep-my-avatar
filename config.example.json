@@ -57,6 +57,10 @@
   "captioning": {
     "backend": "auto"
   },
+  "external_vision": {
+    "openai_model": "gpt-5.4-mini",
+    "gemini_model": "gemini-2.5-flash"
+  },
   "training": {
     "default_family": "zimage"
   },

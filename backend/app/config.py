@@ -84,6 +84,10 @@ DEFAULTS = {
     # enables third-party generation in Settings.
     'privacy': {'allow_remote_generation': False},
     'captioning': {'backend': 'auto'},                         # auto|joycaption|ollama|none
+    'external_vision': {
+        'openai_model': 'gpt-5.4-mini',
+        'gemini_model': 'gemini-2.5-flash',
+    },
     'training': {'default_family': 'zimage'},
     # Cloud GPU training (vast.ai). Everything has a sane default: the only
     # required user input is the VAST_API_KEY secret. Values here are knobs
@@ -429,6 +433,11 @@ def _resolve_config(user: dict) -> dict:
     _parse_optional_http_url('llamacpp.url', resolved.get('llamacpp', {}).get('url'))
     _parse_optional_http_url(
         'comfyui.api_url', resolved.get('comfyui', {}).get('api_url'))
+    for provider in ('openai', 'gemini'):
+        _parse_text(
+            f'external_vision.{provider}_model',
+            resolved.get('external_vision', {}).get(f'{provider}_model'),
+        )
     return resolved
 
 def load_config(force=False) -> dict:

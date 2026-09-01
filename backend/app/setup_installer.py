@@ -139,7 +139,8 @@ def _environment_snapshot(interpreter: str) -> dict:
         "for d in importlib.metadata.distributions() if d.metadata.get('Name'))))"
     )
     result = subprocess.run(
-        [interpreter, '-c', code], capture_output=True, text=True, timeout=120)
+        [interpreter, '-c', code], stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise Precondition(
             f'could not snapshot target interpreter before installation: '
@@ -163,7 +164,7 @@ def _spawn_owned(action, command):
         # the published child; it can never land in an unowned spawn gap.
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1)
+            stdin=subprocess.DEVNULL, text=True, bufsize=1)
         run['process'] = proc
     child_identity = None
     try:
@@ -201,7 +202,8 @@ def _restore_environment(snapshot: dict) -> tuple[bool, str]:
             handle.write('\n'.join(packages) + '\n')
         result = subprocess.run(
             [interpreter, '-m', 'pip', 'install', '-r', requirements],
-            capture_output=True, text=True, timeout=1800)
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=1800)
         if result.returncode != 0:
             return False, (result.stderr or result.stdout)[-2000:]
         current = _environment_snapshot(interpreter)['packages']
@@ -211,7 +213,8 @@ def _restore_environment(snapshot: dict) -> tuple[bool, str]:
         if extras:
             removed = subprocess.run(
                 [interpreter, '-m', 'pip', 'uninstall', '-y', *extras],
-                capture_output=True, text=True, timeout=1800)
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=1800)
             if removed.returncode != 0:
                 return False, (removed.stderr or removed.stdout)[-2000:]
         if _environment_snapshot(interpreter)['packages'] != packages:

@@ -11,7 +11,8 @@ Finish describing and accepting the imported photos first. A photo without these
 ## Do this
 
 1. Open **Check photo variety** in the dataset step navigator. Its URL ends in `/coverage`.
-2. Use **Analyse photo variety** when local vision is available, or describe each accepted photo manually on this page.
+2. Choose **Local settings**, **OpenAI API**, or **Google Gemini API**, then select **Analyse photo variety**. Remote choices name the destination and require confirmation before any image leaves the machine.
+   - If no photo details are added, verify the selected model and credential in **Settings** and retry. Describe photos manually only when the selected provider still cannot classify them; never treat an empty result as completed analysis.
 3. Record framing, angle, expression, lighting, pose, background, and occlusion where the app asks for them.
 4. Keep **Balanced** for a normal first run. **Strict** recommends fewer generated gaps; **Experimental** allows more.
 5. Read each framing card. The first number is what you have and the second is the target.

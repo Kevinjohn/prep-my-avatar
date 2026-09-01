@@ -1,6 +1,6 @@
 /** Interactive pre-training preflight. Keeps the aggregate warning message but
  * drills into WHICH captions leak identity (editable in place, saves on blur)
- * and WHICH kept images are near-duplicates (reject one per pair) — so the
+ * WHICH kept images have pixel-QA warnings, and WHICH are near-duplicates — so the
  * offenders get fixed right at the confirm, not hunted down in the grid after.
  * Replaces the old blocking window.confirm: onResolve(true) = start anyway,
  * onResolve(false) = cancel. */
@@ -11,7 +11,12 @@ import { useEscapeToClose } from '../../hooks/useEscapeToClose';
 import { datasetImageUrl } from './datasetImageUrl';
 
 export default function PreflightModal({ report, datasetId, ds, onResolve }) {
-  const { warnings = [], leak_images: leaks = [], dup_pairs: dups = [] } = report || {};
+  const {
+    warnings = [],
+    leak_images: leaks = [],
+    dup_pairs: dups = [],
+    quality_images: qualityImages = [],
+  } = report || {};
   const leakGuidance = report?.leak_kind === 'concept'
     ? 'Captions naming the trained concept — remove the concept terms'
     : report?.leak_kind === 'identity'
@@ -23,7 +28,17 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
     image.training_usefulness && `${image.training_usefulness} technical quality`,
     image.caption && `caption: ${image.caption}`,
   ].filter(Boolean).join(', ');
+  const qualityLabel = (image) => [
+    image.filename ? `file ${image.filename}` : `image ${image.id}`,
+    `technical quality: ${image.technical || 'not checked'}`,
+    `face-region quality: ${image.face_quality || 'not checked'}`,
+  ].join(', ');
+  const isRedQuality = (image) => image.technical === 'red' || image.face_quality === 'red';
+  const redQualityImages = qualityImages.filter(isRedQuality);
+  const advisoryQualityImages = qualityImages.filter((image) => !isRedQuality(image));
+  const orderedQualityImages = [...redQualityImages, ...advisoryQualityImages];
   const [rejected, setRejected] = useState({});   // imageId -> pending|done
+  const [previewImage, setPreviewImage] = useState(null);
   const [pendingActions, setPendingActions] = useState(0);
   const [actionError, setActionError] = useState('');
   const dialogRef = useRef(null);
@@ -43,7 +58,7 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
       if (saved) setRejected((m) => ({ ...m, [id]: 'done' }));
       else {
         setRejected((m) => { const next = { ...m }; delete next[id]; return next; });
-        setActionError(`Image ${id} could not be rejected. The pair is still unresolved.`);
+        setActionError(`Image ${id} could not be rejected. It remains in the training set.`);
       }
     } finally {
       setPendingActions((count) => Math.max(0, count - 1));
@@ -101,6 +116,57 @@ export default function PreflightModal({ report, datasetId, ds, onResolve }) {
                   className="flex-1 bg-app/60 border border-amber-400/30 rounded px-2 py-1 text-[0.6875rem] text-content resize-y" />
               </div>
             ))}
+          </div>
+        )}
+
+        {/* WHICH images have red or incomplete pixel QA — inspect before deciding. */}
+        {qualityImages.length > 0 && (
+          <div className="rounded-lg border border-red-400/30 bg-red-500/5 p-2.5 flex flex-col gap-2">
+            <span className="text-red-300 text-[0.8125rem] font-semibold">
+              Pixel QA review ({qualityImages.length}): {redQualityImages.length} red ·{' '}
+              {advisoryQualityImages.length} amber or incomplete
+            </span>
+
+            {previewImage && (
+              <div className="rounded-lg border border-red-400/30 bg-black/50 p-2 flex flex-col gap-2"
+                aria-label="Full-size QA preview">
+                <div className="flex items-start gap-2">
+                  <span className="text-xs text-content-muted">{qualityLabel(previewImage)}</span>
+                  <button type="button" onClick={() => setPreviewImage(null)}
+                    className="ml-auto text-content-subtle hover:text-content text-xs"
+                    aria-label="Close full-size QA preview">✕</button>
+                </div>
+                <img src={imgUrl(previewImage.filename)} alt={qualityLabel(previewImage)}
+                  className="w-full max-h-[55vh] object-contain bg-black rounded" />
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {orderedQualityImages.map((image) => {
+                const state = rejected[image.id];
+                return (
+                  <div key={image.id}
+                    className={`rounded border border-red-400/20 p-1.5 flex flex-col gap-1 ${state === 'done' ? 'opacity-60' : ''}`}>
+                    <button type="button" onClick={() => setPreviewImage(image)}
+                      aria-label={`Inspect ${qualityLabel(image)} at full size`}
+                      className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-300">
+                      <img src={imgUrl(image.filename)} alt={qualityLabel(image)} loading="lazy"
+                        className={`w-full h-28 rounded object-contain bg-black ${state === 'done' ? 'grayscale' : ''}`} />
+                    </button>
+                    <span className="text-[0.625rem] text-content-muted break-all">{image.filename}</span>
+                    <span className="text-[0.625rem] text-content-muted">
+                      technical quality: {image.technical || 'not checked'}<br />
+                      face-region quality: {image.face_quality || 'not checked'}
+                    </span>
+                    <button type="button" disabled={Boolean(state)} onClick={() => reject(image.id)}
+                      aria-label={`Reject ${qualityLabel(image)} from training`}
+                      className="px-2 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300 text-[0.625rem] disabled:opacity-40">
+                      {state === 'pending' ? 'Saving…' : state === 'done' ? '✕ rejected' : 'Reject this photo'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 

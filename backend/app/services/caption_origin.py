@@ -7,7 +7,11 @@ from sqlalchemy import and_, func, or_
 ASSERTED = "asserted"
 JOYCAPTION = "joycaption"
 OLLAMA = "ollama"
-ENGINES = (JOYCAPTION, OLLAMA)
+OPENAI = "openai"
+GEMINI = "gemini"
+CHATGPT = "chatgpt"
+ENGINES = (JOYCAPTION, OLLAMA, OPENAI, GEMINI, CHATGPT)
+PROVENANCE_ENGINES = (JOYCAPTION, OPENAI, GEMINI, CHATGPT)
 ORIGINS = (ASSERTED, *ENGINES)
 CAPTION_FIELDS = ("caption", "caption_origin", "caption_provenance")
 
@@ -154,7 +158,7 @@ def model_caption_values(
         "caption": text,
         "caption_origin": origin if has_text else None,
         "caption_provenance": (
-            provenance if has_text and origin == JOYCAPTION else None),
+            provenance if has_text and origin in PROVENANCE_ENGINES else None),
     }
 
 

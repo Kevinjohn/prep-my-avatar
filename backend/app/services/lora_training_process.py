@@ -58,7 +58,7 @@ def assert_free_disk(path, min_gb, what) -> None:
             f'~{min_gb} GB needed - free up space and retry')
 
 
-def _log_tail(path: str, n: int = 30) -> str:
+def _log_tail(path: str, n: int = 120) -> str:
     """Dernières `n` lignes d'un fichier log (pour remonter une erreur ai-toolkit)."""
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
@@ -86,7 +86,7 @@ def _watch_training(app, proc, log_path, dataset_id) -> None:
                              "Fin du log :\n%s", dataset_id, rc, tail)
                 # Surface l'erreur à l'UI (sinon un crash = juste « terminé » silencieux).
                 queue_manager._set_system_state(
-                    'training_error', {'dataset_id': dataset_id, 'rc': rc, 'log_tail': tail[-1500:]},
+                    'training_error', {'dataset_id': dataset_id, 'rc': rc, 'log_tail': tail},
                     ttl_seconds=3600)
             else:
                 logger.info("Entraînement ai-toolkit dataset %s terminé (rc=%s).", dataset_id, rc)

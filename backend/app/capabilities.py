@@ -108,6 +108,44 @@ def probe_openai(subscription_status=None) -> dict:
     return {'ok': key or sub, 'detail': ' + '.join(parts) if parts else 'key missing'}
 
 
+def probe_openai_api() -> dict:
+    """Live, text-only check used by the explicit Settings Test button.
+
+    Key presence alone cannot distinguish a valid-but-unfunded API project.
+    Keep this out of the passive capability scan: it makes a billable request.
+    """
+    key = cfg.secret('OPENAI_API_KEY')
+    if not key:
+        return {'ok': False, 'detail': 'API key missing'}
+    model = cfg.get('external_vision.openai_model') or 'gpt-5.4-mini'
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/responses',
+            headers={'Authorization': f'Bearer {key}',
+                     'Content-Type': 'application/json'},
+            json={'model': model, 'input': 'Reply with OK.',
+                  'max_output_tokens': 8, 'store': False},
+            timeout=20,
+        )
+        if response.status_code == 200:
+            return {'ok': True, 'detail': f'API key, credits, and {model} ready'}
+        payload = response.json() if response.status_code else {}
+        error = payload.get('error') if isinstance(payload, dict) else {}
+        code = str((error or {}).get('code') or '')
+        details = {
+            'credit_balance_exhausted': (
+                'API credit balance exhausted — add credits in OpenAI billing'),
+            'organization_usage_limit_exceeded': 'OpenAI organization usage limit exhausted',
+            'organization_spend_limit_exceeded': 'OpenAI organization spend limit exhausted',
+            'project_spend_limit_exceeded': 'OpenAI project spend limit exhausted',
+            'model_not_found': f'Configured OpenAI model is unavailable: {model}',
+        }
+        detail = details.get(code, f'OpenAI API returned HTTP {response.status_code}')
+        return {'ok': False, 'detail': detail, **({'code': code} if code else {})}
+    except Exception:
+        return {'ok': False, 'detail': 'OpenAI API is unreachable'}
+
+
 def probe_comfyui() -> dict:
     api_url = (cfg.get('comfyui.api_url') or '').rstrip('/')
     if not api_url:
