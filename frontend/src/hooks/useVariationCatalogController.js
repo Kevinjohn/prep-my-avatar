@@ -16,7 +16,7 @@ const serializeBoolean = (value) => value ? '1' : '0'
 
 /** Owns catalog loading, shot selection, presets, engine state, and launch policy. */
 export function useVariationCatalogController({ onGenerate, bodyFidelity, recommendedIds,
-  images, variationLabelCounts }) {
+  images, variationLabelCounts, anchorPlan }) {
   const toast = useToast();
   const confirm = useConfirmDialog();
   const promptDialog = usePromptDialog();
@@ -72,7 +72,8 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
   const {
     generator, setGenerator, settingsError, remoteAllowed,
     isNB, isGPT, isKlein, nbAvailable, gptAvailable, klAvailable,
-    currentAvailable, gptViaSub, gptPlanLabel, kleinHint,
+    nbProviderReady, gptProviderReady, nanoBananaProviderLabel,
+    approveRemoteGeneration, currentAvailable, gptViaSub, gptPlanLabel, kleinHint,
   } = useVariationEngines(caps);
 
   useEffect(() => {
@@ -268,17 +269,33 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
       }
     }
     if (!toGen.length) return;
-    // Guard-rail: pay-per-use API engines bill per image — above $5 estimated,
-    // confirm with the amount (silent for the free local Klein AND for the
-    // ChatGPT subscription lane, which spends plan quota, not dollars).
-    const rate = isNB ? nanoBananaRate : (isGPT && !gptViaSub) ? chatGptApiRate : 0;
-    const cost = toGen.length * multiplier * rate;
-    if (cost > 5 && !(await confirm({
-      title: `Spend about $${cost.toFixed(2)}?`,
-      message: `This will launch ${toGen.length * multiplier} paid API generations with ${isNB ? 'Nano Banana' : 'ChatGPT'}. The final charge may vary by provider.`,
-      confirmLabel: 'Launch paid generation',
-      tone: 'warning',
-    }))) return;
+    if (!isKlein) {
+      const requestCount = toGen.length * multiplier;
+      const destination = isNB ? nanoBananaProviderLabel : 'OpenAI';
+      const providerName = isNB
+        ? `Nano Banana Pro via ${nanoBananaProviderLabel}`
+        : `ChatGPT ${gptPlanLabel}`;
+      const referenceLimit = isGPT && gptViaSub ? 5 : 14;
+      const referenceCount = Math.min(Number(anchorPlan?.selected_total) || 0, referenceLimit);
+      const rate = isNB ? nanoBananaRate : gptViaSub ? 0 : chatGptApiRate;
+      const costLine = rate > 0
+        ? ` Estimated provider cost: about $${(requestCount * rate).toFixed(2)}.`
+        : ' This uses your connected ChatGPT plan quota.';
+      const permissionLine = remoteAllowed
+        ? '' : ' Accepting also enables third-party image generation in Settings.';
+      if (!(await confirm({
+        title: `Generate ${requestCount} shot${requestCount === 1 ? '' : 's'} with ${providerName}?`,
+        message: `This sends ${referenceCount} selected reference image${referenceCount === 1 ? '' : 's'} and ${requestCount} prompt${requestCount === 1 ? '' : 's'} to ${destination}.${costLine}${permissionLine}`,
+        confirmLabel: `Allow this ${requestCount}-shot batch`,
+        tone: 'warning',
+      }))) return;
+      try {
+        await approveRemoteGeneration();
+      } catch (error) {
+        toast.error(error.message || 'Could not enable third-party image generation');
+        return;
+      }
+    }
     onGenerate(toGen, multiplier, klein, loraStrength, generator);
   };
 
@@ -289,7 +306,8 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
     setCustomPrompt, customFraming, setCustomFraming, customShots, customPresets,
     storageWarning, addCustomShot, removeCustomShot, loraStrength, setLoraStrength,
     setGenerator, settingsError, remoteAllowed, isNB, isGPT, isKlein,
-    nbAvailable, gptAvailable, klAvailable, currentAvailable, gptViaSub, gptPlanLabel,
+    nbAvailable, gptAvailable, klAvailable, nbProviderReady, gptProviderReady,
+    nanoBananaProviderLabel, approveRemoteGeneration, currentAvailable, gptViaSub, gptPlanLabel,
     kleinHint, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
     customPresetStats, toggle, applyPreset, saveCurrentPreset, applyCustomPreset,
     renameCustomPreset, removeCustomPreset, go,

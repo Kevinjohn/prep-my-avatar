@@ -1,6 +1,9 @@
 function stepState(step, currentSlug) {
-  if (step.slug === currentSlug) return { glyph: '●', label: 'Current' };
+  if (step.slug === currentSlug) return step.needsAttention
+    ? { glyph: '!', label: 'Current — Needs attention' }
+    : { glyph: '●', label: 'Current' };
   if (step.done) return { glyph: '✓', label: 'Complete' };
+  if (step.needsAttention) return { glyph: '!', label: 'Needs attention' };
   if (step.unavailable) return { glyph: '!', label: 'Unavailable' };
   if (step.optional) return { glyph: '○', label: 'Optional' };
   return { glyph: '○', label: 'Upcoming' };
@@ -37,6 +40,7 @@ export default function DatasetWorkflowNav({ steps, currentSlug, onNavigate }) {
             const state = stepState(step, currentSlug);
             const tone = current ? 'border-indigo-400 text-content font-semibold'
               : step.done ? 'text-emerald-300'
+                : step.needsAttention ? 'text-amber-300 hover:text-amber-200'
                 : step.unavailable ? 'text-content-subtle'
                   : 'text-content-muted hover:text-content';
             return (
@@ -82,7 +86,12 @@ export function DatasetStepActions({ current, previous, next, onNavigate }) {
             Skip optional step
           </button>
         )}
-        {next && (
+        {current.needsAttention && (
+          <p role="alert" className="m-0 text-xs text-amber-300">
+            Resolve or accept this step to continue.
+          </p>
+        )}
+        {next && !current.needsAttention && (
           <button type="button" onClick={() => onNavigate(next.slug)}
             className="rounded-lg bg-gradient-primary px-4 py-2 text-sm font-semibold text-white">
             Continue <span className="hidden sm:inline">to {next.label}</span> →

@@ -62,12 +62,19 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
     setCustomPrompt, customFraming, setCustomFraming, customShots, customPresets,
     storageWarning, addCustomShot, removeCustomShot, loraStrength, setLoraStrength,
     setGenerator, settingsError, remoteAllowed, isNB, isGPT, isKlein,
-    nbAvailable, gptAvailable, klAvailable, currentAvailable, gptViaSub, gptPlanLabel,
+    nbAvailable, gptAvailable, klAvailable, nbProviderReady, gptProviderReady,
+    nanoBananaProviderLabel, currentAvailable, gptViaSub, gptPlanLabel,
     kleinHint, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
     customPresetStats, toggle, applyPreset, saveCurrentPreset, applyCustomPreset,
     renameCustomPreset, removeCustomPreset, go,
   } = useVariationCatalogController({ onGenerate, bodyFidelity, recommendedIds,
-    images, variationLabelCounts })
+    images, variationLabelCounts, anchorPlan })
+  const failedLocalGenerations = images.filter((img) => (
+    img.source === 'generated' && img.status === 'failed'
+      && (img.generation_engine === 'klein' || img.klein_model)
+  ));
+  const failedLocalReasons = [...new Set(failedLocalGenerations
+    .map((img) => img.fail_reason).filter(Boolean))];
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-3">
       <div className="flex items-center gap-2">
@@ -82,6 +89,26 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
           </span>
         )}
       </div>
+
+      {failedLocalGenerations.length > 0 && (
+        <div role="alert"
+          className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          <p className="m-0 font-semibold">
+            Local generation failed for {failedLocalGenerations.length} shot{failedLocalGenerations.length === 1 ? '' : 's'}.
+          </p>
+          {failedLocalReasons.slice(0, 1).map((reason) => (
+            <p key={reason} className="mb-0 mt-1 break-words">{reason}</p>
+          ))}
+          {failedLocalReasons.length > 1 && (
+            <p className="mb-0 mt-1 text-red-100/80">
+              {failedLocalReasons.length - 1} additional failure details are available on the failed tiles in Curation.
+            </p>
+          )}
+          <p className="mb-0 mt-1 text-red-100/80">
+            The failed shots remain selected below so you can retry after resolving the reported issue.
+          </p>
+        </div>
+      )}
 
       {/* Engine cards — Klein (local GPU) vs Nano Banana Pro vs ChatGPT (APIs).
           Each card disables itself with an actionable hint when its engine
@@ -123,7 +150,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
           )}
         </div>
         <button type="button" onClick={() => setGenerator('nanobanana')} aria-pressed={isNB}
-          disabled={!nbAvailable || !!generating}
+          disabled={!nbProviderReady || !!generating}
           title={generating ? 'A generation batch is running — wait for it to finish before switching engine' : undefined}
           className={`flex items-start gap-3 rounded-xl border p-3 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${isNB
             ? 'border-amber-400/60 bg-amber-500/15 ring-1 ring-amber-400/40'
@@ -131,7 +158,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
           <span className="w-9 h-9 shrink-0 grid place-items-center text-2xl" aria-hidden="true">🍌</span>
           <span className="flex flex-col gap-1 min-w-0">
             <span className={`text-[0.8125rem] font-semibold ${isNB ? 'text-amber-200' : 'text-content-muted'}`}>
-              Nano Banana Pro <span className="font-normal text-content-subtle">· API</span>
+              Nano Banana Pro <span className="font-normal text-content-subtle">· {nanoBananaProviderLabel} API</span>
             </span>
             <span className="flex flex-wrap gap-1">
               <span className="px-1.5 py-px rounded-full bg-app/60 border border-border text-content-muted text-[0.625rem]">No GPU</span>
@@ -144,15 +171,21 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
               <span className={`text-[0.625rem] ${isNB ? 'text-amber-300' : 'text-content-subtle'}`}>
                 Best face fidelity · estimated cost ≈ ${(selected.size * multiplier * nanoBananaRate).toFixed(2)}
               </span>
+            ) : nbProviderReady && !remoteAllowed ? (
+              <span className="text-amber-300 text-[0.625rem]">
+                Ready via {nanoBananaProviderLabel} · Generate will ask for batch approval
+              </span>
             ) : (
               <span className="text-amber-300 text-[0.625rem]">
-                ⚠ {remoteAllowed ? 'Add GEMINI_API_KEY in Settings' : 'Enable remote generation in Settings ▸ Image engines'}
+                ⚠ {nanoBananaProviderLabel === 'Replicate'
+                  ? 'Add a Replicate API token in Settings'
+                  : 'Add a Gemini API key in Settings'}
               </span>
             )}
           </span>
         </button>
         <button type="button" onClick={() => setGenerator('chatgpt')} aria-pressed={isGPT}
-          disabled={!gptAvailable || !!generating}
+          disabled={!gptProviderReady || !!generating}
           title={generating ? 'A generation batch is running — wait for it to finish before switching engine' : undefined}
           className={`flex items-start gap-3 rounded-xl border p-3 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${isGPT
             ? 'border-emerald-400/60 bg-emerald-500/15 ring-1 ring-emerald-400/40'
@@ -174,6 +207,10 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
                 {gptViaSub
                   ? `gpt-image-2 · uses your ChatGPT ${gptPlanLabel} quota`
                   : `gpt-image-2 · estimated cost ≈ $${(selected.size * multiplier * chatGptApiRate).toFixed(2)}`}
+              </span>
+            ) : gptProviderReady && !remoteAllowed ? (
+              <span className="text-amber-300 text-[0.625rem]">
+                Connected · {gptPlanLabel} subscription · Generate will ask for batch approval
               </span>
             ) : (
               <span className="text-amber-300 text-[0.625rem]">

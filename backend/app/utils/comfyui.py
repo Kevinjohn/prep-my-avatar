@@ -35,6 +35,7 @@ import os
 import re
 import threading
 import time
+from pathlib import Path
 from urllib.parse import urlencode, urljoin
 
 import requests
@@ -464,6 +465,36 @@ def queue_prompt_to_comfyui(prompt_workflow, client_id, worker_url=None):
     except Exception as e:
         logger.error(f"Unexpected error queuing prompt to {api_addr}: {e}")
         return None, f"An unexpected error occurred: {e}"
+
+
+def upload_input_to_comfyui(path, worker_url=None):
+    """Upload one staged input through ComfyUI's API.
+
+    ComfyUI Desktop may keep its live input directory outside the configured
+    application bundle.  The upload endpoint is the authoritative way to put a
+    file where ``LoadImage`` can see it, regardless of that filesystem layout.
+    """
+    source = Path(path)
+    if not source.is_file():
+        raise RuntimeError(f'ComfyUI input staging file is missing: {source.name}')
+    api_addr = worker_url or api_address()
+    try:
+        with source.open('rb') as handle:
+            response = requests.post(
+                urljoin(api_addr, '/upload/image'),
+                files={'image': (source.name, handle)},
+                data={'type': 'input', 'overwrite': 'true'},
+                timeout=30,
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except (OSError, ValueError, requests.exceptions.RequestException) as exc:
+        raise RuntimeError(
+            f'Could not stage {source.name} in ComfyUI: {exc}') from exc
+    if payload.get('name') != source.name:
+        raise RuntimeError(
+            f'ComfyUI staged {source.name} under an unexpected name')
+    return payload
 
 
 def get_comfyui_history(prompt_id, worker_url=None):

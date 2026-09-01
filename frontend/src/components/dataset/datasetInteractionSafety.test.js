@@ -26,6 +26,25 @@ test('variation catalog exposes retry, storage failure, and stale-preset recover
   assert.match(persistence, /session-only because browser storage is unavailable/);
   assert.match(controller, /applyShotPreset\(preset, customShots, availableIds\)/);
   assert.match(controller, /no longer exist and were removed from this selection/);
+  assert.match(catalog, /Local generation failed/);
+  assert.match(catalog, /img\.fail_reason/);
+});
+
+test('remote engine cards distinguish provider readiness from privacy approval', () => {
+  const catalog = source('./VariationCatalog.jsx');
+  const engines = source('../../hooks/useVariationEngines.js');
+  const controller = source('../../hooks/useVariationCatalogController.js');
+  assert.match(engines, /nbProviderReady/);
+  assert.match(engines, /gptProviderReady/);
+  assert.match(controller, /nbProviderReady, gptProviderReady, nanoBananaProviderLabel/);
+  assert.match(catalog, /Ready via \{nanoBananaProviderLabel\}/);
+  assert.match(catalog, /Connected · \{gptPlanLabel\} subscription/);
+  assert.match(catalog, /Generate will ask for batch approval/);
+  assert.match(controller, /selected reference image/);
+  assert.match(controller, /prompt.*to \$\{destination\}/);
+  assert.match(controller, /approveRemoteGeneration/);
+  assert.match(catalog, /disabled=\{!nbProviderReady/);
+  assert.match(catalog, /disabled=\{!gptProviderReady/);
 });
 
 test('duplicate-shot protection uses authoritative whole-dataset counts', () => {

@@ -539,7 +539,7 @@ test('assembled VariationCatalog retries, persists custom shots, reconciles dupl
   fireEvent.change(screen.getByRole('textbox', { name: /Describe outfit/ }), {
     target: { value: 'night portrait under neon lights' },
   })
-  fireEvent.click(screen.getByRole('button', { name: /Add/ }))
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add', exact: true }))
   assert.match(localStorage.getItem('datasetCustomShots'), /night portrait/)
   fireEvent.click(screen.getByRole('button', { name: /Generate \(2\)/ }))
   assert.equal(launches.length, 1)

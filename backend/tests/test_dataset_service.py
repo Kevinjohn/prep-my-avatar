@@ -47,6 +47,85 @@ def test_create_and_payload(app):
         assert p['coverage_plan']['summary']['gaps'] == 4
 
 
+def test_coverage_recommendations_span_underfilled_framings_and_name_each_shot(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Variety gaps', 'variety_gaps')
+        rows = []
+        for framing, count in (('face', 8), ('bust', 17), ('body', 5)):
+            for index in range(count):
+                rows.append(FaceDatasetImage(
+                    dataset_id=ds.id,
+                    filename=f'{framing}-{index}.webp',
+                    source='import',
+                    status='keep',
+                    framing=framing,
+                    coverage_json=json.dumps({
+                        'angle': 'front',
+                        'expression': 'neutral',
+                        'lighting': 'daylight',
+                        'pose': 'headshot' if framing == 'face' else 'standing',
+                        'background': 'plain',
+                        'occlusion': 'none',
+                    }),
+                ))
+        svc.db.session.add_all(rows)
+        svc.db.session.commit()
+
+        plan = svc.build_coverage_plan(ds, rows)
+        generated = [item for item in plan['recommendations'] if item['kind'] == 'generate']
+
+        assert {item['framing'] for item in generated[:3]} == {'face', 'body', 'back'}
+        assert len(generated) == 6
+        assert len({item['reason'] for item in generated}) == len(generated)
+        assert all(item['shot_label'] in item['reason'] for item in generated)
+        assert [(item['framing'], item['deficit']) for item in plan['primary_actions']] == [
+            ('back', 1), ('face', 4), ('body', 1),
+        ]
+
+
+def test_coverage_gap_acknowledgement_is_invalidated_when_the_dataset_changes(app):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Acknowledged gaps', 'acknowledged_gaps')
+        row = FaceDatasetImage(
+            dataset_id=ds.id,
+            filename='portrait.webp',
+            source='import',
+            status='keep',
+            framing='bust',
+            coverage_json=json.dumps({
+                'angle': 'front', 'expression': 'neutral', 'lighting': 'daylight',
+                'pose': 'standing', 'background': 'plain', 'occlusion': 'none',
+            }),
+        )
+        svc.db.session.add(row)
+        svc.db.session.commit()
+
+        initial = svc.build_coverage_plan(ds, [row])
+        assert initial['requires_attention'] is True
+        assert initial['acknowledged'] is False
+
+        assert svc.acknowledge_coverage_gaps(
+            LOCAL_USER, ds.id, initial['gap_signature']) is True
+        acknowledged = svc.build_coverage_plan(ds, [row])
+        assert acknowledged['requires_attention'] is False
+        assert acknowledged['acknowledged'] is True
+
+        row.framing = 'face'
+        svc.db.session.commit()
+        changed = svc.build_coverage_plan(ds, [row])
+        assert changed['gap_signature'] != initial['gap_signature']
+        assert changed['requires_attention'] is True
+        assert changed['acknowledged'] is False
+
+
 def test_api_fanout_creates_pending_rows(app, monkeypatch):
     from app.services import face_dataset_service as svc
     from app.models import FaceDatasetImage

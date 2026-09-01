@@ -969,6 +969,11 @@ def normalize_coverage_targets(targets) -> dict:
                     or isinstance(target, bool) or not isinstance(target, int)):
                 raise ValueError(f'invalid {dimension} target: {value}')
             clean['dimensions'][dimension][value] = max(0, min(100, target))
+    acknowledged = (targets or {}).get('acknowledged_gap_signature')
+    if acknowledged is not None:
+        if not isinstance(acknowledged, str) or not re.fullmatch(r'[0-9a-f]{64}', acknowledged):
+            raise ValueError('acknowledged gap signature must be a SHA-256 hash')
+        clean['acknowledged_gap_signature'] = acknowledged
     return clean
 
 
@@ -1013,6 +1018,103 @@ def _dimension_plans(accepted, targets_by_dimension) -> list[dict]:
         result.append({'id': dimension, 'classified': classified,
                        'unknown': max(0, len(accepted) - classified), 'items': items})
     return result
+
+
+def _coverage_gap_signature(framing_gaps, dimension_plans) -> str:
+    """Fingerprint the unresolved targets so an acknowledgement cannot go stale."""
+    unresolved = {
+        'framing': [
+            {'id': item['id'], 'have': item['have'], 'target': item['target']}
+            for item in framing_gaps if item['deficit'] > 0
+        ],
+        'dimensions': [
+            {'id': item['id'], 'have': item['have'], 'target': item['target']}
+            for dimension in dimension_plans
+            for item in dimension['items']
+            if item['state'] in ('missing', 'weak')
+        ],
+    }
+    encoded = json.dumps(unresolved, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def _coverage_shot_label(entry) -> str:
+    """Turn structured catalogue metadata into a concise English shot request."""
+    shot_id = entry['id']
+    hint = entry.get('coverage_hint') or {}
+    parts = []
+    angle = hint.get('angle')
+    if angle == 'three-quarter':
+        side = ' left' if '_34l' in shot_id else ' right' if '_34r' in shot_id else ''
+        parts.append(f'three-quarter{side}')
+    elif angle == 'profile':
+        side = 'left ' if 'profile_l' in shot_id else 'right ' if 'profile_r' in shot_id else ''
+        parts.append(f'{side}profile')
+    elif angle == 'back':
+        parts.append('three-quarter back' if '34' in shot_id else 'back view')
+    elif angle:
+        parts.append(angle)
+    for dimension in ('expression', 'lighting', 'pose', 'background'):
+        value = hint.get(dimension)
+        if value and value not in parts:
+            parts.append(value)
+    return ' · '.join(parts) or entry.get('axis') or 'different composition'
+
+
+def _gap_recommendations(labels, framing_gaps, dimension_plans, limit):
+    """Select exact gap shots without letting one framing crowd out the rest."""
+    dimension_deficits = {
+        (dimension['id'], item['value']): item['deficit']
+        for dimension in dimension_plans
+        for item in dimension['items']
+        if item['deficit'] > 0
+    }
+    candidates = {}
+    for entry in labels:
+        if entry['state'] != 'missing':
+            continue
+        impact = sum(
+            dimension_deficits.get((dimension, value), 0)
+            for dimension, value in (entry.get('coverage_hint') or {}).items()
+        )
+        candidates.setdefault(entry['framing'], []).append((impact, entry))
+    for entries in candidates.values():
+        entries.sort(key=lambda item: (-item[0], item[1].get('axis') or '', item[1]['id']))
+
+    actions = sorted(
+        (gap for gap in framing_gaps if gap['deficit'] > 0),
+        key=lambda gap: (0 if gap['state'] == 'missing' else 1, -gap['deficit'], gap['framing']),
+    )
+    quotas = {gap['framing']: gap['deficit'] for gap in actions}
+    selected = []
+
+    def take_one(framing):
+        entries = candidates.get(framing) or []
+        if not entries or quotas.get(framing, 0) <= 0 or len(selected) >= limit:
+            return False
+        _impact, entry = entries.pop(0)
+        selected.append(entry)
+        quotas[framing] -= 1
+        return True
+
+    # First pass guarantees that every underfilled framing is represented.
+    for gap in actions:
+        take_one(gap['framing'])
+    # Remaining slots follow the largest remaining composition deficit.
+    while len(selected) < limit:
+        remaining = sorted(actions, key=lambda gap: (-quotas[gap['framing']], gap['framing']))
+        if not any(take_one(gap['framing']) for gap in remaining):
+            break
+
+    primary_actions = []
+    for gap in actions:
+        shots = [_coverage_shot_label(entry) for entry in selected
+                 if entry['framing'] == gap['framing']]
+        primary_actions.append({
+            'framing': gap['framing'], 'have': gap['have'], 'target': gap['target'],
+            'deficit': gap['deficit'], 'state': gap['state'], 'suggested_shots': shots,
+        })
+    return selected, primary_actions
 
 
 def _conceptual_coverage_plan(ds, images):
@@ -1126,16 +1228,12 @@ def build_coverage_plan(ds, images) -> dict:
             'coverage_hint': hint,
         })
 
-    deficits = {gap['framing']: gap['deficit'] for gap in framing_gaps}
-    recommended = sorted(
-        (entry for entry in labels if entry['state'] == 'missing'),
-        key=lambda entry: (-deficits.get(entry['framing'], 0),
-                           entry.get('axis') or '', entry['id']))
     # Keep the default plan useful and affordable: a handful of distinct gap
     # shots is preselected in the catalogue, while the complete list remains
     # visible for manual expansion.
     recommendation_limit = {'strict': 6, 'balanced': 8, 'experimental': 12}.get(profile, 8)
-    recommended = recommended[:recommendation_limit]
+    recommended, primary_actions = _gap_recommendations(
+        labels, framing_gaps, dimension_plans, recommendation_limit)
     unclassified = [img for img in all_imported
                     if img.framing in (None, 'unknown')
                     or len(parse_coverage(img.coverage_json)) < 6]
@@ -1168,17 +1266,34 @@ def build_coverage_plan(ds, images) -> dict:
             'estimated_remote_cost_usd': 0,
         })
     for rank, entry in enumerate(recommended):
+        shot_label = _coverage_shot_label(entry)
         recommendations.append({
             'kind': 'generate', 'variation_id': entry['id'],
+            'framing': entry['framing'], 'shot_label': shot_label,
+            'coverage_hint': entry.get('coverage_hint') or {},
             'score': round(max(0.1, 1.0 - rank * 0.07), 2),
-            'reason': f"Missing {entry['framing']} coverage ({entry.get('axis') or 'composition'})",
+            'reason': f"Add {entry['framing'].title()} shot — {shot_label}",
             'estimated_remote_cost_usd': {'nanobanana': 0.04, 'chatgpt': 0.04},
         })
+    gap_signature = _coverage_gap_signature(framing_gaps, dimension_plans)
+    custom_targets = _safe_json(getattr(ds, 'coverage_targets', None)) or {}
+    unresolved_targets = (
+        sum(1 for gap in framing_gaps if gap['deficit'] > 0)
+        + sum(1 for dimension in dimension_plans for item in dimension['items']
+              if item['state'] in ('missing', 'weak'))
+    )
+    acknowledged = bool(
+        unresolved_targets
+        and custom_targets.get('acknowledged_gap_signature') == gap_signature)
     return {
         'available': True,
         'mode': 'character',
         'profile': profile,
         'targets': targets,
+        'gap_signature': gap_signature,
+        'acknowledged': acknowledged,
+        'requires_attention': bool(unresolved_targets and not acknowledged),
+        'primary_actions': primary_actions,
         'framing': framing_gaps,
         'dimensions': dimension_plans,
         'combinations': labels,
@@ -1190,6 +1305,7 @@ def build_coverage_plan(ds, images) -> dict:
             'reference_pool': len(all_imported), 'generated': len(generated),
             'pending_candidates': len(pending_generated),
             'gaps': sum(1 for gap in framing_gaps if gap['deficit'] > 0),
+            'unresolved_targets': unresolved_targets,
             'dimension_gaps': sum(1 for dimension in dimension_plans
                                   for item in dimension['items']
                                   if item['state'] in ('missing', 'weak')),
@@ -1228,6 +1344,29 @@ def set_coverage_policy(user_id, dataset_id, profile, targets=None) -> bool:
     clean = normalize_coverage_targets(targets)
     ds.coverage_profile = normalized
     ds.coverage_targets = json.dumps(clean, ensure_ascii=False, sort_keys=True)
+    db.session.commit()
+    return True
+
+
+def acknowledge_coverage_gaps(user_id, dataset_id, gap_signature) -> bool:
+    """Accept the current gap snapshot; any later coverage change invalidates it."""
+    ds = get_dataset(user_id, dataset_id)
+    if not ds:
+        return False
+    current = _safe_json(ds.coverage_targets) or {}
+    if gap_signature is None:
+        current.pop('acknowledged_gap_signature', None)
+    else:
+        if not isinstance(gap_signature, str) or not re.fullmatch(r'[0-9a-f]{64}', gap_signature):
+            raise ValueError('gap signature must be a SHA-256 hash')
+        images = (FaceDatasetImage.query.filter_by(dataset_id=dataset_id)
+                  .filter(FaceDatasetImage.status != 'trashed').all())
+        plan = build_coverage_plan(ds, images)
+        if plan['gap_signature'] != gap_signature:
+            raise ValueError('photo-variety plan changed; review the current gaps')
+        current['acknowledged_gap_signature'] = gap_signature
+    ds.coverage_targets = json.dumps(
+        normalize_coverage_targets(current), ensure_ascii=False, sort_keys=True)
     db.session.commit()
     return True
 
@@ -4211,7 +4350,8 @@ def classify_images(user_id, dataset_id, provider='configured'):
     external = provider in ('openai', 'chatgpt', 'gemini')
     if external:
         describe, _ = _external_describer(provider)
-        unload_vision_model = lambda: None
+        def unload_vision_model():
+            return None
         vision_provider = provider
         vision_model = (cfg.get('engines.chatgpt_subscription_model')
                         if provider == 'chatgpt'

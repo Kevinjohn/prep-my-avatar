@@ -110,8 +110,7 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
     review: importedForProgress.length > 0
       && importedForProgress.every((image) => image.status !== 'pending'),
     anchors: Boolean(guidedById.anchors?.done),
-    coverage: Boolean(d?.coverage_plan?.available)
-      && Number(d?.coverage_plan?.summary?.unclassified || 0) === 0,
+    coverage: Boolean(guidedById.coverage?.done),
     reference: Boolean(guidedById.reference?.done),
     generate: images.some((image) => image.source === 'generated' && image.filename),
     curate: Boolean(guidedById.curate?.done),
@@ -138,8 +137,12 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
           ? 'Configure ComfyUI in Setup'
           : '';
     return { ...step, done: Boolean(completedSteps[step.slug]),
+      needsAttention: step.slug === 'coverage'
+        && Boolean(guidedById.coverage?.needsAttention),
       unavailable: Boolean(unavailableReason), unavailableReason };
   });
+  const activeWorkflowStep = workflowSteps.find((step) => step.slug === activeStep.slug)
+    || activeStep;
   const previousWorkflowStep = adjacentDatasetStep(activeStep.slug, -1, { kind: d?.kind });
   const nextWorkflowStep = adjacentDatasetStep(activeStep.slug, 1, { kind: d?.kind });
 
@@ -284,6 +287,17 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
   const startClassification = async (provider) => {
     const needsDetails = Number(d?.coverage_plan?.summary?.unclassified || 0);
     if (await confirmExternalVision(provider, needsDetails)) ds.classify(provider);
+  };
+  const acknowledgeCoverageGaps = async (gapSignature) => {
+    if (!gapSignature) return ds.acknowledgeCoverageGaps(null);
+    const unresolved = Number(d?.coverage_plan?.summary?.unresolved_targets || 0);
+    if (!(await confirm({
+      title: 'Continue with unresolved photo-variety gaps?',
+      message: `This records that you reviewed ${unresolved} unresolved target${unresolved === 1 ? '' : 's'} and chose to continue. Any later photo or classification change will require a fresh review.`,
+      confirmLabel: 'Accept gaps and continue',
+      tone: 'warning',
+    }))) return false;
+    return ds.acknowledgeCoverageGaps(gapSignature);
   };
   const startCaptioning = async () => {
     if (await confirmExternalVision(captionProvider, keptUncaptioned)) {
@@ -767,7 +781,8 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
                   onClassificationProviderChange={setClassificationProvider}
                   visionUnavailableReason={localVisionGateReason(localVisionStep)} />
                 <CoveragePlan plan={d.coverage_plan} onPolicyChange={ds.setCoveragePolicy}
-                  onGoToGenerate={() => jumpTo({ targetId: 'ds-add-generate' })} />
+                  onGoToGenerate={() => jumpTo({ targetId: 'ds-add-generate' })}
+                  onAcknowledgeGaps={acknowledgeCoverageGaps} />
               </>
             )}
 
@@ -1315,7 +1330,7 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
             </div>
           </div>
 
-          <DatasetStepActions current={activeStep} previous={previousWorkflowStep}
+          <DatasetStepActions current={activeWorkflowStep} previous={previousWorkflowStep}
             next={nextWorkflowStep} onNavigate={onStepChange} />
         </div>{/* /right column */}
       </div>{/* /workspace grid */}

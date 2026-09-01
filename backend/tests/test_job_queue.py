@@ -25,6 +25,19 @@ def test_add_job_empty_workflow_raises(app):
             pass
 
 
+def test_submit_uploads_staged_inputs_before_queueing(tmp_path):
+    from app.job_queue import _submit
+
+    staged = tmp_path / 'reference.webp'
+    staged.write_bytes(b'image')
+    with patch('app.utils.comfyui.upload_input_to_comfyui') as upload, \
+         patch('app.utils.comfyui.queue_prompt_to_comfyui',
+               return_value=({'prompt_id': 'prompt-1'}, None)):
+        assert _submit({'1': {}}, 'job-1', [str(staged)]) == 'prompt-1'
+
+    upload.assert_called_once_with(str(staged))
+
+
 def test_system_state_ttl(app):
     from app.job_queue import queue_manager
     with app.app_context():
@@ -283,7 +296,7 @@ def test_cancel_during_submit_window_not_resurrected(app):
     with app.app_context():
         jid = queue_manager.add_job(workflow_data={'1': {}})
 
-        def _submit_then_cancel(workflow, client_id):
+        def _submit_then_cancel(workflow, client_id, staged_inputs=None):
             queue_manager.cancel_job(client_id)  # race: cancel lands mid-submit
             return 'prompt-1'
 

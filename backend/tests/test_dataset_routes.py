@@ -28,6 +28,24 @@ def test_create_returns_ok_envelope(client):
     assert full['name'] == 'Lola' and full['trigger_word'] == 'lola'
 
 
+def test_coverage_acknowledgement_accepts_only_the_current_gap_plan(client):
+    dataset_id = _create(client, 'Gap review', 'gap_review').get_json()['id']
+    plan = client.get(f'/api/dataset/{dataset_id}').get_json()['coverage_plan']
+
+    stale = client.post(f'/api/dataset/{dataset_id}/coverage-acknowledgement', json={
+        'gap_signature': '0' * 64,
+    })
+    assert stale.status_code == 400
+
+    accepted = client.post(f'/api/dataset/{dataset_id}/coverage-acknowledgement', json={
+        'gap_signature': plan['gap_signature'],
+    })
+    assert accepted.status_code == 200
+    refreshed = client.get(f'/api/dataset/{dataset_id}').get_json()['coverage_plan']
+    assert refreshed['acknowledged'] is True
+    assert refreshed['requires_attention'] is False
+
+
 def test_create_requires_name_and_trigger(client):
     resp = client.post('/api/dataset/create', json={'name': '', 'trigger_word': ''})
     assert resp.status_code == 400

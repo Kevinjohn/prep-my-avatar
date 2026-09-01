@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { FRAMING_LABEL } from './variationCatalogModel';
+import CoverageGapResolution from './CoverageGapResolution';
 
 const STATE_LABELS = {
   covered: { icon: '✓', label: 'covered', cls: 'text-emerald-300 border-emerald-400/40 bg-emerald-500/10' },
@@ -30,7 +31,8 @@ function CountChip({ label, value, tone = 'neutral' }) {
   );
 }
 
-export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChange }) {
+export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChange,
+  onAcknowledgeGaps = null }) {
   const [profile, setProfile] = useState('balanced');
   const [targetDraft, setTargetDraft] = useState({});
   const targetsDirtyRef = useRef(false);
@@ -106,12 +108,6 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
         </select>
         <button type="button" onClick={savePolicy} disabled={!onPolicyChange}
           className="rounded border border-indigo-400/40 bg-indigo-500/10 px-2 py-1 text-xs text-indigo-200 disabled:opacity-40">Save targets</button>
-        {recommended.length > 0 && onGoToGenerate && (
-          <button type="button" onClick={onGoToGenerate}
-            className="shrink-0 rounded-lg bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-white">
-            ⚡ Review {recommended.length} gap shots
-          </button>
-        )}
       </div>
 
       <div className="flex flex-wrap gap-1.5">
@@ -150,6 +146,9 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
         <p className="m-0 text-[0.6875rem] text-emerald-300">✓ Framing targets are covered.</p>
       )}
 
+      <CoverageGapResolution plan={plan} onGoToGenerate={onGoToGenerate}
+        onAcknowledgeGaps={onAcknowledgeGaps} />
+
       {dimensions.length > 0 && (
         <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
           {dimensions.map((dimension) => {
@@ -179,13 +178,15 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
       {unresolved.length > 0 && (
         <details className="rounded-md border border-border bg-app/30 px-2 py-1.5">
           <summary className="cursor-pointer text-[0.6875rem] font-semibold text-content-muted">
-            Combination detail · {summary.missing_combinations || 0} missing · {summary.unknown_combinations || 0} unknown
+            Optional variety opportunities · {summary.missing_combinations || 0} not represented · {summary.unknown_combinations || 0} unknown
           </summary>
           <div className="mt-1.5 grid grid-cols-1 gap-1 sm:grid-cols-2">
             {unresolved.map((item) => (
               <div key={item.id} className="flex min-w-0 items-center justify-between gap-2 text-[0.625rem]">
                 <span className="truncate text-content-muted">{item.label}</span>
-                <StateBadge state={item.state} />
+                {item.state === 'missing'
+                  ? <span className="rounded-full border border-border px-1.5 py-px text-content-subtle">optional</span>
+                  : <StateBadge state={item.state} />}
               </div>
             ))}
           </div>
@@ -200,7 +201,7 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
       {(plan.joint_coverage || []).length > 0 && (
         <details className="rounded-md border border-border bg-app/30 px-2 py-1.5">
           <summary className="cursor-pointer text-[0.6875rem] font-semibold text-content-muted">
-            Combined photo variety · {(plan.joint_coverage || []).filter((item) => item.state === 'missing').length} missing combinations
+            Optional combined variety · {(plan.joint_coverage || []).filter((item) => item.state === 'missing').length} opportunities
           </summary>
           <div className="mt-1.5 flex flex-wrap gap-1">
             {(plan.joint_coverage || []).map((item) => (
@@ -210,13 +211,6 @@ export default function CoveragePlan({ plan, onGoToGenerate = null, onPolicyChan
             ))}
           </div>
         </details>
-      )}
-
-      {(plan.recommendations || []).length > 0 && (
-        <div className="rounded-md border border-border bg-app/30 px-2 py-1.5 text-[0.625rem] text-content-muted">
-          <strong className="text-content">Next best actions:</strong>{' '}
-          {(plan.recommendations || []).slice(0, 4).map((item) => item.reason).join(' · ')}
-        </div>
       )}
 
       <div className="flex flex-wrap gap-2 text-[0.625rem] text-content-subtle">

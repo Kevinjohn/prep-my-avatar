@@ -480,6 +480,10 @@ def dataset_generate(dataset_id):
             missing_nodes = keh.klein_missing_nodes()
             if missing_nodes:
                 return _klein_missing_response(keh.klein_missing_assets(), missing_nodes)
+            runtime_blocker = keh.klein_runtime_blocker(data.get('klein_model'))
+            if runtime_blocker:
+                return jsonify({'ok': False, 'code': 'klein_runtime_incompatible',
+                                'error': runtime_blocker}), 409
             ids = svc.generate_variations(LOCAL_USER, dataset_id,
                                           data.get('variations') or [], data.get('multiplier', 1),
                                           data.get('klein_model'),
@@ -587,6 +591,17 @@ def dataset_coverage_policy(dataset_id):
     try:
         ok = svc.set_coverage_policy(
             LOCAL_USER, dataset_id, data.get('profile'), data.get('targets'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return _ok_or_404(ok)
+
+
+@bp.post('/dataset/<int:dataset_id>/coverage-acknowledgement')
+def dataset_coverage_acknowledgement(dataset_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        ok = svc.acknowledge_coverage_gaps(
+            LOCAL_USER, dataset_id, data.get('gap_signature'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     return _ok_or_404(ok)

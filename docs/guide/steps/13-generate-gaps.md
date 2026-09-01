@@ -8,6 +8,12 @@ This guided gap generator is Character-only. Concept and Style datasets do not s
 
 You need a tested Gemini, Replicate, or OpenAI credential, or a working local Klein setup. Before remote generation, explicitly enable remote-generation privacy in **Settings → Image engines**. Remote providers may charge per request and receive the prompt plus the bounded anchor pack.
 
+Provider readiness and transmission permission are separate states. A card can
+show a connected ChatGPT subscription or a ready Replicate route while remaining
+unselectable because **Allow third-party image generation** is off. Enabling it
+does not start a request; it permits a request only after you select that engine
+and press **Generate**.
+
 ## Do this
 
 1. Open **Generate missing views** in the dataset step navigator. Its URL ends in `/generate` and it is labelled **Optional**.

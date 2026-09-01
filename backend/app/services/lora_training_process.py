@@ -259,6 +259,11 @@ def _launch_training(user_id, dataset_id, steps: int | None = None,
     ds = fds.get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
+    # Reject invalid request combinations before environment/model-access gates,
+    # so the webpage names the user's actual mistake instead of an unrelated
+    # Hugging Face blocker that would only matter for a valid launch.
+    launch_fam = _train_type(ds, train_type)
+    eff_vae, eff_te = _effective_vae_te(ds, launch_fam, vae_path, te_path)
     # Disque plein à mi-run = checkpoints corrompus ; refuser AVANT d'exporter.
     assert_free_disk(_output_dir(), MIN_FREE_GB_TRAIN, 'a training run')
     # Garde-fou anti double-lancement : un entraînement DÉJÀ vivant (flag levé +
@@ -286,7 +291,6 @@ def _launch_training(user_id, dataset_id, steps: int | None = None,
     # La famille de CE lancement vient du param train_type s'il est donné, sinon du
     # dataset — c'est elle qui fixe l'enum de variantes valide (flux2klein : 4b/9b ;
     # les autres : turbo/base/deturbo) et le défaut (Krea → Raw, flux2klein → 4B).
-    launch_fam = _train_type(ds, train_type)
     if variant not in _valid_variants_for(launch_fam):
         variant = _default_variant_for(launch_fam)
     if train_type is not None:
@@ -307,7 +311,6 @@ def _launch_training(user_id, dataset_id, steps: int | None = None,
     # --- Custom base/vae/te : whitelist STRICTE par famille + preflight avant spawn.
     # Une famille non-SDXL n'emporte jamais de VAE/TE (cf. _effective_vae_te, qui
     # porte la MÊME règle pour la mise en file).
-    eff_vae, eff_te = _effective_vae_te(ds, launch_fam, vae_path, te_path)
     # Preflight (fichier existe, header safetensors lisible, sniff d'arch) — un
     # sniff non concluant lève un refus CONFIRMABLE (_UNVERIFIED_MARKER), levé par
     # `allow_unverified_weights` exactement comme UNCAPTIONED.

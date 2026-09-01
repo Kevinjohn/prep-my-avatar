@@ -61,14 +61,16 @@ def _claim(job_id) -> bool:
     return bool(claimed)
 
 
-def _submit(workflow, client_id):
+def _submit(workflow, client_id, staged_inputs=None):
     """Queue a workflow on ComfyUI, returning the ComfyUI prompt_id string.
 
     queue_prompt_to_comfyui never raises: it returns (response.json(), None) on
     success or (None, error) on failure. Unpack it here -- binding the raw tuple
     into the comfyui_prompt_id String column is a ProgrammingError that fails
     every real job. Raises on failure so process_one() marks the job failed."""
-    from .utils.comfyui import queue_prompt_to_comfyui
+    from .utils.comfyui import queue_prompt_to_comfyui, upload_input_to_comfyui
+    for staged_path in staged_inputs or []:
+        upload_input_to_comfyui(staged_path)
     result, error = queue_prompt_to_comfyui(workflow, client_id)
     if error:
         raise RuntimeError(error)
@@ -370,7 +372,9 @@ class JobQueueManager:
                     return True  # cancelled/claimed while we were selecting
                 db.session.refresh(job)
                 workflow = json.loads(job.workflow_data or '{}')
-                prompt_id = _submit(workflow, job.job_id)
+                metadata = json.loads(job.job_metadata or '{}')
+                prompt_id = _submit(
+                    workflow, job.job_id, metadata.get('staged_inputs') or [])
                 # Mirror _claim: only advance from 'processing'. If a cancel
                 # landed during submit, never resurrect or poll the row.
                 try:

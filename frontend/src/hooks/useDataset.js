@@ -603,6 +603,15 @@ export function useDataset() {
     return true;
   }, [currentId, refresh, toast]);
 
+  const acknowledgeCoverageGaps = useCallback(async (gapSignature) => {
+    const d = await postJson(`/api/dataset/${currentId}/coverage-acknowledgement`, {
+      gap_signature: gapSignature || null,
+    });
+    if (!d.ok) { toast.error(d.error || 'Could not save the photo-variety decision'); return false; }
+    await refresh();
+    return true;
+  }, [currentId, refresh, toast]);
+
   const caption = useCallback((mode, provider = 'configured') => wrap(async () => {
     setCaptioning(true);
     try {
@@ -1081,7 +1090,7 @@ export function useDataset() {
            deleteDataset, updateSettings, close, setRef, addExtraRef, removeExtraRef,
            generate, importFiles, scrapeImport, resolveSmallImageRescue, improveImage, resolveImageImprovement,
            classify, analyzeCorpus, setAnchorDecision, setCoverage, setSourceRights,
-           setCoveragePolicy, caption, recaption,
+           setCoveragePolicy, acknowledgeCoverageGaps, caption, recaption,
            setStatus, setCaption, crop, cropRef, recropRefAuto, setDatasetTrainType, setDatasetFidelity, deleteImage, batchImages, undoCuration, replaceCaptions, writeCaptionFiles, openDatasetFolder, cancelPending, regenerate, analyzeFaces,
            findWatermarks, cleanWatermarks, cleanWatermarkImages, dismissWatermarks, saveWatermarkRegions,
            purgeUnused, exportZip, exportBackup, importBackup, importDatasetZip, importDatasetFolder,

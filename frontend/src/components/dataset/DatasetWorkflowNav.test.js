@@ -22,6 +22,15 @@ test('step actions include previous, continue, and explicit optional skip contro
   assert.match(source, /current\.optional && next/);
 });
 
+test('required unresolved steps are labelled and cannot continue silently', () => {
+  assert.match(workspace, /coverage: Boolean\(guidedById\.coverage\?\.done\)/);
+  assert.match(workspace, /step\.slug === 'coverage'\s*&& Boolean\(guidedById\.coverage\?\.needsAttention\)/);
+  assert.match(workspace, /current=\{activeWorkflowStep\}/);
+  assert.match(source, /Needs attention/);
+  assert.match(source, /current\.needsAttention/);
+  assert.match(source, /Resolve or accept this step to continue/);
+});
+
 test('dataset navigation and step heading use dividers instead of framed cards', () => {
   assert.match(source, /hidden border-r border-border pr-3 lg:block/);
   assert.doesNotMatch(source, /hidden rounded-lg border border-border bg-surface p-2 lg:block/);

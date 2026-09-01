@@ -246,6 +246,7 @@ def test_extra_refs_chain_native_reference_latents(app, tmp_path, monkeypatch):
     from app.services import klein_edit_helper as keh
     from app.job_queue import queue_manager
     with app.app_context():
+        monkeypatch.setattr(keh.sys, 'platform', 'darwin')
         _comfy(tmp_path, cfg, lora=True)
         src = tmp_path / 'ref.png'
         src.write_bytes(_png())
@@ -259,6 +260,8 @@ def test_extra_refs_chain_native_reference_latents(app, tmp_path, monkeypatch):
                                edit_prompt='p', source_path=str(src),
                                extra_ref_paths=[str(r1), str(r2), str(tmp_path / 'gone.webp')])
         wf = captured['workflow_data']
+        assert wf['77']['inputs']['scheduler'] == 'beta'
+        assert wf['114']['inputs']['weight_dtype'] == 'default'
         # Chain: 92 -> ds_ref1_latent -> ds_ref2_latent -> 77.positive (missing file skipped).
         assert wf['ds_ref1_latent']['inputs']['conditioning'] == ['92', 0]
         assert wf['ds_ref2_latent']['inputs']['conditioning'] == ['ds_ref1_latent', 0]
@@ -266,10 +269,12 @@ def test_extra_refs_chain_native_reference_latents(app, tmp_path, monkeypatch):
         assert 'ds_ref3_latent' not in wf
         # Each extra encodes through the SAME VAE loader as the primary ref.
         assert wf['ds_ref1_encode']['inputs']['vae'] == ['10', 0]
-        # Both extras were copied into the ComfyUI input dir.
-        input_dir = os.path.join(str(tmp_path / 'comfyui'), 'input')
-        assert any('extra1' in f for f in os.listdir(input_dir))
-        assert any('extra2' in f for f in os.listdir(input_dir))
+        # Inputs are staged outside ComfyUI's live input folder, then uploaded
+        # through its API by the worker.
+        staged = captured['metadata']['staged_inputs']
+        assert any('extra1' in f for f in staged)
+        assert any('extra2' in f for f in staged)
+        assert all(os.path.dirname(f) != str(tmp_path / 'comfyui' / 'input') for f in staged)
 
         # Control: no extras -> the sampler still reads the stock node 92.
         captured.clear()
@@ -298,9 +303,9 @@ def test_enqueue_failure_removes_all_klein_staging_files(app, tmp_path, monkeypa
                 user_id='local', source_filename='source.png', edit_prompt='p',
                 source_path=str(source), extra_ref_paths=[str(extra)])
 
-        input_dir = tmp_path / 'comfyui' / 'input'
-        assert not list(input_dir.glob('edit_source_*'))
-        assert not list(input_dir.glob('edit_ref*'))
+        staging_dir = cfg.dataset_images_root().parent / 'comfy-input-staging'
+        assert not list(staging_dir.glob('edit_source_*'))
+        assert not list(staging_dir.glob('edit_ref*'))
 
 
 def test_klein_fanout_passes_dataset_extra_refs(app, tmp_path, monkeypatch):
@@ -656,6 +661,19 @@ def test_generate_missing_nodes_409_names_pack_and_link(app, client, tmp_path, m
     # No doomed rows were created (the preflight blocked before the fan-out).
     payload = client.get(f'/api/dataset/{ds_id}').get_json()
     assert payload['images'] == []
+
+
+def test_generate_blocks_known_mps_fp8_runtime_failure(client, monkeypatch):
+    from app.services import klein_edit_helper as keh
+    monkeypatch.setattr(keh, 'klein_missing_nodes', lambda: [])
+    monkeypatch.setattr(keh, 'klein_runtime_blocker', lambda selected=None: (
+        'Selected Float8 Klein checkpoint cannot run with the currently available Apple GPU memory.'
+    ))
+    ds_id = _make_ds(client)
+    resp = client.post(f'/api/dataset/{ds_id}/generate', json=_KLEIN_BODY)
+    assert resp.status_code == 409
+    assert resp.get_json()['code'] == 'klein_runtime_incompatible'
+    assert client.get(f'/api/dataset/{ds_id}').get_json()['images'] == []
 
 
 def test_generate_proceeds_when_object_info_unreachable(app, client, tmp_path, monkeypatch):

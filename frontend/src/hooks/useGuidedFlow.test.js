@@ -32,6 +32,22 @@ test('vision-ready imported corpora stop at coverage review when metadata is unk
 test('targeted gap generation remains an optional fallback for a mapped corpus', () => {
   const result = deriveSteps(dataset(), CAPS);
   assert.equal(result.steps.find((step) => step.id === 'generate').optional, true);
+  assert.equal(result.nextStep.id, 'coverage');
+  assert.equal(result.steps.find((step) => step.id === 'coverage').done, false);
+});
+
+test('an explicit gap acknowledgement allows a mapped corpus to continue', () => {
+  const d = dataset({
+    coverage_plan: {
+      available: true,
+      requires_attention: false,
+      acknowledged: true,
+      summary: { unclassified: 0, gaps: 2 },
+      recommended_variation_ids: ['face_front_neutral'],
+    },
+  });
+  const result = deriveSteps(d, CAPS);
+  assert.equal(result.steps.find((step) => step.id === 'coverage').done, true);
   assert.equal(result.nextStep.id, 'caption');
 });
 

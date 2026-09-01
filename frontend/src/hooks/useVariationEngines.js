@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { apiFetch } from '../api/fetchClient'
+import { apiFetch, putJson } from '../api/fetchClient'
 import { usePersistedPreference } from './usePersistedPreference'
 import { resolveGeneratorSelection } from './variationEngineSelection.js'
 
@@ -16,6 +16,7 @@ export function useVariationEngines(caps) {
   const [settingsError, setSettingsError] = useState(false)
   const [remoteAllowed, setRemoteAllowed] = useState(false)
   const [chatgptAuth, setChatgptAuth] = useState('auto')
+  const [nanoBananaProvider, setNanoBananaProvider] = useState('google')
   useEffect(() => {
     let cancelled = false
     apiFetch('/api/settings').then((data) => {
@@ -27,6 +28,7 @@ export function useVariationEngines(caps) {
         current, hadStoredGenerator, configuredDefault, enabled,
       ))
       setChatgptAuth(data.config?.engines?.chatgpt_auth || 'auto')
+      setNanoBananaProvider(data.config?.engines?.nanobanana_provider || 'google')
       setRemoteAllowed(!!data.config?.privacy?.allow_remote_generation)
       setSettingsLoaded(true); setSettingsError(false)
     }).catch(() => {
@@ -37,15 +39,27 @@ export function useVariationEngines(caps) {
   const isNB = generator === 'nanobanana'
   const isGPT = generator === 'chatgpt'
   const isKlein = !isNB && !isGPT
-  const nbAvailable = remoteAllowed && enabledEngines.includes('nanobanana') && caps.engines.nanobanana
-  const gptAvailable = remoteAllowed && enabledEngines.includes('chatgpt') && caps.engines.chatgpt
+  const nbProviderReady = enabledEngines.includes('nanobanana') && caps.engines.nanobanana
+  const gptProviderReady = enabledEngines.includes('chatgpt') && caps.engines.chatgpt
+  const nbAvailable = remoteAllowed && nbProviderReady
+  const gptAvailable = remoteAllowed && gptProviderReady
   const klAvailable = enabledEngines.includes('klein') && caps.engines.klein
-  const currentAvailable = settingsLoaded && (isKlein ? klAvailable : isNB ? nbAvailable : gptAvailable)
+  const currentAvailable = settingsLoaded && (
+    isKlein ? klAvailable : isNB ? nbProviderReady : gptProviderReady
+  )
   const subscription = caps.chatgpt_subscription || {}
   const gptViaSub = chatgptAuth === 'subscription'
     || (chatgptAuth === 'auto' && !!subscription.connected)
   const gptPlanLabel = subscription.plan && subscription.plan !== 'free'
     ? subscription.plan.charAt(0).toUpperCase() + subscription.plan.slice(1) : 'Plus/Pro'
+  const nanoBananaProviderLabel = nanoBananaProvider === 'replicate' ? 'Replicate' : 'Google'
+  const approveRemoteGeneration = async () => {
+    if (remoteAllowed) return
+    await putJson('/api/settings', {
+      config: { privacy: { allow_remote_generation: true } },
+    })
+    setRemoteAllowed(true)
+  }
   const kleinHint = klAvailable ? null
     : !enabledEngines.includes('klein') ? '⚠ Klein is disabled in Settings (engines)'
     : !caps.comfyui?.reachable ? '⚠ Configure ComfyUI in Settings'
@@ -53,6 +67,7 @@ export function useVariationEngines(caps) {
   return {
     generator, setGenerator, enabledEngines, settingsLoaded, settingsError, remoteAllowed,
     isNB, isGPT, isKlein, nbAvailable, gptAvailable, klAvailable,
-    currentAvailable, gptViaSub, gptPlanLabel, kleinHint,
+    nbProviderReady, gptProviderReady, nanoBananaProviderLabel,
+    approveRemoteGeneration, currentAvailable, gptViaSub, gptPlanLabel, kleinHint,
   }
 }

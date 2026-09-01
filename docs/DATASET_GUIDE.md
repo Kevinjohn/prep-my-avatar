@@ -231,6 +231,7 @@ The app runs these checks when you hit Train — here's the list to self-check e
 
 - [ ] At least the family minimum kept (12 Z-Image / 20 SDXL / 15 Krea / 15 FLUX.1 / 15 FLUX.2 Klein) — 20–30 is the comfort zone
 - [ ] Framing balanced — not 100% face shots (some bust/body/back)
+- [ ] Photo-variety targets resolved, adjusted deliberately, or explicitly accepted after review
 - [ ] Every kept image captioned *(strongly recommended — a blank caption won't block the launch, it just asks you to confirm "train anyway")*
 - [ ] **Zero identity leaks** (no hair/face/skin words — the leak badge shows 0)
 - [ ] Captions varied, ≥ 8 words, style matches the family (prose vs booru)

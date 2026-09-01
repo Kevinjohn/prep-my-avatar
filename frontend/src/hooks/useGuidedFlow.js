@@ -30,6 +30,10 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
   const hasCoveragePlan = !!coveragePlan?.available;
   const unclassified = coveragePlan?.summary?.unclassified || 0;
   const recommended = coveragePlan?.recommended_variation_ids || [];
+  const characterCoverage = (coveragePlan?.mode || 'character') === 'character';
+  const coverageRequiresAttention = hasCoveragePlan && characterCoverage
+    && (coveragePlan?.requires_attention
+      ?? Number(coveragePlan?.summary?.gaps || 0) > 0);
   const anchorPlan = d && d.anchor_plan;
   const vision = caps?.local_vision || caps?.ollama;
   const visionReady = !!(vision?.reachable && (vision?.model_ready ?? vision?.vision_model_ready));
@@ -47,8 +51,14 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
       done: !!anchorPlan?.selected_total, optional: !hasImportedCorpus,
       subtitle: anchorPlan?.selected_total ? `${anchorPlan.selected_total}/${anchorPlan.limit} selected` : 'automatic or pinned' },
     { id: 'coverage', label: 'Check photo variety', targetId: 'ds-coverage-plan',
-      done: hasImportedCorpus && hasCoveragePlan, optional: !hasImportedCorpus,
-      subtitle: hasCoveragePlan ? `${coveragePlan.summary?.gaps || 0} framing gaps` : 'automatic' },
+      done: hasImportedCorpus && hasCoveragePlan && !coverageRequiresAttention,
+      optional: !hasImportedCorpus,
+      needsAttention: coverageRequiresAttention,
+      subtitle: coverageRequiresAttention
+        ? `${coveragePlan.summary?.unresolved_targets || coveragePlan.summary?.gaps || 0} targets need a decision`
+        : coveragePlan?.acknowledged
+          ? `${coveragePlan.summary?.gaps || 0} framing gaps accepted`
+          : hasCoveragePlan ? 'targets covered' : 'automatic' },
     { id: 'reference', label: 'Primary reference', targetId: 'gf-reference',
       done: !!(d && d.ref_filename), optional: true,
       subtitle: d && d.ref_filename ? 'set' : 'optional; Klein or face scoring' },
@@ -81,7 +91,11 @@ export function deriveSteps(d, caps, checkpointCount = 0) {
     unavailable: !(caps && caps.studio_visible),
     hint: caps && caps.studio_visible ? '' : 'Configure ComfyUI in Settings' });
 
-  const nextStep = steps.find((s) => !s.done && !s.optional && !s.unavailable) || null;
+  const curationStep = steps.find((step) => step.id === 'curate');
+  const curationWaiting = unresolvedPairs.length > 0 || triage.length > 0;
+  const nextStep = (curationWaiting && curationStep)
+    || steps.find((s) => !s.done && !s.optional && !s.unavailable)
+    || null;
   return { steps, nextStep };
 }
 

@@ -203,6 +203,35 @@ under **Unreleased** until a release is tagged.
 
 ### Fixed
 
+- **Check photo variety** no longer reports completion merely because a plan was
+  calculated. Unresolved framing or dimension targets keep the step in **Needs
+  attention** until the photos cover them, the targets are changed, or the user
+  explicitly accepts the current gaps. That acceptance is tied to the exact
+  coverage snapshot and automatically expires after a photo or classification
+  change.
+- Gap recommendations now name each exact shot and represent every underfilled
+  framing before suggesting additional shots from the largest deficit. Catalogue
+  combinations that are not dataset requirements are labelled as optional
+  variety opportunities instead of showing dozens of equivalent `missing`
+  warnings.
+- Local Klein generation now uploads staged references through ComfyUI's input
+  API, so ComfyUI Desktop installations work even when their live input folder
+  differs from the configured application folder. The legacy `beta57` workflow
+  scheduler is also translated to current ComfyUI's supported `beta` scheduler.
+  On Apple MPS, an fp8 checkpoint is cast through ComfyUI's default runtime
+  dtype when memory permits; otherwise generation is blocked before fan-out
+  with the live free-memory requirement instead of creating failed tiles.
+- Failed local generation batches remain visible on the generation page with
+  their recorded reason and a retry path; a batch can no longer fail and return
+  to an apparently idle screen with no explanation.
+- Remote engine cards now distinguish provider readiness from privacy approval.
+  A connected ChatGPT plan remains visibly connected, and Nano Banana names its
+  configured Google or Replicate route even while third-party transmission is
+  disabled. Selecting a ready provider no longer requires hunting through
+  Settings first: Generate presents a batch-specific confirmation naming the
+  destination, reference-image count, prompt count, and estimated charge or
+  plan-quota use before it records approval or transmits anything.
+
 - Official Krea 2, FLUX.1-dev, and FLUX.2 Klein launches are blocked before
   export or process creation when no Hugging Face token is configured. The
   blocker names the exact selected repository, including the distinct Klein 4B

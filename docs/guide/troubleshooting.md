@@ -111,6 +111,14 @@ Klein needs a reachable ComfyUI **and** the Klein model files (~16 GB VRAM
 class). **Setup → ComfyUI** offers the download; the license-gated fp8 model
 needs a Hugging Face token (Settings → Local tools).
 
+On Apple Silicon, MPS cannot execute Float8 tensors directly. Prep My Avatar
+asks ComfyUI to cast an fp8 Klein checkpoint to a supported runtime dtype, which
+needs about 20 GiB of currently free unified GPU memory for the 9B model. If
+ComfyUI reports less, the app blocks before creating generation rows and tells
+you the live free-memory figure. Close memory-heavy applications and retry,
+select a bf16/fp16 checkpoint, or use a configured remote engine after approving
+third-party generation.
+
 ## Gated training fails with `Bearer `, HTTP 401, or exits immediately
 
 Official Krea 2, FLUX.1-dev, and FLUX.2 Klein training bases are gated on

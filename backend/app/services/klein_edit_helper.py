@@ -28,11 +28,15 @@ import logging
 import os
 import random
 import shutil
+import sys
 import time
 import uuid
 
+import requests
+from flask import current_app, has_app_context
+
 from .. import config as cfg
-from ..utils.comfyui import load_workflow_local
+from ..utils.comfyui import api_address, load_workflow_local
 from ..job_queue import queue_manager
 
 logger = logging.getLogger(__name__)
@@ -204,6 +208,42 @@ def klein_missing_assets():
     return missing
 
 
+def klein_runtime_blocker(selected=None):
+    """Return an actionable blocker for a known MPS/Float8 failure.
+
+    The fp8 Klein checkpoint can be cast to fp16 on Apple Silicon only when
+    enough unified GPU memory is currently free. Otherwise ComfyUI retains its
+    Float8 tensors and PyTorch fails in KSampler because MPS has no Float8
+    runtime support. Fail open when ComfyUI cannot report its live device state.
+    """
+    if has_app_context() and current_app.testing:
+        return None
+    unet = resolve_klein_unet(selected)
+    if sys.platform != 'darwin' or not unet or 'fp8' not in unet.lower():
+        return None
+    try:
+        response = requests.get(f"{api_address().rstrip('/')}/system_stats", timeout=3)
+        response.raise_for_status()
+        devices = response.json().get('devices') or []
+    except (requests.RequestException, ValueError, AttributeError):
+        return None
+    mps = next((device for device in devices if device.get('type') == 'mps'), None)
+    if not mps:
+        return None
+    free = int(mps.get('vram_free') or 0)
+    required = 20 * 1024 ** 3
+    if free >= required:
+        return None
+    free_gib = free / 1024 ** 3
+    return (
+        f"Local Klein cannot start: this Float8 checkpoint needs about 20 GiB of "
+        f"free unified GPU memory to cast to a dtype Apple MPS supports; ComfyUI "
+        f"currently reports {free_gib:.1f} GiB free. Close memory-heavy apps and "
+        f"retry, install/select a bf16 or fp16 Klein checkpoint, or use a configured "
+        f"remote image engine after approving third-party generation in Settings."
+    )
+
+
 # --- Custom-node preflight -------------------------------------------------
 # The class_types the shipped 'improve skin.json' historically pulled from custom
 # packs, mapped to the pack that ships each + its GitHub page. Setup installs
@@ -294,11 +334,16 @@ def _bypass_node(workflow, node_id, passthrough_input):
     workflow.pop(node_id, None)
 
 
-def _comfy_input_dir() -> str:
-    d = cfg.comfyui_dir('input')
-    if not d:
-        raise RuntimeError('ComfyUI is not configured')
-    return str(d)
+def _input_staging_dir() -> str:
+    """Return app-owned staging, separate from ComfyUI's live input folder.
+
+    The queue uploads these files through ComfyUI's API. Keeping the source in
+    a separate directory avoids uploading a file onto itself when a Git/code
+    ComfyUI installation uses the configured input path directly.
+    """
+    staging = cfg.dataset_images_root().parent / 'comfy-input-staging'
+    staging.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return str(staging)
 
 
 def _comfy_output_dir():
@@ -349,11 +394,11 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
     if any(a in missing for a in KLEIN_REQUIRED):
         raise KleinModelsMissing(missing)
 
-    comfy_input_dir = _comfy_input_dir()
+    input_staging_dir = _input_staging_dir()
     uid = uuid.uuid4().hex[:8]
     comfy_input = f"edit_source_{uid}_{source_filename}"
     staged_inputs = []
-    source_staging_path = os.path.join(comfy_input_dir, comfy_input)
+    source_staging_path = os.path.join(input_staging_dir, comfy_input)
     shutil.copy2(source_path, source_staging_path)
     staged_inputs.append(source_staging_path)
 
@@ -363,6 +408,10 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
     # from custom-node packs; node 6's `text` is a plain STRING input.
     workflow["6"]["inputs"]["text"] = edit_prompt
     workflow["77"]["inputs"]["seed"] = random.randint(0, 2 ** 64 - 1)
+    # Current ComfyUI replaced the workflow's legacy beta57 scheduler with the
+    # equivalent supported "beta" option.  Normalize it at runtime so older
+    # saved workflow assets remain compatible with current installations.
+    workflow["77"]["inputs"]["scheduler"] = "beta"
     if sampler_steps is not None:
         workflow["77"]["inputs"]["steps"] = max(1, int(sampler_steps))
     if base_lora_strength is not None and "139" in workflow:
@@ -375,6 +424,10 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
     # each new generation overwriting the previous one in the dataset dir.
     workflow["9"]["inputs"]["filename_prefix"] = f"{user_id}_DatasetFace_{uid}"
     workflow["114"]["inputs"]["unet_name"] = unet_ref
+    if sys.platform == "darwin" and "fp8" in unet_ref.lower():
+        # Apple MPS cannot execute Float8 tensors. Let ComfyUI cast an fp8
+        # checkpoint to a runtime dtype supported by the selected device.
+        workflow["114"]["inputs"]["weight_dtype"] = "default"
     workflow["10"]["inputs"]["vae_name"] = vae_ref
     workflow["90"]["inputs"]["clip_name"] = te_ref
 
@@ -390,7 +443,7 @@ def enqueue_klein_edit(user_id, source_filename, edit_prompt, klein_model=None,
             logger.warning(f"klein multi-ref: extra ref missing on disk: {ref_path}")
             continue
         ref_input = f"edit_ref{i}_{uid}_{os.path.basename(ref_path)}"
-        ref_staging_path = os.path.join(comfy_input_dir, ref_input)
+        ref_staging_path = os.path.join(input_staging_dir, ref_input)
         shutil.copy2(ref_path, ref_staging_path)
         staged_inputs.append(ref_staging_path)
         load_id, scale_id = f"ds_ref{i}_load", f"ds_ref{i}_scale"
