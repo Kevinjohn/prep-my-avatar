@@ -64,7 +64,7 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
     setGenerator, settingsError, remoteAllowed, isNB, isGPT, isKlein,
     nbAvailable, gptAvailable, klAvailable, nbProviderReady, gptProviderReady,
     nanoBananaProviderLabel, currentAvailable, gptViaSub, gptPlanLabel,
-    kleinHint, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
+    kleinHint, identityVerified, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
     customPresetStats, toggle, applyPreset, saveCurrentPreset, applyCustomPreset,
     renameCustomPreset, removeCustomPreset, go,
   } = useVariationCatalogController({ onGenerate, bodyFidelity, recommendedIds,
@@ -119,6 +119,17 @@ export default function VariationCatalog({ onGenerate, busy, generating = null, 
           where the images are made — Klein runs free on your GPU · APIs bill per image (or use your ChatGPT subscription)
         </span>
       </div>
+
+      {!isKlein && !identityVerified && (
+        <div role="status"
+          className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+          <p className="m-0 font-semibold">Identity check required before a paid batch</p>
+          <p className="mb-0 mt-1 text-amber-100/80">
+            Generate creates one likeness canary first, even if several shots are selected.
+            Keep it in Curation to unlock batch generation; reject it to keep batches locked while you adjust the provider or references.
+          </p>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <div className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${isKlein
           ? 'border-primary/60 bg-primary/15 ring-1 ring-primary/40'

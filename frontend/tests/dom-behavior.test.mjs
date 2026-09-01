@@ -589,7 +589,7 @@ test('remote generation stays selectable and requires exact batch approval befor
         React.createElement(VariationCatalog, {
           hasRef: true, hasPrimaryRef: true, busy: false,
           onGenerate: (...args) => launches.push(args), images: [],
-          recommendedIds: ['portrait'], anchorPlan: { selected_total: 14, limit: 14 },
+          recommendedIds: ['portrait'], anchorPlan: { selected_total: 5, limit: 5 },
         })))))
 
   const nanoBanana = await screen.findByRole('button', { name: /Nano Banana Pro · Replicate API/ })
@@ -598,8 +598,8 @@ test('remote generation stays selectable and requires exact batch approval befor
   fireEvent.click(screen.getByRole('button', { name: /Generate \(1\)/ }))
 
   const firstDialog = await screen.findByRole('alertdialog')
-  assert.match(firstDialog.textContent, /Generate 1 shot with Nano Banana Pro via Replicate\?/)
-  assert.match(firstDialog.textContent, /14 selected reference images and 1 prompt to Replicate\./)
+  assert.match(firstDialog.textContent, /Verify identity with Nano Banana Pro via Replicate\?/)
+  assert.match(firstDialog.textContent, /5 selected reference images and 1 prompt to Replicate\./)
   assert.match(firstDialog.textContent, /Estimated provider cost: about \$0\.15\./)
   assert.match(firstDialog.textContent, /Accepting also enables third-party image generation in Settings\./)
   assert.equal(settingsUpdates, 0)
@@ -611,7 +611,7 @@ test('remote generation stays selectable and requires exact batch approval befor
 
   fireEvent.click(screen.getByRole('button', { name: /Generate \(1\)/ }))
   await screen.findByRole('alertdialog')
-  fireEvent.click(screen.getByRole('button', { name: 'Allow this 1-shot batch' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Generate 1 identity canary' }))
   await waitFor(() => assert.equal(settingsUpdates, 1))
   await waitFor(() => assert.equal(launches.length, 1))
   assert.equal(launches[0][4], 'nanobanana')

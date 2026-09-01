@@ -6,7 +6,9 @@ import { apiFetch } from '../api/fetchClient'
 import { initialVariationSelection } from '../components/dataset/variationRecommendations'
 import { useVariationEngines } from './useVariationEngines'
 import { useShotPersistence } from './useShotPersistence'
-import { buildVariationLaunch, partitionExistingShots } from '../components/dataset/variationLaunch'
+import {
+  applyRemoteIdentityCanary, buildVariationLaunch, partitionExistingShots,
+} from '../components/dataset/variationLaunch'
 import { applyShotPreset, deleteShotPreset, renameShotPreset, saveShotPreset } from '../utils/shotPresets'
 import { toggleInSet } from '../utils/selection'
 import { usePersistedPreference } from './usePersistedPreference'
@@ -143,6 +145,11 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
     }
     return m;
   }, [images, variationLabelCounts]);
+  const identityVerified = isKlein || images.some((image) => (
+    image.source === 'generated'
+      && image.status === 'keep'
+      && image.generation_engine === generator
+  ));
 
   // Framing mix of each preset — feeds the mini composition bar on its card.
   const presetStats = useMemo(() => {
@@ -269,14 +276,16 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
       }
     }
     if (!toGen.length) return;
+    const launch = applyRemoteIdentityCanary({
+      variations: toGen, multiplier, images, engine: generator, isKlein,
+    });
     if (!isKlein) {
-      const requestCount = toGen.length * multiplier;
+      const requestCount = launch.variations.length * launch.multiplier;
       const destination = isNB ? nanoBananaProviderLabel : 'OpenAI';
       const providerName = isNB
         ? `Nano Banana Pro via ${nanoBananaProviderLabel}`
         : `ChatGPT ${gptPlanLabel}`;
-      const referenceLimit = isGPT && gptViaSub ? 5 : 14;
-      const referenceCount = Math.min(Number(anchorPlan?.selected_total) || 0, referenceLimit);
+      const referenceCount = Math.min(Number(anchorPlan?.selected_total) || 0, 5);
       const rate = isNB ? nanoBananaRate : gptViaSub ? 0 : chatGptApiRate;
       const costLine = rate > 0
         ? ` Estimated provider cost: about $${(requestCount * rate).toFixed(2)}.`
@@ -284,9 +293,17 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
       const permissionLine = remoteAllowed
         ? '' : ' Accepting also enables third-party image generation in Settings.';
       if (!(await confirm({
-        title: `Generate ${requestCount} shot${requestCount === 1 ? '' : 's'} with ${providerName}?`,
-        message: `This sends ${referenceCount} selected reference image${referenceCount === 1 ? '' : 's'} and ${requestCount} prompt${requestCount === 1 ? '' : 's'} to ${destination}.${costLine}${permissionLine}`,
-        confirmLabel: `Allow this ${requestCount}-shot batch`,
+        title: launch.canary
+          ? `Verify identity with ${providerName}?`
+          : `Generate ${requestCount} shot${requestCount === 1 ? '' : 's'} with ${providerName}?`,
+        message: `${launch.canary && launch.requestedTotal > 1
+          ? `You selected ${launch.requestedTotal} outputs, but batch generation stays locked until you approve one likeness. `
+          : ''}This sends ${referenceCount} selected reference image${referenceCount === 1 ? '' : 's'} and ${requestCount} prompt${requestCount === 1 ? '' : 's'} to ${destination}.${costLine}${permissionLine}${launch.canary
+          ? ' Review the result in Curation: keep it to unlock batches, or reject it and adjust the provider or references.'
+          : ''}`,
+        confirmLabel: launch.canary
+          ? 'Generate 1 identity canary'
+          : `Allow this ${requestCount}-shot batch`,
         tone: 'warning',
       }))) return;
       try {
@@ -296,7 +313,7 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
         return;
       }
     }
-    onGenerate(toGen, multiplier, klein, loraStrength, generator);
+    onGenerate(launch.variations, launch.multiplier, klein, loraStrength, generator);
   };
 
   return {
@@ -308,7 +325,7 @@ export function useVariationCatalogController({ onGenerate, bodyFidelity, recomm
     setGenerator, settingsError, remoteAllowed, isNB, isGPT, isKlein,
     nbAvailable, gptAvailable, klAvailable, nbProviderReady, gptProviderReady,
     nanoBananaProviderLabel, approveRemoteGeneration, currentAvailable, gptViaSub, gptPlanLabel,
-    kleinHint, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
+    kleinHint, identityVerified, byFraming, doneByLabel, presetStats, activePreset, activeCustomPreset,
     customPresetStats, toggle, applyPreset, saveCurrentPreset, applyCustomPreset,
     renameCustomPreset, removeCustomPreset, go,
   }
