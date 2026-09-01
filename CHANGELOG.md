@@ -52,6 +52,15 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- Remote identity generation now uses a compact five-image pack led by the
+  primary portrait. Automatically selected references are ranked by measured
+  face similarity and technical quality rather than framing diversity, and the
+  prompt treats later photos as supporting evidence instead of averaging age,
+  hair, facial hair, accessories, or body shape into a new person.
+- Remote providers must pass a one-image identity canary before batch
+  generation unlocks for that dataset and engine. The page shows the true
+  one-image scope and cost, and only a result explicitly kept in Curation
+  counts as likeness approval; rejected and pending outputs do not.
 - The ai-toolkit setup step is now shown as partially ready when the core
   environment works but gated-model access is missing. It explains that any
   Hugging Face read token is valid—the token display name does not need to
@@ -203,6 +212,9 @@ under **Unreleased** until a release is tagged.
 
 ### Fixed
 
+- Replicate Nano Banana Pro requests now explicitly disable provider fallback,
+  so an identity-critical request fails visibly instead of ever being eligible
+  for silent model substitution.
 - **Check photo variety** no longer reports completion merely because a plan was
   calculated. Unresolved framing or dimension targets keep the step in **Needs
   attention** until the photos cover them, the targets are changed, or the user
