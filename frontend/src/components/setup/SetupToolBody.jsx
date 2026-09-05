@@ -734,9 +734,9 @@ export default function SetupToolBody({ id, stepById, config, secretsPresence,
         <TrainingRequirementsPanel caps={caps} hasHfToken={!!secretsPresence.HF_TOKEN} />
         {saveRecheckBtn}
         <p className="mt-2 text-content-muted text-xs">
-          No GPU? You can skip this step: add a <strong>vast.ai API key</strong> in
+          No GPU? You can skip this step: add a <strong>cloud GPU API key (vast.ai or RunPod)</strong> in
           Settings instead and train in the cloud (the app rents a GPU per run,
-          typically ~$1-2). It requests shutdown when work ends and keeps the run visibly billable until vast.ai confirms it.
+          typically ~$1-2). It requests shutdown when work ends and keeps the run visibly billable until the provider confirms it.
         </p>
       </>
     )

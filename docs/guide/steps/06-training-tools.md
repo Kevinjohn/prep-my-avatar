@@ -1,10 +1,10 @@
 # Step 6: Configure training
 
-ai-toolkit trains a LoRA on your own computer. It is optional: you can export a training ZIP for another trainer or configure vast.ai for cloud training later.
+ai-toolkit trains a LoRA on your own computer. It is optional: you can export a training ZIP for another trainer or configure vast.ai or RunPod for cloud training later.
 
 ## Before you begin
 
-Local training requires a compatible GPU and a separate ai-toolkit installation. Cloud training requires a vast.ai account, API key, account credit, and spending limits configured under Settings.
+Local training requires a compatible GPU and a separate ai-toolkit installation. Cloud training requires a vast.ai or RunPod account, API key, account credit, and spending limits configured under Settings.
 
 ## Do this
 
@@ -17,7 +17,7 @@ Local training requires a compatible GPU and a separate ai-toolkit installation.
 
 The browser cannot safely expose an absolute local directory through a normal upload field, so **Choose folder…** opens the Mac's native folder dialog through the local Prep My Avatar server. The picker is available only while accessing the app on the same Mac.
 
-To skip training setup, leave the directory empty and finish. For cloud training later, add a **vast.ai API key** and safety limits in **Settings → Training → Cloud training**.
+To skip training setup, leave the directory empty and finish. For cloud training later, choose **vast.ai** or **RunPod** with the provider selector in **Settings → Training → Cloud GPU**, add that provider’s API key, and press **Test**. Add account credit with your provider and set safety limits under **Cloud training**. RunPod also offers a **Secure / Community** cloud type; host reliability filters apply only to vast.ai.
 
 ## You are finished when
 

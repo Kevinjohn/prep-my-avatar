@@ -142,7 +142,8 @@ is configured, instead of allowing an empty authorization header or late 401.
 environment; any Hugging Face token/licence required by the selected official
 base; an SDXL checkpoint for SDXL; current ai-toolkit extension support for Krea
 2 and FLUX.2 Klein; and either a suitable local accelerator or a configured,
-funded vast.ai account for cloud training. Masked training additionally needs
+funded vast.ai or RunPod account for cloud training. Select the matching provider
+in Settings → Training → Cloud GPU, save its API key, and press **Test**. Masked training additionally needs
 the mask/ML extras; unmasked training remains available without them.
 
 **Checked for every launch:** at least 10 GB free on the training-output and
@@ -172,10 +173,13 @@ machine.
 
 ## A cloud run seems stuck
 
-Open the **Cloud** tab: every run shows its live phase, and the stall watchdog
+Open the **Runs** page: every run shows its live phase, and the stall watchdog
 (Settings → Training → stall timeout) rescues logs and kills the pod if no step
 progress happens for too long. At startup the app also retries cleanup of cloud
 runs it still knows about, but local cleanup success is not a billing guarantee:
 provider requests can fail and a run created outside this app is not tracked.
 Until the provider console confirms the instance is terminated, assume it may
-still be billable and terminate it there manually if necessary.
+still be billable and terminate it there manually if necessary. Each recovery
+link opens that run’s vast.ai or RunPod console, even after you change the
+provider selector. Keep the key for each provider with unfinished runs so the
+app can continue monitoring and requesting shutdown.

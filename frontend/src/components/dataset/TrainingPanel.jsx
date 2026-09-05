@@ -39,6 +39,8 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                                         onPanelOpenChange }) {
   const concept = kind === 'concept' || kind === 'style';  // style: même chemin UI
   const { caps } = useCapabilities();
+  const cloudConfigured = caps.cloud_configured ?? caps.cloud_training;
+  const trainingVisible = caps.training_visible || cloudConfigured;
   const toast = useToast();
   const confirm = useConfirmDialog();
   const promptDialog = usePromptDialog();
@@ -46,7 +48,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // entirely while training is hidden (ai-toolkit not configured) — no point
   // hitting endpoints the backend doesn't expose in that state.
   const { status, statusLoaded, cloudStatus, refreshStatus } = useTrainingMonitoring({
-    trainingVisible: caps.training_visible, cloudTraining: caps.cloud_training,
+    trainingVisible, cloudTraining: caps.cloud_training, cloudConfigured,
     onNavigationStateChange,
   });
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -85,7 +87,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // resynchronisé sur la valeur stockée canonique chaque fois que `adv` arrive/change.
   const [samplePromptsText, setSamplePromptsText] = useState('');
   const checkpointBrowser = useCheckpointBrowser({ dataset: ds, baseInfo,
-    visible: caps.training_visible, toast, onCountChange: onCheckpointsChange });
+    visible: trainingVisible, toast, onCountChange: onCheckpointsChange });
   // Saves cloud synchronisés en local (y compris ceux d'un run EN COURS) —
   // liste séparée : le prompt Resume-or-Fresh ne raisonne que sur le local.
   // {run_dir_bytes, training_dataset_bytes, cloud_staging_bytes, deployed_bytes, total_bytes}
@@ -107,7 +109,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
 
   // Charge les bases + la base/variante du dataset au montage.
   useEffect(() => {
-    if (!caps.training_visible) return undefined;
+    if (!trainingVisible) return undefined;
     let alive = true;
     setBaseInfoState('loading');
     ds.trainBaseInfo?.().then((info) => {
@@ -141,10 +143,10 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
       }
     }).catch(() => { if (alive) setBaseInfoState('error'); });
     return () => { alive = false; };
-  }, [ds.currentId, caps.training_visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ds.currentId, trainingVisible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!caps.training_visible || !ds.currentId || baseInfoState !== 'ready') return undefined;
+    if (!trainingVisible || !ds.currentId || baseInfoState !== 'ready') return undefined;
     let alive = true;
     setPreflightState('loading');
     getJson(`/api/dataset/${ds.currentId}/train/preflight?train_type=${encodeURIComponent(trainType)}`)
@@ -155,20 +157,20 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
       })
       .catch(() => { if (alive) setPreflightState('error'); });
     return () => { alive = false; };
-  }, [caps.training_visible, ds.currentId, trainType, keptCount, baseInfoState]);
+  }, [trainingVisible, ds.currentId, trainType, keptCount, baseInfoState]);
 
   // Pendant une conversion, poll le statut toutes les 4 s. Dépend de la fonction
   // STABLE (useCallback sur currentId), pas de l'objet `ds` entier — sinon
   // l'interval était recréé à chaque render et le timer 4 s n'aboutissait jamais.
   const getBaseInfo = ds.trainBaseInfo;
   useEffect(() => {
-    if (!caps.training_visible || baseInfo?.convert?.status !== 'running') return undefined;
+    if (!trainingVisible || baseInfo?.convert?.status !== 'running') return undefined;
     const id = setInterval(async () => {
       const info = await getBaseInfo?.();
       if (info) setBaseInfo(info);
     }, 4000);
     return () => clearInterval(id);
-  }, [baseInfo?.convert?.status, getBaseInfo, caps.training_visible]);
+  }, [baseInfo?.convert?.status, getBaseInfo, trainingVisible]);
 
   // Bases selon le type choisi (zimage : officiel + merges ; sdxl : checkpoints ComfyUI).
   const currentBases = baseInfo?.bases_by_type?.[trainType] || baseInfo?.bases || [];
@@ -314,13 +316,13 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // Le barème affiché dans Training suit uniquement la configuration Training,
   // jamais le filtre indépendant du navigateur de résultats.
   useEffect(() => {
-    if (!caps.training_visible || !ds.currentId || !baseInfo) return undefined;
+    if (!trainingVisible || !ds.currentId || !baseInfo) return undefined;
     let alive = true;
     ds.listCheckpoints(base, trainType).then((data) => {
       if (alive) setStepsInfo(data?.recommended_steps_info || null);
     }).catch(() => { /* keep the last truthful rationale */ });
     return () => { alive = false; };
-  }, [base, trainType, ds.currentId, baseInfo, caps.training_visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [base, trainType, ds.currentId, baseInfo, trainingVisible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!ds.currentId) { setTrainingFeedback(null); return undefined; }
@@ -413,12 +415,12 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   // Panel gated off (ai-toolkit not configured): the workspace's checkpoint
   // count must not keep a stale value from a previous dataset/session.
   useEffect(() => {
-    if (!caps.training_visible) onCheckpointsChange?.(0);
-  }, [caps.training_visible]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!trainingVisible) onCheckpointsChange?.(0);
+  }, [trainingVisible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cloud run status (global — several cloud runs may be active at once,
   // across different datasets, up to cloudStatus.limit). Polled independently
-  // of the local `status` poll above, and only while a vast.ai key is
+  // of the local `status` poll above, and only while a cloud GPU API key is
   // actually configured.
   // Compat: older servers (or a stale poll) may still answer with only the
   // single `active` field — fall back to a 1-element list built from it.
@@ -439,11 +441,11 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
     stepsOverrideValid, launchConfigReady,
   });
 
-  if (!caps.training_visible) {
+  if (!trainingVisible) {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-border bg-surface p-3 text-content-muted text-sm">
         <span aria-hidden>🎓</span>
-        Training needs ai-toolkit (local GPU) or a vast.ai API key (cloud) — set either in Settings.
+        Training needs ai-toolkit (local GPU) or a cloud GPU API key (vast.ai or RunPod) — set either in Settings.
       </div>
     );
   }
@@ -512,7 +514,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
       )}
 
       {/* Cloud run progress + stop (this dataset only) — separate from the local
-          poll above; runs entirely on the vast.ai pod. */}
+          poll above; runs entirely on the cloud GPU pod. */}
       {cloudActiveHere && (
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2 text-[0.6875rem] text-sky-200 flex-wrap">
@@ -555,7 +557,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
           (a legacy payload without train_type matches any family). Keeping it
           keyed on cloudStatus.last stays simple — per-family history is
           served by ?train_type= on the checkpoint route itself. */}
-      {caps.cloud_training && !cloudActiveHere && cloudStatus.last
+      {cloudConfigured && !cloudActiveHere && cloudStatus.last
         && cloudStatus.last.dataset_id === ds.currentId
         && (!cloudStatus.last.train_type || cloudStatus.last.train_type === trainType)
         && cloudStatus.last.checkpoint_ready && cloudStatus.last.status === 'done' && (
@@ -617,7 +619,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
           <button type="button"
             disabled={!!cloudDisabledReason}
             title={cloudDisabledReason
-              || 'Rents a vast.ai GPU for this run (~$1-2), auto-terminated'}
+              || `Rents a ${caps.cloud_provider?.label || 'vast.ai'} GPU for this run`}
             onClick={async () => { if (await preflightOk()) setCloudDialog(true); }}
             className="px-3 py-1.5 rounded-lg border border-sky-500/50 bg-sky-500/10 text-sky-200 text-sm font-semibold disabled:opacity-40">
             <span aria-hidden>☁️</span> Train in cloud

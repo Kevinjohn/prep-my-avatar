@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getJson } from '../api/fetchClient'
+import { getJson } from '../api/fetchClient.js'
 
 const EMPTY_STATUS = { in_progress: false, installed: true, queue: [], current: null }
 const EMPTY_CLOUD = { configured: false, limit: 1, actives: [], active: null, total_price_per_hour: 0, last: null }
 
-export function useTrainingMonitoring({ trainingVisible, cloudTraining, onNavigationStateChange }) {
+export function useTrainingMonitoring({ trainingVisible, cloudTraining, cloudConfigured, onNavigationStateChange }) {
+  const monitorCloud = cloudConfigured ?? cloudTraining
   const [status, setStatus] = useState(EMPTY_STATUS)
   const [statusLoaded, setStatusLoaded] = useState(false)
   const [cloudStatus, setCloudStatus] = useState(EMPTY_CLOUD)
@@ -31,7 +32,7 @@ export function useTrainingMonitoring({ trainingVisible, cloudTraining, onNaviga
     })
   }, [trainingVisible, statusLoaded, status.queue, onNavigationStateChange])
   useEffect(() => {
-    if (!cloudTraining) return undefined
+    if (!monitorCloud) return undefined
     let alive = true; let timer
     const tick = async () => {
       try { const data = await getJson('/api/dataset/train/cloud/status'); if (alive) setCloudStatus(data) } catch { /* transient */ }
@@ -39,6 +40,6 @@ export function useTrainingMonitoring({ trainingVisible, cloudTraining, onNaviga
     }
     timer = setTimeout(tick, 0)
     return () => { alive = false; clearTimeout(timer) }
-  }, [cloudTraining])
+  }, [monitorCloud])
   return { status, statusLoaded, cloudStatus, refreshStatus }
 }

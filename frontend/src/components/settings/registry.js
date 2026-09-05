@@ -23,7 +23,7 @@ export const SETTINGS_SECTIONS = [
       'watermark', 'inpainting', 'lama', 'cuda', 'cpu', 'device'] },
   { id: 'training', title: 'Training', icon: '🏋️', eyebrow: 'training',
     description: 'Default model family and cloud GPU guardrails.',
-    keywords: ['family', 'zimage', 'sdxl', 'krea', 'cloud', 'vast', 'budget', 'price', 'stall', 'gpu',
+    keywords: ['family', 'zimage', 'sdxl', 'krea', 'cloud', 'vast', 'runpod', 'cloud provider', 'budget', 'price', 'stall', 'gpu',
       'concurrent runs', 'reliability', 'default model'] },
   { id: 'server', title: 'Server & access', icon: '🌐', eyebrow: 'network',
     description: 'Port, LAN access and the access token.',

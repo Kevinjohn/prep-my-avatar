@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useCapabilities } from '../context/CapabilitiesContext';
 import {
   apiResponse, getJson, safePostJson as postJson,
 } from '../api/fetchClient';
@@ -103,6 +104,7 @@ function compareKey(run, index = 0) {
 }
 
 export default function CloudRunsPage() {
+  const { caps } = useCapabilities();
   const toast = useToast();
   const confirm = useConfirmDialog();
   const promptDialog = usePromptDialog();
@@ -167,7 +169,7 @@ export default function CloudRunsPage() {
 
   // ↻ Retry of a failed run: fresh pod, exact same settings as the failed
   // launch (steps/variant/family/masked/GPU class) — the two field failures
-  // (vanished vast offer, pod never ready) are transient by nature.
+  // (vanished cloud GPU offer, pod never ready) are transient by nature.
   const [retrying, setRetrying] = useState({});      // run_id -> bool
   const retry = async (run) => {
     const estimate = costLabel(run);
@@ -244,10 +246,14 @@ export default function CloudRunsPage() {
     }
   };
 
-  const configured = data?.configured;
+  const configured = data?.configured ?? caps.cloud_configured ?? caps.cloud_training;
   const actives = data?.actives || [];
   const recent = data?.recent || [];
   const recoveryRequired = data?.recovery_required || [];
+  const firstRun = actives[0] || recent.find((run) => run.source === 'cloud') || recoveryRequired[0];
+  const consoleUrl = caps.cloud_provider?.console_url || firstRun?.console_url || 'https://cloud.vast.ai/instances/';
+  const consoleLabel = caps.cloud_provider?.console_url
+    ? (caps.cloud_provider.label || 'vast.ai') : (firstRun?.provider_label || 'vast.ai');
   const limit = data?.limit || 1;
   const budget = data?.monthly_budget || 0;
   const spent = data?.month_spend || 0;
@@ -277,9 +283,9 @@ export default function CloudRunsPage() {
           </h1>
           {/* Escape hatch to the provider: see the pod's own console (billing,
               logs, manual destroy) when something looks off app-side. */}
-          <a href="https://cloud.vast.ai/instances/" target="_blank" rel="noreferrer"
+          <a href={consoleUrl} target="_blank" rel="noreferrer"
             className="ml-auto text-xs font-medium text-sky-300 underline hover:text-sky-200">
-            Open the vast.ai console ↗
+            Open the {consoleLabel} console ↗
           </a>
         </div>
         <p className="m-0 text-content-muted text-sm">
@@ -300,14 +306,14 @@ export default function CloudRunsPage() {
 
       {data && !configured && (
         <div className="rounded-lg border border-border bg-surface p-4 text-content-muted text-sm">
-          Cloud training isn’t configured yet. Add your vast.ai API key in{' '}
+          Cloud training isn’t configured yet. Add a cloud GPU API key (vast.ai or RunPod) in{' '}
           <button type="button" onClick={() => navigate('/settings')}
             className="text-sky-300 underline hover:text-sky-200">Settings</button>{' '}
           to rent GPUs on demand.
         </div>
       )}
 
-      {configured && (
+      {configured && data && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm">
           <span className="text-content">
             <b className="tabular-nums">{actives.length}</b>
@@ -419,14 +425,14 @@ export default function CloudRunsPage() {
                 )}
                 <span className="ml-auto flex items-center gap-2">
                   {/* Per-run escape hatch to this pod's provider console (billing,
-                      logs, manual destroy). The vast instance id, when known, goes
+                      logs, manual destroy). The provider instance id, when known, goes
                       in the tooltip so it's findable in the console's instance list. */}
-                  <a href="https://cloud.vast.ai/instances/" target="_blank" rel="noreferrer"
+                  <a href={run.console_url || 'https://cloud.vast.ai/instances/'} target="_blank" rel="noreferrer"
                     title={run.vast_instance_id
-                      ? `vast.ai instance ${run.vast_instance_id} — provider console (billing, logs, manual destroy)`
-                      : 'vast.ai console — billing, logs, manual destroy'}
+                      ? `${run.provider_label || 'vast.ai'} instance ${run.vast_instance_id} — provider console (billing, logs, manual destroy)`
+                      : `${run.provider_label || 'vast.ai'} console — billing, logs, manual destroy`}
                     className="px-2 py-1 rounded-lg text-sky-300 hover:text-sky-200 text-xs no-underline">
-                    vast.ai console ↗
+                    {run.provider_label || 'vast.ai'} console ↗
                   </a>
                   <button type="button" onClick={() => openDataset(run.dataset_id)}
                     className="px-2 py-1 rounded-lg text-content-muted hover:text-content text-xs">
@@ -446,8 +452,17 @@ export default function CloudRunsPage() {
       {/* A pod kept alive for manual recovery bills until reaped — call it out. */}
       {recoveryRequired.length > 0 && (
         <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-amber-200 text-xs">
-          ⚠ {recoveryRequired.length} cloud pod(s) require recovery and may still be billing until vast.ai confirms destruction:
-          {' '}{recoveryRequired.map((run) => run.vast_instance_id || run.run_id).join(', ')}. Verify them in the provider console.
+          ⚠ {recoveryRequired.length} cloud pod(s) require recovery and may still be billing until their providers confirm destruction:
+          <ul className="mt-1 list-disc pl-5">
+            {recoveryRequired.map((run) => (
+              <li key={run.run_id}>
+                <a href={run.console_url || 'https://cloud.vast.ai/instances/'} target="_blank" rel="noreferrer"
+                  className="underline hover:text-amber-100">
+                  {run.provider_label || 'vast.ai'} console ↗ — {run.vast_instance_id || run.run_id}
+                </a>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -504,7 +519,7 @@ export default function CloudRunsPage() {
                   aria-label={`Compare ${run.dataset_name || `dataset ${run.dataset_id}`} version ${run.version || 'unknown'}`}
                   title="Add this run to side-by-side comparison"
                   className="h-4 w-4 accent-indigo-500" />
-                <span aria-hidden title={run.source === 'cloud' ? 'Cloud run (vast.ai)' : 'Local run'}>
+                <span aria-hidden title={run.source === 'cloud' ? `Cloud run (${run.provider_label || 'vast.ai'})` : 'Local run'}>
                   {run.source === 'cloud' ? '☁️' : '💻'}
                 </span>
                 <button type="button" onClick={() => openDataset(run.dataset_id)}
