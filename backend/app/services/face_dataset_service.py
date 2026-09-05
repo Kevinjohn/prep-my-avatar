@@ -97,6 +97,9 @@ def _img_path(img) -> str:
     return os.path.join(_dataset_dir(img.dataset_id), img.filename)
 
 
+TRAINING_EXPORT_MAX_SIDE = 2048
+
+
 def training_source_path(img) -> Path:
     """Prefer the full-resolution upload only for an untouched working image."""
     derivative = Path(_img_path(img))
@@ -7091,9 +7094,11 @@ def build_export_zip(user_id, dataset_id, *, destination=None):
         # status='keep' projection; users can import the reference if they want it
         # represented in the training set.
         for n, img in enumerate(available, 1):
-            path = _img_path(img)
+            path = training_source_path(img)
             png = io.BytesIO()
-            with Image.open(path) as opened, opened.convert('RGB') as converted:
+            with Image.open(path) as opened, ImageOps.exif_transpose(opened) as transposed, \
+                    transposed.convert('RGB') as converted:
+                converted.thumbnail((TRAINING_EXPORT_MAX_SIDE,) * 2, Image.Resampling.LANCZOS)
                 converted.save(png, 'PNG')
             png_bytes = png.getvalue()
             exported_caption = _export_caption(ds, img.caption)

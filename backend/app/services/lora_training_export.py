@@ -24,7 +24,7 @@ from .lora_training import (
 
 logger = logging.getLogger(__name__)
 
-TRAINING_EXPORT_MAX_SIDE = 2048
+TRAINING_EXPORT_MAX_SIDE = fds.TRAINING_EXPORT_MAX_SIDE
 
 
 def _masks_dir(dataset_folder: str) -> str:
