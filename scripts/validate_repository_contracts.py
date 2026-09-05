@@ -174,6 +174,11 @@ def validate_governance() -> list[str]:
     portable = _read("packaging/build_portable.ps1")
     if "(Join-Path $Root 'NOTICE.md') $Stage" not in portable:
         errors.append("Portable build does not stage NOTICE.md")
+    # The release workflow's archive smoke rejects a NOTICE that does not name
+    # this fork; catch that here rather than on a tag push.
+    notice = ROOT / "NOTICE.md"
+    if not notice.is_file() or "prep-my-avatar" not in notice.read_text(encoding="utf-8"):
+        errors.append("NOTICE.md does not identify the prep-my-avatar fork")
 
     implementation = _read("backend/app/services/face_dataset_service.py")
     match = re.search(

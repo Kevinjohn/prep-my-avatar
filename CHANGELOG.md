@@ -339,6 +339,8 @@ under **Unreleased** until a release is tagged.
 ### Internal
 
 - `_finish` lost its unused `destroy` flag.
+- `NOTICE.md` names the fork by repository, which the release archive smoke
+  requires; the repository contract validator now checks the same thing.
 - `.gitattributes` now forces LF on checkout (batch files stay CRLF). The
   release workflow builds on Windows, where the default CRLF checkout changed
   the inlined guide markdown and with it every bundle hash, so the

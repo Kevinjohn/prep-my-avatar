@@ -63,7 +63,7 @@ def test_docker_context_excludes_generated_runtime_and_distribution_trees():
 def _docs_fixture(tmp_path):
     root = SCRIPT.parents[1]
     for relative in (
-        'README.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'docs/VERSIONING.md',
+        'README.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'NOTICE.md', 'docs/VERSIONING.md',
         'CODE_OF_CONDUCT.md', '.github/PULL_REQUEST_TEMPLATE.md',
         '.github/workflows/ci.yml', '.github/workflows/release.yml',
         '.github/ISSUE_TEMPLATE/config.yml',
