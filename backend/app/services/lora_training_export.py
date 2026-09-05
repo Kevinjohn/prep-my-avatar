@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..job_queue import queue_manager
 from ..models import FaceDatasetImage
@@ -23,6 +23,8 @@ from .lora_training import (
 )
 
 logger = logging.getLogger(__name__)
+
+TRAINING_EXPORT_MAX_SIDE = 2048
 
 
 def _masks_dir(dataset_folder: str) -> str:
@@ -115,7 +117,7 @@ def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_d
                 .filter_by(dataset_id=dataset_id, status='keep')
                 .filter(FaceDatasetImage.filename.isnot(None))
                 .order_by(FaceDatasetImage.id.asc()).all())
-        inputs = [(img.id, Path(fds._img_path(img)), img.caption or '') for img in kept]
+        inputs = [(img.id, fds.training_source_path(img), img.caption or '') for img in kept]
     if not inputs:
         raise ValueError('no kept images to export')
     n = 0
@@ -126,7 +128,10 @@ def export_dataset_to_aitoolkit(user_id, dataset_id, masked: bool = True, dest_d
             continue
         stem = f'{trigger}_{n:03d}'
         dst = os.path.join(out, f'{stem}.png')
-        with Image.open(src) as opened, opened.convert('RGB') as converted:
+        with Image.open(src) as opened, ImageOps.exif_transpose(opened) as transposed, \
+                transposed.convert('RGB') as converted:
+            converted.thumbnail(
+                (TRAINING_EXPORT_MAX_SIDE, TRAINING_EXPORT_MAX_SIDE), Image.Resampling.LANCZOS)
             converted.save(dst, 'PNG')
         exported.append(dst)
         cap = caption.strip()

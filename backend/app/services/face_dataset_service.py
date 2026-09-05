@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 from datetime import datetime, timezone
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..extensions import db
 from ..domain_errors import DomainConflictError, DomainValidationError
@@ -95,6 +95,35 @@ def _dataset_dir(dataset_id) -> str:
 
 def _img_path(img) -> str:
     return os.path.join(_dataset_dir(img.dataset_id), img.filename)
+
+
+def training_source_path(img) -> Path:
+    """Prefer the full-resolution upload only for an untouched working image."""
+    derivative = Path(_img_path(img))
+    try:
+        if (img.source != 'import' or not img.original_filename
+                or img.upscale_ratio is not None):
+            return derivative
+        original = Path(_dataset_dir(img.dataset_id)) / img.original_filename
+        if not original.is_file() or original.stat().st_size == 0:
+            return derivative
+        stem, ext = os.path.splitext(derivative)
+        if Path(f'{stem}.orig{ext or ".webp"}').exists():
+            return derivative
+        with Image.open(original) as opened, ImageOps.exif_transpose(opened) as transposed, \
+                Image.open(derivative) as working:
+            transposed.load()
+            working.load()
+            original_aspect = transposed.width / transposed.height
+            working_aspect = working.width / working.height
+            if abs(original_aspect / working_aspect - 1) > 0.015:
+                return derivative
+            if max(transposed.size) < max(working.size):
+                return derivative
+        return original
+    except Exception:
+        logger.debug('Could not check training original for %s', derivative, exc_info=True)
+        return derivative
 
 
 def _atomic_write_bytes(path, data) -> None:
