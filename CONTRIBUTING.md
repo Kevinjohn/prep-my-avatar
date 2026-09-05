@@ -117,6 +117,7 @@ The product docs double as a map of what the app does and why:
 
 - [`README.md`](README.md) — architecture in one pass, the feature list, run modes, and the **Legal & responsible use** section (please read it — this project has hard lines around real people and consent).
 - [`docs/guide/`](docs/guide/) — the in-app manual (getting started, using the app, troubleshooting, getting help).
+- [`docs/screenshots/`](docs/screenshots/) — guide screenshots plus `manifest.yml`, which records each capture's digest and the source files it depends on. CI fails when a screenshot's source changed after its capture. To refresh: `pnpm --dir frontend run capture:guide`, then `python scripts/refresh_screenshot_manifest.py`, then `python scripts/validate_repository_contracts.py`.
 - [`docs/DATASET_GUIDE.md`](docs/DATASET_GUIDE.md) — how good datasets are built, which informs a lot of the product decisions.
 
 ## Security

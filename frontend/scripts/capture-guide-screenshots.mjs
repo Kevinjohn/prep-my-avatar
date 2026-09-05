@@ -16,9 +16,9 @@ const server = spawn(process.execPath, [resolve(root, 'scripts/e2e-server.mjs')]
 });
 
 const screenshots = [
-  ['01_open_app', null, 'Welcome to Prep My Avatar'],
-  ['02_choose_image_provider', /Image generation — API keys & provider/, 'Image generation'],
-  ['03_configure_comfyui', /Local generation — ComfyUI/, 'ComfyUI — local generation & Test Studio'],
+  ['01_open_app', null, 'Setup'],
+  ['02_choose_image_provider', /Cloud\/API image provider/, 'Image generation'],
+  ['03_configure_comfyui', /Local image provider —/, /— local generation & Test Studio/],
   ['04_configure_local_vision', /Local vision —/, 'Local vision — Ollama, LM Studio, or llama.cpp'],
   ['05_install_quality_tools', /Quality tools — ML extras/, 'Quality tools (ML extras)'],
   ['06_configure_training', /LoRA training — ai-toolkit/, 'LoRA training — ai-toolkit'],
@@ -129,7 +129,9 @@ async function main() {
       // Hash navigation keeps SetupPage mounted, including its current wizard
       // screen. Reload so every capture begins from the same welcome state.
       await page.reload();
-      await page.getByRole('heading', { name: 'Welcome to Prep My Avatar', level: 1 }).waitFor();
+      await page.getByRole('heading', { name: 'Setup', level: 1, exact: true }).waitFor();
+      // The checklist first shows a 'Checking setup…' spinner; capture the settled list.
+      await page.getByRole('heading', { name: 'Setup checklist', level: 2 }).waitFor();
       if (row) await page.getByRole('button', { name: row }).click();
       await page.getByRole('heading', { name: heading, level: 1 }).waitFor();
       await sanitizeCapture(page, name);
@@ -174,7 +176,7 @@ async function main() {
       if (slug === 'reference') {
         await page.locator('input[type="file"][accept="image/*"]:not([multiple])').first()
           .setInputFiles(resolve(root, 'tasks/reference-corpus/placeholder_sharp.jpg'));
-        await page.getByAltText('ref').waitFor({ timeout: 60_000 });
+        await page.getByAltText(/^Primary — authoritative identity preview/).waitFor({ timeout: 60_000 });
       }
       await closeNotifications(page);
       await page.waitForTimeout(150);

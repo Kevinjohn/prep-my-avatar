@@ -50,7 +50,7 @@ This is a filesystem heuristic, not a permanent guarantee from ComfyUI. If a fut
 
 ## Do this
 
-1. On **Step 2 of 5 — Local generation — ComfyUI**, check whether the page says ComfyUI is already running.
+1. On **Step 2 of 5 — Local image provider — ComfyUI**, check whether the page says ComfyUI is already running.
 2. Start it using the matching method above: click the instance card on the Comfy Desktop dashboard, or run `python main.py --listen 127.0.0.1 --port 8188` from an activated manual-install environment.
 3. Enter the **ComfyUI install directory** and **ComfyUI API URL** shown by your installation.
 4. Select **Save & re-check**. A classic ComfyUI directory contains `models` and `main.py`; ComfyUI Desktop uses the supported `models` and `custom_nodes` layout instead.

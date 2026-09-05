@@ -25,4 +25,4 @@ If you do not want remote generation, leave every field empty and select **Save 
 
 ## You are finished when
 
-Your chosen key shows **Saved** and its test succeeds, or you have deliberately left all keys empty. The wizard then shows **Step 2 of 5 — Local generation — ComfyUI**.
+Your chosen key shows **Saved** and its test succeeds, or you have deliberately left all keys empty. The wizard then shows **Step 2 of 5 — Local image provider — ComfyUI**.
