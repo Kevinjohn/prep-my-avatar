@@ -339,6 +339,10 @@ under **Unreleased** until a release is tagged.
 ### Internal
 
 - `_finish` lost its unused `destroy` flag.
+- `.gitattributes` now forces LF on checkout (batch files stay CRLF). The
+  release workflow builds on Windows, where the default CRLF checkout changed
+  the inlined guide markdown and with it every bundle hash, so the
+  "frontend build must be committed" step had never passed.
 - `scripts/refresh_screenshot_manifest.py` rewrites `docs/screenshots/manifest.yml`
   digests and capture revisions in place after `pnpm run capture:guide`; the
   capture script's selectors follow the new setup page.

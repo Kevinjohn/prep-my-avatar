@@ -1,2 +1,18 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Normalise line endings on every platform: the frontend bundle inlines guide
+# markdown at build time, so a CRLF checkout (Windows default) changes every
+# chunk hash and fails the "frontend build must be committed" release step.
+* text=auto eol=lf
+
+# cmd.exe needs CRLF batch files.
+*.bat text eol=crlf
+
+# Binary assets.
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.woff binary
+*.woff2 binary
