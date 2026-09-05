@@ -342,6 +342,8 @@ def probe_runpod() -> dict:
         return {'ok': True, 'detail': f"connected as {account['email']}"}
     except RunpodError as exc:
         return {'ok': False, 'detail': str(exc)}
+    except Exception as e:
+        return {'ok': False, 'detail': f'unreachable: {e}'}
 
 
 def probe_vast() -> dict:

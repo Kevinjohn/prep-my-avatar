@@ -341,6 +341,18 @@ def _relaunch(user_id, run, p, steps, **extra):
         **extra)
 
 
+def relaunch_blocker(user_id, run_id) -> str | None:
+    """Explain when the original run's provider credentials are unavailable."""
+    run = db.session.get(CloudTrainingRun, int(run_id))
+    if run is None:
+        return None
+    provider = cloud_provider.for_run(run)
+    if not cfg.secret(provider.secret):
+        return (f'Add your {provider.label} API key in Settings — '
+                f'this run was launched on {provider.label}')
+    return None
+
+
 def retry_cloud_run(user_id, run_id) -> dict:
     """Relance un run TERMINÉ EN ERREUR avec les paramètres exacts persistés au
     lancement d'origine (train_params) — le bouton ↻ Retry de la page Cloud.
@@ -440,7 +452,10 @@ def launch_cloud_training(user_id, dataset_id, steps=None, base_model='',
                           gpu_name=None, resume_ckpt_path=None, resume_step=None,
                           _snapshot_source=None, _preflight_override=None,
                           _config_snapshot=None, provider=None) -> dict:
-    selected = cloud_provider.PROVIDERS[provider] if provider else cloud_provider.current()
+    selected = (cloud_provider.PROVIDERS.get(provider)
+                if provider is not None else cloud_provider.current())
+    if selected is None:
+        raise RuntimeError(f'unknown cloud provider: {provider}')
     if not cfg.secret(selected.secret):
         raise RuntimeError(f'{selected.label} API key is not configured — add it in Settings')
     # A user launching after days away is exactly when an expired
@@ -773,11 +788,10 @@ def _write_bad_hosts(hosts):
     temporary.replace(path)
 
 
-def _blacklist_host(machine_id, reason, run=None):
+def _blacklist_host(machine_id, reason, run):
     """Remember a host whose pod never became ready so the next launch (and the
     tier list) skips it for a few days. Best-effort: never raises."""
-    if not (cloud_provider.for_run(run) if run is not None
-            else cloud_provider.current()).supports_host_blacklist or not machine_id:
+    if not cloud_provider.for_run(run).supports_host_blacklist or not machine_id:
         return
     try:
         with _BAD_HOSTS_LOCK:

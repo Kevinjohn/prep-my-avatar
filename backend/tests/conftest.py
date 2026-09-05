@@ -95,3 +95,13 @@ def client(app):
     test_client = app.test_client()
     yield test_client
     test_client.close_responses()
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_caches():
+    """Capability and import probes must not inherit a previous test's results."""
+    from app import capabilities
+
+    capabilities._cache = None
+    capabilities._cache_ts = 0.0
+    capabilities.clear_import_cache()

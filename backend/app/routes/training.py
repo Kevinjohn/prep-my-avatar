@@ -749,7 +749,11 @@ def dataset_train_cloud_retry():
         return gate
     d = request.get_json(silent=True) or {}
     try:
-        res = ct.retry_cloud_run(LOCAL_USER, int(d.get('run_id') or 0))
+        run_id = int(d.get('run_id') or 0)
+        hint = ct.relaunch_blocker(LOCAL_USER, run_id)
+        if hint:
+            return jsonify({'error': 'Cloud training is not configured', 'hint': hint}), 409
+        res = ct.retry_cloud_run(LOCAL_USER, run_id)
     except Exception as e:
         return _map_error(e)
     return jsonify({'ok': True, **res})
@@ -766,7 +770,11 @@ def dataset_train_cloud_continue():
         return gate
     d = request.get_json(silent=True) or {}
     try:
-        res = ct.continue_cloud_run(LOCAL_USER, int(d.get('run_id') or 0),
+        run_id = int(d.get('run_id') or 0)
+        hint = ct.relaunch_blocker(LOCAL_USER, run_id)
+        if hint:
+            return jsonify({'error': 'Cloud training is not configured', 'hint': hint}), 409
+        res = ct.continue_cloud_run(LOCAL_USER, run_id,
                                     extra_steps=d.get('extra_steps', 1000))
     except Exception as e:
         return _map_error(e)

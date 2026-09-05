@@ -191,6 +191,7 @@ def destroy_instance(instance_id) -> bool:
 
 
 def derive_base_url(instance: dict, container_port: int):
-    if instance and instance.get('actual_status') == 'running':
+    if (instance and instance.get('actual_status') == 'running'
+            and instance.get('instance_id')):
         return f'https://{instance["instance_id"]}-{container_port}.proxy.runpod.net'
     return None

@@ -340,3 +340,99 @@ def test_runpod_selected_launch_gate(client, monkeypatch):
                         lambda *a, **k: {'run_id': 2})
     ds = _mkds(client)
     assert client.post(f'/api/dataset/{ds}/train/cloud', json={}).status_code == 200
+
+
+@pytest.mark.parametrize('action', ['retry', 'continue'])
+def test_relaunch_without_any_key_is_unconfigured(client, action):
+    response = client.post(f'/api/dataset/train/cloud/{action}', json={'run_id': 1})
+    assert response.status_code == 409
+    assert response.get_json()['error'] == 'Cloud training is not configured'
+
+
+@pytest.mark.parametrize('action', ['retry', 'continue'])
+@pytest.mark.parametrize('provider,secret', [('vast', 'VAST_API_KEY'),
+                                            ('runpod', 'RUNPOD_API_KEY')])
+def test_relaunch_with_selected_provider_key_passes_gate(client, monkeypatch, action,
+                                                        provider, secret):
+    from app import config as cfg
+    cfg.save_config({'cloud': {'provider': provider}})
+    monkeypatch.setenv(secret, 'test-key')
+    monkeypatch.setattr(f'app.services.cloud_training.{action}_cloud_run',
+                        lambda *a, **k: {'run_id': 2})
+    response = client.post(f'/api/dataset/train/cloud/{action}', json={'run_id': 1})
+    assert response.status_code == 200
+    assert response.get_json()['run_id'] == 2
+
+
+@pytest.mark.parametrize('action,status', [('retry', 'error'), ('continue', 'done')])
+def test_relaunch_missing_original_provider_key_returns_hint(
+        app, client, monkeypatch, tmp_path, action, status):
+    import json
+    from app import config as cfg
+    from app.extensions import db
+    from app.models import CloudTrainingRun
+    cfg.save_config({'cloud': {'provider': 'vast'}})
+    monkeypatch.setenv('VAST_API_KEY', 'test-key')
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    ds = _mkds(client)
+    staging = tmp_path / 'finished_run'
+    staging.mkdir()
+    (staging / 'job_000000500.safetensors').write_bytes(b'checkpoint')
+    with app.app_context():
+        run = CloudTrainingRun(dataset_id=ds, provider='runpod', status=status,
+                               staging_dir=str(staging),
+                               train_params=json.dumps({'steps': 500, 'train_type': 'krea'}))
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+    # Exercise both real relaunch services through HTTP: a different provider's
+    # key passes the general gate, but cannot authorize this run's relaunch.
+    response = client.post(f'/api/dataset/train/cloud/{action}', json={'run_id': run_id})
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body['error'] == 'Cloud training is not configured'
+    assert body['hint'] == (
+        'Add your RunPod API key in Settings — this run was launched on RunPod')
+    with app.app_context():
+        assert CloudTrainingRun.query.count() == 1
+        assert db.session.get(CloudTrainingRun, run_id).status == status
+
+
+@pytest.mark.parametrize('has_key', [False, True])
+def test_runpod_offers_gate_uses_selected_key(client, monkeypatch, has_key):
+    from app import config as cfg
+    cfg.save_config({'cloud': {'provider': 'runpod'}})
+    monkeypatch.setenv('VAST_API_KEY', 'other-provider-key')
+    if has_key:
+        monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr('app.services.cloud_training.gpu_tiers',
+                        lambda *a, **k: {'tiers': []})
+    ds = _mkds(client)
+    response = client.get(f'/api/dataset/{ds}/train/cloud/offers')
+    assert response.status_code == (200 if has_key else 409)
+    if has_key:
+        assert response.get_json() == {'ok': True, 'tiers': []}
+    else:
+        assert response.get_json()['error'] == 'Cloud training is not configured'
+
+
+@pytest.mark.parametrize('provider,secret', [('vast', 'VAST_API_KEY'),
+                                           ('runpod', 'RUNPOD_API_KEY'),
+                                           (None, 'VAST_API_KEY')])
+@pytest.mark.parametrize('has_key', [False, True])
+def test_relaunch_blocker_uses_persisted_provider(app, monkeypatch, provider, secret, has_key):
+    from app.extensions import db
+    from app.services import cloud_training as ct
+
+    if has_key:
+        monkeypatch.setenv(secret, 'test-key')
+    with app.app_context():
+        run = ct.CloudTrainingRun(dataset_id=1, status='error')
+        db.session.add(run)
+        db.session.flush()
+        run.provider = provider
+        db.session.commit()
+        label = 'RunPod' if provider == 'runpod' else 'vast.ai'
+        assert ct.relaunch_blocker('local', run.id) == (
+            None if has_key else
+            f'Add your {label} API key in Settings — this run was launched on {label}')

@@ -3,6 +3,7 @@
 configured in these tests: the seams must work without it."""
 import io
 import os
+import sqlite3
 
 import pytest
 from PIL import Image
@@ -186,6 +187,8 @@ def test_run_config_dataset_overrides_without_mutating(app, client):
         assert v2.train_variant == 'turbo'
 
 
+@pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 35),
+                    reason='SQLite DROP COLUMN requires version 3.35 or later')
 def test_cloud_provider_default_and_v18_upgrade(app, monkeypatch):
     from sqlalchemy import inspect, text
     from app import _apply_schema_migrations
@@ -216,3 +219,27 @@ def test_cloud_provider_default_and_v18_upgrade(app, monkeypatch):
         monkeypatch.setattr(vast_client, 'destroy_instance', lambda iid: destroyed.append(iid))
         assert ct.reconcile_orphans(app) == 0
         assert destroyed == []
+
+
+def test_provider_migration_is_idempotent(app):
+    from sqlalchemy import inspect, text
+    from app import _apply_schema_migrations
+    from app.extensions import db
+    from app.models import CloudTrainingRun
+    # app is function-scoped: this migration ledger and schema are test-local.
+    with app.app_context():
+        run = CloudTrainingRun(dataset_id=1, provider='runpod', status='training')
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+        assert db.session.execute(text(
+            'SELECT COUNT(*) FROM schema_migration WHERE version = 19')).scalar_one() == 1
+        _apply_schema_migrations()
+        _apply_schema_migrations()
+        db.session.remove()
+        assert [column['name'] for column in inspect(db.engine).get_columns(
+            'cloud_training_run')].count('provider') == 1
+        assert db.session.execute(text(
+            'SELECT COUNT(*) FROM schema_migration WHERE version = 19')).scalar_one() == 1
+        restored = db.session.get(CloudTrainingRun, run_id)
+        assert restored.provider == 'runpod' and restored.status == 'training'

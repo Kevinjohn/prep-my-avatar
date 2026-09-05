@@ -126,3 +126,41 @@ def test_recovery_checks_each_runs_provider(app, monkeypatch):
         ct.db.session.commit()
         ct._recover_active_runs(app)
         assert resumed == [runs[1].id]
+
+
+def test_recovery_resumes_both_providers_when_both_keys_present(app, monkeypatch):
+    from app.services import cloud_training as ct
+    monkeypatch.setenv('VAST_API_KEY', 'vast-key')
+    monkeypatch.setenv('RUNPOD_API_KEY', 'runpod-key')
+    resumed = []
+    monkeypatch.setattr(ct, '_start_monitor_for_app', lambda app, iid: resumed.append(iid))
+    with app.app_context():
+        runs = [ct.CloudTrainingRun(dataset_id=i, provider=name, status='training',
+                                    vast_instance_id=str(i))
+                for i, name in enumerate(('vast', 'runpod'), 1)]
+        ct.db.session.add_all(runs)
+        ct.db.session.commit()
+        ct._recover_active_runs(app)
+        assert set(resumed) == {run.id for run in runs}
+        assert len(resumed) == 2
+
+
+def test_recovery_warns_for_each_run_without_provider_keys(app, monkeypatch, caplog):
+    from app.services import cloud_training as ct
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    resumed = []
+    monkeypatch.setattr(ct, '_start_monitor_for_app', lambda app, iid: resumed.append(iid))
+    with app.app_context():
+        runs = [ct.CloudTrainingRun(dataset_id=i, provider=name, status='training',
+                                    vast_instance_id=str(i))
+                for i, name in enumerate(('vast', 'runpod'), 1)]
+        ct.db.session.add_all(runs)
+        ct.db.session.commit()
+        ct._recover_active_runs(app)
+        assert resumed == []
+        assert all(run.status == 'training' for run in runs)
+        for run, label in zip(runs, ('vast.ai', 'RunPod')):
+            assert f'skipping recovery of run {run.id}: {label} key is missing' in caplog.text
+        assert sum('skipping recovery of run' in record.message
+                   for record in caplog.records) == 2
