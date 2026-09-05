@@ -1642,3 +1642,81 @@ def test_cloud_progress_selects_run_by_family(ct, app, seeded_dataset, tmp_path)
         assert ct.cloud_progress('local', seeded_dataset)['step'] == 60
         # An explicitly different family must never bleed into this panel.
         assert ct.cloud_progress('local', seeded_dataset, train_type='sdxl')['step'] is None
+
+
+@pytest.mark.parametrize('template', ['', 'template-1'])
+def test_runpod_launch_auth(ct, app, seeded_dataset, monkeypatch, template):
+    from app.services import runpod_client
+    _fake_export(monkeypatch, ct)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setenv('HF_TOKEN', 'hf-test')
+    ct.cfg.save_config({'cloud': {'provider': 'runpod', 'runpod': {'template_id': template}}})
+    monkeypatch.setattr(runpod_client, 'search_offers', lambda **kw: [
+        {'offer_id': 'RTX 4090', 'gpu_name': 'RTX 4090', 'dph_total': .4, 'gpu_ram_gb': 24}])
+    seen = {}
+
+    def create(*a, **kw):
+        seen.update(kw)
+        return 'pod-1'
+
+    monkeypatch.setattr(runpod_client, 'create_instance', create)
+    with app.app_context():
+        result = ct.launch_cloud_training('local', seeded_dataset)
+        run = ct.db.session.get(ct.CloudTrainingRun, result['run_id'])
+        assert run.provider == 'runpod'
+        ct._provision(run)
+        assert run.auth_token and seen['env']['AI_TOOLKIT_AUTH'] == run.auth_token
+        assert seen['env']['HF_TOKEN'] == 'hf-test'
+        assert seen['template_hash'] == (template or None)
+        assert seen['image'] == 'ostris/aitoolkit:latest'
+        payload = ct._run_payload(run)
+        assert payload['provider_label'] == 'RunPod'
+        assert payload['console_url'] == 'https://console.runpod.io/pods/pod-1'
+        ct._blacklist_host('host', 'failed', run=run)
+        assert 'host' not in ct._load_bad_hosts()
+        # A retry still belongs to RunPod after the selected provider changes.
+        ct.cfg.save_config({'cloud': {'provider': 'vast'}})
+        monkeypatch.setattr(ct, '_reusable_run_snapshot', lambda *a, **k: (None, None))
+        calls = {}
+        monkeypatch.setattr(ct, 'launch_cloud_training', lambda *a, **k: calls.update(k))
+        ct._relaunch('local', run, {}, 500)
+        assert calls['provider'] == 'runpod'
+
+
+def test_reconcile_provider_id_collision(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    destroyed = []
+    listed = []
+    for name, provider_client in [('vast', ct.vast_client), ('runpod', runpod_client)]:
+        def instances(name=name):
+            listed.append(name)
+            return [{'instance_id': 'same', 'label': 'lds-1'}]
+        monkeypatch.setattr(provider_client, 'list_instances', instances)
+        monkeypatch.setattr(provider_client, 'destroy_instance',
+                            lambda iid, name=name: destroyed.append((name, iid)) or True)
+    with app.app_context():
+        # Vast owns the active id; RunPod's terminal row must not overwrite it.
+        ct.db.session.add_all([
+            ct.CloudTrainingRun(dataset_id=1, provider='vast', status='training', vast_instance_id='same'),
+            ct.CloudTrainingRun(dataset_id=2, provider='runpod', status='error', vast_instance_id='same')])
+        ct.db.session.commit()
+        assert ct.reconcile_orphans(app) == 1
+        assert listed == ['vast', 'runpod']
+        assert destroyed == [('runpod', 'same')]
+
+
+def test_status_any_provider_key(ct, app, monkeypatch):
+    ct.cfg.save_config({'cloud': {'provider': 'runpod'}})
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    with app.app_context():
+        for payload in (ct.cloud_status(), ct.all_runs()):
+            assert payload['configured'] is True
+            assert payload['selected_provider'] == {'name': 'runpod', 'label': 'RunPod', 'launch_ready': False}
+
+
+def test_explicit_provider_checks_original_key(ct, app, seeded_dataset, monkeypatch):
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    with app.app_context():
+        with pytest.raises(RuntimeError, match='RunPod API key'):
+            ct.launch_cloud_training('local', seeded_dataset, provider='runpod')

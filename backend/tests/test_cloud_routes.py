@@ -22,7 +22,7 @@ def test_cloud_train_unconfigured_409_with_hint(client):
     assert r.status_code == 409
     body = r.get_json()
     assert body['error'] == 'Cloud training is not configured'
-    assert 'vast.ai' in body['hint']
+    assert body['hint'] == 'Add a cloud GPU API key (vast.ai or RunPod) in Settings'
 
 
 def test_cloud_train_forwards_kwargs(client, monkeypatch):
@@ -316,3 +316,27 @@ def test_all_runs_unifies_local_and_cloud_history(app, client, monkeypatch):
     legacy = next(r for r in recent if r.get('run_name') == 'old')
     assert legacy['settings'] is None and legacy['status'] == 'done'
     assert out['local_active'] is None
+
+
+@pytest.mark.parametrize('action', ['retry', 'continue'])
+def test_relaunch_gate_uses_any_provider(client, monkeypatch, action):
+    from app import config as cfg
+    cfg.save_config({'cloud': {'provider': 'runpod'}})
+    monkeypatch.setenv('VAST_API_KEY', 'test-key')
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    monkeypatch.setattr(f'app.services.cloud_training.{action}_cloud_run',
+                        lambda *a, **k: {'run_id': 2})
+    response = client.post(f'/api/dataset/train/cloud/{action}', json={'run_id': 1})
+    assert response.status_code == 200
+    ds = _mkds(client)
+    assert client.post(f'/api/dataset/{ds}/train/cloud', json={}).status_code == 409
+
+
+def test_runpod_selected_launch_gate(client, monkeypatch):
+    from app import config as cfg
+    cfg.save_config({'cloud': {'provider': 'runpod'}})
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr('app.services.cloud_training.launch_cloud_training',
+                        lambda *a, **k: {'run_id': 2})
+    ds = _mkds(client)
+    assert client.post(f'/api/dataset/{ds}/train/cloud', json={}).status_code == 200

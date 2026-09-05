@@ -44,11 +44,11 @@ def _require_aitoolkit():
     return None
 
 
-def _require_cloud():
+def _require_cloud(*, relaunch=False):
     """None if cloud training is configured, else the (body, status) 409 to return."""
-    if not capabilities.probe().get('cloud_training'):
+    if not capabilities.probe().get('cloud_configured' if relaunch else 'cloud_training'):
         return jsonify({'error': 'Cloud training is not configured',
-                        'hint': 'Add your vast.ai API key in Settings'}), 409
+                        'hint': 'Add a cloud GPU API key (vast.ai or RunPod) in Settings'}), 409
     return None
 
 
@@ -744,7 +744,7 @@ def dataset_train_cloud(dataset_id):
 def dataset_train_cloud_retry():
     """↻ Retry d'un run en erreur (page Cloud) : relance avec les paramètres
     exacts du run raté — pod frais, mêmes garde-fous que tout launch."""
-    gate = _require_cloud()
+    gate = _require_cloud(relaunch=True)
     if gate:
         return gate
     d = request.get_json(silent=True) or {}
@@ -761,7 +761,7 @@ def dataset_train_cloud_continue():
     checkpoint harvesté et vise dernier_step + extra_steps — pod frais, mêmes
     garde-fous que tout launch ; le monitor dépose le checkpoint sur le pod avant
     de démarrer (auto-resume ai-toolkit)."""
-    gate = _require_cloud()
+    gate = _require_cloud(relaunch=True)
     if gate:
         return gate
     d = request.get_json(silent=True) or {}

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import requests
 
+from .services import cloud_provider
 from . import config as cfg
 from .utils.resolution import resolution_metadata
 
@@ -329,6 +330,18 @@ def probe_aitoolkit() -> dict:
 
 
 VAST_API_BASE = 'https://console.vast.ai/api/v0'
+
+
+def probe_runpod() -> dict:
+    """Test the configured RunPod account without creating any resources."""
+    from .services.runpod_client import graphql, RunpodError
+    try:
+        account = graphql('{ myself { email } }').get('myself') or {}
+        if not account.get('email'):
+            return {'ok': False, 'detail': 'RunPod returned no account email'}
+        return {'ok': True, 'detail': f"connected as {account['email']}"}
+    except RunpodError as exc:
+        return {'ok': False, 'detail': str(exc)}
 
 
 def probe_vast() -> dict:
@@ -772,7 +785,11 @@ def _probe_locked(force=False, request_generation=0) -> dict:
             'configured': bool(cfg.get('aitoolkit.dir')),
             'valid': aitoolkit['ok'],
         },
-        'cloud_training': bool(cfg.secret('VAST_API_KEY')),
+        'cloud_training': bool(cfg.secret(cloud_provider.current().secret)),
+        'cloud_configured': bool(cloud_provider.configured()),
+        'cloud_provider': {'name': cloud_provider.current().name,
+                           'label': cloud_provider.current().label,
+                           'console_url': cloud_provider.current().console_url()},
         # Publish-to-HF is gated purely on the HF_TOKEN secret being present (the
         # write-scope check is a live preflight at publish time, not here — probe()
         # must stay network-free). The ⋯ More menu entry keys off this.
@@ -791,7 +808,7 @@ def _probe_locked(force=False, request_generation=0) -> dict:
         'watermark_inpaint': watermark_inpaint['ok'],
         'python': python_ml_status(),
         'scrape_deps': probe_scrape_deps()['ok'],
-        'training_visible': aitoolkit['ok'] or bool(cfg.secret('VAST_API_KEY')),
+        'training_visible': aitoolkit['ok'] or bool(cloud_provider.configured()),
         'studio_visible': comfy['ok'],
         # One authoritative, versioned estimate drives every frontend badge,
         # total and paid-launch confirmation. These are estimates, not billing

@@ -110,3 +110,19 @@ def test_recovery_contains_per_run_failure(app, monkeypatch):
         monkeypatch.setattr(ct, '_start_monitor_for_app', start)
         ct._recover_active_runs(app)
         assert resumed == [runs[1].id]
+
+
+def test_recovery_checks_each_runs_provider(app, monkeypatch):
+    from app.services import cloud_training as ct
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    resumed = []
+    monkeypatch.setattr(ct, '_start_monitor_for_app', lambda app, iid: resumed.append(iid))
+    with app.app_context():
+        runs = [ct.CloudTrainingRun(dataset_id=i, provider=name, status='training',
+                                    vast_instance_id=str(i))
+                for i, name in enumerate(('vast', 'runpod'), 1)]
+        ct.db.session.add_all(runs)
+        ct.db.session.commit()
+        ct._recover_active_runs(app)
+        assert resumed == [runs[1].id]

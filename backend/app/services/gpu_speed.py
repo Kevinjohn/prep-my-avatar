@@ -26,6 +26,7 @@ _SPEED = {
     # Blackwell workstation/server cards (PRO 6000 WS/S/Max-Q share the die)
     'rtxpro5000': 1.9, 'rtxpro6000': 3.0,
     'l40s': 1.85, 'l40': 1.7, 'l4': 0.5,
+    'a10080gb': 2.1, 'h10080gb': 3.6,
     'a100': 2.1, 'h100': 3.6, 'h200': 4.1, 'b200': 5.5,
 }
 

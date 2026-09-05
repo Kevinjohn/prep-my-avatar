@@ -952,3 +952,33 @@ def test_boot_timeout_fresh_run_not_charged_for_stale_created_at(ct, app, client
         ct._monitor(app, run_id)
         assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
         assert destroyed == ['777']
+
+
+@pytest.mark.parametrize('actual_price,expected_status', [(.6, 'done'), (.9, 'error')])
+def test_runpod_boot_port_and_allocated_price(ct, app, client, monkeypatch,
+                                             actual_price, expected_status):
+    from app.services import runpod_client
+    destroyed = []
+    remote = FakeRemote()
+    _, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
+    monkeypatch.setattr(runpod_client, 'get_instance', lambda iid: {
+        'instance_id': iid, 'actual_status': 'running', 'dph_total': actual_price,
+        'ports': {'8675/tcp': [{'HostPort': 443}]}})
+    monkeypatch.setattr(runpod_client, 'destroy_instance', lambda iid: destroyed.append(iid) or True)
+    ports = []
+    derive = runpod_client.derive_base_url
+    monkeypatch.setattr(runpod_client, 'derive_base_url',
+                        lambda inst, port: ports.append(port) or derive(inst, port))
+    with app.app_context():
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
+        ct._set(run, provider='runpod', vast_instance_id='pod', auth_token='token',
+                price_per_hour=.4, estimated_minutes=10)
+        ct._monitor(app, run_id)
+        assert run.status == expected_status
+        assert run.price_per_hour == actual_price
+        assert run.estimated_cost_usd == round(actual_price * 45 / 60, 2)
+        assert destroyed == ['pod']
+        if expected_status == 'done':
+            assert ports and set(ports) == {8675}
+        else:
+            assert 'allocated at $0.9/h, above your $0.8/h cap' in run.error

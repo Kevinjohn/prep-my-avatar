@@ -45,7 +45,7 @@ _DOTENV_INJECTED = {
 # sources). Both scrape sources read their env var first, and set_secrets() stamps
 # os.environ on save — so a key saved in the UI takes effect without a restart.
 SECRET_KEYS = ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'REPLICATE_API_TOKEN',
-               'HF_TOKEN', 'VAST_API_KEY',
+               'HF_TOKEN', 'VAST_API_KEY', 'RUNPOD_API_KEY',
                'REDDIT_CLIENT_ID', 'CIVITAI_API_KEY')
 
 DEFAULT_UPDATE_REPO = 'Kevinjohn/prep-my-avatar'
@@ -93,6 +93,9 @@ DEFAULTS = {
     # required user input is the VAST_API_KEY secret. Values here are knobs
     # for power users / for adjusting after the real-world smoke test.
     'cloud': {
+        'provider': 'vast',
+        'runpod': {'template_id': '', 'image': 'ostris/aitoolkit:latest',
+                   'cloud_type': 'SECURE', 'ui_port': 8675},
         # Official vast.ai "Ostris AI Toolkit" template (smoke-validated
         # 2026-07-12): publishes the UI behind the pod's Caddy proxy on 18675
         # and generates the per-instance auth token. Clearing this falls back

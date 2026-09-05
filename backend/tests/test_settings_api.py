@@ -739,3 +739,9 @@ def test_settings_restart_refuses_active_package_mutation(client, monkeypatch):
     assert response.status_code == 409
     assert response.get_json()['active_installs'] == ['ml_extras']
     assert called == []
+
+
+def test_cloud_provider_enums(client):
+    assert client.put('/api/settings', json={'config': {'cloud': {'provider': 'lambda'}}}).status_code == 400
+    assert client.put('/api/settings', json={'config': {'cloud': {
+        'runpod': {'cloud_type': 'COMMUNITY'}}}}).status_code == 200

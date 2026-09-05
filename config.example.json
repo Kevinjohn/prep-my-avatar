@@ -65,6 +65,13 @@
     "default_family": "zimage"
   },
   "cloud": {
+    "provider": "vast",
+    "runpod": {
+      "template_id": "",
+      "image": "ostris/aitoolkit:latest",
+      "cloud_type": "SECURE",
+      "ui_port": 8675
+    },
     "image": "vastai/ostris-ai-toolkit:4625406-2026-07-12-cuda-12.9",
     "ui_port": 18675,
     "max_price_per_hour": 0.8,
