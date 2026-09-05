@@ -77,23 +77,34 @@ def test_api_only_end_to_end(client, app, monkeypatch):
     with patch('app.services.chatgpt_image.generate_variation', return_value=_png()), \
          patch('concurrent.futures.ThreadPoolExecutor', _SyncExecutor):
         with app.app_context():
+            # Identity-canary rule: generate and keep one image before a batch.
+            canary_ids = svc.generate_variations_nanobanana(app, LOCAL_USER, did,
+                                                          select_preset('zimage_12')[:1], 1,
+                                                          engine='chatgpt')
+            assert len(canary_ids) == 1
+            assert len(calls) == 1
+            svc._run_nanobanana_batch(*calls[0])
+            r = client.post(f'/api/dataset/image/{canary_ids[0]}/status',
+                            json={'status': 'keep'})
+            assert r.status_code == 200
+
             ids = svc.generate_variations_nanobanana(app, LOCAL_USER, did,
                                                       select_preset('zimage_12')[:2], 1,
                                                       engine='chatgpt')
             assert len(ids) == 2
-            assert calls  # background batch was dispatched (Thread stubbed)
+            assert len(calls) == 2  # background batch was dispatched (Thread stubbed)
             # Emulate thread completion synchronously: run the captured worker
             # body (its internal ThreadPoolExecutor is stubbed inline above).
-            svc._run_nanobanana_batch(*calls[0])
+            svc._run_nanobanana_batch(*calls[1])
             rows = svc.FaceDatasetImage.query.filter_by(dataset_id=did).all()
-            assert len(rows) == 2
+            assert len(rows) == 3
             assert all(row.filename for row in rows)  # generation actually "completed"
 
     payload = client.get(f'/api/dataset/{did}?include_images=1').get_json()
-    assert len(payload['images']) == 2
+    assert len(payload['images']) == 3
 
     # Keep one, caption it manually, export.
-    iid = payload['images'][0]['id']
+    iid = canary_ids[0]
     r = client.post(f'/api/dataset/image/{iid}/status', json={'status': 'keep'})
     assert r.status_code == 200
     r = client.post(f'/api/dataset/image/{iid}/caption', json={'caption': 'a portrait'})

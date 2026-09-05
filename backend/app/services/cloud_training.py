@@ -1399,9 +1399,9 @@ def _submit_remote_job(run, remote, pod_settings, job_config):
     return job_id
 
 
-def _finish(run, status, detail='', error=None, destroy=True):
+def _finish(run, status, detail='', error=None):
     destroyed = not run.vast_instance_id
-    if destroy and run.vast_instance_id:
+    if run.vast_instance_id:
         try:
             destroyed = bool(cloud_provider.for_run(run).client.destroy_instance(run.vast_instance_id))
             if not destroyed:
@@ -1409,7 +1409,7 @@ def _finish(run, status, detail='', error=None, destroy=True):
                                run.vast_instance_id)
         except Exception as e:
             logger.warning('terminate %s failed: %s', run.vast_instance_id, e)
-    if destroy and not destroyed:
+    if not destroyed:
         # Cleanup is part of the lifecycle, not a best-effort epilogue.  Keep
         # the run active and billable so budget enforcement and the UI cannot
         # claim that a provider instance has stopped before confirmation.

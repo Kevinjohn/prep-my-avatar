@@ -37,7 +37,7 @@ The repository README has the canonical [Installation and launch](https://github
 
 ## You are finished when
 
-Your browser shows **Welcome to Prep My Avatar** or the **Setup** screen. On first launch, choose **Start setup** to configure tools now. The next five pages explain its five screens one at a time.
+Your browser shows the **Setup** screen. On first launch, choose **Start setup** to configure tools now. The next five pages explain its five screens one at a time.
 
 Setup is optional as a whole: **Skip setup — I'll do it later** takes you directly to **Datasets**. If you start Setup, its local-vision screen must be ready before the wizard can advance; Step 4 explains that choice exactly.
 

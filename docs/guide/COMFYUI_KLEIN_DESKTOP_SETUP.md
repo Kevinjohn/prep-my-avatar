@@ -63,7 +63,7 @@ composition between edits.
 2. Confirmed that the instance reads shared models and that newly downloaded
    models belong under the instance's `ComfyUI/models` directory.
 3. Entered the ComfyUI application directory above on Prep My Avatar's
-   **Setup → Local generation — ComfyUI** step and selected
+   **Setup → Local image provider — ComfyUI** step and selected
    **Save & re-check**.
 4. Confirmed that Prep My Avatar found the installation and that ComfyUI was
    running at port 8188.

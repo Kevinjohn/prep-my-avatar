@@ -3,6 +3,7 @@ happy path, the stop path, max-runtime kill, unreachable-pod failure, the
 download-failure pod-kept state, and the resume contract (Task 7 needs
 _monitor to skip re-provisioning/re-submitting an already-running job).
 No sleeping: _sleep is a no-op seam."""
+import inspect
 import json
 import os
 from datetime import datetime, timedelta
@@ -1110,8 +1111,11 @@ def test_blacklist_vast_run_requires_machine_id(ct, app, monkeypatch, machine_id
         assert set(ct._load_bad_hosts()) == expected
 
 
-@pytest.mark.parametrize('destroy', [True, False])
-def test_runpod_finish_cleanup_contract(ct, app, monkeypatch, destroy):
+def test_finish_has_no_skip_destroy_flag(ct):
+    assert list(inspect.signature(ct._finish).parameters) == ['run', 'status', 'detail', 'error']
+
+
+def test_runpod_finish_marks_cleanup_pending_when_destroy_fails(ct, app, monkeypatch):
     from app.services import runpod_client
     calls = []
     monkeypatch.setattr(runpod_client, 'destroy_instance',
@@ -1122,19 +1126,11 @@ def test_runpod_finish_cleanup_contract(ct, app, monkeypatch, destroy):
                                   billing_started_at=ct.utcnow() - timedelta(minutes=10))
         ct.db.session.add(run)
         ct.db.session.commit()
-        result = ct._finish(run, 'stopped', destroy=destroy)
-        assert calls == (['pod'] if destroy else [])
-        if destroy:
-            assert result is False
-            assert run.status == 'terminating'
-            assert run.billing_ended_at is None
-            assert run.finished_at is None
-            assert run.auth_token == 'token'
-            assert 'cleanup pending' in run.phase_detail
-        else:
-            # Explicitly skipping destruction currently completes local cleanup.
-            assert result is True
-            assert run.status == 'stopped'
-            assert run.billing_ended_at == ct.utcnow()
-            assert run.finished_at == ct.utcnow()
-            assert run.auth_token is None
+        result = ct._finish(run, 'stopped')
+        assert calls == ['pod']
+        assert result is False
+        assert run.status == 'terminating'
+        assert run.billing_ended_at is None
+        assert run.finished_at is None
+        assert run.auth_token == 'token'
+        assert 'cleanup pending' in run.phase_detail
