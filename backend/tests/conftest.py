@@ -105,3 +105,7 @@ def _reset_capability_caches():
     capabilities._cache = None
     capabilities._cache_ts = 0.0
     capabilities.clear_import_cache()
+    # Same class of leak for the ComfyUI model listers: a 5-minute module
+    # cache that made test_comfyui_utils order-dependent.
+    from app.utils import comfyui as _comfyui
+    _comfyui.clear_model_caches()
