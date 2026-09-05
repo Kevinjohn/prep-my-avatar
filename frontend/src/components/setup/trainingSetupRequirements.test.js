@@ -32,3 +32,10 @@ test('setup distinguishes launch-time gates from installation readiness', () => 
     'captions', 'custom_weights', 'trigger_collision',
   ]) assert.ok(ids.includes(required), `missing ${required}`);
 });
+
+test('cloud launch requirements name both providers and require selecting the funded provider', () => {
+  assert.deepEqual(TRAINING_LAUNCH_REQUIREMENTS.find((item) => item.id === 'cloud_access'), {
+    id: 'cloud_access', label: 'Cloud alternative', kind: 'hard',
+    detail: 'Cloud training additionally requires a saved cloud GPU API key (vast.ai or RunPod), that provider selected in Settings → Training → Cloud GPU, a funded account, and an offer within configured limits.',
+  });
+});

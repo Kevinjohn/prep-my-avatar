@@ -19,7 +19,7 @@ runInNewContext(outputText, {
     if (id === './primitives') return {
       INPUT_CLASS: '',
       Card: ({ title, children }) => React.createElement('section', { title }, children),
-      SecretField: ({ field }) => React.createElement('secret-field', { field }),
+      SecretField: ({ field }) => React.createElement('secret-field', { field }, field.guide),
     };
     if (id === '../../api/fetchClient') return { safeJson: async () => ({ month_spend: 0 }) };
     return require(id);
@@ -38,6 +38,8 @@ test('provider selection keeps both keys and switches provider-specific controls
   await act(async () => { renderer = TestRenderer.create(React.createElement(exports.default, props)); });
   try {
     assert.equal(renderer.root.findByProps({ id: 'cloud-provider' }).props.value, 'vast');
+    assert.ok(renderer.root.findAllByType('section').some((node) => node.props.title === 'Cloud GPU'));
+    assert.ok(!renderer.root.findAllByType('section').some((node) => node.props.title === 'Cloud GPU (vast.ai)'));
     assert.equal(renderer.root.findByProps({ id: 'cloud-min-reliability' }).props.value, 0.97);
     const secrets = renderer.root.findAllByType('secret-field').map((node) => node.props.field);
     assert.deepEqual(secrets.map(({ key, testTarget }) => [key, testTarget]), [
@@ -56,7 +58,65 @@ test('provider selection keeps both keys and switches provider-specific controls
     assert.equal(section, 'cloud');
     assert.equal(key, 'runpod');
     assert.deepEqual({ ...value }, { ...config.cloud.runpod, cloud_type: 'COMMUNITY' });
+    await act(async () => renderer.update(React.createElement(exports.default, {
+      ...props, config: { ...config, cloud: { ...config.cloud, provider: 'runpod', runpod: value } },
+    })));
+    assert.equal(renderer.root.findByProps({ id: 'cloud-runpod-cloud-type' }).props.value, 'COMMUNITY');
+    renderer.root.findByProps({ id: 'cloud-provider' }).props.onChange({ target: { value: 'vast' } });
+    assert.deepEqual(updates.pop(), ['cloud', 'provider', 'vast']);
+    await act(async () => renderer.update(React.createElement(exports.default, props)));
+    assert.equal(renderer.root.findByProps({ id: 'cloud-min-reliability' }).props.value, 0.97);
+    assert.equal(renderer.root.findAllByProps({ id: 'cloud-runpod-cloud-type' }).length, 0);
   } finally {
     act(() => renderer.unmount());
   }
+});
+
+function textContent(node) {
+  return typeof node === 'string' ? node : node.children.map(textContent).join('');
+}
+
+test('RunPod secret renders its label, help and four-step account guide', async () => {
+  let renderer;
+  await act(async () => { renderer = TestRenderer.create(React.createElement(exports.default, {
+    config: { training: {}, cloud: {} }, setField: () => {},
+  })); });
+  try {
+    const secret = renderer.root.findAllByType('secret-field').find((node) => node.props.field.key === 'RUNPOD_API_KEY');
+    assert.equal(secret.props.field.label, 'RunPod API key');
+    assert.equal(secret.props.field.help, 'Enables cloud GPU training with RunPod. The app requests shutdown when work ends and keeps retrying until RunPod confirms it; the Cloud runs page stays billable/visible until then. Get a key at console.runpod.io → Settings → API Keys.');
+    const guide = secret.findByType('details');
+    assert.equal(textContent(guide.findByType('summary')), '📖 How to get a RunPod API key (≈2 minutes)');
+    const link = guide.findByType('a');
+    assert.equal(link.props.href, 'https://console.runpod.io/');
+    assert.equal(link.props.rel, 'noreferrer');
+    assert.equal(link.props.target, '_blank');
+    const steps = guide.findByType('ol').findAllByType('li').map(textContent);
+    assert.equal(steps.length, 4);
+    assert.match(steps[0], /Create a free account at console.runpod.io/);
+    assert.match(steps[1], /Settings → API Keys → Create.*Read\/Write/);
+    assert.match(steps[2], /Billing.*add credit/);
+    assert.match(steps[3], /Paste the key.*Test.*saves the key automatically/);
+  } finally { act(() => renderer.unmount()); }
+});
+
+test('RunPod cloud type defaults to SECURE and can be saved without existing nested settings', async () => {
+  const updates = [];
+  const config = { training: {}, cloud: { provider: 'runpod' } };
+  const props = { config, setField: (...args) => updates.push(args) };
+  let renderer;
+  await act(async () => { renderer = TestRenderer.create(React.createElement(exports.default, props)); });
+  try {
+    const select = renderer.root.findByProps({ id: 'cloud-runpod-cloud-type' });
+    assert.equal(select.props.value, 'SECURE');
+    select.props.onChange({ target: { value: 'COMMUNITY' } });
+    const [section, key, value] = updates.pop();
+    assert.equal(section, 'cloud');
+    assert.equal(key, 'runpod');
+    assert.deepEqual({ ...value }, { cloud_type: 'COMMUNITY' });
+    await act(async () => renderer.update(React.createElement(exports.default, {
+      ...props, config: { ...config, cloud: { ...config.cloud, runpod: value } },
+    })));
+    assert.equal(renderer.root.findByProps({ id: 'cloud-runpod-cloud-type' }).props.value, 'COMMUNITY');
+  } finally { act(() => renderer.unmount()); }
 });

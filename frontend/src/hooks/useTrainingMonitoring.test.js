@@ -5,6 +5,8 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { useTrainingMonitoring } from './useTrainingMonitoring.js';
 
 for (const [name, flags, expected] of [
+  ['capabilities are absent', {}, 0],
+  ['both cloud flags are enabled', { cloudConfigured: true, cloudTraining: true }, 1],
   ['another provider remains configured', { cloudConfigured: true, cloudTraining: false }, 1],
   ['legacy capabilities allow cloud training', { cloudTraining: true }, 1],
   ['no provider is configured', { cloudConfigured: false, cloudTraining: false }, 0],

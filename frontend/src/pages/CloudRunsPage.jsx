@@ -253,7 +253,7 @@ export default function CloudRunsPage() {
   const firstRun = actives[0] || recent.find((run) => run.source === 'cloud') || recoveryRequired[0];
   const consoleUrl = caps.cloud_provider?.console_url || firstRun?.console_url || 'https://cloud.vast.ai/instances/';
   const consoleLabel = caps.cloud_provider?.console_url
-    ? (caps.cloud_provider.label || 'vast.ai') : (firstRun?.provider_label || 'vast.ai');
+    ? (caps.cloud_provider.label || firstRun?.provider_label || 'vast.ai') : (firstRun?.provider_label || 'vast.ai');
   const limit = data?.limit || 1;
   const budget = data?.monthly_budget || 0;
   const spent = data?.month_spend || 0;
