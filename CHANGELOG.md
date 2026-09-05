@@ -7,6 +7,31 @@ under **Unreleased** until a release is tagged.
 
 ## Unreleased
 
+## 2026.09.05.1
+
+### Release highlights
+
+- RunPod joins vast.ai as a cloud training provider: pick the provider in
+  **Settings → Training → Cloud GPU**, paste a key, press Test, launch. Runs
+  remember their provider, the Cloud runs page links to the right console, and
+  the price you are billed for replaces the quoted one once the pod is up.
+- Setup is now a checklist that is separate from the **Start this session**
+  check, with explicit ComfyUI Desktop / from-Git routes, a native folder
+  picker for ai-toolkit on macOS, and a complete LoRA dependency map.
+- Remote identity generation uses an explicit ordered reference pack shown on
+  **Set primary reference**, gated by a one-image identity canary before any
+  batch; local Klein generation, gap recommendations and photo-variety
+  reporting were corrected end to end.
+- Training exports, snapshots and the dataset ZIP read the full-resolution
+  originals instead of the 1024px working cache.
+- Heavy ML features run in their own interpreter and report their own crash
+  line; the updater writes its crash-critical files atomically and verifies
+  the front-end once after an update.
+- The test suite is green again in both directions: the identity-canary rule
+  is followed by the end-to-end test, two order-dependent leaks are reset per
+  test, and all 21 guide screenshots were recaptured with a manifest refresh
+  script so the governance check can be kept green.
+
 ### Added
 
 - RunPod is now a cloud training provider alongside vast.ai. **Settings →
