@@ -71,3 +71,99 @@ for (const [name, runs, expectedUrl, expectedLabel] of [
     } finally { act(() => renderer.unmount()); }
   });
 }
+
+for (const [name, runs, expectedLabel] of [
+  ['run label', [runpod], 'RunPod'],
+  ['legacy default', [{ ...vast, provider_label: undefined }], 'vast.ai'],
+  ['empty history default', [], 'vast.ai'],
+]) {
+  test(`selected console without a label uses ${name}`, async () => {
+    const renderer = await renderPage({ cloud_provider: { console_url: 'https://console.runpod.io/pods' } }, {
+      configured: true, actives: runs,
+    });
+    try {
+      const link = renderer.root.findAllByType('a')[0];
+      assert.equal(link.props.href, 'https://console.runpod.io/pods');
+      assert.equal(link.children.join(''), `Open the ${expectedLabel} console ↗`);
+    } finally { act(() => renderer.unmount()); }
+  });
+}
+
+for (const [name, data, expected] of [
+  ['active before recent and recovery', { actives: [vast, runpod], recent: [runpod], recovery_required: [runpod] }, vast],
+  ['first cloud history row before recovery, skipping local', { recent: [{ ...vast, run_id: 99, source: 'local' }, runpod, vast], recovery_required: [vast] }, runpod],
+  ['recovery when history is local only', { recent: [{ ...vast, run_id: 99, source: 'local' }], recovery_required: [runpod, vast] }, runpod],
+]) {
+  test(`page console chooses ${name}`, async () => {
+    const renderer = await renderPage({}, { configured: true, ...data });
+    try {
+      const link = renderer.root.findAllByType('a')[0];
+      assert.equal(link.props.href, expected.console_url);
+      assert.equal(link.children.join(''), `Open the ${expected.provider_label} console ↗`);
+    } finally { act(() => renderer.unmount()); }
+  });
+}
+
+for (const [name, data, showsWarning, showsStats] of [
+  ['server false overrides configured capabilities', { configured: false }, true, false],
+  ['missing server flag falls back to capabilities', {}, false, true],
+  ['loading hides the stats despite configured capabilities', null, false, false],
+]) {
+  test(name, async () => {
+    const renderer = await renderPage({ cloud_configured: true }, data);
+    try {
+      const output = JSON.stringify(renderer.toJSON());
+      assert.equal(output.includes('Cloud training isn’t configured yet'), showsWarning);
+      assert.equal(output.includes('/h total'), showsStats);
+      assert.equal(output.includes('this month:'), showsStats);
+      assert.equal(output.includes('Loading…'), data === null);
+    } finally { act(() => renderer.unmount()); }
+  });
+}
+
+for (const [name, provider, label, url] of [
+  ['RunPod', runpod, 'RunPod', runpod.console_url],
+  ['legacy', { run_id: 3, dataset_id: 3, source: 'cloud' }, 'vast.ai', vast.console_url],
+]) {
+  for (const instanceId of ['pod-42', undefined]) {
+    test(`${name} row console title with instance ${instanceId}`, async () => {
+      const renderer = await renderPage({}, {
+        configured: true, actives: [{ ...provider, vast_instance_id: instanceId }],
+        recent: [{ ...provider, run_id: 4 }],
+      });
+      try {
+        const title = instanceId
+          ? `${label} instance ${instanceId} — provider console (billing, logs, manual destroy)`
+          : `${label} console — billing, logs, manual destroy`;
+        const link = renderer.root.findByProps({ title });
+        assert.equal(link.type, 'a');
+        assert.equal(link.props.href, url);
+        assert.equal(link.props.rel, 'noreferrer');
+        assert.equal(link.children.join(''), `${label} console ↗`);
+        assert.equal(renderer.root.findAllByProps({ title: `Cloud run (${label})` }).length, 1);
+      } finally { act(() => renderer.unmount()); }
+    });
+  }
+}
+
+test('recovery entries use unique run keys even with shared or missing instance ids', async (t) => {
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+  const renderer = await renderPage({}, { recovery_required: [
+    { ...runpod, run_id: 11, vast_instance_id: 'shared' },
+    { ...vast, run_id: 12, vast_instance_id: 'shared' },
+    { run_id: 13 }, { run_id: 14 },
+  ] });
+  try {
+    const items = renderer.root.findByType('ul').findAllByType('li');
+    assert.equal(items.length, 4);
+    assert.deepEqual(items.map((item) => item.findByType('a').children.join('')), [
+      'RunPod console ↗ — shared', 'vast.ai console ↗ — shared',
+      'vast.ai console ↗ — 13', 'vast.ai console ↗ — 14',
+    ]);
+    assert.deepEqual(items.map((item) => item.findByType('a').props.href), [
+      runpod.console_url, vast.console_url, vast.console_url, vast.console_url,
+    ]);
+    assert.deepEqual(errors, [], 'React must not report missing or duplicate list keys');
+  } finally { act(() => renderer.unmount()); }
+});
