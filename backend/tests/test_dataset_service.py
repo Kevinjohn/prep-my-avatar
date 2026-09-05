@@ -226,6 +226,40 @@ def test_export_zip_layout(app):
         assert manifest['source_mix'] == {'reference': 0, 'imported': 0, 'generated': 1}
 
 
+@pytest.mark.parametrize('edited', [False, True], ids=['original', 'upscaled-working'])
+def test_export_zip_uses_bounded_training_source(app, edited):
+    from app.config import LOCAL_USER
+    from app.models import FaceDatasetImage
+    from app.services import face_dataset_service as svc
+
+    with app.app_context():
+        ds = svc.create_dataset(LOCAL_USER, 'Originals', 'originals')
+        root = Path(svc._dataset_dir(ds.id))
+        (root / 'originals').mkdir()
+        row = FaceDatasetImage(
+            dataset_id=ds.id, filename='working.webp', status='keep',
+            source='import', original_filename='originals/upload.jpg',
+            upscale_ratio=1.0 if edited else None, caption='portrait')
+        with Image.new('RGB', (3000, 2000), (30, 60, 90)) as original:
+            original.save(root / row.original_filename, 'JPEG')
+            original.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            original.save(root / row.filename, 'WEBP')
+        with Image.open(root / row.filename) as working:
+            working_size = working.size
+        svc.db.session.add(row)
+        svc.db.session.commit()
+
+        with zipfile.ZipFile(io.BytesIO(svc.build_export_zip(LOCAL_USER, ds.id))) as archive:
+            with Image.open(io.BytesIO(archive.read('10_originals/Originals_001.png'))) as image:
+                assert image.format == 'PNG'
+                assert image.mode == 'RGB'
+                if edited:
+                    assert image.size == working_size
+                else:
+                    assert max(image.size) == 2048
+                    assert image.width / image.height == pytest.approx(3000 / 2000, rel=0.01)
+
+
 def test_export_rejects_partial_missing_kept_files(app):
     from app.config import LOCAL_USER
     from app.models import FaceDatasetImage

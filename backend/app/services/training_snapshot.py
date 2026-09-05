@@ -73,7 +73,7 @@ def capture(user_id, dataset_id, destination) -> dict:
     dataset_root = Path(fds._dataset_dir(dataset_id)).resolve()
     try:
         for index, row in enumerate(rows):
-            source = Path(fds._img_path(row))
+            source = fds.training_source_path(row)
             try:
                 source.resolve(strict=True).relative_to(dataset_root)
             except (OSError, ValueError):
@@ -103,6 +103,8 @@ def capture(user_id, dataset_id, destination) -> dict:
                 'image_id': row.id,
                 'stored_name': stored_name,
                 'source_filename': row.filename,
+                'source_kind': ('derivative' if source == Path(fds._img_path(row))
+                                else 'original'),
                 'content_sha256': copied_hash,
                 'caption': row.caption or '',
                 'caption_sha256': _caption_hash(row.caption),
