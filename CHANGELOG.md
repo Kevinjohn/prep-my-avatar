@@ -244,6 +244,10 @@ under **Unreleased** until a release is tagged.
 ### Fixed
 
 - The phase-1 end-to-end test now follows the identity-canary rule (one kept image before a batch).
+- All 21 guide screenshots were captured before the setup page was split into a
+  checklist and a session check, so the repository governance check had been
+  red since 1 Sep. Recaptured against the current app; the guide's copy now
+  names the "Setup" screen and the "Local image provider" row.
 - Two order-dependent test failures that also affected `main`: the
   capabilities probe cache and the ComfyUI model-list cache leaked between
   tests. Both reset before every test, and the backend suite now passes in
@@ -310,6 +314,9 @@ under **Unreleased** until a release is tagged.
 ### Internal
 
 - `_finish` lost its unused `destroy` flag.
+- `scripts/refresh_screenshot_manifest.py` rewrites `docs/screenshots/manifest.yml`
+  digests and capture revisions in place after `pnpm run capture:guide`; the
+  capture script's selectors follow the new setup page.
 - New `runpod_client` and `cloud_provider` registry with the same surface as
   `vast_client`; `cloud_training` resolves the provider per run. Schema
   migration 19 adds `cloud_training_run.provider` (NULL reads as vast.ai).
