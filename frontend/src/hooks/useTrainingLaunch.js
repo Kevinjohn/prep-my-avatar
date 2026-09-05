@@ -172,7 +172,7 @@ export function useTrainingLaunch({ ds, trainType, base, variant, vaePath, tePat
   };
 
   // Launch-time GPU speed picker: the ☁️ button opens a dialog that lists live
-  // vast.ai offers by speed (price/h + approx time + cost); the chosen class is
+  // Cloud GPU offers by speed (price/h + approx time + cost); the chosen class is
   // forwarded as gpu_name. launchCloud carries the POST + the MISMATCH_CAPTION
   // retry that used to live inline in the button handler.
   const [cloudDialog, setCloudDialog] = useState(false);

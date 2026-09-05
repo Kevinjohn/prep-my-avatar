@@ -87,7 +87,7 @@ provenance visible during review.
 ### 5. Check training readiness
 
 The training workspace keeps the next blocker visible and shows whether a local
-or cloud trainer is configured before launch. Blank captions produce a warning
+or cloud trainer (vast.ai or RunPod) is configured before launch. Blank captions produce a warning
 and an explicit **Start anyway** confirmation; they do not block training.
 
 ### 6. Export or back up

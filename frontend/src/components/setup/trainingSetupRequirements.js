@@ -42,5 +42,5 @@ export const TRAINING_LAUNCH_REQUIREMENTS = [
   { id: 'captions', label: 'Caption admission', detail: 'Missing captions or the wrong prose/booru style require an explicit confirmation before launch.', kind: 'confirm' },
   { id: 'custom_weights', label: 'Custom weights', detail: 'Files must exist and be readable; Z-Image single-file bases require conversion, and uncertain architectures require confirmation.', kind: 'hard' },
   { id: 'trigger_collision', label: 'Run-folder identity', detail: 'Two datasets cannot use the same trigger and base because their checkpoints would collide.', kind: 'hard' },
-  { id: 'cloud_access', label: 'Cloud alternative', detail: 'Cloud training additionally requires a saved vast.ai key, funded account, and an offer within configured limits.', kind: 'hard' },
+  { id: 'cloud_access', label: 'Cloud alternative', detail: 'Cloud training additionally requires a saved cloud GPU API key (vast.ai or RunPod), that provider selected in Settings → Training → Cloud GPU, a funded account, and an offer within configured limits.', kind: 'hard' },
 ];

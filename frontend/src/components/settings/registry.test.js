@@ -31,3 +31,10 @@ test('representative visible controls are indexed for every settings section', (
     assert.equal(matchesQuery(section, examples[section.id]), true, section.id);
   }
 });
+
+test('both cloud providers and the provider selector find Training', () => {
+  const training = SETTINGS_SECTIONS.find((section) => section.id === 'training');
+  for (const query of ['vast', 'RunPod', 'cloud provider']) {
+    assert.equal(matchesQuery(training, query), true, query);
+  }
+});
