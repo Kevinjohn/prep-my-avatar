@@ -739,3 +739,45 @@ def test_settings_restart_refuses_active_package_mutation(client, monkeypatch):
     assert response.status_code == 409
     assert response.get_json()['active_installs'] == ['ml_extras']
     assert called == []
+
+
+def test_cloud_provider_enums(client):
+    assert client.put('/api/settings', json={'config': {'cloud': {'provider': 'lambda'}}}).status_code == 400
+    assert client.put('/api/settings', json={'config': {'cloud': {
+        'runpod': {'cloud_type': 'COMMUNITY'}}}}).status_code == 200
+
+
+@pytest.mark.parametrize('provider', ['vast', 'runpod'])
+def test_cloud_provider_setting_accepts_supported_names(client, provider):
+    response = client.put('/api/settings', json={'config': {'cloud': {'provider': provider}}})
+    assert response.status_code == 200
+    assert client.get('/api/settings').get_json()['config']['cloud']['provider'] == provider
+
+
+@pytest.mark.parametrize('provider', ['', None, 'VAST'])
+def test_cloud_provider_setting_rejects_invalid_names(client, provider):
+    response = client.put('/api/settings', json={'config': {'cloud': {'provider': provider}}})
+    assert response.status_code == 400
+    assert client.get('/api/settings').get_json()['config']['cloud']['provider'] == 'vast'
+
+
+@pytest.mark.parametrize('cloud_type', ['SPOT', 'secure'])
+def test_runpod_cloud_type_rejects_invalid_enum(client, cloud_type):
+    response = client.put('/api/settings', json={'config': {'cloud': {
+        'runpod': {'cloud_type': cloud_type}}}})
+    assert response.status_code == 400
+    assert 'cloud.runpod.cloud_type' in response.get_json()['error']
+    assert client.get('/api/settings').get_json()['config']['cloud']['runpod']['cloud_type'] == 'SECURE'
+
+
+def test_runpod_probe_route_preserves_failure_detail(client, monkeypatch):
+    from app.services import runpod_client
+    from test_vast_client import FakeResp
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(runpod_client.requests, 'request',
+                        lambda *a, **k: FakeResp(401, {'message': 'invalid api key'}))
+    response = client.post('/api/settings/test/runpod')
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['ok'] is False
+    assert '401' in body['detail'] and 'invalid api key' in body['detail']

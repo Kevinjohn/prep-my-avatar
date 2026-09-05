@@ -44,11 +44,11 @@ def _require_aitoolkit():
     return None
 
 
-def _require_cloud():
+def _require_cloud(*, relaunch=False):
     """None if cloud training is configured, else the (body, status) 409 to return."""
-    if not capabilities.probe().get('cloud_training'):
+    if not capabilities.probe().get('cloud_configured' if relaunch else 'cloud_training'):
         return jsonify({'error': 'Cloud training is not configured',
-                        'hint': 'Add your vast.ai API key in Settings'}), 409
+                        'hint': 'Add a cloud GPU API key (vast.ai or RunPod) in Settings'}), 409
     return None
 
 
@@ -744,12 +744,16 @@ def dataset_train_cloud(dataset_id):
 def dataset_train_cloud_retry():
     """↻ Retry d'un run en erreur (page Cloud) : relance avec les paramètres
     exacts du run raté — pod frais, mêmes garde-fous que tout launch."""
-    gate = _require_cloud()
+    gate = _require_cloud(relaunch=True)
     if gate:
         return gate
     d = request.get_json(silent=True) or {}
     try:
-        res = ct.retry_cloud_run(LOCAL_USER, int(d.get('run_id') or 0))
+        run_id = int(d.get('run_id') or 0)
+        hint = ct.relaunch_blocker(LOCAL_USER, run_id)
+        if hint:
+            return jsonify({'error': 'Cloud training is not configured', 'hint': hint}), 409
+        res = ct.retry_cloud_run(LOCAL_USER, run_id)
     except Exception as e:
         return _map_error(e)
     return jsonify({'ok': True, **res})
@@ -761,12 +765,16 @@ def dataset_train_cloud_continue():
     checkpoint harvesté et vise dernier_step + extra_steps — pod frais, mêmes
     garde-fous que tout launch ; le monitor dépose le checkpoint sur le pod avant
     de démarrer (auto-resume ai-toolkit)."""
-    gate = _require_cloud()
+    gate = _require_cloud(relaunch=True)
     if gate:
         return gate
     d = request.get_json(silent=True) or {}
     try:
-        res = ct.continue_cloud_run(LOCAL_USER, int(d.get('run_id') or 0),
+        run_id = int(d.get('run_id') or 0)
+        hint = ct.relaunch_blocker(LOCAL_USER, run_id)
+        if hint:
+            return jsonify({'error': 'Cloud training is not configured', 'hint': hint}), 409
+        res = ct.continue_cloud_run(LOCAL_USER, run_id,
                                     extra_steps=d.get('extra_steps', 1000))
     except Exception as e:
         return _map_error(e)

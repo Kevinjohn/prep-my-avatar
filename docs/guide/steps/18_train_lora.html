@@ -18,7 +18,7 @@
     <div class="prose">
       <p class="eyebrow">First run · 18 of 21</p>
       <h1>Step 18: Train a LoRA</h1>
-      <p>Training turns the kept images and captions into a <code>.safetensors</code> LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai cloud worker. If you do not want to train in Prep My Avatar, skip Steps 18–20 and continue to Step 21 to back up the dataset.</p>
+      <p>Training turns the kept images and captions into a <code>.safetensors</code> LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai or RunPod cloud worker. If you do not want to train in Prep My Avatar, skip Steps 18–20 and continue to Step 21 to back up the dataset.</p>
     </div>
     <figure class="step-shot">
       <img src="../../screenshots/guide/18_train_lora.jpg" alt="Train a LoRA screen in Prep My Avatar" width="1440" height="900">
@@ -26,6 +26,7 @@
     <div class="prose">
       <h2>Before you begin</h2>
       <p>Training can take significant time, disk space, GPU memory, and—for cloud runs—money. Complete curation, captions, leak review, and source-rights confirmation. Accept any required base-model licence and add its Hugging Face token before launch.</p>
+      <p>For cloud training, choose vast.ai or RunPod with the provider selector in Settings → Training → Cloud GPU, save and test that provider’s API key, and add account credit. Existing cloud runs remain visible after switching providers; new launches require the selected provider’s key.</p>
       <h2>Do this</h2>
       <ol><li>Open <strong>Train a LoRA</strong> in the dataset step navigator. Its URL ends in <code>/train</code> and it is labelled <strong>Optional</strong>.</li><li>Choose the LoRA family that matches the target model you intend to use.</li><li>Read the readiness summary and resolve blocking findings.</li><li>Keep the automatic step count and default recipe for a first run. Open <strong>Advanced options</strong> only when you understand the setting you need to change.</li><li>Select <strong>Train the LoRA</strong> for the configured local trainer, or <strong>Train in cloud</strong>.</li><li>Read the <strong>Before training</strong> confirmation. Fix duplicate pairs or caption leaks shown there.</li><li>Confirm the launch. For cloud training, check the quoted limits before accepting.</li><li>Keep the app running for local training. Follow either type of run from <strong>Runs</strong>.</li><li>Select <strong>Continue to Review checkpoints</strong>, or <strong>Skip optional step</strong> to move through the remaining optional training pages toward backup.</li></ol>
       <h2>You are finished when</h2>

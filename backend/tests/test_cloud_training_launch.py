@@ -2,7 +2,7 @@
 stop request, and boot reconciliation. vast_client and the monitor thread are
 always mocked -- no network, no thread started for real."""
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -20,6 +20,8 @@ def threaded_ct(threaded_app, monkeypatch):
 def _configure_ct(monkeypatch):
     monkeypatch.setenv('VAST_API_KEY', 'k-test')
     from app.services import cloud_training
+    monkeypatch.setattr(cloud_training, 'utcnow', lambda: datetime(2026, 7, 15, 12))
+    monkeypatch.setattr(cloud_training, '_now', lambda: 1784116800.0)
     # never start the real monitor thread in launch tests
     monkeypatch.setattr(cloud_training, '_start_monitor', lambda *a, **k: None)
     # launch_cloud_training now reconciles orphans on every call (so a user
@@ -246,7 +248,7 @@ def test_retry_reuses_frozen_snapshot_and_recipe_after_dataset_edits(
             'local', seeded_dataset, train_type='krea', variant='base')
         source = ct.db.session.get(ct.CloudTrainingRun, first['run_id'])
         source.status = 'error'
-        source.finished_at = datetime.now(timezone.utc)
+        source.finished_at = ct.utcnow()
         ds.trigger_word = 'edited_later'
         ds.train_settings = json.dumps({'rank': 64, 'resolution': '1024'})
         ds.train_base_model = 'local-only.safetensors'
@@ -316,6 +318,7 @@ def test_simultaneous_launches_reserve_only_one_active_slot(
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
+        assert not thread.is_alive()
 
     assert [kind for kind, _value in results].count('ok') == 1
     errors = [value for kind, value in results if kind == 'error']
@@ -499,7 +502,7 @@ def test_reconcile_spares_recent_error_pod_kept(ct, app, monkeypatch):
         run = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
                                   vast_instance_id='555', vast_label='lds-1',
                                   job_name='j', error='checkpoint download failed',
-                                  finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=10))
+                                  finished_at=ct.utcnow() - timedelta(minutes=10))
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'list_instances',
@@ -530,7 +533,7 @@ def test_reconcile_reaps_expired_error_pod_kept(ct, app, monkeypatch):
         run = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
                                   vast_instance_id='555', vast_label='lds-1',
                                   job_name='j', error='checkpoint download failed',
-                                  finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))
+                                  finished_at=ct.utcnow() - timedelta(minutes=500))
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'list_instances',
@@ -558,7 +561,7 @@ def test_reconcile_closes_billing_when_kept_pod_is_absent(ct, app, monkeypatch):
         run = ct.CloudTrainingRun(dataset_id=1, status='error_pod_kept',
                                   vast_instance_id='555', vast_label='lds-1',
                                   job_name='j', error='checkpoint download failed',
-                                  finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))
+                                  finished_at=ct.utcnow() - timedelta(minutes=500))
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'list_instances', lambda: [])
@@ -579,7 +582,7 @@ def test_failed_destroy_stays_active_and_billable_until_reconciled(
         run = ct.CloudTrainingRun(
             dataset_id=1, status='training', vast_instance_id='555',
             vast_label='lds-1', job_name='j', price_per_hour=1.0,
-            billing_started_at=datetime.now(timezone.utc).replace(tzinfo=None)
+            billing_started_at=ct.utcnow()
                                - timedelta(hours=1))
         ct.db.session.add(run)
         ct.db.session.commit()
@@ -608,8 +611,8 @@ def test_request_stop_can_terminate_recovery_pod(ct, app, monkeypatch):
         run = ct.CloudTrainingRun(
             dataset_id=1, status='error_pod_kept', vast_instance_id='555',
             vast_label='lds-1', job_name='j', error='download failed',
-            billing_started_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            finished_at=datetime.now(timezone.utc).replace(tzinfo=None))
+            billing_started_at=ct.utcnow(),
+            finished_at=ct.utcnow())
         ct.db.session.add(run)
         ct.db.session.commit()
         monkeypatch.setattr(ct.vast_client, 'destroy_instance', lambda _iid: True)
@@ -631,7 +634,7 @@ def test_reconcile_keeps_active_and_spares_error_pod_kept_together(ct, app, monk
         kept_run = ct.CloudTrainingRun(dataset_id=2, status='error_pod_kept',
                                        vast_instance_id='555', vast_label='lds-2',
                                        job_name='j2', error='checkpoint download failed',
-                                       finished_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=10))
+                                       finished_at=ct.utcnow() - timedelta(minutes=10))
         ct.db.session.add_all([active, kept_run])
         ct.db.session.commit()
         active_id, kept_id = active.id, kept_run.id
@@ -746,7 +749,7 @@ def _seed_finished_run(ct, price, start_h, end_h, dataset_id=999):
     month_start + end_h), never to `now` — a now-relative seed run during the
     first UTC hours of the 1st would land in the PREVIOUS month and genuinely
     fail the spend assertions. cost = price x (end_h - start_h)."""
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = ct.utcnow()
     month_start = datetime(now.year, now.month, 1)
     run = ct.CloudTrainingRun(
         dataset_id=dataset_id, status='done', job_name='j', vast_label='lds-9',
@@ -783,7 +786,7 @@ def test_budget_ignores_previous_month_runs(ct, app, seeded_dataset, monkeypatch
     _fake_export(monkeypatch, ct)
     ct.cfg.save_config({'cloud': {'monthly_budget_usd': 3}})
     with app.app_context():
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = ct.utcnow()
         month_start = datetime(now.year, now.month, 1)
         run = ct.CloudTrainingRun(
             dataset_id=999, status='done', job_name='j', vast_label='lds-9',
@@ -1141,7 +1144,8 @@ def test_legacy_terminal_billing_ends_at_finished_time_with_provider_id(ct, app)
 
 def test_filter_offers_drops_blacklisted_hosts(ct, app):
     with app.app_context():
-        ct._blacklist_host(43503, 'never became ready')
+        ct._blacklist_host(43503, 'never became ready',
+                           run=ct.CloudTrainingRun(provider='vast'))
         offers = [
             {'offer_id': 1, 'gpu_name': 'RTX 3090', 'dph_total': 0.10, 'machine_id': 43503},
             {'offer_id': 2, 'gpu_name': 'RTX 3090', 'dph_total': 0.15, 'machine_id': 99},
@@ -1152,7 +1156,8 @@ def test_filter_offers_drops_blacklisted_hosts(ct, app):
 
 def test_blacklist_expires_after_ttl(ct, app, monkeypatch):
     with app.app_context():
-        ct._blacklist_host(43503, 'never became ready')
+        ct._blacklist_host(43503, 'never became ready',
+                           run=ct.CloudTrainingRun(provider='vast'))
         assert '43503' in ct._load_bad_hosts()
         # jump past the 3-day TTL
         real_now = ct._now()
@@ -1642,3 +1647,368 @@ def test_cloud_progress_selects_run_by_family(ct, app, seeded_dataset, tmp_path)
         assert ct.cloud_progress('local', seeded_dataset)['step'] == 60
         # An explicitly different family must never bleed into this panel.
         assert ct.cloud_progress('local', seeded_dataset, train_type='sdxl')['step'] is None
+
+
+@pytest.mark.parametrize('template', ['', 'template-1'])
+def test_runpod_launch_auth(ct, app, seeded_dataset, monkeypatch, template):
+    from app.services import runpod_client
+    _fake_export(monkeypatch, ct)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setenv('HF_TOKEN', 'hf-test')
+    ct.cfg.save_config({'cloud': {
+        'provider': 'runpod', 'image': 'ignored-vast-image',
+        'onstart': 'ignored-vast-command', 'disk_gb': 91,
+        'runpod': {'template_id': template, 'image': 'custom-runpod-image'}}})
+    monkeypatch.setattr(runpod_client, 'search_offers', lambda **kw: [
+        {'offer_id': 'RTX 4090', 'gpu_name': 'RTX 4090', 'dph_total': .4, 'gpu_ram_gb': 24}])
+    seen = {}
+
+    def create(*a, **kw):
+        seen.update(kw)
+        return 'pod-1'
+
+    monkeypatch.setattr(runpod_client, 'create_instance', create)
+    with app.app_context():
+        result = ct.launch_cloud_training('local', seeded_dataset)
+        assert result['provider'] == 'runpod'
+        assert result['provider_label'] == 'RunPod'
+        assert result['console_url'] == 'https://console.runpod.io/pods'
+        run = ct.db.session.get(ct.CloudTrainingRun, result['run_id'])
+        assert run.provider == 'runpod'
+        ct._provision(run)
+        assert run.auth_token and seen['env']['AI_TOOLKIT_AUTH'] == run.auth_token
+        assert seen['env']['HF_TOKEN'] == 'hf-test'
+        assert seen['template_hash'] == (template or None)
+        assert seen['image'] == 'custom-runpod-image'
+        assert seen['onstart'] is None
+        assert seen['disk_gb'] == 91
+        payload = ct._run_payload(run)
+        assert payload['provider_label'] == 'RunPod'
+        assert payload['console_url'] == 'https://console.runpod.io/pods/pod-1'
+        ct._blacklist_host('host', 'failed', run=run)
+        assert 'host' not in ct._load_bad_hosts()
+        # A retry still belongs to RunPod after the selected provider changes.
+        ct.cfg.save_config({'cloud': {'provider': 'vast'}})
+        monkeypatch.setattr(ct, '_reusable_run_snapshot', lambda *a, **k: (None, None))
+        calls = {}
+        monkeypatch.setattr(ct, 'launch_cloud_training', lambda *a, **k: calls.update(k))
+        ct._relaunch('local', run, {}, 500)
+        assert calls['provider'] == 'runpod'
+
+
+def test_reconcile_provider_id_collision(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    destroyed = []
+    listed = []
+    for name, provider_client in [('vast', ct.vast_client), ('runpod', runpod_client)]:
+        def instances(name=name):
+            listed.append(name)
+            return [{'instance_id': 'same', 'label': 'lds-1'}]
+        monkeypatch.setattr(provider_client, 'list_instances', instances)
+        monkeypatch.setattr(provider_client, 'destroy_instance',
+                            lambda iid, name=name: destroyed.append((name, iid)) or True)
+    with app.app_context():
+        # Vast owns the active id; RunPod's terminal row must not overwrite it.
+        ct.db.session.add_all([
+            ct.CloudTrainingRun(dataset_id=1, provider='vast', status='training', vast_instance_id='same'),
+            ct.CloudTrainingRun(dataset_id=2, provider='runpod', status='error', vast_instance_id='same')])
+        ct.db.session.commit()
+        assert ct.reconcile_orphans(app) == 1
+        # Registry ordering is pinned explicitly in test_cloud_provider.py.
+        assert listed == ['vast', 'runpod']
+        assert destroyed == [('runpod', 'same')]
+
+
+def test_status_any_provider_key(ct, app, monkeypatch):
+    ct.cfg.save_config({'cloud': {'provider': 'runpod'}})
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    with app.app_context():
+        for payload in (ct.cloud_status(), ct.all_runs()):
+            assert payload['configured'] is True
+            assert payload['selected_provider'] == {'name': 'runpod', 'label': 'RunPod', 'launch_ready': False}
+
+
+def test_explicit_provider_checks_original_key(ct, app, seeded_dataset, monkeypatch):
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    with app.app_context():
+        with pytest.raises(RuntimeError, match='RunPod API key'):
+            ct.launch_cloud_training('local', seeded_dataset, provider='runpod')
+
+
+def test_launch_unknown_provider_is_actionable(ct, app, seeded_dataset):
+    with app.app_context(), pytest.raises(RuntimeError, match='^unknown cloud provider: bogus$'):
+        ct.launch_cloud_training('local', seeded_dataset, provider='bogus')
+
+
+@pytest.mark.parametrize('offers,blacklisted,message', [
+    ([], False, 'no RunPod offer matches'),
+    ([{'offer_id': 'gpu', 'gpu_name': 'RTX 4090', 'dph_total': .4}],
+     True, 'all matching RunPod hosts are temporarily blacklisted'),
+])
+def test_runpod_offer_errors_name_provider(ct, app, monkeypatch, offers, blacklisted, message):
+    from app.services import runpod_client
+    monkeypatch.setattr(runpod_client, 'search_offers', lambda **kw: offers)
+    if blacklisted:
+        monkeypatch.setattr(ct, '_filter_offers', lambda offers: [])
+    with app.app_context(), pytest.raises(RuntimeError, match=message):
+        ct._provision(ct.CloudTrainingRun(provider='runpod', dataset_id=1))
+
+
+def test_runpod_out_of_stock_marks_run_error(ct, app, seeded_dataset, monkeypatch):
+    from app.services import runpod_client
+    _fake_export(monkeypatch, ct)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(runpod_client, 'search_offers', lambda **kw: [
+        {'offer_id': 'gpu', 'gpu_name': 'RTX 4090', 'dph_total': .4}])
+
+    def no_capacity(*args, **kwargs):
+        raise runpod_client.RunpodError(
+            'no RunPod capacity for gpu right now — open the GPU picker and choose another tier')
+
+    monkeypatch.setattr(runpod_client, 'create_instance', no_capacity)
+    with app.app_context():
+        result = ct.launch_cloud_training('local', seeded_dataset, provider='runpod')
+        ct._monitor(app, result['run_id'])
+        run = ct.db.session.get(ct.CloudTrainingRun, result['run_id'])
+        assert run.status == 'error'
+        assert 'open the GPU picker' in run.error
+        assert run.vast_instance_id is None
+
+
+def test_register_runpod_without_quoted_price(ct, app):
+    with app.app_context():
+        run = ct.CloudTrainingRun(provider='runpod', dataset_id=1)
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        ct._register_instance(run, 'pod', {'gpu_name': 'RTX 4090', 'dph_total': None}, 'token')
+        assert run.vast_instance_id == 'pod'
+        assert run.price_per_hour is None
+        assert run.estimated_cost_usd is None
+        assert run.estimated_minutes > 0
+
+
+@pytest.mark.parametrize('machine_id', [None, 'host-7'])
+def test_blacklist_run_host_preserves_vast_policy(ct, app, machine_id):
+    with app.app_context():
+        run = ct.CloudTrainingRun(provider='vast', train_params=json.dumps({'machine_id': machine_id}))
+        ct._blacklist_run_host(run, 'boot failed')
+        hosts = ct._load_bad_hosts()
+        assert set(hosts) == ({'host-7'} if machine_id else set())
+        if machine_id:
+            assert hosts[machine_id]['reason'] == 'boot failed'
+
+
+def test_blacklist_requires_run(ct):
+    with pytest.raises(TypeError, match='run'):
+        ct._blacklist_host('host', 'boot failed')
+
+
+def test_best_of_empty_uses_provider_neutral_error(ct):
+    with pytest.raises(RuntimeError, match='^no eligible cloud GPU offers remain$'):
+        ct._best_of([])
+
+
+def test_reconcile_runpod_only_ignores_non_training_pods(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(ct.vast_client, 'list_instances', lambda: pytest.fail('vast key is absent'))
+    monkeypatch.setattr(runpod_client, 'list_instances', lambda: [
+        {'instance_id': 'personal', 'label': 'my-pod'},
+        {'instance_id': 'orphan', 'label': 'lds-orphan'}])
+    destroyed = []
+    monkeypatch.setattr(runpod_client, 'destroy_instance', lambda iid: destroyed.append(iid) or True)
+    assert ct.reconcile_orphans(app) == 1
+    assert destroyed == ['orphan']
+
+
+def test_reconcile_legacy_null_provider_belongs_only_to_vast(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    destroyed = []
+    for name, client in [('vast', ct.vast_client), ('runpod', runpod_client)]:
+        monkeypatch.setattr(client, 'list_instances', lambda: [
+            {'instance_id': 'same', 'label': 'lds-legacy'}])
+        monkeypatch.setattr(client, 'destroy_instance',
+                            lambda iid, name=name: destroyed.append((name, iid)) or True)
+    with app.app_context():
+        run = ct.CloudTrainingRun(dataset_id=1, status='training', vast_instance_id='same')
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        run.provider = None
+        ct.db.session.commit()
+        assert ct.reconcile_orphans(app) == 1
+        assert run.provider is None
+        assert run.billing_ended_at is None
+    assert destroyed == [('runpod', 'same')]
+
+
+@pytest.mark.parametrize('age,reaped', [(10, False), (481, True), (None, True)])
+def test_reconcile_runpod_recovery_window(ct, app, monkeypatch, age, reaped):
+    from app.services import runpod_client
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(runpod_client, 'list_instances', lambda: [
+        {'instance_id': 'kept', 'label': 'lds-kept'}])
+    destroyed = []
+    monkeypatch.setattr(runpod_client, 'destroy_instance', lambda iid: destroyed.append(iid) or True)
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, provider='runpod', status='error_pod_kept', vast_instance_id='kept',
+            auth_token='token', error='download failed',
+            billing_started_at=ct.utcnow() - timedelta(hours=10),
+            finished_at=ct.utcnow() - timedelta(minutes=age) if age is not None else None)
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        assert ct.reconcile_orphans(app) == int(reaped)
+        ct.db.session.refresh(run)
+        assert run.status == 'error_pod_kept'
+        assert destroyed == (['kept'] if reaped else [])
+        assert ('reaped after the recovery window' in run.error) is reaped
+        assert (run.billing_ended_at == ct.utcnow()) is reaped
+        assert run.auth_token == (None if reaped else 'token')
+
+
+def test_reconcile_runpod_vanished_billing_is_provider_scoped(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(runpod_client, 'list_instances', lambda: [])
+    with app.app_context():
+        runs = [ct.CloudTrainingRun(
+            dataset_id=1, provider=provider, status='error_pod_kept', vast_instance_id='missing',
+            billing_started_at=ct.utcnow() - timedelta(hours=1), auth_token='token')
+            for provider in ('vast', 'runpod')]
+        ct.db.session.add_all(runs)
+        ct.db.session.commit()
+        assert ct.reconcile_orphans(app) == 0
+        for run in runs:
+            ct.db.session.refresh(run)
+        assert runs[0].billing_ended_at is None
+        assert runs[0].auth_token == 'token'
+        assert runs[1].billing_ended_at == ct.utcnow()
+        assert runs[1].auth_token is None
+        assert runs[1].error.endswith('provider instance is no longer active')
+
+
+def test_reconcile_continues_after_first_provider_list_failure(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+
+    def fail_list():
+        raise ct.vast_client.VastError('offline')
+
+    monkeypatch.setattr(ct.vast_client, 'list_instances', fail_list)
+    monkeypatch.setattr(runpod_client, 'list_instances', lambda: [
+        {'instance_id': 'orphan', 'label': 'lds-orphan'}])
+    destroyed = []
+    monkeypatch.setattr(runpod_client, 'destroy_instance', lambda iid: destroyed.append(iid) or True)
+    assert ct.reconcile_orphans(app) == 1
+    assert destroyed == ['orphan']
+
+
+@pytest.mark.parametrize('with_key', [True, False])
+def test_status_runpod_selected_readiness(ct, app, monkeypatch, with_key):
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    if with_key:
+        monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    ct.cfg.save_config({'cloud': {'provider': 'runpod'}})
+    with app.app_context():
+        for payload in (ct.cloud_status(), ct.all_runs()):
+            assert payload['configured'] is with_key
+            assert payload['selected_provider'] == {
+                'name': 'runpod', 'label': 'RunPod', 'launch_ready': with_key}
+
+
+@pytest.mark.parametrize('provider,instance_id,url', [
+    ('runpod', None, 'https://console.runpod.io/pods'),
+    ('vast', '123', 'https://cloud.vast.ai/instances/'),
+])
+def test_run_payload_console_url(ct, app, provider, instance_id, url):
+    with app.app_context():
+        run = ct.CloudTrainingRun(dataset_id=1, provider=provider, vast_instance_id=instance_id)
+        assert ct._run_payload(run)['console_url'] == url
+
+
+def test_runpod_gpu_tiers_preserve_catalogue_classes_and_unknown_prices(
+        ct, app, seeded_dataset, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    ct.cfg.save_config({'cloud': {'provider': 'runpod', 'max_runtime_minutes': 480}})
+    offers = [
+        {'offer_id': 'unknown', 'gpu_name': 'unpriced', 'dph_total': None},
+        {'offer_id': 'slow', 'gpu_name': 'slow', 'dph_total': .2},
+        {'offer_id': 'fast', 'gpu_name': 'fast', 'dph_total': .7},
+    ]
+    for offer in offers:
+        offer.update(machine_id=None, reliability=None, gpu_ram_gb=24)
+    monkeypatch.setattr(runpod_client, 'search_offers', lambda **kw: offers)
+    monkeypatch.setattr(ct.gpu_speed, 'speed_factor', lambda name: 1)
+    monkeypatch.setattr(ct.gpu_speed, 'estimate_minutes',
+                        lambda name, *args: 500 if name == 'slow' else 30)
+    with app.app_context():
+        tiers = ct.gpu_tiers('local', seeded_dataset)['tiers']
+    assert [tier['offer_id'] for tier in tiers] == ['slow', 'fast', 'unknown']
+    assert tiers[0]['exceeds_cap'] is True
+    assert tiers[1]['exceeds_cap'] is False
+    assert tiers[1]['est_cost'] > 0
+    assert tiers[2]['dph_total'] is None
+    assert tiers[2]['est_cost'] is None
+
+
+def test_runpod_gpu_tiers_require_selected_key(ct, app, seeded_dataset, monkeypatch):
+    monkeypatch.delenv('RUNPOD_API_KEY', raising=False)
+    ct.cfg.save_config({'cloud': {'provider': 'runpod'}})
+    with app.app_context(), pytest.raises(RuntimeError, match='RunPod API key is not configured'):
+        ct.gpu_tiers('local', seeded_dataset)
+
+
+def test_reconcile_kept_run_destroy_exception_keeps_billing_open(ct, app, monkeypatch, caplog):
+    from app.services import runpod_client
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(runpod_client, 'list_instances', lambda: [
+        {'instance_id': 'kept', 'label': 'lds-kept'}])
+
+    def fail_destroy(iid):
+        raise runpod_client.RunpodError('temporarily unreachable')
+
+    monkeypatch.setattr(runpod_client, 'destroy_instance', fail_destroy)
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, provider='runpod', status='error_pod_kept',
+            vast_instance_id='kept', auth_token='token', error='download failed',
+            finished_at=ct.utcnow() - timedelta(minutes=500))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        assert ct.reconcile_orphans(app) == 0
+        ct.db.session.refresh(run)
+        assert run.status == 'error_pod_kept'
+        assert run.billing_ended_at is None
+        assert run.auth_token == 'token'
+        assert run.error == 'download failed'
+        assert 'destroy kept failed: temporarily unreachable' in caplog.text
+
+
+def test_reconcile_vanished_runpod_completes_pending_cleanup(ct, app, monkeypatch):
+    from app.services import runpod_client
+    monkeypatch.delenv('VAST_API_KEY', raising=False)
+    monkeypatch.setenv('RUNPOD_API_KEY', 'test-key')
+    monkeypatch.setattr(runpod_client, 'list_instances', lambda: [])
+    with app.app_context():
+        run = ct.CloudTrainingRun(
+            dataset_id=1, provider='runpod', status='training',
+            vast_instance_id='gone', auth_token='token',
+            billing_started_at=ct.utcnow() - timedelta(minutes=10))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        ct._mark_cleanup_pending(run, 'stopped', 'user stopped', None)
+        assert ct.reconcile_orphans(app) == 0
+        ct.db.session.refresh(run)
+        assert run.status == 'stopped'
+        assert run.phase_detail == 'user stopped'
+        assert run.billing_ended_at == ct.utcnow()
+        assert run.finished_at == ct.utcnow()
+        assert run.auth_token is None

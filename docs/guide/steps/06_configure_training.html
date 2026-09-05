@@ -18,18 +18,18 @@
     <div class="prose">
       <p class="eyebrow">First run · 6 of 21</p>
       <h1>Step 6: Configure training</h1>
-      <p>ai-toolkit trains a LoRA on your own computer. It is optional: you can export a training ZIP for another trainer or configure vast.ai for cloud training later.</p>
+      <p>ai-toolkit trains a LoRA on your own computer. It is optional: you can export a training ZIP for another trainer or configure vast.ai or RunPod for cloud training later.</p>
     </div>
     <figure class="step-shot">
       <img src="../../screenshots/guide/06_configure_training.jpg" alt="Configure training screen in Prep My Avatar" width="1440" height="900">
     </figure>
     <div class="prose">
       <h2>Before you begin</h2>
-      <p>Local training requires a compatible GPU and a separate ai-toolkit installation. Cloud training requires a vast.ai account, API key, account credit, and spending limits configured under Settings.</p>
+      <p>Local training requires a compatible GPU and a separate ai-toolkit installation. Cloud training requires a vast.ai or RunPod account, API key, account credit, and spending limits configured under Settings.</p>
       <h2>Do this</h2>
       <ol><li>On <strong>Step 5 of 5 — LoRA training — ai-toolkit</strong>, check whether the app found an installation.</li><li>If it found one, select <strong>Use this ai-toolkit →</strong>.</li><li>Otherwise, follow <strong>ai-toolkit on GitHub</strong> and clone it. On an Apple Silicon Mac, open Terminal in the cloned folder and run <code>./run_mac.zsh</code>; wait for the experimental macOS setup to finish before returning to Prep My Avatar.</li><li>Select <strong>Choose folder…</strong> and choose the ai-toolkit folder containing <code>run.py</code>. You may instead paste its full macOS path, such as <code>/Users/you/Documents/GitHub/ai-toolkit</code>.</li><li>Select <strong>Save &amp; re-check</strong>. If the folder exists but its Python environment is missing, the page shows the exact macOS command to run.</li><li>When the page says ai-toolkit is set up, select <strong>Save &amp; finish →</strong>.</li></ol>
       <p>The browser cannot safely expose an absolute local directory through a normal upload field, so <strong>Choose folder…</strong> opens the Mac's native folder dialog through the local Prep My Avatar server. The picker is available only while accessing the app on the same Mac.</p>
-      <p>To skip training setup, leave the directory empty and finish. For cloud training later, add a <strong>vast.ai API key</strong> and safety limits in <strong>Settings → Training → Cloud training</strong>.</p>
+      <p>To skip training setup, leave the directory empty and finish. For cloud training later, choose <strong>vast.ai</strong> or <strong>RunPod</strong> with the provider selector in <strong>Settings → Training → Cloud GPU</strong>, add that provider’s API key, and press <strong>Test</strong>. Add account credit with your provider and set safety limits under <strong>Cloud training</strong>. RunPod also offers a <strong>Secure / Community</strong> cloud type; host reliability filters apply only to vast.ai.</p>
       <h2>You are finished when</h2>
       <p>The page says ai-toolkit is set up, or you have deliberately skipped it, and <strong>Start this session</strong> appears. That page lists the same five tool groups and reports their current runtime state separately from Setup. Continue to <strong>Datasets</strong> when the tools you plan to use are ready.</p>
       <p>The <strong>Start this session</strong> rows open task-specific instructions: commands and ports for local servers, or an explicit “nothing to start” explanation for tools that Prep My Avatar invokes itself. ai-toolkit is in the latter group: when training starts, Prep My Avatar runs it from the configured folder. Selecting <strong>Back to session status</strong> returns to the runtime checklist that opened the detail.</p>

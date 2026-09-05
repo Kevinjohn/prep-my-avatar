@@ -41,6 +41,8 @@ def _validate_cloud_settings(cloud: dict) -> str | None:
 
 
 _ENUM_VALUES = {
+    'cloud.provider': {'vast', 'runpod'},
+    'cloud.runpod.cloud_type': {'SECURE', 'COMMUNITY'},
     'server.host': {'127.0.0.1', '0.0.0.0'},
     'engines.chatgpt_auth': {'auto', 'api', 'subscription'},
     'engines.openai_image_quality': {'low', 'medium', 'high'},
@@ -100,6 +102,7 @@ _TEST_TARGETS = {
     'face_scoring': capabilities.probe_face_scoring,
     'masks': capabilities.probe_masks,
     'vast': capabilities.probe_vast,
+    'runpod': capabilities.probe_runpod,
 }
 
 

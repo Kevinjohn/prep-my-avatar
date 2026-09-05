@@ -523,6 +523,7 @@ class CloudTrainingRun(db.Model):
     boot-time reconciliation matches live vast instances (label 'lds-<id>')
     against these rows to kill orphaned pods — the expensive failure mode."""
     __tablename__ = 'cloud_training_run'
+    provider = db.Column(db.String(16), default='vast')
     id = db.Column(db.Integer, primary_key=True)
     # Historical cloud runs deliberately survive a dataset's eventual hard
     # purge, so this is an indexed historical identifier rather than a

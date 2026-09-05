@@ -7,6 +7,7 @@ import logging
 import requests
 
 from .. import config as cfg
+from .cloud_provider import ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ API_BASE_V1 = 'https://console.vast.ai/api/v1'
 _TIMEOUT = 30
 
 
-class VastError(RuntimeError):
+class VastError(ProviderError):
     pass
 
 

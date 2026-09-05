@@ -27,6 +27,7 @@ from ..utils.time import utcnow
 from ..utils.redact import redact_user_paths
 from ..version import APP_VERSION
 from . import cloud_training as ct
+from . import cloud_provider
 from ..utils.training_families import FAMILY_LABELS
 
 _NOT_RECORDED = 'not recorded on this run'
@@ -202,7 +203,8 @@ def build_run_config_text(run_key):
     L.append('')
     L.append(f'App version:   {APP_VERSION}')
     L.append(f'Run date:      {_fmt_dt(created)}')
-    L.append(f'Source:        {"cloud (vast.ai)" if is_cloud else "local"}')
+    source_label = f'cloud ({cloud_provider.for_run(crun).label})' if is_cloud else 'local'
+    L.append(f'Source:        {source_label}')
     fam_line = _family_label(family)
     vlabel = _variant_label(variant)
     if vlabel:

@@ -3,6 +3,7 @@
 configured in these tests: the seams must work without it."""
 import io
 import os
+import sqlite3
 
 import pytest
 from PIL import Image
@@ -184,3 +185,61 @@ def test_run_config_dataset_overrides_without_mutating(app, client):
         v2 = ct._run_config_dataset(ds, {'train_type': 'krea'})
         assert v2.train_type == 'krea'
         assert v2.train_variant == 'turbo'
+
+
+@pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 35),
+                    reason='SQLite DROP COLUMN requires version 3.35 or later')
+def test_cloud_provider_default_and_v18_upgrade(app, monkeypatch):
+    from sqlalchemy import inspect, text
+    from app import _apply_schema_migrations
+    from app.extensions import db
+    from app.models import CloudTrainingRun
+    from app.services import cloud_provider, cloud_training as ct, vast_client
+    with app.app_context():
+        run = CloudTrainingRun(dataset_id=1, status='training', vast_instance_id='legacy')
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+        assert run.provider == 'vast'
+        assert 'provider' in {c['name'] for c in inspect(db.engine).get_columns('cloud_training_run')}
+        db.session.remove()
+        # Recreate v18's column/ledger state while retaining the active row.
+        db.session.execute(text('ALTER TABLE cloud_training_run DROP COLUMN provider'))
+        db.session.execute(text('DELETE FROM schema_migration WHERE version = 19'))
+        db.session.commit()
+        _apply_schema_migrations()
+        db.session.remove()
+        restored = db.session.get(CloudTrainingRun, run_id)
+        assert restored.status == 'training' and restored.provider is None
+        assert cloud_provider.for_run(restored).name == 'vast'
+        monkeypatch.setenv('VAST_API_KEY', 'test-key')
+        monkeypatch.setattr(vast_client, 'list_instances', lambda: [
+            {'instance_id': 'legacy', 'label': 'lds-1'}])
+        destroyed = []
+        monkeypatch.setattr(vast_client, 'destroy_instance', lambda iid: destroyed.append(iid))
+        assert ct.reconcile_orphans(app) == 0
+        assert destroyed == []
+
+
+def test_provider_migration_is_idempotent(app):
+    from sqlalchemy import inspect, text
+    from app import _apply_schema_migrations
+    from app.extensions import db
+    from app.models import CloudTrainingRun
+    # app is function-scoped: this migration ledger and schema are test-local.
+    with app.app_context():
+        run = CloudTrainingRun(dataset_id=1, provider='runpod', status='training')
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+        assert db.session.execute(text(
+            'SELECT COUNT(*) FROM schema_migration WHERE version = 19')).scalar_one() == 1
+        _apply_schema_migrations()
+        _apply_schema_migrations()
+        db.session.remove()
+        assert [column['name'] for column in inspect(db.engine).get_columns(
+            'cloud_training_run')].count('provider') == 1
+        assert db.session.execute(text(
+            'SELECT COUNT(*) FROM schema_migration WHERE version = 19')).scalar_one() == 1
+        restored = db.session.get(CloudTrainingRun, run_id)
+        assert restored.provider == 'runpod' and restored.status == 'training'

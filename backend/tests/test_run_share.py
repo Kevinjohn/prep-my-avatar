@@ -180,3 +180,35 @@ def test_all_runs_and_share_expose_admission_provenance(client, app):
     assert '## Admission decision' in body
     assert 'pose gap' in body
     assert 'allow_uncaptioned' in body
+
+
+def test_share_runpod_label(client, app):
+    from app.extensions import db
+    from app.models import CloudTrainingRun
+    ds = _mkds(client)
+    with app.app_context():
+        run = CloudTrainingRun(dataset_id=ds, provider='runpod', status='done')
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+    response = client.get(f'/api/dataset/train/runs/cloud-{run_id}/share')
+    assert response.status_code == 200
+    assert 'cloud (RunPod)' in response.get_data(as_text=True)
+
+
+def test_share_null_provider_uses_legacy_vast_label(client, app):
+    from app.extensions import db
+    from app.models import CloudTrainingRun
+    ds = _mkds(client)
+    with app.app_context():
+        run = CloudTrainingRun(dataset_id=ds, status='done')
+        db.session.add(run)
+        db.session.flush()
+        # Set NULL after insertion so the model's default does not replace it.
+        run.provider = None
+        db.session.commit()
+        run_id = run.id
+        assert db.session.get(CloudTrainingRun, run_id).provider is None
+    response = client.get(f'/api/dataset/train/runs/cloud-{run_id}/share')
+    assert response.status_code == 200
+    assert 'cloud (vast.ai)' in response.get_data(as_text=True)

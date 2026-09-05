@@ -69,3 +69,10 @@ def test_krea_slower_per_step_than_zimage():
 
 def test_zero_steps_is_zero_minutes():
     assert gs.estimate_minutes('RTX 4090', 'zimage', 0) == 0.0
+
+
+def test_runpod_display_names():
+    from app.services.gpu_speed import speed_factor
+    for name in ('NVIDIA GeForce RTX 4090', 'NVIDIA A100 80GB PCIe',
+                 'NVIDIA H100 80GB HBM3', 'NVIDIA RTX A6000'):
+        assert speed_factor(name) != 1.0

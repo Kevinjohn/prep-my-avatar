@@ -42,6 +42,35 @@ function VastKeyGuide() {
   )
 }
 
+function RunpodKeyGuide() {
+  return (
+    <details className="mb-2 rounded-lg border border-border bg-surface px-3 py-2 open:pb-3">
+      <summary className="cursor-pointer select-none text-xs font-medium text-content">
+        <span aria-hidden>📖</span> How to get a RunPod API key (≈2 minutes)
+      </summary>
+      <ol className="mt-2 list-decimal space-y-1.5 pl-5 text-xs text-content-muted">
+        <li>
+          Create a free account at{' '}
+          <a href="https://console.runpod.io/" target="_blank" rel="noreferrer"
+            className="font-medium text-sky-300 underline hover:text-sky-200">console.runpod.io</a>.
+        </li>
+        <li>Open <strong>Settings → API Keys → Create</strong> and choose <strong>Read/Write</strong> access.</li>
+        <li>Open <strong>Billing</strong> and add credit — GPU rental is billed by RunPod, not by this app.</li>
+        <li>
+          Paste the key in the field below and press <strong>Test</strong> — it saves the
+          key automatically and should answer “connected as &lt;your account&gt;”.
+        </li>
+      </ol>
+    </details>
+  )
+}
+
+const RUNPOD_SECRET = {
+  key: 'RUNPOD_API_KEY', label: 'RunPod API key', testTarget: 'runpod',
+  help: 'Enables cloud GPU training with RunPod. The app requests shutdown when work ends and keeps retrying until RunPod confirms it; the Cloud runs page stays billable/visible until then. Get a key at console.runpod.io → Settings → API Keys.',
+  guide: <RunpodKeyGuide />,
+}
+
 const VAST_SECRET = {
   key: 'VAST_API_KEY', label: 'vast.ai API key', testTarget: 'vast',
   help: 'Enables cloud GPU training (typical run: $1-2). The app requests shutdown when work ends and keeps retrying until vast.ai confirms it; the Cloud runs page stays billable/visible until then. Get a key at cloud.vast.ai → Keys.',
@@ -62,7 +91,7 @@ function CloudTrainingCard({ config, setField }) {
     return () => { alive = false }
   }, [])
   return (
-    <Card title="Cloud training" help="vast.ai GPU rental guardrails — how many training pods may run at once, the offer price ceiling, your monthly spend limit, and how long a run may go without step progress before it is rescued and killed.">
+    <Card title="Cloud training" help="Cloud GPU rental guardrails — how many training pods may run at once, the offer price ceiling, your monthly spend limit, and how long a run may go without step progress before it is rescued and killed.">
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label htmlFor="cloud-max-concurrent-runs" className="block text-sm font-medium text-content">
@@ -123,24 +152,42 @@ function CloudTrainingCard({ config, setField }) {
             className={INPUT_CLASS}
           />
         </div>
-        <div>
-          <label htmlFor="cloud-min-reliability" className="block text-sm font-medium text-content">
-            Min host reliability
-          </label>
-          <input
-            id="cloud-min-reliability"
-            type="number"
-            min="0.9"
-            max="0.999"
-            step="0.005"
-            value={config.cloud?.min_reliability ?? 0.98}
-            onChange={(e) => setField('cloud', 'min_reliability', Math.min(0.999, Math.max(0.9, parseFloat(e.target.value) || 0.98)))}
-            className={INPUT_CLASS}
-          />
-          <p className="mt-1 text-[0.6875rem] text-content-subtle">
-            Lower it (e.g. 0.95) to surface cheaper hosts in the GPU picker — at a higher risk of a pod that never boots (≈ a few wasted cents, auto-cleaned).
-          </p>
-        </div>
+        {config.cloud?.provider === 'runpod' ? (
+          <div>
+            <label htmlFor="cloud-runpod-cloud-type" className="block text-sm font-medium text-content">
+              RunPod cloud type
+            </label>
+            <select
+              id="cloud-runpod-cloud-type"
+              value={config.cloud?.runpod?.cloud_type ?? 'SECURE'}
+              onChange={(e) => setField('cloud', 'runpod', { ...config.cloud?.runpod, cloud_type: e.target.value })}
+              className={INPUT_CLASS}
+            >
+              <option value="SECURE">Secure</option>
+              <option value="COMMUNITY">Community</option>
+            </select>
+            <p className="mt-1 text-[0.6875rem] text-content-subtle">vast.ai-only host filters are hidden for RunPod.</p>
+          </div>
+        ) : (
+          <div>
+            <label htmlFor="cloud-min-reliability" className="block text-sm font-medium text-content">
+              Min host reliability
+            </label>
+            <input
+              id="cloud-min-reliability"
+              type="number"
+              min="0.9"
+              max="0.999"
+              step="0.005"
+              value={config.cloud?.min_reliability ?? 0.98}
+              onChange={(e) => setField('cloud', 'min_reliability', Math.min(0.999, Math.max(0.9, parseFloat(e.target.value) || 0.98)))}
+              className={INPUT_CLASS}
+            />
+            <p className="mt-1 text-[0.6875rem] text-content-subtle">
+              Lower it (e.g. 0.95) to surface cheaper hosts in the GPU picker — at a higher risk of a pod that never boots (≈ a few wasted cents, auto-cleaned).
+            </p>
+          </div>
+        )}
       </div>
       {spend != null && (
         <p className="text-xs text-content-muted">Spent this month: ${spend.toFixed(2)}</p>
@@ -167,8 +214,21 @@ export default function TrainingSection(props) {
         </div>
       </Card>
 
-      <Card title="Cloud GPU (vast.ai)" help="No local GPU? The app can rent one per run — the key below unlocks the ☁️ Train in cloud button.">
+      <Card title="Cloud GPU" help="No local GPU? The app can rent one per run — the selected provider’s key unlocks the ☁️ Train in cloud button.">
+        <div>
+          <label htmlFor="cloud-provider" className="block text-sm font-medium text-content">Cloud provider</label>
+          <select
+            id="cloud-provider"
+            value={config.cloud?.provider ?? 'vast'}
+            onChange={(e) => setField('cloud', 'provider', e.target.value)}
+            className={INPUT_CLASS}
+          >
+            <option value="vast">vast.ai</option>
+            <option value="runpod">RunPod</option>
+          </select>
+        </div>
         <SecretField field={VAST_SECRET} {...props} />
+        <SecretField field={RUNPOD_SECRET} {...props} />
       </Card>
 
       <CloudTrainingCard config={config} setField={setField} />

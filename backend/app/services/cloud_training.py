@@ -1,4 +1,4 @@
-"""Cloud LoRA training orchestrator (vast.ai ephemeral pod).
+"""Cloud LoRA training orchestrator (ephemeral GPU pod).
 
 State machine (CloudTrainingRun.status):
   preparing -> provisioning -> uploading -> training -> downloading
@@ -29,7 +29,9 @@ from ..utils.time import utcnow
 from . import face_dataset_service as fds
 from . import gpu_speed
 from . import lora_training as lt
-from . import vast_client
+from . import cloud_provider
+from . import vast_client as vast_client
+from .cloud_provider import ProviderError
 from .aitoolkit_remote import RemoteAiToolkit
 
 logger = logging.getLogger(__name__)
@@ -326,6 +328,7 @@ def _relaunch(user_id, run, p, steps, **extra):
         run, required=bool(p.get('record_id')))
     return launch_cloud_training(
         user_id, run.dataset_id,
+        provider=cloud_provider.for_run(run).name,
         steps=steps,
         variant=p.get('variant'),
         train_type=p.get('train_type'),
@@ -336,6 +339,18 @@ def _relaunch(user_id, run, p, steps, **extra):
         _preflight_override=preflight,
         _config_snapshot=p.get('config_snapshot'),
         **extra)
+
+
+def relaunch_blocker(user_id, run_id) -> str | None:
+    """Explain when the original run's provider credentials are unavailable."""
+    run = db.session.get(CloudTrainingRun, int(run_id))
+    if run is None:
+        return None
+    provider = cloud_provider.for_run(run)
+    if not cfg.secret(provider.secret):
+        return (f'Add your {provider.label} API key in Settings — '
+                f'this run was launched on {provider.label}')
+    return None
 
 
 def retry_cloud_run(user_id, run_id) -> dict:
@@ -436,9 +451,13 @@ def launch_cloud_training(user_id, dataset_id, steps=None, base_model='',
                           allow_caption_mismatch=False, allow_uncaptioned=False,
                           gpu_name=None, resume_ckpt_path=None, resume_step=None,
                           _snapshot_source=None, _preflight_override=None,
-                          _config_snapshot=None) -> dict:
-    if not cfg.secret('VAST_API_KEY'):
-        raise RuntimeError('vast.ai API key is not configured — add it in Settings')
+                          _config_snapshot=None, provider=None) -> dict:
+    selected = (cloud_provider.PROVIDERS.get(provider)
+                if provider is not None else cloud_provider.current())
+    if selected is None:
+        raise RuntimeError(f'unknown cloud provider: {provider}')
+    if not cfg.secret(selected.secret):
+        raise RuntimeError(f'{selected.label} API key is not configured — add it in Settings')
     # A user launching after days away is exactly when an expired
     # error_pod_kept pod (past its recovery window) should be reaped, not
     # just at boot. reconcile_orphans() never raises, so this is safe; routed
@@ -490,7 +509,7 @@ def launch_cloud_training(user_id, dataset_id, steps=None, base_model='',
         # thread (_prepare_staging). This request still performs the required
         # immutable raw snapshot copy, so launch latency scales with admitted
         # input bytes; the UI deliberately remains in its Launching state.
-        _set(run, vast_label=f'lds-{run.id}',
+        _set(run, provider=selected.name, vast_label=f'lds-{run.id}',
              job_name=f'lds{run.id}_{lt._run_name(ds, family=fam)}')
         # Mirror the LOCAL launch: persist this dataset's family/variant as its
         # remembered selection (launch_training does the same; two launch tests
@@ -638,7 +657,10 @@ def launch_cloud_training(user_id, dataset_id, steps=None, base_model='',
             db.session.rollback()
             logger.exception('could not close failed cloud launch %s', run.id)
         raise
-    return {'run_id': run.id, 'status': run.status,
+    provider = cloud_provider.for_run(run)
+    return {'provider': provider.name, 'provider_label': provider.label,
+            'console_url': provider.console_url(run.vast_instance_id),
+            'run_id': run.id, 'status': run.status,
             'job_name': run.job_name, 'steps': n_steps}
 
 
@@ -766,10 +788,10 @@ def _write_bad_hosts(hosts):
     temporary.replace(path)
 
 
-def _blacklist_host(machine_id, reason):
+def _blacklist_host(machine_id, reason, run):
     """Remember a host whose pod never became ready so the next launch (and the
     tier list) skips it for a few days. Best-effort: never raises."""
-    if not machine_id:
+    if not cloud_provider.for_run(run).supports_host_blacklist or not machine_id:
         return
     try:
         with _BAD_HOSTS_LOCK:
@@ -780,6 +802,11 @@ def _blacklist_host(machine_id, reason):
                        machine_id, cfg.get('cloud.host_blacklist_days') or 3, reason)
     except Exception:
         logger.exception('could not blacklist host %s', machine_id)
+
+
+def _blacklist_run_host(run, reason):
+    if cloud_provider.for_run(run).supports_host_blacklist:
+        _blacklist_host(_run_machine_id(run), reason, run=run)
 
 
 def _offer_search_kwargs(c, min_vram, **extra):
@@ -828,7 +855,7 @@ def _best_of(group):
     """Most reliable offer among those within +10% of the group's cheapest —
     a hair more money for a host that actually boots is the right trade."""
     if not group:
-        raise RuntimeError('no eligible vast.ai offers remain')
+        raise RuntimeError('no eligible cloud GPU offers remain')
     priced = [o for o in group if o.get('dph_total') is not None]
     if not priced:
         return group[0]
@@ -911,18 +938,21 @@ def _provision(run):
 
 def _provision_locked(run):
     c = cfg.get('cloud') or {}
+    provider = cloud_provider.for_run(run)
+    client = provider.client
+    settings = c if provider.name == 'vast' else c.get('runpod', {})
     params = json.loads(run.train_params or '{}')
     fam = params.get('train_type') or 'zimage'
     min_vram = (c.get('min_vram_gb') or {}).get(fam, 24)
-    offers = vast_client.search_offers(**_offer_search_kwargs(c, min_vram))
+    offers = client.search_offers(**_offer_search_kwargs(c, min_vram))
     if not offers:
         raise RuntimeError(
-            f'no vast.ai offer matches (>= {min_vram} GB VRAM, '
+            f'no {provider.label} offer matches (>= {min_vram} GB VRAM, '
             f'<= ${c.get("max_price_per_hour", 0.80)}/h) — raise the price cap in Settings')
     eligible = _filter_offers(offers)
     if not eligible:
         raise RuntimeError(
-            'all matching vast.ai hosts are temporarily blacklisted after recent '
+            f'all matching {provider.label} hosts are temporarily blacklisted after recent '
             'failures — wait for the blacklist window or clear cloud run data')
     offer = _pick_offer(eligible, params.get('requested_gpu'))
     # Search results are live and pricing is now known: enforce the predictive
@@ -932,15 +962,15 @@ def _provision_locked(run):
     if offer.get('machine_id') is not None:
         params['machine_id'] = offer['machine_id']
         _set(run, train_params=json.dumps(params))
-    template_hash = (c.get('template_hash') or '').strip()
-    if template_hash:
+    template_hash, port = provider.boot_settings(c)
+    if template_hash and provider.name == 'vast':
         # Preferred path (smoke-validated 2026-07-12): the official template
         # publishes the UI behind the pod's Caddy proxy on ui_port and vast
         # generates the per-instance auth token (picked up from the instance
         # record during boot-wait). HF_TOKEN reaches the pod later via
         # ensure_settings(), not env.
         token = ''
-        instance_id = vast_client.create_instance(
+        instance_id = client.create_instance(
             offer['offer_id'], disk_gb=int(c.get('disk_gb') or 60),
             label=run.vast_label, template_hash=template_hash,
             image=(c.get('image') or None))
@@ -948,22 +978,22 @@ def _provision_locked(run):
         # Raw-image fallback (config escape hatch): direct port publish +
         # our own bearer token on the UI itself.
         token = pysecrets.token_urlsafe(24)
-        port = int(c.get('ui_port') or 18675)
         env = {'AI_TOOLKIT_AUTH': token, f'-p {port}:{port}': '1'}
         hf = cfg.secret('HF_TOKEN')
         if hf:
             env['HF_TOKEN'] = hf
-        instance_id = vast_client.create_instance(
+        instance_id = client.create_instance(
             offer['offer_id'], disk_gb=int(c.get('disk_gb') or 60),
-            label=run.vast_label, image=c.get('image'), env=env,
-            onstart=(c.get('onstart') or None))
+            label=run.vast_label, image=settings.get('image'), env=env,
+            template_hash=template_hash or None,
+            onstart=(settings.get('onstart') or None))
     try:
         _register_instance(run, instance_id, offer, token)
     except Exception:
         # the pod exists but we failed to remember it -> kill it NOW, and make
         # the outcome observable (destroy_instance returns False on failure)
         try:
-            if not vast_client.destroy_instance(instance_id):
+            if not client.destroy_instance(instance_id):
                 logger.warning('leak-safe destroy of %s FAILED — instance may still '
                                'be running; boot reconciliation will retry', instance_id)
         except Exception:
@@ -1062,90 +1092,90 @@ def reconcile_orphans(app) -> int:
         return 0
     try:
         with app.app_context():
-            if not cfg.secret('VAST_API_KEY'):
-                return 0
-            try:
-                instances = vast_client.list_instances()
-            except Exception as e:
-                logger.warning('reconcile: cannot list vast instances: %s', e)
-                return 0
-            runs_with_instances = {
-                str(r.vast_instance_id): r
-                for r in CloudTrainingRun.query.filter(
-                    CloudTrainingRun.vast_instance_id.isnot(None)).all()
-            }
-            keep = {
-                iid for iid, run in runs_with_instances.items()
-                if run.status in ACTIVE_STATES and run.status != 'terminating'
-            }
-            c = cfg.get('cloud') or {}
-            max_seconds = int(c.get('max_runtime_minutes') or 480) * 60
-            now = utcnow()
-            seen_instance_ids = set()
-            for inst in instances:
-                label = inst.get('label') or ''
-                if not label.startswith('lds-'):
+            for provider in cloud_provider.configured():
+                try:
+                    instances = provider.client.list_instances()
+                except Exception as e:
+                    logger.warning('reconcile: cannot list %s instances: %s', provider.label, e)
                     continue
-                iid = str(inst['instance_id'])
-                seen_instance_ids.add(iid)
-                if iid in keep:
-                    continue
-                associated_run = runs_with_instances.get(iid)
-                kept_run = (associated_run
-                            if associated_run is not None
-                            and associated_run.status == 'error_pod_kept'
-                            else None)
-                if kept_run is not None:
-                    # No finished_at (shouldn't happen -- every writer stamps it) means
-                    # the recovery window can't be established: fail toward the leak-safety
-                    # invariant (reap) rather than sparing an unbounded pod.
-                    if kept_run.finished_at and \
-                            (now - kept_run.finished_at).total_seconds() <= max_seconds:
-                        continue    # still within the manual-recovery window -> spare
+                runs_with_instances = {
+                    str(r.vast_instance_id): r
+                    for r in CloudTrainingRun.query.filter(
+                        CloudTrainingRun.vast_instance_id.isnot(None)).all()
+                    if (r.provider or 'vast') == provider.name
+                }
+                keep = {
+                    iid for iid, run in runs_with_instances.items()
+                    if run.status in ACTIVE_STATES and run.status != 'terminating'
+                }
+                c = cfg.get('cloud') or {}
+                max_seconds = int(c.get('max_runtime_minutes') or 480) * 60
+                now = utcnow()
+                seen_instance_ids = set()
+                for inst in instances:
+                    label = inst.get('label') or ''
+                    if not label.startswith('lds-'):
+                        continue
+                    iid = str(inst['instance_id'])
+                    seen_instance_ids.add(iid)
+                    if iid in keep:
+                        continue
+                    associated_run = runs_with_instances.get(iid)
+                    kept_run = (associated_run
+                                if associated_run is not None
+                                and associated_run.status == 'error_pod_kept'
+                                else None)
+                    if kept_run is not None:
+                        # No finished_at (shouldn't happen -- every writer stamps it) means
+                        # the recovery window can't be established: fail toward the leak-safety
+                        # invariant (reap) rather than sparing an unbounded pod.
+                        if kept_run.finished_at and \
+                                (now - kept_run.finished_at).total_seconds() <= max_seconds:
+                            continue    # still within the manual-recovery window -> spare
+                        try:
+                            if provider.client.destroy_instance(inst['instance_id']):
+                                destroyed += 1
+                                logger.warning('reconcile: reaped expired error_pod_kept '
+                                               'pod %s (%s)', inst['instance_id'], label)
+                                _set(kept_run, error=(kept_run.error or '') +
+                                     ' — pod reaped after the recovery window',
+                                     auth_token=None, billing_ended_at=now)
+                        except Exception as e:
+                            logger.warning('reconcile: destroy %s failed: %s',
+                                           inst['instance_id'], e)
+                        continue
                     try:
-                        if vast_client.destroy_instance(inst['instance_id']):
+                        if provider.client.destroy_instance(inst['instance_id']):
                             destroyed += 1
-                            logger.warning('reconcile: reaped expired error_pod_kept '
-                                           'pod %s (%s)', inst['instance_id'], label)
-                            _set(kept_run, error=(kept_run.error or '') +
-                                 ' — pod reaped after the recovery window',
-                                 auth_token=None, billing_ended_at=now)
+                            if associated_run is not None \
+                                    and associated_run.status == 'terminating':
+                                target, detail, error = _cleanup_target(associated_run)
+                                _complete_cleanup(associated_run, target, detail, error,
+                                                  ended_at=now)
+                            elif associated_run is not None \
+                                    and not associated_run.billing_ended_at:
+                                _set(associated_run, auth_token=None,
+                                     billing_ended_at=now)
+                            logger.warning('reconcile: destroyed cleanup/orphan pod %s (%s)',
+                                           inst['instance_id'], label)
                     except Exception as e:
                         logger.warning('reconcile: destroy %s failed: %s',
                                        inst['instance_id'], e)
-                    continue
-                try:
-                    if vast_client.destroy_instance(inst['instance_id']):
-                        destroyed += 1
-                        if associated_run is not None \
-                                and associated_run.status == 'terminating':
-                            target, detail, error = _cleanup_target(associated_run)
-                            _complete_cleanup(associated_run, target, detail, error,
-                                              ended_at=now)
-                        elif associated_run is not None \
-                                and not associated_run.billing_ended_at:
-                            _set(associated_run, auth_token=None,
-                                 billing_ended_at=now)
-                        logger.warning('reconcile: destroyed cleanup/orphan pod %s (%s)',
-                                       inst['instance_id'], label)
-                except Exception as e:
-                    logger.warning('reconcile: destroy %s failed: %s',
-                                   inst['instance_id'], e)
-            # A previously-kept provider instance that is no longer returned
-            # by the authoritative instance list has already stopped billing
-            # (for example, the user destroyed it in the vast.ai console).
-            # Close that window instead of showing a perpetually growing cost.
-            for iid, associated_run in runs_with_instances.items():
-                if iid in seen_instance_ids or associated_run.billing_ended_at:
-                    continue
-                if associated_run.status == 'terminating':
-                    target, detail, error = _cleanup_target(associated_run)
-                    _complete_cleanup(associated_run, target, detail, error,
-                                      ended_at=now)
-                else:
-                    suffix = ' — provider instance is no longer active'
-                    _set(associated_run, billing_ended_at=now, auth_token=None,
-                         error=((associated_run.error or '') + suffix))
+                # A previously-kept provider instance that is no longer returned
+                # by the authoritative instance list has already stopped billing
+                # (for example, the user destroyed it in the vast.ai console).
+                # Close that window instead of showing a perpetually growing cost.
+                for iid, associated_run in runs_with_instances.items():
+                    if iid in seen_instance_ids or associated_run.billing_ended_at:
+                        continue
+                    if associated_run.status == 'terminating':
+                        target, detail, error = _cleanup_target(associated_run)
+                        _complete_cleanup(associated_run, target, detail, error,
+                                          ended_at=now)
+                    else:
+                        suffix = ' — provider instance is no longer active'
+                        _set(associated_run, billing_ended_at=now, auth_token=None,
+                             error=((associated_run.error or '') + suffix))
     except Exception:
         logger.exception('reconcile failed')
     finally:
@@ -1226,9 +1256,12 @@ def boot_recover(app):
 def _recover_active_runs(app):
     """Resume every durable active row once provider credentials are usable."""
     with app.app_context():
-        if not cfg.secret('VAST_API_KEY'):
-            return
         for run in get_active_runs():
+            provider = cloud_provider.for_run(run)
+            if not cfg.secret(provider.secret):
+                logger.warning('skipping recovery of run %s: %s key is missing',
+                               run.id, provider.label)
+                continue
             try:
                 current = _monitor_threads.get(int(run.id))
                 if current is not None and current.is_alive():
@@ -1370,7 +1403,7 @@ def _finish(run, status, detail='', error=None, destroy=True):
     destroyed = not run.vast_instance_id
     if destroy and run.vast_instance_id:
         try:
-            destroyed = bool(vast_client.destroy_instance(run.vast_instance_id))
+            destroyed = bool(cloud_provider.for_run(run).client.destroy_instance(run.vast_instance_id))
             if not destroyed:
                 logger.warning('terminate %s returned false; billing may still be active',
                                run.vast_instance_id)
@@ -1440,33 +1473,38 @@ def _monitor(app, run_id):
             # ever touching _now() -- a test clock that jumps in large
             # strides per call must not misfire this boot-timeout on a pod
             # that was, in fact, instantly ready.
-            template_mode = bool((c.get('template_hash') or '').strip())
+            provider = cloud_provider.for_run(run)
+            _, port = provider.boot_settings(c)
             ready_timeout = (int(c.get('ready_timeout_minutes') or 0) * 60
                              or READY_TIMEOUT_SECONDS)
             _set(run, phase_detail='Waiting for the pod to boot')
-            port = int(c.get('ui_port') or 18675)
-            if template_mode and port == 8675:
-                # 8675 is the pre-template default that Settings saves may have
-                # baked into config.json; the official template only publishes
-                # the UI behind the pod proxy on 18675 — a stale 8675 makes the
-                # boot-wait spin for its whole budget (observed live 2026-07-12).
-                logger.warning('cloud.ui_port=8675 is stale for template mode — using 18675')
-                port = 18675
             while True:
                 # A transient vast API hiccup is just "not ready yet" -- only
                 # READY_TIMEOUT_SECONDS may fail the boot wait, never a single
                 # 502 that would destroy a pod about to come up fine.
                 try:
-                    inst = vast_client.get_instance(run.vast_instance_id)
-                except vast_client.VastError as e:
-                    logger.warning('boot-wait: vast API hiccup (%s) — retrying', e)
+                    inst = provider.client.get_instance(run.vast_instance_id)
+                except ProviderError as e:
+                    logger.warning('boot-wait: %s API hiccup (%s) — retrying', provider.label, e)
                     inst = None
+                if inst and inst.get('dph_total') is not None:
+                    price = float(inst['dph_total'])
+                    if price != run.price_per_hour:
+                        overhead = float(c.get('pod_overhead_minutes') or 0)
+                        estimate = (round(price * (run.estimated_minutes + overhead) / 60, 2)
+                                    if run.estimated_minutes is not None else None)
+                        _set(run, price_per_hour=price, estimated_cost_usd=estimate)
+                    cap = float(c.get('max_price_per_hour', 0.80))
+                    if price > cap:
+                        _finish(run, 'error',
+                                error=f'allocated at ${price:g}/h, above your ${cap:g}/h cap')
+                        return
                 # Template launches authenticate with the vast-generated
                 # per-instance token (the pod's Caddy proxy accepts it as a
                 # Bearer header) — pick it up as soon as the record shows it.
                 if inst and not run.auth_token and inst.get('jupyter_token'):
                     _set(run, auth_token=inst['jupyter_token'])
-                base = vast_client.derive_base_url(inst, port) if inst else None
+                base = provider.client.derive_base_url(inst, port) if inst else None
                 ready = False
                 if base:
                     if run.base_url != base:
@@ -1486,7 +1524,7 @@ def _monitor(app, run_id):
                     # host — blacklist it like a timeout would. An early stop
                     # (changed their mind) says nothing about the host.
                     if _now() - boot_started > 8 * 60:
-                        _blacklist_host(_run_machine_id(run),
+                        _blacklist_run_host(run,
                                         'user stopped a boot stuck past 8 min')
                     _finish(run, 'stopped', detail='Stopped by user during boot')
                     return
@@ -1506,7 +1544,7 @@ def _monitor(app, run_id):
                 if _now() - boot_started > ready_timeout:
                     # This host burned the whole boot budget — skip it for the
                     # next few days so a relaunch can't land on it again.
-                    _blacklist_host(_run_machine_id(run),
+                    _blacklist_run_host(run,
                                     'pod did not become ready in time')
                     raise RuntimeError('pod did not become ready in time')
                 _sleep(POLL_SECONDS)
@@ -1611,7 +1649,7 @@ def _monitor(app, run_id):
                     if not ok:
                         # A host that cannot DELIVER its result (even through
                         # the resume loop) is a bad host — skip it next time.
-                        _blacklist_host(_run_machine_id(run),
+                        _blacklist_run_host(run,
                                         'could not serve the final checkpoint')
                         # LoRA > a few minutes of pod time: keep the pod for
                         # manual recovery; max-runtime/reconcile will reap it.
@@ -1656,7 +1694,7 @@ def _monitor(app, run_id):
             # 2026-07-13: a krea run lost at ~$0.93 when its pod went
             # unreachable) — skip this machine for the next launches.
             if 'unreachable' in str(e).lower():
-                _blacklist_host(_run_machine_id(run), 'pod died mid-run (unreachable)')
+                _blacklist_run_host(run, 'pod died mid-run (unreachable)')
             _finish(run, 'error', detail='Run failed', error=str(e)[:500])
         finally:
             # This run's slot in the module maps is done with — drop it so
@@ -2031,7 +2069,10 @@ def _run_payload(run, dataset_names=None) -> dict:
     training_seconds = (max(0, int((training_end - run.training_started_at).total_seconds()))
                         if run.training_started_at else None)
     cost_estimate = _cost_estimate(run)
-    return {'run_id': run.id, 'dataset_id': run.dataset_id, 'status': run.status,
+    provider = cloud_provider.for_run(run)
+    return {'provider': provider.name, 'provider_label': provider.label,
+            'console_url': provider.console_url(run.vast_instance_id),
+            'run_id': run.id, 'dataset_id': run.dataset_id, 'status': run.status,
             # Stable id for the per-run "Share configuration" download. Every
             # cloud row (active/finished/legacy) addresses by its pod row id;
             # local rows use 'rec-<record id>' (set in all_runs).
@@ -2082,6 +2123,12 @@ def _recovery_required_runs() -> list:
             .order_by(CloudTrainingRun.id.desc()).all())
 
 
+def _selected_provider():
+    provider = cloud_provider.current()
+    return {'name': provider.name, 'label': provider.label,
+            'launch_ready': bool(cfg.secret(provider.secret))}
+
+
 def cloud_status() -> dict:
     actives = get_active_runs()
     c = cfg.get('cloud') or {}
@@ -2090,7 +2137,8 @@ def cloud_status() -> dict:
             .order_by(CloudTrainingRun.id.desc()).first())
     recovery_required = _recovery_required_runs()
     active_payloads = [_run_payload(r) for r in actives]
-    return {'configured': bool(cfg.secret('VAST_API_KEY')), 'limit': limit,
+    return {'configured': bool(cloud_provider.configured()),
+            'selected_provider': _selected_provider(), 'limit': limit,
             'actives': active_payloads,
             # compat: single 'active' field for old frontend/tests, first of actives
             'active': active_payloads[0] if active_payloads else None,
@@ -2224,7 +2272,8 @@ def all_runs(limit: int = 20) -> dict:
             payload['evaluation'] = (
                 active_feedback.get(rec.id) if rec is not None else None)
     recovery_required = _recovery_required_runs()
-    return {'configured': bool(cfg.secret('VAST_API_KEY')),
+    return {'configured': bool(cloud_provider.configured()),
+            'selected_provider': _selected_provider(),
             'limit': max(1, int((c.get('max_concurrent_runs') or 1))),
             'actives': active_payloads,
             'local_active': local_active,
@@ -2243,8 +2292,9 @@ def gpu_tiers(user_id, dataset_id, train_type=None, steps=None) -> dict:
     an approximate training time and total run cost. Read-only: rents nothing.
     The launch then re-searches and rents the cheapest live offer of the chosen
     class. Raises the same guards as launch (no key / dataset / SDXL)."""
-    if not cfg.secret('VAST_API_KEY'):
-        raise RuntimeError('vast.ai API key is not configured — add it in Settings')
+    selected = cloud_provider.current()
+    if not cfg.secret(selected.secret):
+        raise RuntimeError(f'{selected.label} API key is not configured — add it in Settings')
     ds = fds.get_dataset(user_id, dataset_id)
     if not ds:
         raise ValueError('dataset not found')
@@ -2257,7 +2307,7 @@ def gpu_tiers(user_id, dataset_id, train_type=None, steps=None) -> dict:
     # A wider scan than the launch default so several GPU classes surface (the
     # user is choosing between them, not taking the single cheapest); the
     # quality filters themselves are the launch's, by construction.
-    offers = _filter_offers(vast_client.search_offers(
+    offers = _filter_offers(selected.client.search_offers(
         **_offer_search_kwargs(c, min_vram,
                                limit=int(c.get('offer_scan_limit') or 100))))
     offers_by_gpu = {}

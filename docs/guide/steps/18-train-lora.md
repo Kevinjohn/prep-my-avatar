@@ -1,10 +1,12 @@
 # Step 18: Train a LoRA
 
-Training turns the kept images and captions into a `.safetensors` LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai cloud worker. If you do not want to train in Prep My Avatar, skip Steps 18–20 and continue to Step 21 to back up the dataset.
+Training turns the kept images and captions into a `.safetensors` LoRA for one model family. This optional step can use configured local ai-toolkit or a vast.ai or RunPod cloud worker. If you do not want to train in Prep My Avatar, skip Steps 18–20 and continue to Step 21 to back up the dataset.
 
 ## Before you begin
 
 Training can take significant time, disk space, GPU memory, and—for cloud runs—money. Complete curation, captions, leak review, and source-rights confirmation. Accept any required base-model licence and add its Hugging Face token before launch.
+
+For cloud training, choose vast.ai or RunPod with the provider selector in Settings → Training → Cloud GPU, save and test that provider’s API key, and add account credit. Existing cloud runs remain visible after switching providers; new launches require the selected provider’s key.
 
 ## Do this
 

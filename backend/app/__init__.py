@@ -105,6 +105,9 @@ _MIGRATIONS = (
     (18, 'caption authorship', (
         ('face_dataset_image', 'caption_origin', 'VARCHAR(16)'),
     )),
+    (19, 'cloud training provider', (
+        ('cloud_training_run', 'provider', 'VARCHAR(16)'),
+    )),
 )
 
 

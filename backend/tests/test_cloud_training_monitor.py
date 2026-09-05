@@ -3,8 +3,9 @@ happy path, the stop path, max-runtime kill, unreachable-pod failure, the
 download-failure pod-kept state, and the resume contract (Task 7 needs
 _monitor to skip re-provisioning/re-submitting an already-running job).
 No sleeping: _sleep is a no-op seam."""
+import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ def ct(app, monkeypatch):
     monkeypatch.setenv('VAST_API_KEY', 'k-test')
     from app.services import cloud_training
     monkeypatch.setattr(cloud_training, '_sleep', lambda s: None)
+    monkeypatch.setattr(cloud_training, 'utcnow', lambda: datetime(2026, 7, 15, 12))
     monkeypatch.setattr(cloud_training, '_start_monitor', lambda *a, **k: None)
     # launch_cloud_training now reconciles orphans on every call (Task 7) --
     # no-op that seam so these monitor tests, which never mock vast_client
@@ -230,7 +232,7 @@ def test_max_runtime_cap_counts_pre_restart_time(ct, app, client, monkeypatch):
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         ct._set(run, vast_instance_id='777', remote_job_id='j-1', status='training',
                 base_url='http://1.2.3.4:40123', auth_token='tok',
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=500))  # > 480 min cap
+                created_at=ct.utcnow() - timedelta(minutes=500))  # > 480 min cap
         ct._monitor(app, run_id)
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'stopped'
@@ -917,7 +919,7 @@ def test_boot_timeout_anchored_to_created_at_on_resume(ct, app, client, monkeypa
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         ct._set(run, vast_instance_id='777', staging_dir='/tmp/x',
                 base_url='http://1.2.3.4:40123',
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30))   # > 15 min
+                created_at=ct.utcnow() - timedelta(minutes=30))   # > 15 min
         ct._monitor(app, run_id)
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)
         assert run.status == 'error'
@@ -948,7 +950,191 @@ def test_boot_timeout_fresh_run_not_charged_for_stale_created_at(ct, app, client
                         lambda: clock.__setitem__('t', clock['t'] + 60.0) or clock['t'])
     with app.app_context():
         run = ct.db.session.get(ct.CloudTrainingRun, run_id)    # fresh, no pod yet
-        ct._set(run, created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30))
+        ct._set(run, created_at=ct.utcnow() - timedelta(minutes=30))
         ct._monitor(app, run_id)
         assert ct.db.session.get(ct.CloudTrainingRun, run_id).status == 'done'
         assert destroyed == ['777']
+
+
+@pytest.mark.parametrize('actual_price,expected_status', [(.6, 'done'), (.9, 'error')])
+def test_runpod_boot_port_and_allocated_price(ct, app, client, monkeypatch,
+                                             actual_price, expected_status):
+    from app.services import runpod_client
+    monkeypatch.setattr(ct, '_now', lambda: 0.0)
+    monkeypatch.setattr(ct, '_sleep', lambda seconds: None)
+    destroyed = []
+    remote = FakeRemote()
+    _, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
+    monkeypatch.setattr(runpod_client, 'get_instance', lambda iid: {
+        'instance_id': iid, 'actual_status': 'running', 'dph_total': actual_price,
+        'ports': {'8675/tcp': [{'HostPort': 443}]}})
+    monkeypatch.setattr(runpod_client, 'destroy_instance', lambda iid: destroyed.append(iid) or True)
+    ports = []
+    derive = runpod_client.derive_base_url
+    monkeypatch.setattr(runpod_client, 'derive_base_url',
+                        lambda inst, port: ports.append(port) or derive(inst, port))
+    with app.app_context():
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
+        ct._set(run, provider='runpod', vast_instance_id='pod', auth_token='token',
+                price_per_hour=.4, estimated_minutes=10)
+        ct._monitor(app, run_id)
+        assert run.status == expected_status
+        assert run.price_per_hour == actual_price
+        assert run.estimated_cost_usd == round(actual_price * 45 / 60, 2)
+        assert destroyed == ['pod']
+        if expected_status == 'done':
+            assert ports and set(ports) == {8675}
+        else:
+            assert 'allocated at $0.9/h, above your $0.8/h cap' in run.error
+
+
+@pytest.mark.parametrize('actual_price,minutes,expected_price,expected_cost', [
+    (None, 10, .4, .3),
+    (.4, 10, .4, .3),
+    (.7, 10, .7, .52),
+    (.7, None, .7, None),
+    (.8, 10, .8, .6),
+])
+def test_runpod_boot_price_edges(ct, app, client, monkeypatch,
+                                 actual_price, minutes, expected_price, expected_cost):
+    from app.services import runpod_client
+    remote = FakeRemote()
+    destroyed = []
+    _, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
+    monkeypatch.setattr(ct, '_now', lambda: 0.0)
+    monkeypatch.setattr(runpod_client, 'get_instance', lambda iid: {
+        'instance_id': iid, 'actual_status': 'running', 'dph_total': actual_price})
+    monkeypatch.setattr(runpod_client, 'destroy_instance',
+                        lambda iid: destroyed.append(iid) or True)
+    writes = []
+    original_set = ct._set
+
+    def record_set(run, **values):
+        writes.append(values)
+        return original_set(run, **values)
+
+    with app.app_context():
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
+        ct._set(run, provider='runpod', vast_instance_id='pod', auth_token='token',
+                price_per_hour=.4, estimated_minutes=minutes, estimated_cost_usd=.3,
+                created_at=ct.utcnow())
+        monkeypatch.setattr(ct, '_set', record_set)
+        ct._monitor(app, run_id)
+        assert run.status == 'done'
+        assert run.price_per_hour == expected_price
+        assert run.estimated_cost_usd == expected_cost
+        assert destroyed == ['pod']
+        price_writes = [values for values in writes if 'price_per_hour' in values]
+        assert len(price_writes) == (0 if actual_price in (None, .4) else 1)
+
+
+def test_runpod_boot_retries_provider_hiccup(ct, app, client, monkeypatch):
+    from app.services import runpod_client
+    remote = FakeRemote()
+    destroyed = []
+    _, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
+    monkeypatch.setattr(ct, '_now', lambda: 0.0)
+    replies = iter([runpod_client.RunpodError('temporary outage'),
+                    {'instance_id': 'pod', 'actual_status': 'running'}])
+    calls = []
+
+    def get_instance(iid):
+        calls.append(iid)
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(runpod_client, 'get_instance', get_instance)
+    monkeypatch.setattr(runpod_client, 'destroy_instance',
+                        lambda iid: destroyed.append(iid) or True)
+    with app.app_context():
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
+        ct._set(run, provider='runpod', vast_instance_id='pod', auth_token='token',
+                created_at=ct.utcnow())
+        ct._monitor(app, run_id)
+        assert run.status == 'done'
+        assert calls == ['pod', 'pod']
+        assert destroyed == ['pod']
+
+
+@pytest.mark.parametrize('failure', ['late_stop', 'ready_timeout', 'download', 'unreachable'])
+def test_runpod_monitor_failures_never_blacklist(ct, app, client, monkeypatch, failure):
+    from app.services import runpod_client
+    remote = FakeRemote(polls_to_complete=2, fail_downloads=failure == 'download')
+    destroyed = []
+    _, run_id = _launch(ct, app, client, monkeypatch, remote, destroyed)
+    if failure in ('late_stop', 'ready_timeout'):
+        remote.is_ready = lambda: False
+    if failure == 'unreachable':
+        def unavailable(job_id):
+            raise RuntimeError('connection refused')
+        remote.get_job = unavailable
+    clock = {'t': 0.0}
+    monkeypatch.setattr(ct, '_now', lambda: clock['t'])
+    monkeypatch.setattr(ct, '_sleep',
+                        lambda seconds: clock.update(t=clock['t'] + 120))
+    monkeypatch.setattr(runpod_client, 'get_instance', lambda iid: {
+        'instance_id': iid, 'actual_status': 'running'})
+    monkeypatch.setattr(runpod_client, 'destroy_instance',
+                        lambda iid: destroyed.append(iid) or True)
+    writes = []
+    monkeypatch.setattr(ct, '_write_bad_hosts', lambda hosts: writes.append(hosts))
+    with app.app_context():
+        run = ct.db.session.get(ct.CloudTrainingRun, run_id)
+        ct._set(run, provider='runpod', vast_instance_id='pod', auth_token='token',
+                train_params=json.dumps({**json.loads(run.train_params), "machine_id": 43503}),
+                created_at=ct.utcnow() - timedelta(minutes=9 if failure == 'late_stop' else 0))
+        if failure == 'late_stop':
+            ct._stop_event_for(run_id).set()
+        ct._monitor(app, run_id)
+        expected = {'late_stop': 'stopped', 'ready_timeout': 'error',
+                    'download': 'error_pod_kept', 'unreachable': 'error'}
+        assert run.status == expected[failure]
+        if failure == 'ready_timeout':
+            assert run.error == 'pod did not become ready in time'
+        if failure == 'unreachable':
+            assert 'pod unreachable' in run.error
+        assert destroyed == ([] if failure == 'download' else ['pod'])
+        assert writes == []
+        assert ct._load_bad_hosts() == {}
+
+
+@pytest.mark.parametrize('machine_id,expected', [(43503, {'43503'}), (None, set())])
+def test_blacklist_vast_run_requires_machine_id(ct, app, monkeypatch, machine_id, expected):
+    monkeypatch.setattr(ct, '_now', lambda: 1000.0)
+    with app.app_context():
+        run = ct.CloudTrainingRun(dataset_id=1, provider='vast',
+                                  train_params=json.dumps({'machine_id': machine_id}))
+        ct._blacklist_run_host(run, 'boot failed')
+        assert set(ct._load_bad_hosts()) == expected
+
+
+@pytest.mark.parametrize('destroy', [True, False])
+def test_runpod_finish_cleanup_contract(ct, app, monkeypatch, destroy):
+    from app.services import runpod_client
+    calls = []
+    monkeypatch.setattr(runpod_client, 'destroy_instance',
+                        lambda iid: calls.append(iid) or False)
+    with app.app_context():
+        run = ct.CloudTrainingRun(dataset_id=1, provider='runpod', status='training',
+                                  vast_instance_id='pod', auth_token='token',
+                                  billing_started_at=ct.utcnow() - timedelta(minutes=10))
+        ct.db.session.add(run)
+        ct.db.session.commit()
+        result = ct._finish(run, 'stopped', destroy=destroy)
+        assert calls == (['pod'] if destroy else [])
+        if destroy:
+            assert result is False
+            assert run.status == 'terminating'
+            assert run.billing_ended_at is None
+            assert run.finished_at is None
+            assert run.auth_token == 'token'
+            assert 'cleanup pending' in run.phase_detail
+        else:
+            # Explicitly skipping destruction currently completes local cleanup.
+            assert result is True
+            assert run.status == 'stopped'
+            assert run.billing_ended_at == ct.utcnow()
+            assert run.finished_at == ct.utcnow()
+            assert run.auth_token is None

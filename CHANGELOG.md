@@ -9,6 +9,16 @@ under **Unreleased** until a release is tagged.
 
 ### Added
 
+- RunPod is now a cloud training provider alongside vast.ai. **Settings →
+  Training → Cloud GPU** has a provider selector, a RunPod API key field with
+  a step-by-step guide and a Test button, and a Secure/Community cloud-type
+  choice. RunPod runs start the official ai-toolkit image on a pod the app
+  creates, reach its UI through RunPod's HTTPS proxy with an app-generated
+  token, and use the same launch button, progress, checkpoints, and
+  automatic shutdown as vast.ai runs.
+- Cloud runs record their provider. The Cloud runs page links each run to its
+  own provider console, the recovery banner lists one link per pod, and the
+  shared run configuration names the provider.
 - Photo-variety analysis and captioning can now run through the configured
   local model, a connected ChatGPT subscription, the OpenAI API, or the Google
   Gemini API. Remote choices require an explicit per-action confirmation before
@@ -52,6 +62,19 @@ under **Unreleased** until a release is tagged.
 
 ### Changed
 
+- Training exports, training snapshots, and the Step 17 dataset ZIP now read
+  the full-resolution upload (capped at 2048 px on the long side) whenever the
+  working image is untouched, instead of the 1024 px working copy. Cropped,
+  rotated, watermark-cleaned, and generated images keep using the working copy.
+- Cloud training is "configured" when any provider key is present, and
+  "launchable" only when the selected provider's key is present. Existing runs
+  stay visible and monitored after switching providers, and the launch button
+  follows the selection.
+- Retry and continue keep the run's original provider. When that provider's
+  key has been removed they stop with a clear hint instead of a server error.
+- The pod's actual hourly price replaces the quoted price once the pod is
+  allocated. A pod allocated above **Max price per hour** is destroyed and the
+  run fails with the two prices in the message.
 - **Set primary reference** now shows the exact ordered remote identity pack,
   labels the authoritative and supporting roles, states which references local
   Klein and face scoring actually use, provides direct replacement controls,
@@ -220,6 +243,12 @@ under **Unreleased** until a release is tagged.
 
 ### Fixed
 
+- Two order-dependent test failures that also affected `main`: the
+  capabilities probe cache and the ComfyUI model-list cache leaked between
+  tests. Both reset before every test, and the backend suite now passes in
+  reversed collection order.
+- GPU names in RunPod's catalogue (for example `NVIDIA A100 80GB PCIe`) now
+  resolve to their speed tier instead of the default.
 - Replicate Nano Banana Pro requests now explicitly disable provider fallback,
   so an identity-critical request fails visibly instead of ever being eligible
   for silent model substitution.
@@ -279,6 +308,12 @@ under **Unreleased** until a release is tagged.
 
 ### Internal
 
+- New `runpod_client` and `cloud_provider` registry with the same surface as
+  `vast_client`; `cloud_training` resolves the provider per run. Schema
+  migration 19 adds `cloud_training_run.provider` (NULL reads as vast.ai).
+- RunPod client and provider registry at 100% line coverage; around 120 new
+  backend tests and 32 new frontend tests, including the first TrainingPanel
+  test. Wall-clock fixtures frozen and sleeps stubbed in the cloud tests.
 - The LoRA Test Studio coordinator no longer re-states the rules its two launch
   paths share. Building the pool of base models for a family, validating
   always-on LoRAs, encoding the Krea rebalance value and deriving a run's shared
