@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "status": "not_started",
+  "subject_id": null,
+  "export_revision": null,
+  "export_sha256": null,
+  "consent": {"evidence_path": null, "permitted_purposes": [], "checked_at": null},
+  "selected_uploads": [],
+  "route": {"provider": null, "endpoint": null, "model_id": null, "base_family": null, "capabilities_evidence": null, "checked_at": null},
+  "storage": {"provider": null, "private_repository": null, "visibility": null, "retention": null, "access_verified_at": null, "backup_path": null},
+  "permissions": {"execution_scope": null, "publication_scope": null, "terms_version": null, "terms_evidence": null, "eligibility_evidence": null, "checked_at": null, "upload_authorised": false, "publication_authorised": false},
+  "budget": {"currency": null, "combined_ceiling": null, "estimate": null, "estimate_source": null, "checked_at": null, "authorised_at": null, "enforceable_provider_cap": false, "reported_spend": null},
+  "free_offer": {"status": "unknown", "source": null, "checked_at": null, "eligibility": null, "remaining_quota": null, "quota_unit": null, "expires_at": null},
+  "routing_policy": {"chosen_provider": null, "alternative_upload_authorised": false},
+  "adaptation_decision": {"status": "baseline_required", "baseline_attempt_ids": [], "reason": null, "additional_budget_authorisation": null}
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "subject_id": null,
+  "note": "Edit examples for the subject; record actual prompts, aspect ratios and seeds before execution.",
+  "still_scenes": [
+    {"id": "close_up", "brief": "Close-up with useful facial detail", "aspect_ratio": null, "seeds": []},
+    {"id": "waist_up", "brief": "Waist-up gesture", "aspect_ratio": null, "seeds": []},
+    {"id": "full_body", "brief": "Full-body composition", "aspect_ratio": null, "seeds": []},
+    {"id": "presentation", "brief": "Person beside a presentation screen", "aspect_ratio": null, "seeds": []},
+    {"id": "website_hero", "brief": "Website hero with text space", "aspect_ratio": null, "seeds": []},
+    {"id": "social_background", "brief": "Social background with room for a quote", "aspect_ratio": null, "seeds": []}
+  ],
+  "video_actions": [
+    {"id": "walk", "brief": "Walk into a scene", "seeds": []},
+    {"id": "turn", "brief": "Turn toward others", "seeds": []},
+    {"id": "gesture", "brief": "Gesture beside a screen", "seeds": []}
+  ]
+}
