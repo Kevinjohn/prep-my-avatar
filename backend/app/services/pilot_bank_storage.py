@@ -38,7 +38,7 @@ def digest(data):
 
 def contained(root, relative, *, file=False):
     root = Path(os.path.abspath(root))
-    if (not isinstance(relative, str) or not relative or '\\' in relative
+    if (not isinstance(relative, str) or not relative or relative.startswith('/') or '\\' in relative
             or ':' in relative or any(ord(c) < 32 for c in relative)):
         raise BankError('Unsafe bank path')
     parts = Path(relative).parts

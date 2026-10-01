@@ -708,3 +708,14 @@ def test_multipart_png_checksum_failure_is_sanitized_and_valid_image_still_impor
     assert response.status_code == 200
     output = response.json['attempts'][0]['outputs'][0]
     assert client.get(output['url']).data == valid_png
+
+
+def test_drive_relative_root_is_rejected_with_windows_path_rules(monkeypatch, tmp_path):
+    from pathlib import PureWindowsPath
+    from app.services import pilot_bank_storage as storage
+
+    # A slash-rooted Windows path resets the directory but has no drive, so
+    # is_absolute() alone does not establish that it stays inside the bank.
+    monkeypatch.setattr(storage, 'Path', PureWindowsPath)
+    with pytest.raises(storage.BankError, match='Unsafe'):
+        storage.contained(tmp_path, '/outside')
