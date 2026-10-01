@@ -35,6 +35,16 @@ the [manual pilot kit](https://github.com/Kevinjohn/prep-my-avatar/blob/69d099ee
 private records and silent-video review steps. Ordinary **Export ZIP** and
 **Backup** remain separate actions.
 
+## Retain attempts and returned assets
+
+Open **Private asset bank** in this step after creating a reviewed export. The reference-only recipe prepares generation references and optional held-out evaluation photos without requiring training images.
+
+Record a manual still, training or video attempt with its actual recipe, ordered references, prompt and seed. Update the request outcome and cost, retaining failures and uncertain outcomes too. Import returned images, clips, weights and configuration locally; review each output separately. Accepted stills can become first frames for later video attempts.
+
+With FFprobe installed, the bank checks actual video/audio streams. With FFmpeg installed, it can create a separate silent derivative while retaining the original. Neither operation proves likeness or accepts a clip automatically.
+
+Download the dedicated private bank archive to retain records, files and linked export evidence. **Ordinary dataset Backup does not include this bank.** No provider upload, request or charge is performed by these local actions.
+
 ## You are finished when
 
 A ZIP file exists in your chosen download folder and its image/text pairs match the kept set. If export is your goal, skip the optional training, checkpoint-review, and Studio work in Steps 18–20, then continue to Step 21 to back up the dataset.

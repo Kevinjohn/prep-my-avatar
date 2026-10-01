@@ -18,6 +18,7 @@ import os
 import shutil
 import uuid
 import zipfile
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -210,8 +211,8 @@ def source_preview(user_id, dataset_id, image_id):
 
 def _derivative(row, selection, definition, parameters, trigger):
     role = selection.get('role', 'training')
-    if role not in ROLES:
-        raise ValueError('invalid selection role')
+    if role not in definition['supported_roles']:
+        raise ValueError('unsupported selection role for this recipe')
     reason = _eligibility(row, role)
     if reason:
         raise ValueError(reason)
@@ -315,7 +316,7 @@ def _validate_selection(payload, dataset, rows, families, definition):
         raise ValueError('dataset changed since review; refresh the source list')
     selections = payload.get('selections')
     if not isinstance(selections, list) or not selections or len(selections) > 10000:
-        raise ValueError('select at least one training image (at most 10000 selections)')
+        raise ValueError('select at least one image (at most 10000 selections)')
     by_id = {row.id: row for row in rows}
     seen = set()
     family_roles = {}
@@ -324,7 +325,7 @@ def _validate_selection(payload, dataset, rows, families, definition):
         if not isinstance(selection, dict):
             raise ValueError('selection must be an object')
         image_id, role = selection.get('image_id'), selection.get('role')
-        if type(image_id) is not int or image_id not in by_id or role not in ROLES:
+        if type(image_id) is not int or image_id not in by_id or role not in definition['supported_roles']:
             raise ValueError('invalid selected image or role')
         if (image_id, role) in seen:
             raise ValueError('duplicate image role selection')
@@ -350,9 +351,9 @@ def _validate_selection(payload, dataset, rows, families, definition):
         roles = set().union(*(family_roles[item] for item in linked_families))
         if 'evaluation' in roles and roles & {'training', 'reference'}:
             raise ValueError('held-out lineage or burst overlaps training/reference selections')
-    minimum = definition['input_requirements']['minimum_training_images']
-    if sum(role == 'training' for _, role in seen) < minimum:
-        raise ValueError(f'select at least {minimum} training image(s)')
+    for required_role, minimum in recipes.role_minima(definition).items():
+        if sum(role == required_role for _, role in seen) < minimum:
+            raise ValueError(f'select at least {minimum} {required_role} image(s)')
     excluded = payload.get('excluded_image_ids', [])
     if (not isinstance(excluded, list) or any(type(v) is not int or v not in by_id for v in excluded)
             or set(excluded) & {image_id for image_id, _ in seen}):
@@ -393,7 +394,9 @@ def capture(user_id, dataset_id, payload, destination):
     try:
         (temporary / 'references').mkdir(mode=0o700)
         (temporary / 'evaluation').mkdir(mode=0o700)
-        with zipfile.ZipFile(temporary / definition['archive_name'], 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive_context = (zipfile.ZipFile(temporary / definition['archive_name'], 'w', zipfile.ZIP_DEFLATED)
+                           if 'training' in definition['supported_roles'] else nullcontext())
+        with archive_context as archive:
             for index, selection in enumerate(selections):
                 row = by_id[selection['image_id']]
                 data, caption, transform, warnings, source, source_hash = _derivative(
@@ -439,15 +442,22 @@ def capture(user_id, dataset_id, payload, destination):
                          'definition': definition, 'parameters': parameters,
                          'trigger_phrase': subject['trigger_word']}
         _write_json(temporary / 'recipe.json', recipe_record)
+        training_instructions = (
+            'Only the training ZIP contains provider inputs; never upload the outer package, '
+            'manifest, references or evaluation directory as the training dataset.\n\n'
+            if 'training' in definition['supported_roles'] else
+            'This reference-only package contains no training archive. Select compatible references '
+            'for the chosen endpoint; never submit held-out evaluation photos as generation inputs. '
+            'Provider input compatibility remains unverified.\n\n')
         (temporary / 'README.md').write_text(
             '# Private person export\n\n'
             'Keep this complete revision private, with your master originals and a backup. '
-            'Only the training ZIP contains provider inputs; never upload the outer package, '
-            'manifest, references or evaluation directory as the training dataset.\n\n'
+            + training_instructions +
             'Before manual submission, recheck the endpoint documentation, consent, source rights, '
             'service retention and publication scope, current prices and an agreed spending ceiling. '
-            'Apply the explicit parameters and trigger in recipe.json with reviewed sidecars and '
-            'automatic captioning off. Archive acceptance and output likeness remain unverified.\n\n'
+            'Review the pinned definition and parameters in recipe.json before use. '
+            'For training, use reviewed sidecars and automatic captioning off. '
+            'Provider acceptance and output likeness remain unverified.\n\n'
             'Use references in manifest order and map each purpose explicitly in prompts. '
             'Keep evaluation photographs held out from training and generation references. '
             'Compare generated identity, anatomy, composition and correction effort against these '

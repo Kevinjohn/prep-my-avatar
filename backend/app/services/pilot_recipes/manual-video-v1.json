@@ -1,0 +1,22 @@
+{
+  "id": "manual-video",
+  "version": 1,
+  "label": "MiniMax H3 Max reference video (manual)",
+  "process": "video",
+  "provider": "fal",
+  "endpoint": "minimax/h3-max/reference-to-video",
+  "model_id": "minimax-h3-max",
+  "base_family": "minimax-h3-max",
+  "parameters": {
+    "duration": 5,
+    "resolution": "768P",
+    "prompt_expansion_mode": "disabled"
+  },
+  "documentation_url": "https://fal.ai/models/minimax/h3-max/reference-to-video/api",
+  "documentation_checked_at": "2026-10-01",
+  "capabilities": {
+    "max_references": 12,
+    "first_frame": true,
+    "asset_input_kinds": []
+  }
+}

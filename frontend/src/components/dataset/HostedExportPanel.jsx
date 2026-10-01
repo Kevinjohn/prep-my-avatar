@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiFetch, postJson, fetchWithCsrfRetry, getCsrfToken } from '../../api/fetchClient';
 import HostedExportSettings from './HostedExportSettings';
 import HostedExportSelection from './HostedExportSelection';
-import { createHostedDraft, updateHostedSelection, reviewKey, hostedExportErrors, hostedExportPayload } from './hostedExportModel';
+import { createHostedDraft, updateHostedSelection, reviewKey, hostedExportErrors, hostedExportPayload, hostedRoles, hostedRoleMinima, changeHostedRecipe } from './hostedExportModel';
 
 const BUTTON = 'rounded border border-border bg-surface px-3 py-1.5 text-sm text-content disabled:opacity-40';
 const withoutReviews = (entry) => {
@@ -54,9 +54,13 @@ export default function HostedExportPanel({ datasetId }) {
 
   const changeSettings = (patch) => {
     operation.current += 1;
+    if (patch.recipe_id) {
+      const selected = snapshot.recipes.find((item) => item.id === patch.recipe_id && item.version === patch.recipe_version);
+      replace(changeHostedRecipe(latest.current, selected));
+      return;
+    }
     replace({ ...latest.current, ...patch, selections: latest.current.selections.map((entry) => {
       const clean = withoutReviews(entry);
-      if (patch.recipe_id) { delete clean.crop_box; clean.crop = null; }
       return clean;
     }) });
   };
@@ -130,14 +134,14 @@ export default function HostedExportPanel({ datasetId }) {
       {notice && <p role="status" className="m-0 text-sm text-content-muted">{notice}</p>}
       {draft && snapshot && <>
         <HostedExportSettings draft={draft} recipes={snapshot.recipes} onChange={changeSettings} />
-        <p className="m-0 text-sm text-content-muted">{recipe?.count_guidance && <>Planning guidance: {Object.entries(recipe.count_guidance).map(([role, count]) => `${count} ${role}`).join(', ')} photos. </>}Minimum training photos: {recipe?.input_requirements?.minimum_training_images}. Evaluation must use separate source families and burst groups.</p>
+        <p className="m-0 text-sm text-content-muted">{recipe?.count_guidance && <>Planning guidance: {Object.entries(recipe.count_guidance).map(([role, count]) => `${count} ${role}`).join(', ')} photos. </>}Required photos: {Object.entries(hostedRoleMinima(recipe)).filter(([, minimum]) => minimum > 0).map(([role, minimum]) => `${minimum} ${role}`).join(', ')}. Evaluation must use separate source families and burst groups.</p>
         {snapshot.images.length === 0 && <p role="status">No photos are available. Import and review photos first.</p>}
         {snapshot.images.map((image) => {
           const entries = draft.selections.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.image_id === image.id);
           return <article key={image.id} className="min-w-0 rounded-lg border border-border p-3 flex flex-col gap-3">
             <h3 className="m-0 text-sm font-semibold text-content">Photo {image.id} · {image.framing || 'framing unknown'}</h3>
             <div className="flex flex-wrap gap-3 text-sm text-content">
-              {['training', 'reference', 'evaluation'].map((role) => <label key={role} className="flex gap-2 items-center"><input type="checkbox" aria-label={`Photo ${image.id} ${role}`} disabled={!image.eligible || Boolean(image.role_exclusions?.[role]) || (role === 'reference' && image.anchor_decision === 'excluded')} checked={entries.some(({ entry }) => entry.role === role)} onChange={(event) => toggleRole(image, role, event.target.checked)} />{role}</label>)}
+              {hostedRoles(recipe).map((role) => <label key={role} className="flex gap-2 items-center"><input type="checkbox" aria-label={`Photo ${image.id} ${role}`} disabled={!image.eligible || Boolean(image.role_exclusions?.[role]) || (role === 'reference' && image.anchor_decision === 'excluded')} checked={entries.some(({ entry }) => entry.role === role)} onChange={(event) => toggleRole(image, role, event.target.checked)} />{role}</label>)}
               <span>{entries.length ? `${entries.length} selected roles` : 'Excluded from this package'}</span>
             </div>
             {!image.eligible && <p className="m-0 text-sm text-content-muted">Excluded: {image.exclusion_reason || 'Admission or rights rules'}</p>}
@@ -153,6 +157,7 @@ export default function HostedExportPanel({ datasetId }) {
             </>}
           </article>;
         })}
+        {recipe?.purpose === 'reference-preparation' && <p className="m-0 text-sm text-content-muted">This pack contains reviewed references and optional held-out photos, with no training archive. Check the selected provider’s input compatibility before use.</p>}
         {errors.length > 0 && <div className="text-sm text-content-muted"><p className="m-0">Before download:</p><ul className="list-disc pl-5">{errors.map((message) => <li key={message}>{message}</li>)}</ul></div>}
         <button type="button" className="self-start rounded-lg bg-gradient-primary px-4 py-2 text-sm font-semibold text-white disabled:opacity-40" disabled={Boolean(busy) || errors.length > 0} onClick={download}>Download reviewed hosted package</button>
       </>}

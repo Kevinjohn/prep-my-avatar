@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHostedDraft, updateHostedSelection, reviewKey, hostedExportErrors, hostedExportPayload, squareCrop } from './hostedExportModel.js';
+import { createHostedDraft, updateHostedSelection, reviewKey, hostedExportErrors, hostedExportPayload, squareCrop, changeHostedRecipe } from './hostedExportModel.js';
 
 const snapshot = { dataset_revision: 'revision-a', subject: { name: 'Demo person', trigger_word: 'demo' }, recipes: [{ id: 'fal-krea-reviewed', version: 1, crop_rule: 'square', input_requirements: { minimum_training_images: 1 }, defaults: { resolution: 1024, steps: 1000, learning_rate: 0.0005, auto_captioning: 'Off', debug_dataset: false } }], images: [{ id: 1, eligible: true, width: 800, height: 1200, original_lineage: 'a' }, { id: 2, eligible: true, width: 800, height: 1200, original_lineage: 'b' }] };
 function readyDraft() {
@@ -67,4 +67,30 @@ test('minimum counts and parameter constraints come from the selected recipe', (
   assert.ok(hostedExportErrors(draft, data).some((error) => error.includes('at least 2 training')));
   draft.parameters.steps = 21;
   assert.ok(hostedExportErrors(draft, data).some((error) => error.includes('steps')));
+});
+
+test('reference-only recipe validates reviewed references without training and refuses training roles', () => {
+  const recipe = { id: 'reviewed-reference', version: 1, supported_roles: ['reference', 'evaluation'], input_requirements: { minimum_images_by_role: { reference: 1, evaluation: 0 } }, parameters: {}, defaults: {} };
+  const data = { ...snapshot, recipes: [recipe] };
+  const draft = createHostedDraft(data);
+  draft.subject = { ...draft.subject, consent: true, rights_basis: 'owned', publication_scope: 'Private preparation' };
+  assert.ok(hostedExportErrors(draft, data).some((error) => error.includes('at least 1 reference')));
+  draft.selections = [{ image_id: 1, role: 'reference', reference_role: 'Identity', reference_order: 1, crop: null }];
+  draft.selections[0].approval = { key: reviewKey(draft, draft.selections[0]), image_sha256: 'i', caption_sha256: 'c', pair_sha256: 'p' };
+  assert.deepEqual(hostedExportErrors(draft, data), []);
+  draft.selections.push({ image_id: 2, role: 'training' });
+  assert.ok(hostedExportErrors(draft, data).some((error) => error.includes('unsupported role')));
+});
+
+
+test('switching to references removes training and invalidates old crop approvals', () => {
+  const draft = readyDraft();
+  draft.selections.push({ image_id: 2, role: 'reference', crop_box: { left: 0, top: 0, side: 80 }, crop: [0, 0, 1, 1], approval: { image_sha256: 'old' } });
+  const recipe = { id: 'reviewed-reference', version: 1, supported_roles: ['reference', 'evaluation'], defaults: {} };
+  const changed = changeHostedRecipe(draft, recipe);
+  assert.deepEqual(changed.selections.map((entry) => entry.role), ['reference']);
+  assert.equal(changed.selections[0].crop, null);
+  assert.equal(changed.selections[0].crop_box, undefined);
+  assert.equal(changed.selections[0].approval, undefined);
+  assert.deepEqual(changed.parameters, {});
 });

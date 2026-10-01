@@ -2,6 +2,7 @@ import copy
 import hashlib
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -487,3 +488,128 @@ def test_trusted_data_root_alias_allows_export_but_rejects_internal_symlinks_and
         with pytest.raises(ValueError, match='unsafe path'):
             svc.preview(LOCAL_USER, ds.id, {'recipe_id': 'fal-krea-reviewed', 'recipe_version': 1,
                                           'image_id': rows[0].id})
+
+
+def reference_request(ds, rows, include_evaluation=True):
+    from app.services import hosted_export as svc
+    payload = {'dataset_revision': ds.revision, 'recipe_id': 'reviewed-reference',
+               'recipe_version': 1, 'parameters': {},
+               'subject': {'name': ds.name, 'trigger_word': ds.trigger_word,
+                           'consent': True, 'rights_basis': 'owned',
+                           'publication_scope': 'private'}, 'selections': []}
+    selected = [(rows[0], 'reference')]
+    if include_evaluation:
+        selected.append((rows[2], 'evaluation'))
+    for row, role in selected:
+        selection = {'image_id': row.id, 'role': role, 'reference_role': 'identity'}
+        preview = svc.preview(LOCAL_USER, ds.id, {**payload, **selection})
+        selection.update({f'approved_{name}': preview[name] for name in
+                          ('image_sha256', 'caption_sha256', 'pair_sha256')})
+        payload['selections'].append(selection)
+    return payload
+
+
+@pytest.mark.parametrize('include_evaluation', [False, True])
+def test_reference_only_pack_preserves_sources_and_aspect_without_training_zip(
+        app, tmp_path, include_evaluation):
+    from app.services import hosted_export as svc
+    from app.services import face_dataset_service as fds
+    with app.app_context():
+        ds, rows = seed()
+        before = {row.id: (Path(fds._img_path(row)).read_bytes(), row.caption) for row in rows}
+        payload = reference_request(ds, rows, include_evaluation)
+        root = tmp_path / 'reference-pack'
+        manifest = svc.capture(LOCAL_USER, ds.id, payload, root)
+        assert not list(root.glob('*.zip'))
+        assert not any(entry['role'] == 'training' for entry in manifest['entries'])
+        entry = manifest['entries'][0]
+        with Image.open(root / entry['image_path']) as image:
+            assert image.size == (120, 80)
+        assert manifest['recipe']['definition']['supported_roles'] == ['reference', 'evaluation']
+        assert manifest['recipe']['definition']['model_id'] is None
+        assert len(list((root / 'evaluation').glob('*.png'))) == int(include_evaluation)
+        assert 'no training archive' in (root / 'README.md').read_text().lower()
+        for row in rows:
+            assert (Path(fds._img_path(row)).read_bytes(), row.caption) == before[row.id]
+
+
+def test_reference_recipe_rejects_training_and_requires_reference(app, tmp_path):
+    from app.services import hosted_export as svc
+    with app.app_context():
+        ds, rows = seed()
+        payload = reference_request(ds, rows)
+        with pytest.raises(ValueError, match='role'):
+            svc.preview(LOCAL_USER, ds.id, {**payload, 'image_id': rows[0].id, 'role': 'training'})
+        changed = copy.deepcopy(payload)
+        changed['selections'][0]['role'] = 'training'
+        with pytest.raises(ValueError, match='role'):
+            svc.capture(LOCAL_USER, ds.id, changed, tmp_path / 'training')
+        payload['selections'] = payload['selections'][1:]
+        with pytest.raises(ValueError, match='at least 1 reference'):
+            svc.capture(LOCAL_USER, ds.id, payload, tmp_path / 'empty')
+
+
+@pytest.mark.parametrize('overlap', ['lineage', 'burst'])
+def test_reference_only_pack_rejects_held_out_overlap(app, tmp_path, overlap):
+    from app.services import hosted_export as svc
+    from app.services import face_dataset_service as fds
+    with app.app_context():
+        ds, rows = seed()
+        payload = reference_request(ds, rows)
+        if overlap == 'lineage':
+            rows[2].parent_image_id = rows[0].id
+            fds.db.session.commit()
+            payload['dataset_revision'] = ds.revision
+        else:
+            for selection in payload['selections']:
+                selection['burst_group'] = 'same-session'
+        with pytest.raises(ValueError, match='lineage|burst'):
+            svc.capture(LOCAL_USER, ds.id, payload, tmp_path / 'overlap')
+
+
+def test_krea_still_requires_training_and_pinned_reference_recipe_is_historical(app, tmp_path, monkeypatch):
+    from app.services import hosted_export as svc
+    from app.services import hosted_export_recipes as recipes
+    with app.app_context():
+        ds, rows = seed()
+        krea = request_for(ds, rows)
+        krea['selections'] = krea['selections'][1:]
+        with pytest.raises(ValueError, match='at least 1 training'):
+            svc.capture(LOCAL_USER, ds.id, krea, tmp_path / 'krea')
+        root = tmp_path / 'reference'
+        svc.capture(LOCAL_USER, ds.id, reference_request(ds, rows), root)
+        before = (root / 'recipe.json').read_bytes()
+        changed = recipes.get_recipe('reviewed-reference', 1)
+        changed['count_guidance']['reference'] = 99
+        monkeypatch.setitem(recipes.DEFINITIONS, ('reviewed-reference', 1), changed)
+        assert (root / 'recipe.json').read_bytes() == before
+
+
+@pytest.mark.parametrize('change', ['caption', 'source'])
+def test_reference_only_exact_approval_binds_caption_and_source(app, tmp_path, change):
+    from PIL.PngImagePlugin import PngInfo
+    from app.services import hosted_export as svc
+    from app.services import face_dataset_service as fds
+    with app.app_context():
+        ds, rows = seed()
+        payload = reference_request(ds, rows)
+        if change == 'caption':
+            payload['selections'][0]['caption_override'] = 'different caption'
+        else:
+            metadata = PngInfo()
+            metadata.add_text('changed', 'same pixels, different source bytes')
+            Image.new('RGB', (120, 80), (0, 30, 40)).save(fds._img_path(rows[0]), pnginfo=metadata)
+        root = tmp_path / 'stale-reference'
+        with pytest.raises(ValueError, match='approval'):
+            svc.capture(LOCAL_USER, ds.id, payload, root)
+        assert not root.exists()
+
+
+def test_sources_list_exposes_both_maintained_recipes(app):
+    from app.services import hosted_export as svc
+    with app.app_context():
+        ds, _ = seed()
+        definitions = {item['id']: item for item in svc.list_sources(LOCAL_USER, ds.id)['recipes']}
+        assert {'fal-krea-reviewed', 'reviewed-reference'} <= set(definitions)
+        assert definitions['fal-krea-reviewed']['input_requirements']['minimum_training_images'] == 1
+        assert definitions['reviewed-reference']['input_requirements']['minimum_images_by_role']['reference'] == 1

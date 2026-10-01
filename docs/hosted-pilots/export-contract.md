@@ -50,3 +50,11 @@ Only the inner training ZIP contains trainer pairs. The outer package preserves
 ordered reference/evaluation files, transforms, source lineage, selected and
 excluded IDs, consent/rights declarations, definition/settings and file hashes.
 Keep the outer package private and back it up before any manual provider use.
+
+## Reference-only preparation
+
+The maintained `reviewed-reference` v1 definition supports reference and evaluation roles, requires at least one reference and preserves framing. It emits the same private manifest/reference/evaluation contract without a training ZIP. It declares no model or provider compatibility. The Krea recipe retains its training minimum and trainer archive format.
+
+Recipes declare supported roles and role-specific minima; legacy training definitions retain their training minimum. Changing recipes clears unsupported selections and approvals. Both recipes preserve held-out exclusion, source/caption hashes and immutable capture.
+
+Completed revisions can be selected by the [private asset bank](bank-contract.md) for recorded manual attempts and returned output evaluation.

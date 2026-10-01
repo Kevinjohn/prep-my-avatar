@@ -40,9 +40,21 @@ research suggests bespoke GPU execution, managed-service-first takes precedence.
 
 ## Delivered offline milestone
 
-The [export contract](../hosted-pilots/export-contract.md) describes the implemented local API and archive. The export workspace now supports exact crop/caption approval, training/reference/held-out roles, lineage exclusion and immutable capture. Versioned definitions pin model capabilities and formatting; a second recipe and fake service are exercised only as local fixtures. Ordinary export and backup remain separate.
+The [export contract](../hosted-pilots/export-contract.md) describes the implemented local API and archive. The export workspace now supports exact crop/caption approval, training/reference/held-out roles, lineage exclusion and immutable capture. Versioned definitions pin model capabilities and formatting. The maintained reference-only recipe supports the still baseline without training material; fake services remain local test fixtures. Ordinary export and backup remain separate.
 
 The [manual pilot kit](../hosted-pilots/README.md) supplies readiness, brief, attempt and asset records for the still-image baseline and silent B-roll. No hosted request, training, identity upload or generated person asset is demonstrated. Selected photos and consent, provider/storage access, execution/publication permissions and an explicit spending ceiling remain prerequisites.
+
+## Delivered local asset-bank milestone
+
+Lack of hosted execution evidence does not prevent local preparation, retention or review development. The local implementation extends the offline workflow with:
+
+- A reviewed reference-only export recipe, so the still baseline does not require training material.
+- A dataset-local private bank of manual attempts, including failed and uncertain submissions, pinned settings, ordered references and separate first-frame inputs.
+- Imported original images, clips and model-specific files with exact hashes, compatibility declarations and per-output evaluations.
+- Local video-stream inspection and silent derivatives that preserve their originals and record their relationship.
+- A dedicated private archive containing bank records, retained files and linked export evidence; ordinary corpus backup is unchanged.
+
+Synthetic files, fake tool failures and browser flows verify local behavior; see the delivery pull request for executed checks. Real service acceptance, asset application, subject-recognised likeness and whole-clip identity remain separate pilot evidence. No provider execution adapter is required for this local milestone.
 
 ## Initial delivery: an offline export package
 

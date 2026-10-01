@@ -29,6 +29,6 @@ export default function HostedExportSettings({ draft, recipes, onChange }) {
         </label>;
       })}
     </div>
-    <p className="m-0 text-xs text-content-subtle">These recipe settings describe a later manual run. Downloading this package performs no upload, training or paid provider call.</p>
+    <p className="m-0 text-xs text-content-subtle">These settings describe the selected preparation recipe. Downloading this package performs no upload, training or paid provider call.</p>
   </div>;
 }

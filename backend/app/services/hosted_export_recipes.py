@@ -10,11 +10,21 @@ import json
 import math
 from pathlib import Path
 
-_DEFINITION_PATH = Path(__file__).with_name('export_recipes') / 'fal-krea-reviewed-v1.json'
 DEFINITIONS = {}
-if _DEFINITION_PATH.is_file():
-    _initial = json.loads(_DEFINITION_PATH.read_text(encoding='utf-8'))
-    DEFINITIONS[(_initial['id'], _initial['version'])] = _initial
+for _path in sorted(Path(__file__).with_name('export_recipes').glob('*.json')):
+    _initial = json.loads(_path.read_text(encoding='utf-8'))
+    _key = (_initial['id'], _initial['version'])
+    if _key in DEFINITIONS:
+        raise ValueError('duplicate maintained export recipe revision')
+    DEFINITIONS[_key] = _initial
+
+
+def role_minima(definition):
+    requirements = definition['input_requirements']
+    minima = dict(requirements.get('minimum_images_by_role', {}))
+    if 'minimum_training_images' in requirements:
+        minima['training'] = requirements['minimum_training_images']
+    return minima
 
 
 def get_recipe(recipe_id, version):
@@ -24,16 +34,30 @@ def get_recipe(recipe_id, version):
     if definition is None:
         raise ValueError('unsupported export recipe revision')
     definition = copy.deepcopy(definition)
+    reference_pack = definition.get('purpose') == 'reference-preparation'
     if (definition.get('format') != 'person-export-recipe'
             or definition.get('schema_version') != 1
             or definition.get('id') != recipe_id or definition.get('version') != version
-            or not isinstance(definition.get('model_id'), str)
-            or not definition['model_id'].strip()):
+            or (not reference_pack and (not isinstance(definition.get('model_id'), str)
+                                       or not definition['model_id'].strip()))):
         raise ValueError('invalid versioned export recipe definition')
-    if (definition.get('crop_rule') not in ('square', 'preserve')
+    definition.setdefault('supported_roles', ['training', 'reference', 'evaluation'])
+    roles = definition['supported_roles']
+    if (not isinstance(roles, list) or not roles
+            or any(role not in ('training', 'reference', 'evaluation') for role in roles)
+            or len(set(roles)) != len(roles)):
+        raise ValueError('invalid supported export roles')
+    if reference_pack:
+        if (roles != ['reference', 'evaluation'] or definition.get('crop_rule') != 'preserve'
+                or definition.get('formatter') is not None or definition.get('archive_name') is not None
+                or any(definition.get(key) is not None for key in
+                       ('model_id', 'base_family', 'asset_kind', 'endpoint'))):
+            raise ValueError('invalid reference preparation definition')
+    elif (definition.get('crop_rule') not in ('square', 'preserve')
             or definition.get('formatter') not in FORMATTERS
-            or Path(definition.get('archive_name', '')).name != definition.get('archive_name')
-            or not definition.get('archive_name', '').endswith('.zip')):
+            or not isinstance(definition.get('archive_name'), str)
+            or Path(definition['archive_name']).name != definition['archive_name']
+            or not definition['archive_name'].endswith('.zip')):
         raise ValueError('invalid export recipe definition')
     supported_tasks = definition.get('supported_tasks')
     if (not isinstance(supported_tasks, list) or not supported_tasks
@@ -42,14 +66,21 @@ def get_recipe(recipe_id, version):
         raise ValueError('recipe purpose is incompatible with supported task capabilities')
     service = definition.get('service', {})
     if (service.get('protocol') != 'manual-offline'
-            or definition.get('base_family') not in service.get('supported_base_families', [])
-            or definition.get('asset_kind') not in service.get('supported_asset_kinds', [])):
+            or (not reference_pack and (
+                definition.get('base_family') not in service.get('supported_base_families', [])
+                or definition.get('asset_kind') not in service.get('supported_asset_kinds', [])))):
         raise ValueError('recipe has incompatible service/base family')
     requirements = definition.get('input_requirements', {})
-    minimum = requirements.get('minimum_training_images')
-    if (type(minimum) is not int or minimum < 1 or minimum > 10000
+    supplied_minima = requirements.get('minimum_images_by_role', {})
+    if not isinstance(supplied_minima, dict):
+        raise ValueError('invalid role minima')
+    minima = role_minima(definition)
+    if (not minima or set(minima) - set(roles)
+            or any(type(value) is not int or value < 0 or value > 10000 for value in minima.values())
             or requirements.get('subject_kind') != 'character'
-            or requirements.get('reviewed_caption_pairs') is not True):
+            or requirements.get('reviewed_caption_pairs') is not True
+            or (reference_pack and minima.get('reference', 0) < 1)
+            or (not reference_pack and minima.get('training', 0) < 1)):
         raise ValueError('unsupported recipe input requirements')
     parameters(definition, {})
     return definition

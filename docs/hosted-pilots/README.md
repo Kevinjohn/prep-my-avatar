@@ -5,6 +5,10 @@ and [#52](https://github.com/Kevinjohn/prep-my-avatar/issues/52); it contains no
 hosted results. Complete records privately, outside the application repository.
 Do not commit photographs, identity weights, completed consent records or outputs.
 
+## In-app records and media
+
+Use the [private asset bank](private-bank.md) in the dataset export step to retain manual attempts, returned files and per-output reviews locally. The templates below remain useful for readiness and external evidence. A reference-only export can prepare the baseline without training material. The bank makes no provider requests.
+
 ## Prepare the private bank
 
 Copy the templates into a private working directory. Keep the complete exported
