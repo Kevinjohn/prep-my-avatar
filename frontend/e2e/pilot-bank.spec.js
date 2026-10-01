@@ -191,7 +191,7 @@ test("real offline bank retains imported still review, first frame and downloada
       .getByText("Import returned local file", { exact: true })
       .click();
   await assetAttempt
-    .getByLabel("File kind", { exact: true })
+    .getByRole("combobox", { name: "File kind", exact: true })
     .selectOption("weights");
   await assetAttempt.getByLabel("Returned file").setInputFiles({
     name: "synthetic_weights.safetensors",

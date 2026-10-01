@@ -63,19 +63,19 @@ screenshots:
         sha256: 7d4a08ee134e3941c796cb3665470ee2b1ebd496263ca6b1780b4a472f698a0a
   - path: guide/08_import_photos.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset import
     viewport: 1440x900
     sha256: 4fb3c4526837a3385e5aae1d065c84a5a6ef90c462c20676b9720829be779a54
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: &workflow_sources
       - path: frontend/src/components/dataset/DatasetWorkspace.jsx
-        sha256: c303ed5773dc43df0be7fb6a4da963cc232bb9801b09e81be150a65a0c7f8af9
+        sha256: d0a15e44f35565eee53bc0eb9dffeffb0d8d4bff72dc15c194f5095b1b020679
       - path: frontend/src/components/dataset/DatasetWorkflowNav.jsx
         sha256: 0304fb2f3bd1206e785e1ebb8e295a8b3b50780ba95c22a12bac1901eae29390
   - path: guide/09_review_corpus.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset review
     viewport: 1440x900
     sha256: c8fdc2ac9a30ae74e32bbd4c74a9c9fe01f626d0f75a492bdfeddf4e092ec15c
@@ -83,7 +83,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/10_choose_anchors.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset anchors
     viewport: 1440x900
     sha256: 37ba48fa5169129a16fc4a2e921c36bf45abe9022709f40c32f2163dbccea9af
@@ -91,7 +91,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/11_review_coverage.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset coverage
     viewport: 1440x900
     sha256: 4a4c7e88b38c0e68b7374411b71327f25dab1acffa38472e2b8153de9f042a05
@@ -99,7 +99,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/12_set_primary_reference.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset primary reference
     viewport: 1440x900
     sha256: f8c284f2aaeeaf019962b3f1aaee8b8617284615b33aeb337ea034b7d40b7a5d
@@ -107,15 +107,15 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/13_generate_missing_views.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset generation
     viewport: 1440x900
-    sha256: 58cad04b9a2360f3ac29e6b08e5bb996d968f187317d365d5b04da699f71fcb9
+    sha256: afa34874e04e9725918f170c2b851a557d3b47c0bec28e796b11e67136140ed9
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/14_curate_images.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset curation
     viewport: 1440x900
     sha256: 769619fb8c29e393279bcfcf4456b68b4f0caf598929eb9dc6d4c35ec31ce296
@@ -123,7 +123,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/15_caption_images.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset captions
     viewport: 1440x900
     sha256: e9abac987bb58d082758c8e9516cb921dec3e303453e353cb27cc792f37b015f
@@ -131,7 +131,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/16_score_face_similarity.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset face scoring
     viewport: 1440x900
     sha256: ecaf942ac62e3449fbca5637c22d78a398ca250a095d089004f24d94127cbf5c
@@ -139,15 +139,15 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/17_export_dataset.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset export
     viewport: 1440x900
-    sha256: c9ba94f0044d9fc551237d7a3da5941e51b902b232d20f35bbdb3a75382e878b
+    sha256: c34a63b47d93e08dcf5eef90d600bca94c9ffd38b3f142650caa565e9ba75570
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/18_train_lora.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset training
     viewport: 1440x900
     sha256: ef56b527ed5b67ffae365a7ae3ba6abdb53c0bdfcaec659c799ac5de987c7fbd
@@ -155,7 +155,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/19_review_checkpoints.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset checkpoints
     viewport: 1440x900
     sha256: 383711e1983d7965d139ed9689fca67b39ffefa7347abad24577b0c263c78593
@@ -163,7 +163,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/20_test_studio.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset Studio
     viewport: 1440x900
     sha256: 888e34e6ced2c4902ecdfaed36a186803550e38bd8d14f2fda1593f8c0cb0b86
@@ -171,7 +171,7 @@ screenshots:
     relevant_sources: *workflow_sources
   - path: guide/21_back_up_dataset.jpg
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Dataset backup
     viewport: 1440x900
     sha256: c6eb2771ec18c94e4f4ad7f6b7f6cd85e25606a98ce8a0be68cd109d89caf383
@@ -192,19 +192,53 @@ screenshots:
     reason: Captured copy says captions are required, but launch permits Start anyway.
   - path: guide/17_hosted_export_review.png
     status: current
-    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
     page: Reviewed offline person export with synthetic images
     viewport: 1280x800
-    sha256: ec86da04c028a71a8caf72f6ef28ec00a09aca69b5c0d5740f6406e79bdb3f95
+    sha256: bcf140e5a6fcc3265ccb0e766a92fe12067fb50e63b9992001a92c10617c2116
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources:
       - path: frontend/src/components/dataset/DatasetWorkspace.jsx
-        sha256: c303ed5773dc43df0be7fb6a4da963cc232bb9801b09e81be150a65a0c7f8af9
+        sha256: d0a15e44f35565eee53bc0eb9dffeffb0d8d4bff72dc15c194f5095b1b020679
       - path: frontend/src/components/dataset/HostedExportPanel.jsx
-        sha256: b629e7ad25de56fe6107732e2554d40db65543e4f9b0ec556168e19c00c1f45f
+        sha256: e10645034621d9106c4c8bb03b2015c4682981bf2ac0107829a5893608077c06
       - path: frontend/src/components/dataset/HostedExportSettings.jsx
-        sha256: 015ab3c8dd4017ab4f1eb7770b707a0850601374c156093e66a54f95b973c2ce
+        sha256: 78054bc7a0c7959b3db5b9737673debd9f52b5332e6523a6a683a2c5353b0e86
       - path: frontend/src/components/dataset/HostedExportSelection.jsx
         sha256: 50f103c24ac5dc568adbdc2c02c81d746cf545503c6248a502c07d9c207e6c0c
       - path: frontend/src/components/dataset/hostedExportModel.js
-        sha256: 087c0e41dd4c9874f9d78eb8f520c961dd76e7038b23defb46b976e65a2e5767
+        sha256: 694c6627ee888cd5044fbfa4a7cea7b2aa837feb8a57536c9190761ec24d2ac5
+  - path: guide/17_private_asset_bank.png
+    status: current
+    capture_revision: ac967e2de0b70c8c9d8c58d240c5d30f374fc2bd
+    page: Private asset bank with synthetic imported files and reviews
+    viewport: 1280x800
+    sha256: cac251d71b73ed715f64f7b1480e9a4067d9ed73c7d1f885568664bc48551fe1
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources:
+      - path: frontend/src/components/dataset/DatasetWorkspace.jsx
+        sha256: d0a15e44f35565eee53bc0eb9dffeffb0d8d4bff72dc15c194f5095b1b020679
+      - path: frontend/src/components/dataset/PilotBankAssetEvidence.jsx
+        sha256: 96e1916af0ce7516ef2893097331dcca2ef6ef0f9333c86e1920f28d20725081
+      - path: frontend/src/components/dataset/PilotBankAttempt.jsx
+        sha256: 9d2ec3b636291f3ba2c4b971a52316ccffde245f9e9eee9488a95a127eb42b64
+      - path: frontend/src/components/dataset/PilotBankAttemptForm.jsx
+        sha256: d4ddd1f8059569ffbd6ba8e79dd541772882e35c64e4790cba6ef2ce3a189419
+      - path: frontend/src/components/dataset/PilotBankConflicts.jsx
+        sha256: 2b8e9df05e24123ce7330e05d6b8900760466f4dbd475d0db0e6cbd3c2b9786d
+      - path: frontend/src/components/dataset/PilotBankFields.jsx
+        sha256: 36b16bea357e4fb5cc22973433c4dea7109cae367be928bed5bad2835c0bfca0
+      - path: frontend/src/components/dataset/PilotBankHeldOut.jsx
+        sha256: 8d89a498b4259e34ca957dab15c6ce444a822f57b33d624540da35bb020a99b6
+      - path: frontend/src/components/dataset/PilotBankImport.jsx
+        sha256: 4f284c6460e6c322ba47bfe075322fdc7acdd289c79ae0e7e176626959b6d220
+      - path: frontend/src/components/dataset/PilotBankOutput.jsx
+        sha256: 691a7594c20f6582c0504675c5c75b7741a16b63d5cc8e753c87b7bc30133a42
+      - path: frontend/src/components/dataset/PilotBankPanel.jsx
+        sha256: 748e26297bbcabf780710132cd02cbda487c663c248c269aa0b576f97436f1b0
+      - path: frontend/src/components/dataset/PilotBankReferences.jsx
+        sha256: e815c93fe7d0b49574859eb4abcadceba9b30948de875427e164f212a8156ca8
+      - path: frontend/src/components/dataset/pilotBankDraft.js
+        sha256: 78e8b98d9c67f1449a573e8512af73e83887347b00a23058096575760f9e2fb6
+      - path: frontend/src/components/dataset/pilotBankModel.js
+        sha256: ba10dc801f33087eb739e4bc07d12190c6356af9bee1318c0d0f788316f63f0f
