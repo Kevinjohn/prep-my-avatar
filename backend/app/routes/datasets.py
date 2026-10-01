@@ -1072,6 +1072,69 @@ def dataset_image_crop(image_id):
     return _ok_or_404(ok)
 
 
+@bp.get('/dataset/<int:dataset_id>/hosted-export')
+def dataset_hosted_export_sources(dataset_id):
+    from ..services import hosted_export
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    try:
+        return jsonify(hosted_export.list_sources(LOCAL_USER, dataset_id))
+    except (ValueError, OSError) as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@bp.get('/dataset/<int:dataset_id>/hosted-export/source/<int:image_id>')
+def dataset_hosted_export_source(dataset_id, image_id):
+    from ..services import hosted_export
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    try:
+        return Response(hosted_export.source_preview(LOCAL_USER, dataset_id, image_id),
+                        mimetype='image/png', headers={'Cache-Control': 'no-store'})
+    except (ValueError, OSError) as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@bp.post('/dataset/<int:dataset_id>/hosted-export/preview')
+def dataset_hosted_export_preview(dataset_id):
+    from ..services import hosted_export
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    try:
+        result = hosted_export.preview(LOCAL_USER, dataset_id, request.get_json(silent=True))
+        response = jsonify(result)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except (ValueError, OSError) as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@bp.post('/dataset/<int:dataset_id>/hosted-export')
+def dataset_hosted_export(dataset_id):
+    from ..services import hosted_export
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    stream = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')
+    try:
+        revision = hosted_export.build_package_zip(
+            LOCAL_USER, dataset_id, request.get_json(silent=True), stream)
+    except (ValueError, OSError) as error:
+        stream.close()
+        return jsonify({'error': str(error)}), 400
+    except RuntimeError as error:
+        stream.close()
+        return jsonify({'error': str(error)}), 409
+    except BaseException:
+        stream.close()
+        raise
+    stream.seek(0)
+    response = send_file(stream, mimetype='application/zip', as_attachment=True,
+                         download_name=f'{revision}.zip')
+    response.headers['Cache-Control'] = 'no-store'
+    response.call_on_close(stream.close)
+    return response
+
+
 @bp.get('/dataset/<int:dataset_id>/export')
 def dataset_export(dataset_id):
     stream = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')

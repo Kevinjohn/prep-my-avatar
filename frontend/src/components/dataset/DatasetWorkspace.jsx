@@ -21,6 +21,7 @@ import CropModal from './CropModal';
 import DatasetLightbox from './DatasetLightbox';
 import DatasetSettingsModal from './DatasetSettingsModal';
 import PublishHfModal from './PublishHfModal';
+import HostedExportPanel from './HostedExportPanel';
 import WatermarkReviewLightbox from './WatermarkReviewLightbox';
 import { datasetImageUrl } from './datasetImageUrl';
 import { useToast } from '../common/Toast';
@@ -1253,6 +1254,8 @@ export default function DatasetWorkspace({ ds, onBack, stepSlug, onStepChange })
               </div>
             </div>
           </div>
+
+          {activeStep.slug === 'export' && <HostedExportPanel key={d.id} datasetId={d.id} />}
 
           <div className={stepCls('backup')}>
             <div id="ds-export-backup" tabIndex={-1}

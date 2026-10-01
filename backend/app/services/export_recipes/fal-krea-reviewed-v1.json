@@ -1,0 +1,83 @@
+{
+  "format": "person-export-recipe",
+  "schema_version": 1,
+  "id": "fal-krea-reviewed",
+  "version": 1,
+  "name": "Krea 2 reviewed captions (fal)",
+  "purpose": "person-adaptation",
+  "base_family": "krea-2",
+  "asset_kind": "lora",
+  "service": {
+    "id": "fal",
+    "protocol": "manual-offline",
+    "supported_base_families": [
+      "krea-2"
+    ],
+    "supported_asset_kinds": [
+      "lora"
+    ]
+  },
+  "endpoint": "fal-ai/krea-2-trainer",
+  "input_requirements": {
+    "minimum_training_images": 1,
+    "subject_kind": "character",
+    "reviewed_caption_pairs": true
+  },
+  "crop_rule": "square",
+  "caption_mode": "reviewed-sidecars",
+  "formatter": "paired-root",
+  "archive_name": "krea_training.zip",
+  "documentation_url": "https://fal.ai/models/fal-ai/krea-2-trainer/api",
+  "documentation_checked_at": "2026-10-01",
+  "compatibility_status": "documented; actual archive acceptance and inference loading unverified",
+  "count_guidance": {
+    "training": 32,
+    "evaluation": 8,
+    "reference": 16
+  },
+  "parameters": {
+    "resolution": {
+      "type": "integer",
+      "enum": [
+        768,
+        1024
+      ]
+    },
+    "steps": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 10000
+    },
+    "learning_rate": {
+      "type": "number",
+      "minimum": 1e-05,
+      "maximum": 0.01
+    },
+    "auto_captioning": {
+      "type": "string",
+      "enum": [
+        "Off"
+      ]
+    },
+    "debug_dataset": {
+      "type": "boolean"
+    }
+  },
+  "defaults": {
+    "resolution": 1024,
+    "steps": 1000,
+    "learning_rate": 0.0005,
+    "auto_captioning": "Off",
+    "debug_dataset": false
+  },
+  "parameter_bounds_basis": "Resolution/caption enums are documented; numeric bounds are local preparation guardrails, not verified provider limits.",
+  "availability": {
+    "status": "unverified",
+    "offers": [],
+    "cost": "unknown; recheck and agree spending before execution"
+  },
+  "model_id": "krea-2",
+  "supported_tasks": [
+    "person-adaptation"
+  ]
+}

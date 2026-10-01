@@ -92,8 +92,12 @@ and an explicit **Start anyway** confirmation; they do not block training.
 
 ### 6. Export or back up
 
-Export ordinary training pairs, or create a portable backup that retains the
-current dataset state and source provenance.
+Export ordinary training pairs, prepare a reviewed hosted person pack with
+separate references and held-out evaluation photos, or create a portable backup
+that retains the current dataset state and source provenance. The
+[hosted export](docs/guide/steps/17-export-dataset.md#reviewed-hosted-person-pack)
+works offline; the [manual pilot kit](docs/hosted-pilots/README.md) records the
+separate permissions, spending and output evidence needed for hosted use.
 
 
 ## Fork-specific workflow
