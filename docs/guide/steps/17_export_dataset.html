@@ -29,6 +29,16 @@
       <h2>Do this</h2>
       <ol><li>Open <strong>Export dataset</strong> in the dataset step navigator. Its URL ends in <code>/export</code>.</li><li>Check the kept count beside <strong>Export ZIP</strong>.</li><li>Select <strong>Export ZIP</strong>.</li><li>Choose a destination folder if your browser asks.</li><li>Wait for the download to finish, then open the ZIP to verify it contains image files and matching <code>.txt</code> caption files.</li><li>Keep <code>_prep_my_avatar_manifest.json</code>. Training tools can ignore it, but it records the source mix, coverage, and provenance.</li><li>Select <strong>Continue to Train a LoRA</strong>.</li></ol>
       <p>An export ZIP is a training package, not a complete backup of the project. The final guide step explains the separate <strong>Backup</strong> action.</p>
+      <h2>Reviewed hosted person pack</h2>
+      <p>For a character dataset, choose <strong>Prepare hosted export</strong>. No local trainer, service credentials or network access is needed.</p>
+      <ol>
+        <li>Confirm the subject, trigger, source rights, consent and intended publication scope.</li>
+        <li>Select training, reference and evaluation roles. Keep evaluation families and burst groups separate. Give references a purpose and order.</li>
+        <li>Preview each selected role. Adjust the square training crop and check face/body content; wider references and evaluation photos retain their own framing.</li>
+        <li>Review the final caption beside the exact derivative, then approve each pair. Crop, caption or relevant setting changes require renewed approval. Master captions and originals are preserved.</li>
+        <li>Download and retain the complete private revision with <code>manifest.json</code>, <code>recipe.json</code>, <code>references/</code> and <code>evaluation/</code>. Only <code>krea_training.zip</code> is the trainer upload archive.</li>
+      </ol>
+      <p>The browser saves draft selections, but approvals must be repeated when reopening. Export makes no provider request and grants no upload or spending permission. See the <a href="https://github.com/Kevinjohn/prep-my-avatar/blob/69d099ee040ba54a386f5ac89ef83b960d177701/docs/hosted-pilots/README.md">manual pilot kit</a> for the reference baseline, private records and silent-video review. Ordinary <strong>Export ZIP</strong> and <strong>Backup</strong> remain separate actions.</p>
       <h2>You are finished when</h2>
       <p>A ZIP file exists in your chosen download folder and its image/text pairs match the kept set. If export is your goal, skip the optional training, checkpoint-review, and Studio work in Steps 18–20, then continue to Step 21 to back up the dataset.</p>
     </div>

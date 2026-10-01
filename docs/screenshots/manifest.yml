@@ -63,118 +63,118 @@ screenshots:
         sha256: 7d4a08ee134e3941c796cb3665470ee2b1ebd496263ca6b1780b4a472f698a0a
   - path: guide/08_import_photos.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset import
     viewport: 1440x900
-    sha256: ebc41246bbf36fe07b34b4fedb5e3d881012e199122b3ab4b073e6eae0b48798
+    sha256: 4fb3c4526837a3385e5aae1d065c84a5a6ef90c462c20676b9720829be779a54
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: &workflow_sources
       - path: frontend/src/components/dataset/DatasetWorkspace.jsx
-        sha256: bb83a82d741d6e68e47af09172a453dd4edbde9109c9084fde921e9493745e01
+        sha256: c303ed5773dc43df0be7fb6a4da963cc232bb9801b09e81be150a65a0c7f8af9
       - path: frontend/src/components/dataset/DatasetWorkflowNav.jsx
         sha256: 0304fb2f3bd1206e785e1ebb8e295a8b3b50780ba95c22a12bac1901eae29390
   - path: guide/09_review_corpus.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset review
     viewport: 1440x900
-    sha256: 41301f19896629dcf79e981d1f686aca7d4ec2fa1e73a37703df08edd4f02d63
+    sha256: c8fdc2ac9a30ae74e32bbd4c74a9c9fe01f626d0f75a492bdfeddf4e092ec15c
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/10_choose_anchors.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset anchors
     viewport: 1440x900
-    sha256: 287b2ae132b3db44356d477ecda1aaa71dbad15b0cce487be558f44836390982
+    sha256: 37ba48fa5169129a16fc4a2e921c36bf45abe9022709f40c32f2163dbccea9af
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/11_review_coverage.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset coverage
     viewport: 1440x900
-    sha256: 22494aeb7b0a1cd0e71e23525de994bd8f88612624db93174ab64350f9b6b202
+    sha256: 4a4c7e88b38c0e68b7374411b71327f25dab1acffa38472e2b8153de9f042a05
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/12_set_primary_reference.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset primary reference
     viewport: 1440x900
-    sha256: e0f7c6c1dd672378ea071832ed2e6d8a09906205ecc53e68ced6d8fbf84eb6bf
+    sha256: f8c284f2aaeeaf019962b3f1aaee8b8617284615b33aeb337ea034b7d40b7a5d
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/13_generate_missing_views.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset generation
     viewport: 1440x900
-    sha256: f2ff8388092e6d93f7ed688ecb929da7d5b14bfe0d127e70104a5e095fc55eef
+    sha256: 58cad04b9a2360f3ac29e6b08e5bb996d968f187317d365d5b04da699f71fcb9
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/14_curate_images.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset curation
     viewport: 1440x900
-    sha256: 43b90c79523bc11829ba5ba0ef5b0bf00877d771d5805749318e74c4741db7af
+    sha256: 769619fb8c29e393279bcfcf4456b68b4f0caf598929eb9dc6d4c35ec31ce296
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/15_caption_images.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset captions
     viewport: 1440x900
-    sha256: 06051ed9d71d06df77ce7aedd20e11a8b4dc9928e4d94e7e0d6409afe8ebc72b
+    sha256: e9abac987bb58d082758c8e9516cb921dec3e303453e353cb27cc792f37b015f
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/16_score_face_similarity.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset face scoring
     viewport: 1440x900
-    sha256: 3b618d9ff4adbf4a73f431213243e486b1caae962834846eec1bbf998e913425
+    sha256: ecaf942ac62e3449fbca5637c22d78a398ca250a095d089004f24d94127cbf5c
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/17_export_dataset.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset export
     viewport: 1440x900
-    sha256: 791c65d3274369c66e90800d12eae019798f598edf111ff08023217031cde942
+    sha256: c9ba94f0044d9fc551237d7a3da5941e51b902b232d20f35bbdb3a75382e878b
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/18_train_lora.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset training
     viewport: 1440x900
-    sha256: 896fa2c751b83b4410c9d78797df64d1c069c4844eee4dd3d9eaf4cb75ea449d
+    sha256: ef56b527ed5b67ffae365a7ae3ba6abdb53c0bdfcaec659c799ac5de987c7fbd
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/19_review_checkpoints.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset checkpoints
     viewport: 1440x900
-    sha256: 76685b5fbb3b6f7c1518e798b03028996daeeedc1fd34557082f11ff129d79a7
+    sha256: 383711e1983d7965d139ed9689fca67b39ffefa7347abad24577b0c263c78593
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/20_test_studio.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset Studio
     viewport: 1440x900
-    sha256: 86c47e841f75b7ee17c1121bee048c36db75bc53fd14666795c3c345f6c9d5c9
+    sha256: 888e34e6ced2c4902ecdfaed36a186803550e38bd8d14f2fda1593f8c0cb0b86
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: guide/21_back_up_dataset.jpg
     status: current
-    capture_revision: b1b2f08b3396b7aa1f783d44e1b48eb8cb08442a
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
     page: Dataset backup
     viewport: 1440x900
-    sha256: 3a566b56435320747fd7bac2aaf1111c8b46934db6e4301f8dbc2dc48228bea1
+    sha256: c6eb2771ec18c94e4f4ad7f6b7f6cd85e25606a98ce8a0be68cd109d89caf383
     owner: Kevinjohn/prep-my-avatar maintainers
     relevant_sources: *workflow_sources
   - path: readme/05-training-readiness.jpg
@@ -190,3 +190,21 @@ screenshots:
       - path: frontend/src/components/dataset/PreflightModal.jsx
         sha256: 19a8abc19fa03b956dc0024cac3be9725c30406070854c1dc15ad13fd8f79c5a
     reason: Captured copy says captions are required, but launch permits Start anyway.
+  - path: guide/17_hosted_export_review.png
+    status: current
+    capture_revision: a7678670c07efa7f8b4a30ebe37052b6851e7b30
+    page: Reviewed offline person export with synthetic images
+    viewport: 1280x800
+    sha256: ec86da04c028a71a8caf72f6ef28ec00a09aca69b5c0d5740f6406e79bdb3f95
+    owner: Kevinjohn/prep-my-avatar maintainers
+    relevant_sources:
+      - path: frontend/src/components/dataset/DatasetWorkspace.jsx
+        sha256: c303ed5773dc43df0be7fb6a4da963cc232bb9801b09e81be150a65a0c7f8af9
+      - path: frontend/src/components/dataset/HostedExportPanel.jsx
+        sha256: b629e7ad25de56fe6107732e2554d40db65543e4f9b0ec556168e19c00c1f45f
+      - path: frontend/src/components/dataset/HostedExportSettings.jsx
+        sha256: 015ab3c8dd4017ab4f1eb7770b707a0850601374c156093e66a54f95b973c2ce
+      - path: frontend/src/components/dataset/HostedExportSelection.jsx
+        sha256: 50f103c24ac5dc568adbdc2c02c81d746cf545503c6248a502c07d9c207e6c0c
+      - path: frontend/src/components/dataset/hostedExportModel.js
+        sha256: 087c0e41dd4c9874f9d78eb8f520c961dd76e7038b23defb46b976e65a2e5767

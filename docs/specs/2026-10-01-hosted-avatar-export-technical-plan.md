@@ -1,6 +1,6 @@
 # Hosted avatar exports: technical plan and review brief
 
-- **Status:** Review corrections incorporated; offline export specified; hosted pilots remain untested and gated; implementation not authorised by this document
+- **Status:** Offline export implemented and locally verified; real hosted pilots remain untested and gated
 - **Date:** 2026-10-01
 - **Source baseline inspected:** `8a1a6f8120e3c9ecc901b5328bda1fc1ec96175e`
 - **Evidence:** Focused source inspection and provider documentation; no hosted creation or generation tested
@@ -37,6 +37,12 @@ research suggests bespoke GPU execution, managed-service-first takes precedence.
 | Settings and credentials | [config](../../backend/app/config.py) loads `.env` but does not include `FAL_KEY` in its Settings secret allowlist. A saved variable is not a completed integration. |
 | Hosted account readiness | Account access, credentials, billing readiness and provider loading have not been verified. Do not infer them from local configuration or expose secret values in records. |
 | Model families | [training_families](../../backend/app/utils/training_families.py) includes Krea 2. Qwen/H3/Fizgig/RefMods are not implemented training families in this app. |
+
+## Delivered offline milestone
+
+The [export contract](../hosted-pilots/export-contract.md) describes the implemented local API and archive. The export workspace now supports exact crop/caption approval, training/reference/held-out roles, lineage exclusion and immutable capture. Versioned definitions pin model capabilities and formatting; a second recipe and fake service are exercised only as local fixtures. Ordinary export and backup remain separate.
+
+The [manual pilot kit](../hosted-pilots/README.md) supplies readiness, brief, attempt and asset records for the still-image baseline and silent B-roll. No hosted request, training, identity upload or generated person asset is demonstrated. Selected photos and consent, provider/storage access, execution/publication permissions and an explicit spending ceiling remain prerequisites.
 
 ## Initial delivery: an offline export package
 
