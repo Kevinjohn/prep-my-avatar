@@ -97,7 +97,10 @@ separate references and held-out evaluation photos, or create a portable backup
 that retains the current dataset state and source provenance. The
 [hosted export](docs/guide/steps/17-export-dataset.md#reviewed-hosted-person-pack)
 works offline; the [manual pilot kit](docs/hosted-pilots/README.md) records the
-separate permissions, spending and output evidence needed for hosted use.
+separate permissions, spending and output evidence needed for hosted use. The
+[private asset bank](docs/hosted-pilots/private-bank.md) retains manual attempts,
+returned files, model-specific asset records and per-output reviews locally, with
+a dedicated archive and optional silent-video checks.
 
 
 ## Fork-specific workflow

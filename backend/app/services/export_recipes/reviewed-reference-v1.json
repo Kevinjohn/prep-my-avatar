@@ -1,0 +1,43 @@
+{
+  "format": "person-export-recipe",
+  "schema_version": 1,
+  "id": "reviewed-reference",
+  "version": 1,
+  "name": "Reviewed references and held-out photos",
+  "purpose": "reference-preparation",
+  "supported_tasks": [
+    "reference-preparation"
+  ],
+  "supported_roles": [
+    "reference",
+    "evaluation"
+  ],
+  "model_id": null,
+  "base_family": null,
+  "asset_kind": null,
+  "endpoint": null,
+  "service": {
+    "id": "local-reference-preparation",
+    "protocol": "manual-offline"
+  },
+  "input_requirements": {
+    "minimum_images_by_role": {
+      "reference": 1,
+      "evaluation": 0
+    },
+    "subject_kind": "character",
+    "reviewed_caption_pairs": true
+  },
+  "crop_rule": "preserve",
+  "caption_mode": "reviewed-sidecars",
+  "formatter": null,
+  "archive_name": null,
+  "documentation_checked_at": "2026-10-01",
+  "compatibility_status": "Local preparation only; check input compatibility with the selected provider before use.",
+  "count_guidance": {
+    "reference": 4,
+    "evaluation": 8
+  },
+  "parameters": {},
+  "defaults": {}
+}

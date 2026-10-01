@@ -1,0 +1,12 @@
+{
+  "id": "manual-adaptation",
+  "version": 1,
+  "label": "Private model adaptation (manual)",
+  "process": "adaptation",
+  "provider": "",
+  "endpoint": "",
+  "model_id": "",
+  "base_family": "",
+  "parameters": {},
+  "documentation_checked_at": null
+}

@@ -1,0 +1,27 @@
+{
+  "id": "manual-adapted-still",
+  "version": 1,
+  "label": "Krea 2 Turbo LoRA still (manual candidate)",
+  "process": "still",
+  "provider": "fal",
+  "endpoint": "fal-ai/krea-2/turbo/lora",
+  "model_id": "krea-2-turbo",
+  "base_family": "krea-2",
+  "parameters": {},
+  "capabilities": {
+    "max_references": 0,
+    "first_frame": false,
+    "asset_input_kinds": [
+      "weights",
+      "config"
+    ],
+    "asset_kinds": [
+      "lora"
+    ],
+    "accepted_asset_model_ids": [
+      "krea-2"
+    ]
+  },
+  "documentation_url": "https://fal.ai/models/fal-ai/krea-2/turbo/lora/api",
+  "documentation_checked_at": "2026-10-01"
+}

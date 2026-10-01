@@ -1,3 +1,19 @@
+export function hostedRoles(recipe) {
+  return recipe?.supported_roles || ['training', 'reference', 'evaluation'];
+}
+export function hostedRoleMinima(recipe) {
+  const requirements = recipe?.input_requirements || {};
+  return { ...requirements.minimum_images_by_role,
+    ...(requirements.minimum_training_images != null ? { training: requirements.minimum_training_images } : {}) };
+}
+export function changeHostedRecipe(draft, recipe) {
+  return { ...draft, recipe_id: recipe.id, recipe_version: recipe.version, parameters: { ...recipe.defaults },
+    selections: draft.selections.filter((entry) => hostedRoles(recipe).includes(entry.role)).map((entry) => {
+      const { approval: _approval, preview: _preview, crop_box: _box, ...rest } = entry;
+      return { ...rest, crop: null };
+    }) };
+}
+
 /** Hosted drafts describe derivatives; they never edit the master corpus. */
 export function createHostedDraft(snapshot) {
   const recipe = snapshot.recipes[0];
@@ -32,9 +48,12 @@ export function hostedExportErrors(draft, snapshot) {
   if (!draft.subject.publication_scope.trim()) errors.push('Describe the intended publication scope.');
   const recipe = snapshot.recipes.find((item) => item.id === draft.recipe_id && item.version === draft.recipe_version);
   if (!recipe) errors.push('Choose a supported recipe version.');
-  const minimum = recipe?.input_requirements?.minimum_training_images;
-  if (!Number.isInteger(minimum) || minimum < 1) errors.push('The recipe is missing a valid training minimum.');
-  else if (draft.selections.filter((entry) => entry.role === 'training').length < minimum) errors.push(`Choose at least ${minimum} training photo(s).`);
+  const minima = hostedRoleMinima(recipe);
+  if (!Object.keys(minima).length) errors.push('The recipe is missing valid role minima.');
+  for (const [role, minimum] of Object.entries(minima)) {
+    if (!hostedRoles(recipe).includes(role) || !Number.isInteger(minimum) || minimum < 0) errors.push('The recipe is missing valid role minima.');
+    else if (draft.selections.filter((entry) => entry.role === role).length < minimum) errors.push(`Choose at least ${minimum} ${role} photo(s).`);
+  }
   for (const [name, rule] of Object.entries(recipe?.parameters || {})) {
     const value = draft.parameters[name];
     if ((rule.enum && !rule.enum.includes(value)) || (rule.type === 'integer' && !Number.isInteger(value)) || (rule.type === 'number' && !Number.isFinite(value)) || (rule.type === 'boolean' && typeof value !== 'boolean') || (rule.minimum != null && value < rule.minimum) || (rule.maximum != null && value > rule.maximum)) errors.push(`Check recipe parameter: ${name}.`);
@@ -44,6 +63,7 @@ export function hostedExportErrors(draft, snapshot) {
   const imageFor = (id) => snapshot.images.find((image) => image.id === id);
   for (const entry of draft.selections) {
     const image = imageFor(entry.image_id);
+    if (!hostedRoles(recipe).includes(entry.role)) errors.push(`Photo ${entry.image_id} has an unsupported role for this recipe.`);
     if (entry.crop_box && !squareCrop(image || {}, entry.crop_box)) errors.push(`Photo ${entry.image_id} has an invalid square crop.`);
     if (image?.role_exclusions?.[entry.role]) errors.push(`Photo ${entry.image_id}: ${image.role_exclusions[entry.role]}`);
     if (!image || !image.eligible) errors.push(`Photo ${entry.image_id} is excluded by admission or rights rules.`);
