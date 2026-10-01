@@ -2,23 +2,24 @@
 
 - **Status:** Review corrections incorporated; offline export specified; hosted pilots remain untested and gated; implementation not authorised by this document
 - **Date:** 2026-10-01
-- **Repository:** `/Users/kevinjohngallagher/Documents/GitHub/prep-my-avatar`
 - **Source baseline inspected:** `8a1a6f8120e3c9ecc901b5328bda1fc1ec96175e`
 - **Evidence:** Focused source inspection and provider documentation; no hosted creation or generation tested
 
 ## Outcome and fixed direction
 
-Prepare a reusable, current photographic identity for a personal image bank:
-stage photographs, website/deck compositions and social quote backgrounds.
-Silent B-roll is the next essential outcome. Talking avatars and voice work are
-deferred. The MacBook Pro is the preparation/review workstation; training and
-generation run on third-party services.
+Prepare reusable assets for a consenting subject: photographic stills with
+useful facial detail, whole-person coverage and composition, followed by short
+silent B-roll that maintains identity through movement. Talking avatars and
+voice work are deferred. Subject, appearance, scenes, accounts, geography,
+permissions and eligibility are user data; the workflow must support another
+consenting subject without code changes.
 
-Deliver exports first. Use fal as the primary managed service, Hugging Face as
-the versioned LoRA store, and Replicate as an endpoint-specific alternative.
-Preserve existing local workflows for other users without requiring them for
-this owner's path. Do not build a universal model/provider framework to deliver
-the first export.
+Deliver exports first. The current pilot evaluates fal, Hugging Face and
+Replicate as candidate services and stores, not product-wide assumptions.
+Preserve existing workflows and add small explicit boundaries for
+corpus/provenance, model and asset compatibility, recipes and formatting,
+provider execution, and output import/evaluation. Do not build a universal
+plugin framework.
 
 The [research and product direction](2026-10-01-avatar-models-and-reference-assets-research.md)
 contains model rationale, source-photo guidance and reference/LoRA explanations.
@@ -34,8 +35,7 @@ research suggests bespoke GPU execution, managed-service-first takes precedence.
 | Immutable training snapshots | [training_snapshot](../../backend/app/services/training_snapshot.py) records revision, configuration and content/caption hashes, checking for concurrent changes. Reuse where suitable; don't mutate existing snapshot formats casually. |
 | Existing trainer materialisation | [lora_training_export](../../backend/app/services/lora_training_export.py) supports snapshot-based materialisation outside local ai-toolkit directories. It includes trainer-specific masks; those are not presumed useful to fal. |
 | Settings and credentials | [config](../../backend/app/config.py) loads `.env` but does not include `FAL_KEY` in its Settings secret allowlist. A saved variable is not a completed integration. |
-| fal account | An API-only key was created and stored locally as `FAL_KEY`; `.env` is ignored, untracked and mode 0600. The key was not API-tested. Dashboard credit balance was zero when observed. Never ask a reviewer to read the key. |
-| Hugging Face | Intended asset store; account/repository access and provider loading have not been verified. `HF_TOKEN` is already a recognised secret name, which does not prove usable credentials exist. |
+| Hosted account readiness | Account access, credentials, billing readiness and provider loading have not been verified. Do not infer them from local configuration or expose secret values in records. |
 | Model families | [training_families](../../backend/app/utils/training_families.py) includes Krea 2. Qwen/H3/Fizgig/RefMods are not implemented training families in this app. |
 
 ## Initial delivery: an offline export package
@@ -52,13 +52,17 @@ avatar_export_<revision>/
   references/             # ordered reviewed images for generation
   evaluation/             # held-out real images; not included in upload archive
   manifest.json           # private provenance, selection and file hashes
-  recipe.json             # intended endpoint and explicit settings
+  recipe.json             # pinned recipe plus maintained definition references
   README.md               # manual training, asset storage and evaluation steps
 ```
 
 These are proposed names/contracts, not existing files. Preserve ordinary export
 behaviour and offer an explicit hosted target rather than silently replacing its
 layout. The manifest is a companion document, not presumed trainer input.
+Keep service/model IDs, capabilities, limits, defaults, availability, prices and
+promotional offers in maintained definitions/settings. Pin definition and recipe
+versions, evidence date and selected parameters into each export/run record so
+later definition changes do not rewrite historical exports.
 
 Use existing training admission rules plus a distinct held-out selection. A
 reference may be chosen from the creation set without becoming an extra training
@@ -117,7 +121,7 @@ and $3 respectively, excluding additional captioning, inference and storage cost
 The smoke test proves compatibility, not identity quality. Recheck pricing and
 agree a combined pilot spending ceiling before submission.
 
-## Records and responsibilities
+## Records and small boundaries
 
 Define versioned records at the boundary; begin with companion JSON rather than
 requiring database changes for export-first:
@@ -125,20 +129,28 @@ requiring database changes for export-first:
 | Record | Required information |
 | --- | --- |
 | Export revision | Format/schema version, dataset revision, selected roles, ordered references, relative filenames, content/caption hashes, crop transforms and source lineage |
-| Creation recipe | Purpose, base family, provider/endpoint, explicit parameters, trigger, caption mode, source-document/check date; unknown fields remain unknown |
+| Subject/workflow authority | Subject reference, consent scope/status and date, intended use, execution geography, publication scope, disclosure preference and evidence reference; collect only what the user needs to establish the selected workflow |
+| Creation recipe | Purpose, base family, provider/endpoint definition ID and version, explicit parameters, trigger, caption mode, source-document/check date; unknown fields remain unknown |
+| Provider/model definition | Stable definition ID/version, declared capabilities and compatibility, accepted formats, parameter/file limits, defaults, availability, price basis and dated source/evidence |
+| Promotional offer | Provider/offer ID, eligibility evidence, remaining quota and unit, expiry, dated terms evidence and whether the user selected it; never infer continuing eligibility or free usage |
 | Personal asset | Kind (LoRA or future RefMod), SHA-256, base/checkpoint compatibility, creation revision, trigger/strength, Hub repository/path/commit, applicable licence/version and terms evidence when stored |
 | Evaluation run | Scenario, method, asset hash, actual prompt/settings, reference order, seed, provider request identifier, saved outputs, review outcome and cost when reported |
 
 Do not record tokens, signed URLs or credentials as provenance. Record provider
 model versions only when exposed; seeds cannot promise exact reproducibility
-across provider changes. A Krea LoRA is not interchangeable with a FLUX LoRA;
-a RefMod is not a LoRA merely because both are safetensors files.
+across provider changes. Reject incompatible assets explicitly; a Krea LoRA is
+not interchangeable with a FLUX LoRA, and a RefMod is not a LoRA merely because
+both are safetensors files.
 
-Keep source selection, target formatting and remote execution separate. The
-selection/materialisation layer owns admission and hashes. The target exporter
-owns crop/layout/caption compatibility. A later provider adapter owns request
-translation and remote lifecycle. Reuse existing seams after focused inspection;
-do not create a second corpus, job queue or generic plugin system.
+Keep five small boundaries explicit: subject/corpus selection owns admission,
+lineage and provenance; model/asset definitions own declared capabilities and
+compatibility; versioned recipes own process settings while exporters own target
+format/crops/captions; provider adapters own request translation and lifecycle;
+output import/evaluation owns downloaded outputs, evidence and review results.
+Reuse existing seams after focused inspection; do not create a second corpus,
+job queue or generic plugin system. Prove this extension boundary with a second
+export recipe and a fake second-service fixture, including incompatibility and
+error cases. Fixtures are local evidence only, not hosted service validation.
 
 ## Hugging Face and managed generation
 
@@ -146,8 +158,8 @@ Initially use private Hub storage with an asset card describing base family,
 creation recipe, trigger and tested inference endpoint. Public release is a
 separate visibility decision. Include applicable licence/notice files and any
 required derivative naming when sharing or making an adapter available; retain
-terms evidence even for private storage. The owner intends portable hosting, not
-mandatory anonymous downloads.
+terms evidence even for private storage. Hosting and anonymous download choices
+belong to the user.
 
 The [Krea Turbo LoRA endpoint](https://fal.ai/models/fal-ai/krea-2/turbo/lora/api)
 documents custom LoRAs and hosted file inputs/uploads. Private Hub retrieval and
@@ -161,7 +173,7 @@ generated output promptly, hash it and retain it in the private image bank;
 temporary provider URLs are not the archive. Provider-native image generation
 is the normal path. Replicate remains a verified-family alternative, not an
 automatic failover: a second provider must not receive photos on failure without
-the owner's chosen routing policy.
+the user's chosen routing policy.
 
 ## Reference baseline before adaptation
 
@@ -185,28 +197,30 @@ test. No reference generator is presumed already configured in the app.
 
 ## Execution and publication terms
 
-The owner states that execution will take place in Thailand from the week of
-2026-10-05 and that the applicable licence criteria will be met. Record this as
-the intended execution context and owner declaration, not an independently
-verified universal rights clearance. Account location, provider deployment and
-later output use/display are separate facts.
+Before hosted execution, establish the selected subject's consent and the user's
+applicable eligibility, execution geography, provider/storage access and intended
+publication scope. Record evidence and check dates per workflow. Account location,
+execution location, provider deployment and later output use/display are separate
+facts; none is inferred from this pilot or treated as a product default.
 
-Thailand is not excluded by the [H3 community licence](https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/LICENSE).
-Section V.4 also restricts outputs outside its territory (UK/EU/US/Korea excluded).
-Therefore travel alone does not establish rights for later worldwide website,
-social or slide use. Confirm which fal-specific permissions govern hosted H3 Max
-and intended publication; use a permitted alternative if unresolved. Retain the
-confirmation with run records. Do not assume a rented runtime resolves this.
-The licence also requires prominent disclosure for public generated content;
-the owner's disclosure preference supports this requirement.
+The [H3 community licence](https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/LICENSE)
+sets territorial limits: section V.4 restricts outputs in certain territories
+(UK/EU/US/Korea).
+Therefore execution in an allowed territory does not establish rights for later
+worldwide website, social or slide use. Confirm which fal-specific permissions
+govern hosted H3 Max and the user's intended publication; use a permitted
+alternative if unresolved. Retain the confirmation with run records. Do not
+assume a rented runtime resolves this. The licence also requires prominent
+disclosure for public generated content; record the user's disclosure preference
+and meet applicable terms.
 
 [Krea's v1 licence, dated 2026-06-22](https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf)
 permits community commercial use below $1m trailing annual revenue, including
 affiliated entities; otherwise an enterprise licence is needed. Section 3 sets
 derivative naming, licence/notice and modification requirements when distributing
 models. Treat adapters conservatively as derivatives until applicability is
-confirmed. Record the owner's eligibility declaration and the terms governing
-hosted outputs, downloaded weights and onward sharing separately. Preserve
+confirmed. Record the user's eligibility evidence and the terms governing hosted
+outputs, downloaded weights and onward sharing separately. Preserve
 provenance markings and provider safeguards; manually review outputs before use.
 
 These checks do not block offline preparation. Before each relevant hosted pilot,
@@ -267,17 +281,23 @@ This is later scope, not part of the offline export milestone:
   provider/Hub resources with size/time limits; a custom weight URL is a server
   fetch boundary, not an unrestricted URL proxy.
 
-Use fake responses for routine tests. Live paid checks belong to an approved
-pilot, not normal CI. No new JavaScript package manager, Docker support or
-production deployment is part of this plan.
+Use fake responses for routine tests, including a fake second-service fixture
+that exercises the provider boundary without changing corpus logic. Include a
+second export recipe fixture to prove recipe/format additions preserve historical
+exports. Record offer eligibility, quota, expiry and dated evidence; never assume
+free usage continues or silently incur charges after expiry. Uploads to another
+provider require the user's selected routing policy. Fixtures and mocks are local
+evidence only. Live paid checks belong to an approved pilot, not normal CI. No new
+JavaScript package manager, Docker support or production deployment is part of
+this plan.
 
 ## Delivery sequence and acceptance evidence
 
 | Milestone | Deliverable | Acceptance evidence |
 | --- | --- | --- |
-| 1: offline export | Explicit hosted ZIP, crop/caption review, reference/held-out packs and companion records | No API calls; source-lineage exclusion; emitted pair hashes; concurrent/interrupted changes cannot publish a completed package; unchanged ordinary export/backup; useful export with local trainers absent |
-| 2: reference baseline | Named reference endpoint, six scene briefs and three seeds | Terms/upload scope and ceiling checked; all attempts/costs retained; owner reviews likeness, composition and correction effort; results inform whether adaptation is useful |
-| 3: manual adaptation and comparison | Krea smoke/identity training, saved asset, Hub-to-fal round trip and same six-scene comparison | Terms and total ceiling checked; archive accepted; saved weights/config hashes verified; asset locator/hash and nonzero strength logged; paired no-LoRA/LoRA control where supported; recognisable identity demonstrated; at least one usable image per scene without face replacement; inspect final website/deck crops; actual costs retained |
+| 1: offline export | Explicit hosted ZIP, crop/caption review, reference/held-out packs and companion records | No API calls; source-lineage exclusion; emitted pair hashes; concurrent/interrupted changes cannot publish a completed package; unchanged ordinary export/backup; useful export with local trainers absent; second recipe fixture preserves prior export; fake second-service fixture exercises declared capabilities and failures |
+| 2: reference baseline | Named reference endpoint, six scene briefs and three seeds | Subject consent, terms/upload scope and spending ceiling checked; all attempts/costs retained; user reviews likeness, composition and correction effort; results inform whether adaptation is useful |
+| 3: manual adaptation and comparison | Krea smoke/identity training, saved asset, Hub-to-fal round trip and same six-scene comparison | Terms and total ceiling checked; archive accepted; saved weights/config hashes verified; asset locator/hash and nonzero strength logged; paired no-LoRA/LoRA control where supported; recognisable identity demonstrated; at least one usable image per scene without face replacement; inspect intended crops; actual costs retained |
 | 4: silent B-roll pilot | Three simple actions, two seeds each | Hosted execution and intended output publication permissions established; at least one usable clip per action; identity stable through the full clip; final media contains no audio stream |
 | 5: minimal integration | Settings, hosted job lifecycle and output import | Secret redaction, restart recovery, failed downloads and unknown submission outcomes tested without duplicate paid submissions |
 
@@ -285,7 +305,7 @@ Milestones 2–4 are experiments and can use service dashboards before integrati
 A working Hub-to-fal round trip establishes compatibility for that exact asset
 and endpoint, not automatic Replicate interoperability. Provider acceptance alone
 is insufficient evidence of learned identity or actual application of weights.
-An integration owner checks the complete export-to-output chain once new code is
+An implementation reviewer checks the complete export-to-output chain once new code is
 authorised. Unit/contract tests cover changed boundaries; browser verification
 covers crop review and export UI. Re-run relevant checks after corrections, not
 unchanged broad suites for reassurance. No schedule estimate is asserted before
@@ -326,7 +346,7 @@ The ten review concerns are reflected in this revision:
 
 | Concern | Disposition |
 | --- | --- |
-| H3 territory | Thailand execution context recorded; hosted/output permission remains an explicit pilot gate |
+| H3 territory | User-specific execution context recorded; hosted/output permission remains an explicit pilot gate |
 | Cropped-image captions | Final derivative review and target overrides required |
 | Held-out leakage | Original lineage/burst grouping required before role assignment |
 | Baseline sequencing | Named fal reference route precedes adaptation |
@@ -342,8 +362,10 @@ Offline export has a defined acceptance contract. Hosted pilots remain untested;
 provider/storage compatibility, output quality and applicable rights need the
 specified evidence before their execution or publication milestones.
 
-No owner decision is missing for document review. Access to current photos,
-permission/access for the chosen hosted stores, a spending ceiling before paid
-work and subjective likeness approval become relevant at their respective
-execution milestones. Reviewers should resolve technical uncertainty through
-sources/evidence rather than ask the owner to choose model internals.
+No user decision is missing for document review. Access to selected photos,
+subject consent, permission/access for chosen hosted stores, an explicit spending
+ceiling before paid work and subjective likeness approval become relevant at
+their respective execution milestones. Resolve technical uncertainty through
+sources/evidence rather than asking users to choose model internals.
+
+For private manual preparation and records, see the [hosted-pilot kit](../hosted-pilots/README.md), including the [readiness](../hosted-pilots/readiness.template.json), [briefs](../hosted-pilots/briefs.template.json), [attempt](../hosted-pilots/attempt.template.json) and [asset](../hosted-pilots/asset.template.json) templates. These provide preparation steps only; hosted results remain untested until recorded from an actual run.

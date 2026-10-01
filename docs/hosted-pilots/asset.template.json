@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "kind": null,
+  "sha256": null,
+  "local_relative_path": null,
+  "configuration_sha256": null,
+  "creation_attempt_id": null,
+  "export_revision": null,
+  "model_id": null,
+  "base_family": null,
+  "checkpoint": null,
+  "trigger": null,
+  "tested_strength": null,
+  "private_storage": {"repository": null, "path": null, "commit": null, "visibility_verified_at": null},
+  "rights": {"licence_version": null, "terms_evidence_path": null, "required_notices": [], "execution_scope": null, "distribution_scope": null},
+  "compatibility": {"status": "unproven", "provider": null, "endpoint": null, "loading_attempt_id": null, "submitted_sha256": null, "application_control_attempt_ids": [], "subject_review_evidence": null},
+  "backup_verified_at": null
+}

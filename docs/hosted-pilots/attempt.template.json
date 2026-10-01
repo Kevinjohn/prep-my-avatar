@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "attempt_id": null,
+  "status": "not_started",
+  "subject_id": null,
+  "export_revision": null,
+  "scene_or_action_id": null,
+  "method": null,
+  "recipe": {"id": null, "version": null, "definition_sha256": null, "pinned_definition_path": null, "provider": null, "endpoint": null, "model_id": null, "base_family": null, "provider_version_if_exposed": null, "documentation_checked_at": null, "parameters": {}},
+  "inputs": {"references_in_order": [], "first_frame": null, "asset_sha256": null, "asset_locator_without_credentials": null, "asset_strength": null},
+  "prompt": null,
+  "seed": null,
+  "request": {"submitted_at": null, "provider_request_id": null, "outcome": "not_submitted", "error": null, "reconciliation_evidence": null},
+  "outputs": [],
+  "cost": {"currency": null, "estimated": null, "reported_actual": null, "evidence": null},
+  "review": {"reviewed_at": null, "subject_recognises_likeness": null, "face_detail": null, "hands_body": null, "prompt_adherence": null, "clothing_flexibility": null, "copied_surroundings": null, "composition_and_final_crop": null, "correction_minutes": null, "accepted": false, "reason": null, "whole_clip_viewed": false, "timed_observations": [], "no_audio_stream_verified": false, "probe_evidence_path": null},
+  "controls": {"paired_without_adapter_attempt_id": null, "paired_with_adapter_attempt_id": null, "application_evidence": null},
+  "backup_verified_at": null
+}

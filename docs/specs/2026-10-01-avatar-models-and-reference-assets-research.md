@@ -7,8 +7,8 @@
 
 ## Purpose
 
-Prep My Avatar should prepare a person's identity for several useful generation
-workflows: new photographs, edits to existing images, and consistent video.
+Prep My Avatar should prepare a consenting subject's identity for several useful
+generation workflows: new photographs, edits to existing images, and consistent video.
 The durable investment is the reviewed source corpus and its provenance. From
 that corpus we should be able to create different model-specific assets as the
 ecosystem changes.
@@ -22,31 +22,31 @@ and [multi-reference corpus design](import-first-multi-reference-design.md).
 For delivery boundaries, technical contracts and independent review, use the
 [hosted export technical plan](2026-10-01-hosted-avatar-export-technical-plan.md).
 
-## Confirmed purpose and priorities
+## Initial use cases and priorities
 
-Confirmed on 2026-10-01:
+The initial use cases are examples, not product defaults or eligibility
+assumptions. Each user's subject, appearance, scenes, accounts, geography,
+permissions and eligibility are data to capture and verify for that workflow.
+The product must support another consenting subject without code changes.
 
-- **Primary outcome:** a fresh photographic image bank of the owner, especially
-  speaking on stage, for a personal website, slide decks and social quote images.
+- **Primary outcome:** a fresh photographic image bank of a consenting subject,
+  including stage scenes, website/deck compositions and social quote images.
   Images should work with chosen backgrounds and leave useful space for text.
 - **Next essential outcome:** silent B-roll using the same recognisable person.
   This is a crucial follow-on capability, not a distant optional experiment.
 - **Deferred:** talking avatars, voice identity and lip synchronisation.
 - **Delivery approach:** export first. Prepare reviewed datasets and reference
   packs for external tools before considering in-app creation or execution.
-- **Execution:** the owner's MacBook Pro is for preparation and review. Training
-  and image/video generation should use third-party services. Hugging Face is
-  the intended store for reusable LoRAs accessible to compatible services.
-- **Audience:** the owner's own use drives the requirements. Open-source release
-  may help others, but does not require a broad commercial product workflow.
-- **Source material:** many existing stage photographs are about ten years old
-  and low resolution. Fresh photographs can be taken with family assistance to
-  fill specific face, body and pose gaps.
-- **Execution location:** the owner plans to perform hosted work from Thailand
-  from the week of 2026-10-05 and states that applicable licence criteria will be
-  met. Execution location and later output publication rights remain distinct.
-- **Disclosure:** the owner is comfortable labelling published images as edited
-  or generated. Keep provenance so that disclosure remains straightforward.
+- **Execution:** preparation/review hardware, execution provider and asset store
+  are user choices. The initial route proposes local preparation and managed hosted
+  execution, with Hugging Face as a candidate store for compatible LoRAs.
+- **Audience:** intended use and publication context must be recorded per run.
+- **Source material:** historical photographs can inform framing and gestures,
+  but fresh photographs should establish present-day appearance and fill any
+  face, body or pose gaps.
+- **Permissions and disclosure:** record the subject's consent, the user's
+  applicable execution/publication permissions and disclosure preference per
+  workflow. Do not infer them from this pilot or from account geography.
 
 The desired result is a current likeness placed in useful scenes. Reconstructing
 an old stage photo does not establish current appearance. Historical photos can
@@ -59,9 +59,17 @@ quality and compatibility claims still require experiments.
 
 ## Working decisions
 
-These are chosen defaults for this internal tool. The owner does not need to
-select model internals, quantisation or node graphs. Change a default when
-documented compatibility or measured output quality warrants it, and record why.
+These are pilot defaults, not assumptions about other users. The product should
+select compatible recipes from maintained definitions and capture the chosen
+settings and evidence. Users should not need to select model internals,
+quantisation or node graphs unless a workflow requires it.
+
+Keep the extension seams small: subject/corpus provenance, model and asset
+compatibility, versioned recipes and formatters, provider lifecycle adapters, and
+output import/evaluation. Pin changing endpoint capabilities, limits, prices and
+offers with dated eligibility, quota and expiry evidence. The technical plan
+requires a second recipe and fake second-service fixture to prove those seams;
+fixtures do not establish hosted compatibility.
 
 | Area | Decision | Reason |
 | --- | --- | --- |
@@ -74,7 +82,7 @@ documented compatibility or measured output quality warrants it, and record why.
 | Primary service | fal for hosted Krea training/generation and H3 reference video | Documented endpoints cover the two immediate goals |
 | Secondary service | Replicate for verified model-specific alternatives, notably FLUX LoRAs | Explicit Hugging Face LoRA support exists for those endpoints; do not assume Krea parity |
 | Asset store | Hugging Face for versioned personal LoRAs and creation metadata | Keeps the weights portable between compatible services |
-| Hardware direction | Managed hosted execution; no local generation or training requirement | The MacBook Pro remains the preparation/review workstation |
+| Hardware direction | Managed hosted execution; no local generation or training requirement | Use the user's chosen preparation/review workstation |
 | Specialist fallback | RunPod-hosted Fizgig/ComfyUI only when a required asset is unsupported by managed APIs | Useful for RefMods, but not the normal workflow |
 | Lower priority | Optimised RefMods, H3 LoRAs, LoKR, edit/slider adapters and multi-person scenes | Add them when a specific baseline failure or requested use justifies them |
 | Deferred | Talking avatars, voice transfer and new Ideogram training support | Outside the immediate outcome; Ideogram 4.5 adaptation is not yet established here |
@@ -95,8 +103,9 @@ Within the 32 inputs, aim for twelve face-focused views, twelve chest/waist-up
 speaker poses and eight full-body views. Include both sides, natural expressions,
 several outfits and more than one lighting/background situation. Preserve the
 originals and reuse images across purpose-specific packs rather than requiring
-separate photos for every target. Review the existing corpus first; ask family
-to capture only missing current views. An optional T-pose is supplemental.
+separate photos for every target. Review the existing corpus first and request
+new capture only for missing current views, with the subject's consent. An
+optional T-pose is supplemental.
 
 ### Default experiment and escalation
 
@@ -169,7 +178,7 @@ one into the other.
 Proposed flow (training is conditional on the reference baseline):
 
 ```text
-MacBook: curate photos and export
+Local workstation: curate photos and export
   → hosted still-reference baseline
   → assess whether adaptation adds useful repeatability or portability
   → if justified: managed training service
@@ -197,7 +206,7 @@ describe access controls. fal's file documentation expects fetchable URLs or
 uploads, so a private Hub URL is not assumed to work directly. Where needed,
 fetch privately and upload the selected weights to provider storage; assess that
 storage's access/retention before execution. Do not place access tokens in asset
-URLs or the public repository. A public LoRA remains an option if the owner later
+URLs or the public repository. A public LoRA remains an option if the user later
 chooses easy anonymous access and reuse by others.
 
 The service-first decision takes precedence over earlier trainer-specific
@@ -213,16 +222,16 @@ candidate. The current
 defines non-commercial use as research or evaluation only (section 1.i).
 Accordingly, do not make it the default production image-bank route without
 separate permission covering that use. This is a conservative project decision,
-not a request for the owner to interpret the licence.
+not a request for the user to interpret the licence without project guidance.
 
 The technical plan's [execution and publication terms](2026-10-01-hosted-avatar-export-technical-plan.md#execution-and-publication-terms)
-record Krea's revenue eligibility and derivative-distribution requirements,
-H3's territorial/output restrictions and the owner's Thailand context. Thailand
-execution does not alone settle later worldwide publication. Confirm the actual
-hosted permissions and retain the governing licence/version with personal assets;
+record Krea's revenue eligibility and derivative-distribution requirements and
+H3's territorial/output restrictions. Execution geography does not alone settle
+later worldwide publication. Confirm the actual hosted permissions and retain
+the governing licence/version with user assets;
 open-source application licensing does not grant rights to adapters or outputs.
 Preserve required licence/notice material when sharing weights. Public generated
-media disclosure remains part of the owner's chosen publication workflow.
+media disclosure remains part of the user's chosen publication workflow.
 
 Keep source photos, reference packs and previews outside the public code
 repository. Store personal LoRAs on Hugging Face under the visibility policy
@@ -512,7 +521,7 @@ plain/tuned distinction are documented in the guides above; still-image models
 have their own reference interfaces and must be evaluated separately.
 
 For this project, whether reference conditioning is enough is an experiment we
-must help the owner interpret, not a technical preference they need to choose
+should help users interpret, not a technical preference they need to choose
 in advance. Proposed decision rule:
 
 1. Try a reviewed fresh reference pack across several representative stills:
@@ -565,10 +574,10 @@ is authorised by this document.
 
 Start from a documented hosted configuration, measure cost,
 time and quality, then change one constraint at a time. There is no need for
-the owner to select quantisation, GPU models or node graphs before we have
+users to select quantisation, GPU models or node graphs before we have
 identified a useful output route. No hardware purchase is planned.
 
-## Evidence to gather later, rather than decisions for the owner
+## Evidence to gather later, rather than decisions for the user
 
 - Review current-photo coverage and produce a short missing-shot list.
 - Pin compatible model/tool versions and verify the export formats they accept.
@@ -576,12 +585,12 @@ identified a useful output route. No hardware purchase is planned.
 - Verify Hugging Face-to-provider weight loading and selected endpoint costs.
 - Perform the bounded comparisons above; retain complete results, not only winners.
 
-No user answer is required to finish this product direction. At execution time,
-request only information that cannot be found or inferred: access to the chosen
-current photos if unavailable, a spending ceiling before paid work, and personal
-likeness approval on the resulting candidates. Technical choices remain the
-responsibility of the project workflow and are revised using evidence.
+At execution time, establish access to selected photos, the subject's consent,
+an explicit spending ceiling before paid work, and the subject's likeness
+approval on resulting candidates. Technical choices should be guided by
+documented capabilities and evidence.
 
-No application development, installation, GPU spending or publication is part of
-this research document. Before a future experiment, recheck the linked versions,
-complete the relevant evidence checks and preserve a dated creation recipe.
+For preparation steps and private record templates, see the
+[manual hosted-pilot kit](../hosted-pilots/README.md). It records no hosted
+results. Before an experiment, recheck linked versions, complete the relevant
+evidence checks and preserve a dated creation recipe.
