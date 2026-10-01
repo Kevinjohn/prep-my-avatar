@@ -1,6 +1,6 @@
 # Avatar models and reusable reference assets
 
-- **Status:** Export-first product direction with review corrections incorporated; implementation deferred
+- **Status:** Offline export implemented and locally verified; still-image and silent-video pilots await execution inputs
 - **Date / sources checked:** 2026-10-01
 - **Scope:** Krea 2, Qwen Image 2.1, Fizgig and its training adapter, MiniMax H3 and RefMods, Ideogram 4.5
 - **Verification:** Documentation reviewed; no models downloaded, training performed or generation quality independently measured
