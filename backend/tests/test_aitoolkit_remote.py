@@ -34,12 +34,16 @@ def test_is_ready_and_auth_header(remote, monkeypatch):
     seen = {}
 
     def fake(method, url, **kw):
-        seen['url'], seen['auth'] = url, kw['headers'].get('Authorization')
+        seen.setdefault('urls', []).append(url)
+        seen['auth'] = kw['headers'].get('Authorization')
+        if url.endswith('/api/settings'):
+            return FakeResp(200, {'TRAINING_FOLDER': '/out', 'DATASETS_FOLDER': '/datasets'})
         return FakeResp(200, {'isAuthenticated': True})
 
     monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
     assert remote.is_ready() is True
-    assert seen['url'] == 'http://1.2.3.4:40123/api/auth'
+    assert seen['urls'] == ['http://1.2.3.4:40123/api/auth',
+                           'http://1.2.3.4:40123/api/settings']
     assert seen['auth'] == 'Bearer tok-abc'
 
 
@@ -47,6 +51,15 @@ def test_is_ready_false_on_connection_error(remote, monkeypatch):
     def boom(*a, **kw):
         raise OSError('refused')
     monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', boom)
+    assert remote.is_ready() is False
+
+
+@pytest.mark.parametrize('settings_response', [FakeResp(404), FakeResp(200, {}),
+                                             FakeResp(200, '<html>Starting</html>')])
+def test_auth_alone_is_not_ready_without_usable_settings(remote, monkeypatch, settings_response):
+    def fake(method, url, **kw):
+        return FakeResp(200, {'isAuthenticated': True}) if url.endswith('/api/auth') else settings_response
+    monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
     assert remote.is_ready() is False
 
 
@@ -101,6 +114,25 @@ def test_ensure_settings_without_token_never_posts(remote, monkeypatch):
     assert st['TRAINING_FOLDER'] == '/root/aitk/out'
 
 
+def test_ensure_settings_preserves_models_path_required_by_new_pods(remote, monkeypatch):
+    settings = {'TRAINING_FOLDER': '/workspace/out',
+                'DATASETS_FOLDER': '/workspace/datasets',
+                'MODELS_PATH': '/workspace/models'}
+
+    def fake(method, url, **kw):
+        if method == 'GET':
+            return FakeResp(200, settings)
+        # Current ai-toolkit upserts this fourth field alongside the others;
+        # omitting it causes Prisma to reject the entire settings update.
+        if kw['json'].get('MODELS_PATH') != settings['MODELS_PATH']:
+            return FakeResp(500, {'error': 'Failed to update settings'})
+        assert kw['json'] == {**settings, 'HF_TOKEN': 'hf_test'}
+        return FakeResp(200, {'success': True})
+
+    monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
+    assert remote.ensure_settings(hf_token='hf_test')['MODELS_PATH'] == '/workspace/models'
+
+
 def test_ensure_settings_returns_applied_token(remote, monkeypatch):
     def fake(method, url, **kw):
         if method == 'GET':
@@ -110,6 +142,41 @@ def test_ensure_settings_returns_applied_token(remote, monkeypatch):
     monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
     st = remote.ensure_settings(hf_token='hf_new')
     assert st['HF_TOKEN'] == 'hf_new'
+
+
+def test_settings_retries_transient_proxy_404_without_repeating_other_writes(remote, monkeypatch):
+    attempts = []
+
+    def fake(method, url, **kw):
+        attempts.append(method)
+        if len(attempts) in (1, 3):
+            return FakeResp(404)
+        if method == 'GET':
+            return FakeResp(200, {'TRAINING_FOLDER': '/out', 'DATASETS_FOLDER': '/data'})
+        return FakeResp(200, {'success': True})
+
+    monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
+    monkeypatch.setattr('app.services.aitoolkit_remote.time.sleep', lambda _: None, raising=False)
+    assert remote.ensure_settings(hf_token='hf_new')['HF_TOKEN'] == 'hf_new'
+    assert attempts == ['GET', 'GET', 'POST', 'POST']
+
+
+def test_settings_retry_is_bounded_and_queue_start_is_not_repeated(remote, monkeypatch):
+    calls = []
+
+    def fake(method, url, **kw):
+        calls.append(url)
+        return FakeResp(404)
+
+    monkeypatch.setattr('app.services.aitoolkit_remote.requests.request', fake)
+    monkeypatch.setattr('app.services.aitoolkit_remote.time.sleep', lambda _: None)
+    with pytest.raises(RemoteError):
+        remote.get_settings()
+    assert len(calls) == 3
+    calls.clear()
+    with pytest.raises(RemoteError):
+        remote.queue_job('job-1')
+    assert calls == ['http://1.2.3.4:40123/api/jobs/job-1/start']
 
 
 def test_upload_dataset_batches_and_counts(remote, monkeypatch, tmp_path):

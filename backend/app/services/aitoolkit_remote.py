@@ -9,6 +9,7 @@ revision 0e1784176708e351ae664002a53baa585b5949fb in the contract fixture."""
 import os
 import posixpath
 import re
+import time
 from urllib.parse import quote
 
 import requests
@@ -36,7 +37,15 @@ class RemoteAiToolkit:
                                 headers=headers, timeout=timeout, **kwargs)
 
     def _json(self, method, path, **kwargs):
-        r = self._request(method, path, **kwargs)
+        # Pod proxies may briefly lose the route while the UI starts. Only
+        # settings reads and identical settings upserts are safe to repeat;
+        # never retry job creation or queue operations here.
+        attempts = 3 if path == '/api/settings' and method in ('GET', 'POST') else 1
+        for attempt in range(attempts):
+            r = self._request(method, path, **kwargs)
+            if r.status_code not in (404, 502, 503, 504) or attempt == attempts - 1:
+                break
+            time.sleep(attempt + 1)
         if r.status_code != 200:
             raise RemoteError(f'{method} {path} -> HTTP {r.status_code}: {r.text[:200]}')
         return r.json()
@@ -60,7 +69,15 @@ class RemoteAiToolkit:
     # -- readiness / settings ---------------------------------------------
     def is_ready(self) -> bool:
         try:
-            return self._request('GET', '/api/auth', timeout=8).status_code == 200
+            if self._request('GET', '/api/auth', timeout=8).status_code != 200:
+                return False
+            response = self._request('GET', '/api/settings', timeout=8)
+            if response.status_code != 200:
+                return False
+            settings = response.json()
+            return isinstance(settings, dict) and all(
+                isinstance(settings.get(key), str) and settings[key].strip()
+                for key in ('TRAINING_FOLDER', 'DATASETS_FOLDER'))
         except Exception:
             return False
 
@@ -68,17 +85,22 @@ class RemoteAiToolkit:
         return self._json('GET', '/api/settings')
 
     def ensure_settings(self, hf_token=None) -> dict:
-        """POST /api/settings requires all three keys — echo back the folders
+        """POST /api/settings requires all advertised folder keys — echo them
         read from GET so only HF_TOKEN actually changes. Only POSTs when a
         token is provided: a None hf_token must never clear a token already
         set on the pod (GET may omit secrets). Returns the applied state."""
         st = self.get_settings()
         if hf_token:
-            self._json('POST', '/api/settings', json={
+            payload = {
                 'HF_TOKEN': hf_token,
                 'TRAINING_FOLDER': st.get('TRAINING_FOLDER') or '',
                 'DATASETS_FOLDER': st.get('DATASETS_FOLDER') or '',
-            })
+            }
+            # New pods also upsert MODELS_PATH. Preserve their configured
+            # value; older API revisions expose only the original folders.
+            if 'MODELS_PATH' in st:
+                payload['MODELS_PATH'] = st.get('MODELS_PATH') or ''
+            self._json('POST', '/api/settings', json=payload)
             st = {**st, 'HF_TOKEN': hf_token}
         return st
 
