@@ -101,6 +101,42 @@ def test_prepare_is_offline_and_builds_one_lora_entry(tmp_path):
     assert not (tmp_path / 'out').exists()
 
 
+def test_qwen_recipe_builds_unaccelerated_request_and_replays_offline(tmp_path):
+    recipe_path, _ = make_recipe(tmp_path, endpoint='fal-ai/qwen-image-2512/lora')
+    transport = FakeTransport()
+    prepared = render.run(recipe_path, tmp_path / 'out')
+    assert prepared['request']['acceleration'] == 'none'
+    execute(recipe_path, tmp_path / 'out', transport)
+    assert transport.calls[0][1] == 'https://queue.fal.run/fal-ai/qwen-image-2512/lora'
+    assert transport.calls[0][2] == prepared['request']
+    offline = FakeTransport()
+    render.run(None, tmp_path / 'out', execute=True, transport=offline, key=None)
+    assert offline.calls == []
+
+
+@pytest.mark.parametrize('acceleration', ['none', 'regular', 'high', 'invalid', True])
+def test_qwen_acceleration_is_validated(tmp_path, acceleration):
+    recipe_path, _ = make_recipe(tmp_path, endpoint='fal-ai/qwen-image-2512/lora')
+    recipe = json.loads(recipe_path.read_text())
+    recipe['arguments']['acceleration'] = acceleration
+    recipe_path.write_text(json.dumps(recipe))
+    if acceleration in ('none', 'regular', 'high'):
+        prepared = render.run(recipe_path, tmp_path / 'out')
+        assert prepared['request']['acceleration'] == acceleration
+    else:
+        with pytest.raises(render.RenderError, match='acceleration'):
+            render.run(recipe_path, tmp_path / 'out')
+
+
+def test_flux_recipe_does_not_accept_qwen_acceleration(tmp_path):
+    recipe_path, _ = make_recipe(tmp_path)
+    recipe = json.loads(recipe_path.read_text())
+    recipe['arguments']['acceleration'] = 'none'
+    recipe_path.write_text(json.dumps(recipe))
+    with pytest.raises(render.RenderError, match='unsupported argument'):
+        render.run(recipe_path, tmp_path / 'out')
+
+
 @pytest.mark.parametrize('count', [1, 2, True])
 def test_explicit_image_count_is_limited_to_one(tmp_path, count):
     recipe_path, _ = make_recipe(tmp_path)

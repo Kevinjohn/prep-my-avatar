@@ -1,7 +1,8 @@
 # Repeatable fal identity-LoRA render
 
 `scripts/render_lora.py` prepares or resumes one private image render against
-`fal-ai/flux-lora` or `fal-ai/flux-krea-lora`. Preparation validates the recipe
+`fal-ai/flux-lora`, `fal-ai/flux-krea-lora`, or `fal-ai/qwen-image-2512/lora`.
+Preparation validates the recipe
 and local adapter checksum without making a network request. The `--execute`
 flag is required to submit or poll a paid job.
 
@@ -41,6 +42,14 @@ inspect the request locally:
 ```sh
 python scripts/render_lora.py data/render-recipe.json --out output/render-01
 ```
+
+For Qwen Image 2512, use its matching trained adapter and endpoint, with
+`guidance_scale: 4` and `num_inference_steps: 28` for the initial portrait test.
+The command explicitly sends `acceleration: "none"` by default for this endpoint.
+Qwen recipes may select `none`, `regular`, or `high` in their arguments; this
+option is rejected for the FLUX endpoints. Keep the acceleration setting fixed
+when comparing adapter results. Endpoint support does not imply likeness
+acceptance of any particular trained adapter.
 
 Set `FAL_KEY` in the process environment, then explicitly submit or resume:
 

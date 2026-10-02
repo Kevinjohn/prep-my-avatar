@@ -20,7 +20,8 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 
-ENDPOINTS = {'fal-ai/flux-lora', 'fal-ai/flux-krea-lora'}
+QWEN_ENDPOINT = 'fal-ai/qwen-image-2512/lora'
+ENDPOINTS = {'fal-ai/flux-lora', 'fal-ai/flux-krea-lora', QWEN_ENDPOINT}
 HASH_RE = re.compile(r'^[0-9a-f]{64}$')
 STATE_NAME = 'run.json'
 IMAGE_NAME = 'result.png'
@@ -152,7 +153,7 @@ def _read_recipe(path: Path) -> tuple[dict, dict, str]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RenderError('recipe could not be read as JSON') from exc
     if not isinstance(recipe, dict) or recipe.get('endpoint') not in ENDPOINTS:
-        raise RenderError('recipe endpoint must be fal-ai/flux-lora or fal-ai/flux-krea-lora')
+        raise RenderError('recipe endpoint must be one of: ' + ', '.join(sorted(ENDPOINTS)))
     adapter = recipe.get('adapter')
     args = recipe.get('arguments')
     if not isinstance(adapter, dict) or not isinstance(args, dict):
@@ -180,7 +181,12 @@ def _read_recipe(path: Path) -> tuple[dict, dict, str]:
         value = args.get(field)
         if isinstance(value, bool) or not isinstance(value, expected):
             raise RenderError(f'arguments.{field} has an invalid value')
-    if set(args) - {'num_images'} != set(required):
+    optional = {'num_images'}
+    if recipe['endpoint'] == QWEN_ENDPOINT:
+        optional.add('acceleration')
+        if args.get('acceleration', 'none') not in ('none', 'regular', 'high'):
+            raise RenderError('arguments.acceleration must be none, regular, or high')
+    if set(args) - optional != set(required):
         raise RenderError('recipe contains unsupported argument fields')
     if type(args.get('num_images', 1)) is not int or args.get('num_images', 1) != 1:
         raise RenderError('arguments.num_images must be 1')
@@ -204,6 +210,8 @@ def _read_recipe(path: Path) -> tuple[dict, dict, str]:
     request = {field: value for field, value in args.items() if field != 'lora_scale'}
     request['num_images'] = 1
     request['loras'] = [{'path': adapter_url, 'scale': args['lora_scale']}]
+    if recipe['endpoint'] == QWEN_ENDPOINT:
+        request['acceleration'] = args.get('acceleration', 'none')
     return normalized, request, str(adapter_path)
 
 
