@@ -9,6 +9,8 @@ Do not commit photographs, identity weights, completed consent records or output
 
 Use the [private asset bank](private-bank.md) in the dataset export step to retain manual attempts, returned files and per-output reviews locally. The templates below remain useful for readiness and external evidence. A reference-only export can prepare the baseline without training material. The bank makes no provider requests.
 
+For an existing FLUX.1 identity adapter, the [repeatable render command](repeatable-lora-render.md) records exact inference inputs, resumes interrupted requests and verifies returned images. Keep its recipes and results private; successful execution does not establish recognisable likeness.
+
 ## Prepare the private bank
 
 Copy the templates into a private working directory. Keep the complete exported
