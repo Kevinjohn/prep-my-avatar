@@ -1,0 +1,213 @@
+{
+  "date": "2026-10-02",
+  "status": "reviewed; no new paid pilot started",
+  "human_likeness_accepted": false,
+  "checkpoint_count": 14,
+  "sample_count": 30,
+  "single_banked_diagnostic_checkpoint": 3500,
+  "gpu_deleted": true,
+  "monitor_status": "paused",
+  "consumer_reload_verified": false,
+  "training_seconds": 18598.335863113403,
+  "total_elapsed_seconds": 19939.984156131744,
+  "cost_usd": {
+    "estimated": 12.19,
+    "final_reported": null
+  },
+  "source_revision": "ecee894ed2b1f3716d9d7326693061ec1a3105bb",
+  "model_revision": "26afe3a78bb242c0a8bb181dcc8937bb16e5c66c",
+  "text_encoder_revision": "68faf511d618ef198fef186659617cfd2eb8e33a",
+  "training_zip_sha256": "5e228b64d0facf936ff9bb675e165cfd62e6d45b15b95084897deb8b6864fb3e",
+  "executed_timestep_policy": "sigmoid via config fallback",
+  "proposed_timestep_policy": "weighted",
+  "causality_proven": false,
+  "next_pilot": {
+    "maximum_gpu_runtime_seconds": 3600,
+    "initial_step_target": 250,
+    "save_every": 250,
+    "dataset_change": false,
+    "fresh_job_required": true,
+    "human_continuation_required": true,
+    "automatic_extension": false
+  },
+  "private_backups": [
+    {
+      "repository_relative_directory": "data/flux2_checkpoint_round_2026_10_02",
+      "evidence_files": [
+        "backup_verification.json",
+        "sha256_manifest.json",
+        "private_bank_archive.zip",
+        "bank_verification.json",
+        "saved_run_review.json",
+        "saved_run_review.md",
+        "saved_run_review_backup_verification.json",
+        "research_findings_2026_10_02.md",
+        "bounded_pilot_review_plan.json"
+      ]
+    },
+    {
+      "repository_relative_directory": "data/flux2_dev_round_2026_10_02",
+      "evidence_files": [
+        "jobs/flux2_training.json",
+        "assets/flux2_training/config_file.json"
+      ]
+    }
+  ],
+  "private_working_directory": "output/flux2_checkpoint_round",
+  "checkpoint_checks": [
+    {
+      "step": 250,
+      "verified_sha256": "aebf7622b38a1764318ccccab3e99cbbc8ed4e0f4cee023075c9ab91222632fb",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005112352596241283,
+      "B_rms": 0.0006024528269258274,
+      "B_nonzero_fraction": 0.9999583484680672,
+      "B_change_rms_from_previous": null
+    },
+    {
+      "step": 500,
+      "verified_sha256": "90e448b69bf9673abc207d1c7f9136818a1b9de8aafa6255d934ef21b2146078",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.00514892394894399,
+      "B_rms": 0.0008928544298050992,
+      "B_nonzero_fraction": 0.9999723822120729,
+      "B_change_rms_from_previous": 0.0005714234813781442
+    },
+    {
+      "step": 750,
+      "verified_sha256": "522f13cae6fc456544e45d0b19ff1d85fa5764e6ecf00b442120b355d2a238c7",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005197926758889823,
+      "B_rms": 0.0012040940359578855,
+      "B_nonzero_fraction": 0.9999782748338653,
+      "B_change_rms_from_previous": 0.0006825679705813008
+    },
+    {
+      "step": 1000,
+      "verified_sha256": "73d1c3f638ff8a22c2ed9844b3e5466b266bab082cf6c89d6f602ba3edaf8420",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005259216459130367,
+      "B_rms": 0.0014476505337648327,
+      "B_nonzero_fraction": 0.9999825857519135,
+      "B_change_rms_from_previous": 0.0006219918433933252
+    },
+    {
+      "step": 1250,
+      "verified_sha256": "180fa8038138d2ac94147fcb7a89ff3b0cf7f188314ce69609d388f34fb4d0ad",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.0053270768156993735,
+      "B_rms": 0.0016906808670269678,
+      "B_nonzero_fraction": 0.9999842604970545,
+      "B_change_rms_from_previous": 0.0006595902669264077
+    },
+    {
+      "step": 1500,
+      "verified_sha256": "0878ace57820364a796ab66e4700a0e54ae79ab8b8f69f3f1216300e96305dc5",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005414874893168064,
+      "B_rms": 0.0019221305760053224,
+      "B_nonzero_fraction": 0.9999860748042905,
+      "B_change_rms_from_previous": 0.0006667691279103805
+    },
+    {
+      "step": 1750,
+      "verified_sha256": "443eb9898b8378222b17203a04dac6ef14c4b5c6a0fc9b78757384179f4f494f",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005520809548783371,
+      "B_rms": 0.0021555171558454212,
+      "B_nonzero_fraction": 0.999987935632225,
+      "B_change_rms_from_previous": 0.0007029180886720268
+    },
+    {
+      "step": 2000,
+      "verified_sha256": "cb9458d02fde7f97016dcd0ce79b02e0d11fc5a57f063b5ce175a4e1703b3a9b",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.0056434728087515155,
+      "B_rms": 0.0023940310626066634,
+      "B_nonzero_fraction": 0.999988617935801,
+      "B_change_rms_from_previous": 0.0007590226360877242
+    },
+    {
+      "step": 2250,
+      "verified_sha256": "3f3b2875cd85d4cb97a7f48b9e79503b6030b68a5802b398cceadaf0539b294d",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005774646384435632,
+      "B_rms": 0.002596485387273692,
+      "B_nonzero_fraction": 0.9999886024289015,
+      "B_change_rms_from_previous": 0.0007062161013843433
+    },
+    {
+      "step": 2500,
+      "verified_sha256": "6df5029bfa950f54eef3a79f19498e2688bb7379d75d1fb5a53378f6a0536cad",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.005907916756452268,
+      "B_rms": 0.002805080966237751,
+      "B_nonzero_fraction": 0.9999899980498523,
+      "B_change_rms_from_previous": 0.000750045557272832
+    },
+    {
+      "step": 2750,
+      "verified_sha256": "30d146ce44a4ddadab11972d9f1b92ab2b539480b3c6e65b12b7effeca61c23d",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.006064683566146057,
+      "B_rms": 0.002987822214972495,
+      "B_nonzero_fraction": 0.9999906183258305,
+      "B_change_rms_from_previous": 0.0006564797419849051
+    },
+    {
+      "step": 3000,
+      "verified_sha256": "7c505a91ba0ef8082138c8f2df0cce669c60bb1ed3beaaf4e407c2d9a6431bab",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.006233172784932658,
+      "B_rms": 0.0031891163461061195,
+      "B_nonzero_fraction": 0.9999916107673955,
+      "B_change_rms_from_previous": 0.0007607689751158772
+    },
+    {
+      "step": 3250,
+      "verified_sha256": "07d5063917cb786944e683f5526beea0a59c2c6d26205e5600c61e2a789130f7",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.006407640657248502,
+      "B_rms": 0.0033731818746591605,
+      "B_nonzero_fraction": 0.9999918123570884,
+      "B_change_rms_from_previous": 0.0007035208834403094
+    },
+    {
+      "step": 3500,
+      "verified_sha256": "7f3f5f74731e0645ca7a8396f7844b987f246ac5fb1c2cdf510bc74bca517dda",
+      "tensor_count": 320,
+      "adapted_module_count": 160,
+      "all_values_finite": true,
+      "A_rms": 0.006598779326427082,
+      "B_rms": 0.0035568696155745382,
+      "B_nonzero_fraction": 0.9999921224950775,
+      "B_change_rms_from_previous": 0.0007127754196093974
+    }
+  ]
+}

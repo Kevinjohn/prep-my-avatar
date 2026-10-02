@@ -140,3 +140,10 @@ real-media acceptance evidence exists. Report blockers with the precise missing
 input and next action. Do not publish personal evidence without its own visibility
 permission; public progress can identify counts and verification methods without
 exposing identities or assets.
+
+## Sanitized experiment findings
+
+The [identity adaptation investigation](../experiments/2026-10-02-identity-training.md)
+records operational findings and the bounded next-pilot decision. Personal
+photographs, identity adapters, provider locators and per-subject evidence remain
+private and outside version control.
